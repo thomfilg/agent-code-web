@@ -317,6 +317,7 @@ export async function createAgentWebServer(options = {}) {
       adapterFactory: options.adapterFactory || null,
     });
     manager.on("event", event => { if (["chat_updated", "message", "chat_deleted"].includes(event.type)) sidebarChanged(); });
+    manager.pullRequests.start();
     return { host: config.host, port, url: `http://${config.host.includes(":") ? `[${config.host}]` : config.host}:${port}` };
   }
 

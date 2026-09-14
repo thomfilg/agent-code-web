@@ -212,6 +212,12 @@ export class CodexAdapter {
 
   #notification(message) {
     const { method, params = {} } = message;
+    if (method === "serverRequest/resolved") {
+      const requestId = `approval_${params.requestId}`;
+      this.requests.delete(requestId);
+      this.hooks.onEvent?.({ type: "request_resolved", requestId });
+      return;
+    }
     if (method === "item/agentMessage/delta" && this.current) {
       this.current.text += params.delta || "";
       this.hooks.onEvent?.({ type: "assistant_delta", delta: params.delta || "" });

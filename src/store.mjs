@@ -4,6 +4,7 @@ import { newId, nowIso } from "./utils.mjs";
 import { runtimeWorkflowPatch } from "../public/chat-organization.js";
 
 function restored(chat) {
+  chat = { ...chat, archived: chat.archived ?? chat.workflowState === "archived" };
   return { pinned: false, customGroupId: null, workflowState: "idle", ...chat,
     ...runtimeWorkflowPatch(chat, "stopped"), status: "stopped", pendingRequest: null, idleDeadlineAt: null };
 }
@@ -102,7 +103,11 @@ export class ChatStore {
       customGroupId: null,
       workflowState: "idle",
       stateOrigin: "runtime",
-      resumeState: "idle",
+      stateDetail: "Ready for another message",
+      archived: false,
+      awaitingUser: false,
+      pullRequests: [],
+      gitBranches: [],
       workspaceReady: false,
       workspace: this.workspaceDir(id),
       createdAt: timestamp,

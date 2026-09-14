@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { CHAT_STATES, SORT_OPTIONS } from "../public/chat-organization.js";
+import { SORT_OPTIONS, workflowPatch } from "../public/chat-organization.js";
 
 const fail = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 export class ChatOrganization {
@@ -33,7 +33,8 @@ export class ChatOrganization {
       const chat = this.store.get(id);
       if (!chat) throw fail("Chat not found", 404);
       const patch = {};
-      for (const key of Object.keys(input)) if (!["pinned", "customGroupId", "workflowState", "title"].includes(key)) throw fail(`Cannot change ${key} here`);
+      if (Object.hasOwn(input, "workflowState")) throw fail("Chat states are detected automatically from the agent and GitHub");
+      for (const key of Object.keys(input)) if (!["pinned", "customGroupId", "archived", "title"].includes(key)) throw fail(`Cannot change ${key} here`);
       if (Object.hasOwn(input, "pinned")) {
         if (typeof input.pinned !== "boolean") throw fail("Pinned must be true or false");
         patch.pinned = input.pinned;
@@ -42,19 +43,17 @@ export class ChatOrganization {
         if (input.customGroupId !== null && (typeof input.customGroupId !== "string" || !await this.records.get("chat-group", input.customGroupId))) throw fail("Choose an existing group", 404);
         patch.customGroupId = input.customGroupId;
       }
-      if (Object.hasOwn(input, "workflowState")) {
-        if (!CHAT_STATES.some(([id]) => id === input.workflowState)) throw fail("Invalid chat state");
-        if (manager.isBusy(id)) throw fail("Stop the working agent before changing its state", 409);
-        if (input.workflowState === "archived") await manager.stop(id, "archived");
-        patch.workflowState = input.workflowState;
-        patch.stateOrigin = "manual";
-        patch.resumeState = ["pr_open", "pr_merged"].includes(input.workflowState) ? input.workflowState : "idle";
+      if (Object.hasOwn(input, "archived")) {
+        if (typeof input.archived !== "boolean") throw fail("Archived must be true or false");
+        if (manager.isBusy(id)) throw fail("Stop the working agent before archiving", 409);
+        if (input.archived) await manager.stop(id, "archived");
+        patch.archived = input.archived;
       }
       if (Object.hasOwn(input, "title")) {
         if (typeof input.title !== "string" || !input.title.trim() || input.title.trim().length > 120) throw fail("Title must contain 1–120 characters");
         patch.title = input.title.trim(); patch.autoTitle = false;
       }
-      const updated = await this.store.update(id, patch);
+      const updated = await this.store.update(id, current => ({ ...patch, ...workflowPatch({ ...current, ...patch }) }));
       manager.publishChat(updated);
       return updated;
     });

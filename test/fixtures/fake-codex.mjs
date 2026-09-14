@@ -19,6 +19,7 @@ rl.on("line", (line) => {
     send({ method: "item/started", params: { ...pendingTurn, startedAtMs: Date.now(), item: { id: "cmd_fixture", type: "commandExecution", command: "printf fixture", commandActions: [], cwd: process.cwd(), status: "inProgress" } } });
     send({ method: "item/commandExecution/requestApproval", id: 900, params: { ...pendingTurn, itemId: "cmd_fixture", command: "printf fixture", cwd: process.cwd(), reason: "Fixture approval" } });
   } else if (message.id === 900 && message.result?.decision) {
+    send({ method: "serverRequest/resolved", params: { threadId: pendingTurn.threadId, requestId: 900 } });
     send({ method: "item/completed", params: { ...pendingTurn, completedAtMs: Date.now(), item: { id: "cmd_fixture", type: "commandExecution", command: "printf fixture", commandActions: [], cwd: process.cwd(), status: "completed", aggregatedOutput: "fixture output", exitCode: 0, durationMs: 1 } } });
     send({ method: "item/agentMessage/delta", params: { ...pendingTurn, itemId: "agent_fixture", delta: "hello " } });
     send({ method: "item/agentMessage/delta", params: { ...pendingTurn, itemId: "agent_fixture", delta: "world" } });

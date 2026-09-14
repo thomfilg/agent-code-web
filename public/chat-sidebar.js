@@ -1,4 +1,4 @@
-import { CHAT_STATES, SORT_OPTIONS, groupChats, repositoryGroup, stateLabel } from "./chat-organization.js";
+import { SORT_OPTIONS, groupChats, repositoryGroup, stateLabel } from "./chat-organization.js";
 
 const $ = selector => document.querySelector(selector);
 function el(tag, className, text) {
@@ -14,29 +14,58 @@ function button(text, label, action, className = "small-icon") {
   return item;
 }
 
+function statusIcon(chat) {
+  const state = chat.workflowState || "idle";
+  const icon = el("span", `chat-status-icon ${state}`);
+  icon.setAttribute("role", "img"); icon.setAttribute("aria-label", stateLabel(state));
+  icon.title = `${stateLabel(state)} · ${chat.stateDetail || "Automatically detected"}${chat.githubSyncWarning ? " · GitHub status may be stale" : ""}`;
+  if (state.startsWith("pr_")) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 16 16"); svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor"); svg.setAttribute("stroke-width", "1.5"); svg.setAttribute("aria-hidden", "true");
+    for (const [tag, attributes] of [
+      ["circle", { cx: 4, cy: 3, r: 2 }], ["circle", { cx: 4, cy: 13, r: 2 }],
+      ["circle", { cx: 12, cy: state === "pr_merged" ? 11 : 13, r: 2 }],
+      ["path", { d: state === "pr_merged" ? "M4 5v6M6 4c0 4 6 2 6 5" : "M4 5v6M12 11V6a3 3 0 0 0-3-3H8m2-2L8 3l2 2" }],
+    ]) {
+      const part = document.createElementNS("http://www.w3.org/2000/svg", tag);
+      for (const [key, value] of Object.entries(attributes)) part.setAttribute(key, String(value));
+      svg.append(part);
+    }
+    icon.append(svg);
+  } else icon.append(el("span", "status-dot"));
+  return icon;
+}
+
 export class ChatSidebar {
   constructor({ state, api, select, updated, toast, age, agentLabel }) {
     Object.assign(this, { state, api, select, updated, toast, age, agentLabel });
     this.groups = []; this.preferences = { sort: "updated_desc", collapsed: [] };
-    this.dragging = false; this.pendingPreferences = 0;
+    this.dragging = false; this.pendingPreferences = 0; this.preferenceVersion = 0; this.refreshVersion = 0;
     for (const [value, label] of SORT_OPTIONS) { const option = el("option", "", label); option.value = value; $("#chat-sort").append(option); }
     $("#chat-sort").addEventListener("change", () => { this.preferences.sort = $("#chat-sort").value; this.render(); this.savePreferences(); });
     $("#add-group-button").addEventListener("click", () => this.editGroup());
     $("#organize-chat-button").addEventListener("click", () => { if (state.active) this.editChat(state.active); });
     $("#group-form").addEventListener("submit", event => this.saveGroup(event));
     $("#organize-form").addEventListener("submit", event => this.saveChat(event));
+    $("#archive-chat-button").addEventListener("click", () => this.toggleArchive());
     $("#remove-group-button").addEventListener("click", () => this.removeGroup());
     document.addEventListener("dragend", () => { this.dragging = false; document.querySelectorAll(".drop-over").forEach(item => item.classList.remove("drop-over")); this.scheduleRefresh(); });
     document.querySelectorAll("[data-close-dialog]").forEach(item => item.addEventListener("click", () => item.closest("dialog").close()));
   }
   async refresh() {
     if (this.dragging) return;
+    const version = ++this.refreshVersion, preferencesAtStart = this.preferenceVersion, savingAtStart = this.pendingPreferences > 0;
     const result = await this.api("/api/sidebar");
+    if (version !== this.refreshVersion || this.dragging) return;
     this.state.chats = result.chats; this.groups = result.groups;
-    if (!this.pendingPreferences) this.preferences = result.preferences;
+    if (!this.pendingPreferences && !savingAtStart && preferencesAtStart === this.preferenceVersion) this.preferences = result.preferences;
     this.render();
     const active = result.chats.find(chat => chat.id === this.state.active?.id);
     if (active) this.updated(active);
+    if ($("#organize-dialog").open && this.editingChat) {
+      const chat = result.chats.find(chat => chat.id === this.editingChat.id);
+      if (chat) this.renderChatStatus(chat);
+    }
   }
   connect() {
     this.events?.close();
@@ -49,6 +78,7 @@ export class ChatSidebar {
     this.refreshTimer = setTimeout(() => this.refresh().then(() => { $("#sidebar-sync").textContent = ""; }).catch(() => { $("#sidebar-sync").textContent = "Updates unavailable"; }), 120);
   }
   async savePreferences() {
+    this.preferenceVersion++;
     this.pendingPreferences++;
     const value = structuredClone(this.preferences);
     this.preferenceQueue = (this.preferenceQueue || Promise.resolve()).catch(() => {}).then(() => this.api("/api/sidebar/preferences", { method: "PATCH", body: JSON.stringify(value) }));
@@ -105,9 +135,9 @@ export class ChatSidebar {
     select.dataset.focusKey = `select-${chat.id}`;
     select.setAttribute("aria-current", String(this.state.active?.id === chat.id));
     const top = el("div", "chat-item-top");
-    top.append(el("span", "agent-glyph", chat.agent === "claude" ? "C" : chat.agent === "mock" ? "M" : "X"), el("span", "chat-item-title", chat.title));
+    top.append(statusIcon(chat), el("span", "chat-item-title", chat.title));
     const meta = el("div", "chat-item-meta");
-    meta.append(el("span", `mini-status ${chat.workflowState || "idle"}`), el("span", "", stateLabel(chat.workflowState)), el("time", "chat-age", `· ${this.age(chat.updatedAt)}`));
+    meta.append(el("span", "", stateLabel(chat.workflowState)), el("time", "chat-age", `· ${this.age(chat.updatedAt)}`));
     meta.lastChild.dateTime = chat.updatedAt;
     meta.lastChild.title = `Created: ${new Date(chat.createdAt).toLocaleString()}\nUpdated: ${new Date(chat.updatedAt).toLocaleString()}`;
     select.append(top, meta);
@@ -190,16 +220,38 @@ export class ChatSidebar {
     $("#organize-group").replaceChildren();
     for (const group of [{ id: "", name: "Automatic · company / repository" }, ...this.groups]) { const option = el("option", "", group.name); option.value = group.id; $("#organize-group").append(option); }
     $("#organize-group").value = chat.customGroupId || "";
-    $("#organize-state").replaceChildren();
-    for (const [value, label] of CHAT_STATES) { const option = el("option", "", label); option.value = value; $("#organize-state").append(option); }
-    $("#organize-state").value = chat.workflowState || "idle";
+    this.renderChatStatus(chat);
     $("#organize-error").textContent = "";
     $("#organize-dialog").showModal();
+  }
+  renderChatStatus(chat) {
+    $("#organize-status").replaceChildren(statusIcon(chat), el("span", "", stateLabel(chat.workflowState)));
+    $("#organize-status-detail").textContent = chat.stateDetail || "Detected automatically from the agent and GitHub.";
+    $("#organize-sync-warning").textContent = chat.githubSyncWarning || "";
+    const links = $("#organize-pull-requests"); links.replaceChildren();
+    for (const pr of chat.pullRequests || []) {
+      if (!/^[\w.-]+\/[\w.-]+$/.test(pr.repository) || !Number.isSafeInteger(pr.number)) continue;
+      const link = el("a", "", `${pr.repository} #${pr.number}${pr.checks === "pending" ? " · checks pending" : ""}`);
+      link.href = `https://github.com/${pr.repository}/pull/${pr.number}`; link.target = "_blank"; link.rel = "noopener noreferrer";
+      links.append(link);
+    }
+    const archive = $("#archive-chat-button");
+    archive.textContent = chat.archived ? "Unarchive chat" : "Archive chat";
+    archive.dataset.archived = String(Boolean(chat.archived));
+    archive.disabled = ["starting", "running", "stopping"].includes(chat.status);
+    archive.title = archive.disabled ? "Stop the working agent before archiving" : "";
+  }
+  async toggleArchive() {
+    const archive = $("#archive-chat-button"); const archived = archive.dataset.archived !== "true";
+    archive.disabled = true;
+    try { await this.patch(this.editingChat.id, { archived }); $("#organize-dialog").close(); }
+    catch (error) { $("#organize-error").textContent = error.message; }
+    finally { archive.disabled = false; }
   }
   async saveChat(event) {
     event.preventDefault(); event.submitter.disabled = true;
     const before = this.editingChat;
-    const values = { title: $("#organize-title").value, pinned: $("#organize-pinned").checked, customGroupId: $("#organize-group").value || null, workflowState: $("#organize-state").value };
+    const values = { title: $("#organize-title").value, pinned: $("#organize-pinned").checked, customGroupId: $("#organize-group").value || null };
     const patch = Object.fromEntries(Object.entries(values).filter(([key, value]) => value !== before[key]));
     try { await this.patch(before.id, patch); $("#organize-dialog").close(); }
     catch (error) { $("#organize-error").textContent = error.message; }

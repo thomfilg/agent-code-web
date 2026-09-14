@@ -186,10 +186,10 @@
         <label class="checkbox-label"><input type="checkbox" id="organize-pinned"><span>Pin to the top</span></label>
         <label><span>Move to group</span><select id="organize-group" aria-label="Move to group"></select></label>
         <p class="muted" id="organize-origin"></p>
-        <label><span>Chat state</span><select id="organize-state" aria-label="Chat state"></select></label>
-        <p class="muted">Working and questions update from the live agent. You can also track states manually; this does not start a worker. Stop a working agent before changing its state. PR states survive autosleep.</p>
+        <div class="automatic-status"><span class="muted">Automatic status</span><div id="organize-status" role="status"></div><p class="muted" id="organize-status-detail"></p><div id="organize-pull-requests"></div><p id="organize-sync-warning" class="muted" role="status"></p></div>
+        <p class="muted">Agent activity, questions and GitHub PR checks update automatically. GitHub is checked every minute, even while the worker sleeps.</p>
         <p id="organize-error" class="form-error" role="alert"></p>
-        <div class="dialog-actions"><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button class="primary-button">Save changes</button></div>
+        <div class="dialog-actions"><button type="button" class="secondary-button" id="archive-chat-button">Archive chat</button><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button class="primary-button">Save changes</button></div>
       </form>
     </dialog>
 

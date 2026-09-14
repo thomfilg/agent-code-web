@@ -192,11 +192,23 @@ details[open] > .group-heading::before { transform: rotate(90deg); }
 .chat-row-actions .small-icon { min-height: 24px; font-size: 16px; }
 .chat-origin { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-top: 5px; font-size: 9px; color: var(--faint); }
 .chat-item-meta { gap: 5px; font-size: 10px; }
-.mini-status.working { background: var(--lime); }
-.mini-status.asking_question { background: var(--amber); box-shadow: 0 0 0 3px #efc36b15; }
-.mini-status.pr_open { background: var(--blue); }
-.mini-status.pr_merged { background: #c8a6ff; }
-.mini-status.archived { background: #62675e; }
+.chat-status-icon { width: 19px; height: 19px; flex: none; display: inline-grid; place-items: center; color: #8b8f87; }
+.chat-status-icon svg { width: 16px; height: 16px; }
+.chat-status-icon .status-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.chat-status-icon.asking_question { color: #eabf55; }
+.chat-status-icon.pr_open { color: #3fb950; }
+.chat-status-icon.pr_merged { color: #a371f7; }
+.chat-status-icon.pr_failing { color: #f85149; }
+.chat-status-icon.idle .status-dot { background: transparent; border: 1px solid currentColor; }
+.chat-status-icon.archived { color: #62675e; }
+.chat-status-icon.archived .status-dot { border-radius: 1px; }
+.chat-item-meta { padding-left: 27px; }
+.automatic-status { padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+#organize-status { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
+#organize-pull-requests { display: grid; gap: 6px; font-size: 12px; }
+#organize-pull-requests a { color: var(--lime); overflow-wrap: anywhere; }
+#organize-sync-warning:empty { display: none; }
+#organize-sync-warning { color: var(--amber); }
 .drop-over { outline: 2px dashed var(--lime); outline-offset: -2px; background: #c9f27c12; }
 .dialog-card .checkbox-label { display: flex; align-items: center; gap: 10px; }
 .dialog-card .checkbox-label input { width: 17px; height: 17px; accent-color: var(--lime); }

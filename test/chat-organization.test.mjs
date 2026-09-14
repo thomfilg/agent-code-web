@@ -37,14 +37,15 @@ test("pinned is exclusive but keeps assignment; custom groups override natural h
 test("all sort orders and stable ties", () => {
   const chats = [{ id: "a", createdAt: "2026-01-01", updatedAt: "2026-03-01", workflowState: "idle" }, { id: "b", createdAt: "2026-02-01", updatedAt: "2026-02-01", workflowState: "working" }];
   for (const [sort, expected] of [["created_desc", "b"], ["created_asc", "a"], ["updated_desc", "a"], ["updated_asc", "b"], ["state", "b"]]) assert.equal([...chats].sort(compareChats(sort))[0].id, expected);
-  assert.deepEqual(CHAT_STATES.map(([id]) => id), ["working", "asking_question", "idle", "pr_open", "pr_merged", "archived"]);
+  assert.deepEqual(CHAT_STATES.map(([id]) => id), ["working", "asking_question", "idle", "pr_failing", "pr_open", "pr_merged", "archived"]);
   assert.ok(compareChats("state")({ ...chats[0], id: "a" }, { ...chats[0], id: "b" }) < 0);
 });
 test("group CRUD, membership, pins, preferences and workflow survive restart", async t => {
   const { records, store, manager, organization } = await fixture(t);
   const chat = await manager.createChat({ agent: "mock" });
   const group = await organization.saveGroup({ name: "Sprint" });
-  await organization.patchChat(chat.id, { pinned: true, customGroupId: group.id, workflowState: "pr_open" }, manager);
+  await store.update(chat.id, { pullRequests: [{ state: "open", verifiedAt: new Date().toISOString() }] });
+  await organization.patchChat(chat.id, { pinned: true, customGroupId: group.id }, manager);
   await organization.savePreferences({ sort: "state", collapsed: [group.id] });
   const restarted = new ChatStore(store.dataDir, records); await restarted.initialize();
   assert.equal(restarted.get(chat.id).pinned, true); assert.equal(restarted.get(chat.id).customGroupId, group.id); assert.equal(restarted.get(chat.id).workflowState, "pr_open");
@@ -65,7 +66,8 @@ test("group validation, concurrent duplicates and delete/move race", async t => 
   const operations = await Promise.allSettled([organization.removeGroup(group.id), organization.patchChat(chat.id, { customGroupId: group.id }, manager)]);
   assert.equal(operations[1].status, "rejected"); assert.equal(store.get(chat.id).customGroupId, null);
   await assert.rejects(organization.patchChat(chat.id, { pinned: "true" }, manager), /true or false/);
-  await assert.rejects(organization.patchChat(chat.id, { workflowState: "broken" }, manager), /Invalid/);
+  await assert.rejects(organization.patchChat(chat.id, { workflowState: "broken" }, manager), /automatically/);
+  await assert.rejects(organization.patchChat(chat.id, { workflowState: "pr_merged" }, manager), /automatically/);
   await assert.rejects(organization.patchChat(chat.id, { repositories: [] }, manager), /Cannot change/);
   await assert.rejects(organization.savePreferences({ sort: "nonsense" }), /Invalid/);
 });
@@ -76,10 +78,10 @@ test("runtime working/question/idle transitions preserve PR milestone; archive r
     return { start: async () => {}, send: () => new Promise(resolve => { finish = resolve; }), respond: async () => {}, stop: async () => { finish?.({ text: "stopped" }); } };
   });
   const chat = await manager.createChat({ agent: "mock" });
-  await organization.patchChat(chat.id, { workflowState: "pr_open" }, manager);
+  await store.update(chat.id, { pullRequests: [{ state: "open", verifiedAt: new Date().toISOString() }] });
   const turn = await manager.submit(chat.id, "work"); await waitFor(() => finish);
   assert.equal(store.get(chat.id).workflowState, "working");
-  await assert.rejects(organization.patchChat(chat.id, { workflowState: "archived" }, manager), /Stop the working/);
+  await assert.rejects(organization.patchChat(chat.id, { archived: true }, manager), /Stop the working/);
   await hooks.onRequest({ requestId: "question-1", method: "item/tool/requestUserInput", params: { questions: [{ id: "a", question: "Which branch?" }] } });
   assert.equal(store.get(chat.id).workflowState, "asking_question");
   await manager.respond(chat.id, "question-1", { answers: { a: "main" } });
@@ -87,10 +89,11 @@ test("runtime working/question/idle transitions preserve PR milestone; archive r
   finish({ text: "done" }); await turn.completion;
   assert.equal(store.get(chat.id).workflowState, "pr_open");
   await manager.stop(chat.id); assert.equal(store.get(chat.id).workflowState, "pr_open");
-  await organization.patchChat(chat.id, { workflowState: "pr_merged" }, manager);
-  await organization.patchChat(chat.id, { workflowState: "archived" }, manager);
+  await store.update(chat.id, { pullRequests: [{ state: "closed", merged: true, verifiedAt: new Date().toISOString() }] });
+  await organization.patchChat(chat.id, { archived: true }, manager);
   await assert.rejects(manager.submit(chat.id, "wake"), /Unarchive/);
-  await organization.patchChat(chat.id, { workflowState: "idle" }, manager);
+  await organization.patchChat(chat.id, { archived: false }, manager);
+  assert.equal(store.get(chat.id).workflowState, "pr_merged");
   assert.equal(store.get(chat.id).status, "stopped");
 });
 test("organization records use authenticated ciphertext, bound to the record id", () => {

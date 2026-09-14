@@ -5,8 +5,9 @@ import { prepareSoftware } from "./software.mjs";
 import { CodexAdapter } from "./adapters/codex.mjs";
 import { ClaudeAdapter } from "./adapters/claude.mjs";
 import { MockAdapter } from "./adapters/mock.mjs";
-import { runtimeWorkflowPatch } from "../public/chat-organization.js";
-import { titlePrompt, extractTitle, TitleStream } from "./title-protocol.mjs";
+import { runtimeWorkflowPatch, workflowPatch } from "../public/chat-organization.js";
+import { responsePrompt, extractResponse, ResponseStream } from "./response-protocol.mjs";
+import { PullRequestMonitor, inspectBranches } from "./pull-requests.mjs";
 
 const ADAPTERS = {
   codex: CodexAdapter,
@@ -51,6 +52,7 @@ export class RuntimeManager extends EventEmitter {
     this.github = github;
     this.environments = environments;
     this.models = models;
+    this.pullRequests = new PullRequestMonitor({ store, github, publish: chat => this.publishChat(chat) });
   }
 
   availableAgents() {
@@ -117,6 +119,7 @@ export class RuntimeManager extends EventEmitter {
     this.#queued.add(chatId);
 
     try {
+      await this.store.update(chatId, { awaitingUser: false, pendingRequest: null });
       const userMessage = await this.store.appendMessage(chatId, { role: "user", kind: "message", text });
       this.#emit(chatId, { type: "message", message: userMessage });
       const completion = this.#runTurn(chatId, text).finally(() => this.#queued.delete(chatId));
@@ -160,16 +163,18 @@ export class RuntimeManager extends EventEmitter {
 
     try {
       const automaticTitle = this.store.get(chatId).autoTitle && this.store.get(chatId).agent !== "mock";
-      runtime.titleStream = automaticTitle ? new TitleStream(event => {
+      const metadata = this.store.get(chatId).agent !== "mock";
+      runtime.titleStream = metadata ? new ResponseStream(event => {
         runtime.eventQueue = runtime.eventQueue.then(() => this.#agentEvent(chatId, event));
-      }) : null;
+      }, automaticTitle) : null;
       const settings = this.models ? await this.models.turnSettings(this.store.get(chatId)) : {};
-      const result = await runtime.adapter.send(automaticTitle ? titlePrompt(text) : text, settings);
+      const result = await runtime.adapter.send(metadata ? responsePrompt(text, automaticTitle) : text, settings);
       if (runtime.generation !== generation) return;
       runtime.titleStream?.flush();
       await runtime.eventQueue;
-      const output = automaticTitle ? extractTitle(result.text || "") : { text: result.text || "", title: null };
+      const output = metadata ? extractResponse(result.text || "", automaticTitle) : { text: result.text || "", title: null, awaitingUser: false };
       if (output.title) await this.#agentEvent(chatId, { type: "title", title: output.title });
+      await this.store.update(chatId, { awaitingUser: output.awaitingUser });
       const message = await this.store.appendMessage(chatId, {
         id: assistantMessageId,
         role: "assistant",
@@ -177,6 +182,10 @@ export class RuntimeManager extends EventEmitter {
         text: output.text,
       });
       this.#emit(chatId, { type: "turn_completed", message });
+      // Inspect only a worker that is already awake. Later GitHub polling uses
+      // these saved branch names and never boots an idle EC2 instance.
+      const gitBranches = await inspectBranches(this.store.get(chatId), runtime.executor);
+      if (runtime.generation === generation) await this.store.update(chatId, { gitBranches });
     } catch (error) {
       if (runtime.generation !== generation) return;
       const message = await this.store.appendMessage(chatId, {
@@ -190,6 +199,7 @@ export class RuntimeManager extends EventEmitter {
       if (runtime.generation === generation && this.#runtimes.get(chatId) === runtime) {
         runtime.busy = false;
         await this.#scheduleIdleStop(chatId, runtime);
+        this.pullRequests.refresh(chatId).catch(() => {});
       }
     }
   }
@@ -262,7 +272,7 @@ export class RuntimeManager extends EventEmitter {
       payload = { decision };
     }
     await runtime.adapter.respond(requestId, payload);
-    const updated = await this.store.update(chatId, { pendingRequest: null, workflowState: "working", stateOrigin: "runtime" });
+    const updated = await this.store.update(chatId, current => ({ pendingRequest: null, ...workflowPatch({ ...current, pendingRequest: null }) }));
     this.publishChat(updated);
     this.#emit(chatId, { type: "request_resolved", requestId });
   }
@@ -272,6 +282,7 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async shutdown() {
+    await this.pullRequests.stop();
     await Promise.allSettled([...this.#runtimes.keys()].map((chatId) => this.stop(chatId, "shutdown")));
   }
 
@@ -364,6 +375,10 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async #agentEvent(chatId, event) {
+    if (event.type === "request_resolved") {
+      const chat = this.store.get(chatId);
+      if (chat?.pendingRequest?.requestId === event.requestId) this.publishChat(await this.store.update(chatId, current => ({ pendingRequest: null, ...workflowPatch({ ...current, pendingRequest: null }) })));
+    }
     if (event.type === "title") {
       const chat = this.store.get(chatId);
       if (chat?.autoTitle && chat.title !== event.title) this.publishChat(await this.store.update(chatId, { title: event.title }));
@@ -390,7 +405,7 @@ export class RuntimeManager extends EventEmitter {
 
   async #agentRequest(chatId, request) {
     const pendingRequest = publicRequest(request);
-    const updated = await this.store.update(chatId, { pendingRequest, workflowState: "asking_question", stateOrigin: "runtime" });
+    const updated = await this.store.update(chatId, current => ({ pendingRequest, ...workflowPatch({ ...current, pendingRequest }) }));
     this.publishChat(updated);
     this.#emit(chatId, { type: "request", request: pendingRequest });
   }

@@ -45,6 +45,7 @@ test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers ap
   assert.equal(result.text, "hello world");
   assert.ok(events.some((event) => event.type === "assistant_delta" && event.delta === "hello "));
   assert.ok(events.some((event) => event.type === "tool" && event.state === "completed"));
+  assert.ok(events.some(event => event.type === "request_resolved" && event.requestId === "approval_900"));
   await adapter.stop();
 
   const resumedChat = { ...chat, agentSessionId: sessionId };

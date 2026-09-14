@@ -118,12 +118,37 @@ Legacy URL-based chats are grouped from their GitHub URL; scratch chats go
 under Personal / No repository.
 
 Sort within each section by creation time, last update (both directions), or
-state: working, asking question, idle, PR open, PR merged, archived. State
-transitions from runtime events are automatic; explicit approval/input requests
-mark a chat as asking a question. PR states are **manually tracked** through the
-chat menu, not synchronized with GitHub PRs. They survive autosleep. Archiving
-stops an idle worker and prevents new messages until unarchived; stop a working
-turn first. Manual state changes don't launch a worker. Pins, groups, collapsed
+state: working, asking question, idle, PR not passing, PR open, PR merged, archived.
+States are automatic and read-only: a gray dot indicates work, yellow indicates
+an answer/approval is needed, and GitHub-style PR icons are green for open,
+purple for merged, or red for failing/cancelled checks. Idle uses a hollow gray
+dot. The chat menu explains the detected state and links its PRs.
+
+Native Codex input/approval requests update immediately. Both agents also emit
+hidden end-of-response metadata when waiting for an ordinary conversational
+answer; this depends on the agent following the metadata instruction (questions
+are not guessed from punctuation). It survives worker autosleep/restarts and
+clears when the next user message arrives. No extra model call is required.
+
+After each turn, the controller discovers PRs from non-default workspace
+branches and GitHub PR URLs in assistant/tool output, scoped to the chat's
+selected repositories (or legacy GitHub source URL). PR state is verified through
+GitHub's API, never trusted from an agent's claim. Every minute it refreshes saved
+branches/PRs, including while workers sleep; this does not boot EC2, extend idle
+timers, or change last-updated sorting when nothing changed. Branch discovery
+supports same-repository branches; fork PRs can be discovered by an emitted PR
+URL. Detached HEADs have no branch to discover. Existing chats gain branch
+tracking on their next completed turn; saved PR links can be tracked immediately.
+Checks include GitHub Check Runs and commit statuses; pending checks stay green
+with a pending explanation, not red. Tokens need repository pull-request,
+checks and commit-status read access. Failed refreshes retain last-known state
+and show a warning. Active work/questions take priority over PR milestones; any
+open failing PR makes an otherwise idle chat red, and all tracked PRs must be
+merged for the merged state. Closed, unmerged PRs return to idle.
+
+Archive/unarchive is a separate explicit action, not a state classification.
+Archiving stops an idle worker and prevents new messages until unarchived; stop
+a working turn first. Pins, groups, collapsed
 sections, sorting, and settings survive reloads/restarts and sync across tabs.
 
 ## PostgreSQL and encrypted settings

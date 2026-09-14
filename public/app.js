@@ -187,7 +187,7 @@ function renderActive() {
   const unavailable = ["running", "starting", "stopping"].includes(chat.status) || chat.workflowState === "archived";
   elements.send.disabled = unavailable;
   elements.input.disabled = unavailable;
-  elements.input.placeholder = chat.workflowState === "archived" ? "Archived · change the state to Idle to continue" : "Ask your agent to build, inspect, or fix something…";
+  elements.input.placeholder = chat.workflowState === "archived" ? "Archived · unarchive this chat to continue" : "Ask your agent to build, inspect, or fix something…";
   elements.composerAgent.replaceChildren(node("span", "agent-glyph", glyph(chat.agent)), node("span", "", agentLabel(chat.agent)));
   activeModelPicker.setAgent(chat.agent, chat);
   renderMessages();

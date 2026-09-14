@@ -1,7 +1,7 @@
 // Shared by the browser and control plane. Runtime status and workflow state are distinct.
 export const CHAT_STATES = [
   ["working", "Working"], ["asking_question", "Asking question"], ["idle", "Idle"],
-  ["pr_open", "PR open"], ["pr_merged", "PR merged"], ["archived", "Archived"],
+  ["pr_failing", "PR not passing"], ["pr_open", "PR open"], ["pr_merged", "PR merged"], ["archived", "Archived"],
 ];
 export const SORT_OPTIONS = [
   ["updated_desc", "Last updated · newest"], ["updated_asc", "Last updated · oldest"],
@@ -50,11 +50,26 @@ export function groupChats(chats, groups, sort) {
 }
 
 export function runtimeWorkflowPatch(chat, status) {
-  if (["starting", "running"].includes(status)) {
-    return { workflowState: "working", stateOrigin: "runtime", resumeState: ["pr_open", "pr_merged"].includes(chat.workflowState) ? chat.workflowState : chat.resumeState || "idle" };
+  const pendingRequest = ["idle", "stopped", "error"].includes(status) ? null : chat.pendingRequest;
+  return { pendingRequest, ...workflowPatch({ ...chat, status, pendingRequest }) };
+}
+
+// Only runtime signals, agent metadata and verified GitHub records classify a chat.
+export function workflowPatch(chat) {
+  let workflowState = "idle", stateOrigin = "runtime", stateDetail = "Ready for another message";
+  if (chat.archived) { workflowState = "archived"; stateOrigin = "archive"; stateDetail = "Unarchive this chat to continue"; }
+  else if (chat.pendingRequest) { workflowState = "asking_question"; stateDetail = "The agent needs your answer or approval"; }
+  else if (["starting", "running", "stopping"].includes(chat.status)) { workflowState = "working"; stateDetail = chat.status === "stopping" ? "Stopping the worker" : "The agent is working"; }
+  else if (chat.awaitingUser) { workflowState = "asking_question"; stateOrigin = "agent"; stateDetail = "The agent is waiting for your reply"; }
+  else {
+    const prs = (chat.pullRequests || []).filter(pr => pr.verifiedAt);
+    const open = prs.filter(pr => pr.state === "open");
+    if (open.length) {
+      workflowState = open.some(pr => pr.checks === "failing") ? "pr_failing" : "pr_open";
+      stateOrigin = "github";
+      stateDetail = workflowState === "pr_failing" ? "GitHub reports failing or cancelled checks" : open.some(pr => pr.checks === "pending") ? "PR open · checks are still running" : "GitHub confirms an open pull request";
+    } else if (prs.length && prs.every(pr => pr.merged)) { workflowState = "pr_merged"; stateOrigin = "github"; stateDetail = "GitHub confirms the pull request was merged"; }
+    else if (prs.length) stateDetail = "Pull request closed without merging";
   }
-  if (["idle", "stopped", "error"].includes(status) && chat.stateOrigin === "runtime") {
-    return { workflowState: chat.resumeState || "idle", stateOrigin: "runtime", pendingRequest: null };
-  }
-  return {};
+  return { workflowState, stateOrigin, stateDetail };
 }
