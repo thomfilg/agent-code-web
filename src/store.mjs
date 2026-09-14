@@ -1,6 +1,12 @@
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { newId, nowIso } from "./utils.mjs";
+import { runtimeWorkflowPatch } from "../public/chat-organization.js";
+
+function restored(chat) {
+  return { pinned: false, customGroupId: null, workflowState: "idle", ...chat,
+    ...runtimeWorkflowPatch(chat, "stopped"), status: "stopped", pendingRequest: null, idleDeadlineAt: null };
+}
 
 function clone(value) {
   return structuredClone(value);
@@ -10,22 +16,33 @@ export class ChatStore {
   #chats = new Map();
   #writes = new Map();
 
-  constructor(dataDir) {
+  constructor(dataDir, records = null) {
     this.dataDir = dataDir;
     this.chatsDir = path.join(dataDir, "chats");
+    this.records = records;
   }
 
   async initialize() {
     await mkdir(this.chatsDir, { recursive: true, mode: 0o700 });
+    if (this.records) {
+      for (const chat of await this.records.list("chat")) {
+        chat.status = "stopped";
+        chat.statusDetail = "Ready to resume";
+        chat.pendingRequest = null;
+        chat.idleDeadlineAt = null;
+        this.#chats.set(chat.id, restored(chat));
+      }
+    }
     const entries = await readdir(this.chatsDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory() || !entry.name.startsWith("chat_")) continue;
+      if (this.#chats.has(entry.name)) continue;
       try {
         const chat = JSON.parse(await readFile(this.chatFile(entry.name), "utf8"));
         chat.status = "stopped";
         chat.statusDetail = "Control plane restarted";
         chat.pendingRequest = null;
-        this.#chats.set(chat.id, chat);
+        this.#chats.set(chat.id, restored(chat));
         await this.#persist(chat.id);
       } catch (error) {
         console.warn(`Skipping unreadable chat ${entry.name}: ${error.message}`);
@@ -65,14 +82,28 @@ export class ChatStore {
     return chat ? clone(chat) : null;
   }
 
-  async create({ title, agent, source = "" }) {
+  async create({ title, agent, source = "", repositories = [], environmentId = null, environmentName = null, autoTitle = true, model = null, effort = null, modelSelectionSet = false }) {
     const id = newId("chat");
     const timestamp = nowIso();
     const chat = {
       id,
+      revision: 1,
       title,
       agent,
+      model,
+      effort,
+      modelSelectionSet,
       source,
+      repositories,
+      environmentId,
+      environmentName,
+      autoTitle,
+      pinned: false,
+      customGroupId: null,
+      workflowState: "idle",
+      stateOrigin: "runtime",
+      resumeState: "idle",
+      workspaceReady: false,
       workspace: this.workspaceDir(id),
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -95,7 +126,7 @@ export class ChatStore {
     const current = this.#chats.get(id);
     if (!current) return null;
     const changes = typeof patch === "function" ? patch(clone(current)) : patch;
-    const next = { ...current, ...changes, id, updatedAt: nowIso() };
+    const next = { ...current, ...changes, id, revision: (current.revision || 0) + 1, updatedAt: nowIso() };
     this.#chats.set(id, next);
     await this.#persist(id);
     return clone(next);
@@ -112,6 +143,7 @@ export class ChatStore {
     };
     const next = {
       ...current,
+      revision: (current.revision || 0) + 1,
       messages: [...current.messages, nextMessage],
       lastActivityAt: timestamp,
       updatedAt: timestamp,
@@ -126,6 +158,7 @@ export class ChatStore {
     if (!this.#chats.has(id)) return false;
     this.#chats.delete(id);
     await this.#writes.get(id);
+    if (this.records) await this.records.delete("chat", id);
     await rm(this.chatDir(id), { recursive: true, force: true });
     return true;
   }
@@ -135,6 +168,7 @@ export class ChatStore {
     const operation = previous.then(async () => {
       const chat = this.#chats.get(id);
       if (!chat) return;
+      if (this.records) { await this.records.put("chat", id, chat); return; }
       const file = this.chatFile(id);
       await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
       const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;

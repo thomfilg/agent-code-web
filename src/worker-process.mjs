@@ -22,6 +22,8 @@ export async function buildWorkerEnvironment({
   authMode,
   capability,
   gatewayOrigin,
+  environmentVariables = {},
+  environmentPath = null,
   ensureDirectory = (directory) => mkdir(directory, { recursive: true, mode: 0o700 }),
 }) {
   const temporary = path.join(runtimeHome, "tmp");
@@ -31,6 +33,8 @@ export async function buildWorkerEnvironment({
   for (const name of SAFE_ENV_NAMES) {
     if (process.env[name]) env[name] = process.env[name];
   }
+  Object.assign(env, environmentVariables);
+  if (environmentPath) env.PATH = environmentPath;
   env.HOME = authMode === "host" ? os.homedir() : runtimeHome;
   env.USER = authMode === "host" ? (process.env.USER || "agent") : "agent";
   env.LOGNAME = env.USER;

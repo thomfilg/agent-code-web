@@ -1,3 +1,8 @@
+import { ChatSidebar } from "./chat-sidebar.js";
+import { stateLabel } from "./chat-organization.js";
+import { WorkspaceSettings } from "./workspace-settings.js";
+import { ModelPicker } from "./model-picker.js";
+
 const state = {
   config: null,
   chats: [],
@@ -68,22 +73,7 @@ function node(tag, className, text) {
 }
 
 function renderChats() {
-  elements.chatList.replaceChildren();
-  if (!state.chats.length) {
-    elements.chatList.append(node("div", "chat-list-empty", "No conversations yet. Create one when an idea is ready."));
-    return;
-  }
-  for (const chat of state.chats) {
-    const button = node("button", `chat-item${state.active?.id === chat.id ? " active" : ""}`);
-    button.type = "button";
-    button.addEventListener("click", () => selectChat(chat.id));
-    const top = node("div", "chat-item-top");
-    top.append(node("span", "agent-glyph", glyph(chat.agent)), node("span", "chat-item-title", chat.title));
-    const meta = node("div", "chat-item-meta");
-    meta.append(node("span", `mini-status ${chat.status}`), node("span", "", agentLabel(chat.agent)), node("span", "", `· ${escapeTime(chat.updatedAt)}`));
-    button.append(top, meta);
-    elements.chatList.append(button);
-  }
+  sidebar.render();
 }
 
 function updateChatSummary(chat) {
@@ -187,15 +177,19 @@ function renderActive() {
     return;
   }
   elements.title.textContent = chat.title;
+  $("#organize-chat-button").textContent = stateLabel(chat.workflowState);
   const runtimeLabel = chat.runtimeMetadata?.instanceId ? ` · ${chat.runtimeMetadata.instanceId}` : "";
   elements.meta.textContent = `${agentLabel(chat.agent)}${runtimeLabel} · ${chat.workspace}`;
   elements.status.textContent = chat.status;
   elements.detail.textContent = chat.statusDetail || "";
   elements.statusDot.className = `status-dot ${chat.status}`;
   $("#stop-button").disabled = chat.status === "stopped";
-  elements.send.disabled = chat.status === "running" || chat.status === "starting";
-  elements.input.disabled = chat.status === "running" || chat.status === "starting";
+  const unavailable = ["running", "starting", "stopping"].includes(chat.status) || chat.workflowState === "archived";
+  elements.send.disabled = unavailable;
+  elements.input.disabled = unavailable;
+  elements.input.placeholder = chat.workflowState === "archived" ? "Archived · change the state to Idle to continue" : "Ask your agent to build, inspect, or fix something…";
   elements.composerAgent.replaceChildren(node("span", "agent-glyph", glyph(chat.agent)), node("span", "", agentLabel(chat.agent)));
+  activeModelPicker.setAgent(chat.agent, chat);
   renderMessages();
   renderApproval();
   tickCountdown();
@@ -212,6 +206,7 @@ function tickCountdown() {
 }
 
 async function selectChat(id) {
+  await activeModelPicker.saving?.catch(() => {});
   state.eventSource?.close();
   state.stream = null;
   state.liveTools.clear();
@@ -232,6 +227,9 @@ function connectEvents(chatId) {
     if (state.active?.id !== chatId) return;
     const event = JSON.parse(data);
     if (event.type === "chat_updated") {
+      // EventSource replays turn history on reconnect; old snapshots must not
+      // undo newer pins, moves, names or states already fetched from the API.
+      if ((event.chat.revision || 0) < (state.active.revision || 0) || event.chat.updatedAt < state.active.updatedAt) return;
       state.active = { ...state.active, ...event.chat };
       updateChatSummary(event.chat);
       renderActive();
@@ -288,11 +286,13 @@ async function resolveRequest(payload) {
   } catch (error) { toast(error.message); }
 }
 
-function openNewChat() {
+async function openNewChat() {
   elements.newForm.reset();
-  $("#workspace-source").value = state.config?.workspaceSource || "";
   renderSecurityHint();
+  $("#create-chat-error").textContent = "";
   elements.newDialog.showModal();
+  try { await workspaceSettings.openNew(); renderSecurityHint(); }
+  catch (error) { $("#create-chat-error").textContent = error.message; }
 }
 
 function renderSecurityHint() {
@@ -314,19 +314,25 @@ async function createChat(event) {
   const submitter = event.submitter;
   if (submitter?.value === "cancel") return elements.newDialog.close();
   submitter.disabled = true;
+  const originalLabel = submitter.textContent;
+  submitter.textContent = "Checking repositories…";
+  $("#create-chat-error").textContent = "";
   try {
-    const payload = {
-      agent: elements.agentSelect.value,
-      title: $("#new-chat-title").value,
-      source: $("#workspace-source").value,
-    };
+    await workspaceSettings.modelPicker.saving;
+    const payload = workspaceSettings.payload();
+    const initialPrompt = $("#initial-prompt").value.trim();
     const { chat } = await api("/api/chats", { method: "POST", body: JSON.stringify(payload) });
+    await workspaceSettings.remember();
     updateChatSummary(chat);
     elements.newDialog.close();
     await selectChat(chat.id);
+    if (initialPrompt) {
+      try { await api(`/api/chats/${chat.id}/messages`, { method: "POST", body: JSON.stringify({ text: initialPrompt }) }); }
+      catch (error) { elements.input.value = initialPrompt; resizeInput(); toast(error.message); }
+    }
     elements.input.focus();
-  } catch (error) { toast(error.message); }
-  finally { submitter.disabled = false; }
+  } catch (error) { $("#create-chat-error").textContent = error.message; }
+  finally { submitter.disabled = false; submitter.textContent = originalLabel; }
 }
 
 async function sendMessage(event) {
@@ -336,6 +342,7 @@ async function sendMessage(event) {
   elements.input.value = "";
   resizeInput();
   try {
+    await activeModelPicker.saving;
     await api(`/api/chats/${state.active.id}/messages`, { method: "POST", body: JSON.stringify({ text }) });
   } catch (error) {
     elements.input.value = text;
@@ -350,6 +357,13 @@ function resizeInput() {
 }
 
 function toast(message) {
+  const dialog = [...document.querySelectorAll("dialog[open]")].at(-1);
+  if (dialog) {
+    let error = dialog.querySelector("[role=alert]");
+    if (!error) { error = node("p", "form-error"); error.setAttribute("role", "alert"); dialog.querySelector("form, .dialog-card")?.append(error); }
+    error.textContent = message;
+    return;
+  }
   const item = node("div", "toast", message);
   $("#toasts").append(item);
   setTimeout(() => item.remove(), 5500);
@@ -362,13 +376,15 @@ async function boot() {
     return;
   }
   state.config = await api("/api/config");
-  state.chats = (await api("/api/chats")).chats;
+  await sidebar.refresh();
+  sidebar.connect();
   elements.agentSelect.replaceChildren();
   for (const agent of state.config.agents.filter((item) => item.enabled)) {
     const option = node("option", "", agent.label);
     option.value = agent.id;
     elements.agentSelect.append(option);
   }
+  await workspaceSettings.load();
   $("#isolation-label").textContent = state.config.workerBackend === "ec2"
     ? "One EC2 worker per chat"
     : state.config.processIsolation === "namespace" ? "Private PID namespaces" : "Process isolation disabled";
@@ -423,6 +439,20 @@ document.addEventListener("keydown", (event) => {
     openNewChat();
   }
 });
-setInterval(() => { tickCountdown(); renderChats(); }, 1000);
+const sidebar = new ChatSidebar({ state, api, select: selectChat, toast, age: escapeTime, agentLabel,
+  updated: chat => {
+    updateChatSummary(chat);
+    if (state.active?.id === chat.id) { state.active = { ...state.active, ...chat }; renderActive(); }
+  },
+});
+const workspaceSettings = new WorkspaceSettings({ state, api, toast });
+const activeModelPicker = new ModelPicker({ root: $("#composer-model-controls"), api, onChange: async settings => {
+  if (!state.active) return;
+  const id = state.active.id;
+  const { chat } = await api(`/api/chats/${id}/model`, { method: "PATCH", body: JSON.stringify(settings) });
+  updateChatSummary(chat);
+  if (state.active?.id === id) state.active = { ...state.active, ...chat };
+} });
+setInterval(tickCountdown, 1000);
 
 boot().catch((error) => toast(error.message));

@@ -8,6 +8,8 @@ packages:
   - curl
   - git
   - jq
+  - python3
+  - python3-venv
   - rsync
   - tar
 
@@ -19,6 +21,37 @@ users:
     shell: /bin/bash
 
 write_files:
+  - path: /usr/local/sbin/agent-web-enable-docker
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      [ "$#" -eq 0 ] || exit 64
+      # The complete machine belongs to exactly one chat. Never install this
+      # helper on the control plane or on a shared/multi-chat worker.
+      /usr/sbin/usermod -a -G docker agent
+      /usr/bin/systemctl start docker
+  - path: /etc/sudoers.d/92-agent-web-docker
+    owner: root:root
+    permissions: "0440"
+    content: |
+      agent ALL=(root) NOPASSWD: /usr/local/sbin/agent-web-enable-docker ""
+  - path: /usr/local/sbin/agent-web-install-docker
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+      chmod a+r /etc/apt/keyrings/docker.asc
+      . /etc/os-release
+      docker_arch="$(dpkg --print-architecture)"
+      printf 'Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: %s\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc\n' "${UBUNTU_CODENAME:-$VERSION_CODENAME}" "$docker_arch" > /etc/apt/sources.list.d/docker.sources
+      apt-get update
+      apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      systemctl disable --now docker.service docker.socket
   - path: /etc/sudoers.d/91-agent-web-transport
     owner: root:root
     permissions: "0440"
@@ -92,6 +125,7 @@ runcmd:
   - curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource-setup.sh
   - bash /tmp/nodesource-setup.sh
   - apt-get install -y nodejs
+  - /usr/local/sbin/agent-web-install-docker
   - npm install --global @openai/codex @anthropic-ai/claude-code
   - install -d -o agent -g agent -m 0700 /opt/agent-web /opt/agent-web/chats
   - install -o agent -g agent -m 0600 /dev/null /opt/agent-web/.heartbeat
@@ -102,4 +136,4 @@ runcmd:
   - systemctl enable agent-web-heartbeat.service agent-web-idle-watchdog.timer
   - systemctl restart ssh
   - rm -f /tmp/nodesource-setup.sh
-  - touch /opt/agent-web/READY
+  - sh -c 'codex --version && claude --version && docker --version && docker compose version && docker buildx version && touch /opt/agent-web/READY'

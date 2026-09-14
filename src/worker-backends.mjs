@@ -84,7 +84,8 @@ class Ec2Executor {
   }
 
   spawn(command, args, options = {}) {
-    const env = { ...(options.env || {}), PATH: this.backend.config.ec2.remotePath };
+    const setupPath = options.env?.PATH?.startsWith(`${this.runtimeHome}/`) ? options.env.PATH : this.backend.config.ec2.remotePath;
+    const env = { ...(options.env || {}), PATH: this.environmentPath || setupPath };
     const assignments = Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`)).join(" ");
     const inner = [
       `cd ${shellQuote(options.cwd || this.workspace)} || exit 1`,

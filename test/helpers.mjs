@@ -16,6 +16,7 @@ export function testConfig(dataDir, overrides = {}) {
     AGENT_DATA_DIR: dataDir,
     AGENT_IDLE_TIMEOUT_MS: "100",
     AGENT_ENABLE_MOCK: "1",
+    AGENT_DATABASE_MODE: "memory",
     AGENT_PROCESS_ISOLATION: "none",
     CODEX_AUTH_MODE: "gateway",
     CLAUDE_AUTH_MODE: "gateway",

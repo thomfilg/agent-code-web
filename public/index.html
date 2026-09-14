@@ -27,10 +27,13 @@
           <kbd>⌘ K</kbd>
         </button>
 
-        <div class="sidebar-label">Conversations</div>
+        <div class="sidebar-heading"><span class="sidebar-label">Conversations</span><button class="small-icon" id="add-group-button" aria-label="Create custom group" title="Create custom group">＋</button></div>
+        <label class="sidebar-sort"><span class="sr-only">Sort chats</span><select id="chat-sort"></select></label>
+        <span class="sidebar-sync" id="sidebar-sync" role="status"></span>
         <nav class="chat-list" id="chat-list" aria-label="Conversations"></nav>
 
         <div class="sidebar-footer">
+          <div class="settings-buttons"><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button></div>
           <div class="system-state">
             <span class="live-dot"></span>
             <div>
@@ -49,6 +52,7 @@
             <div class="chat-meta" id="chat-meta">Independent workspaces. Disposable runtimes.</div>
           </div>
           <div class="topbar-actions" id="chat-actions" hidden>
+            <button class="secondary-button" id="organize-chat-button" aria-label="Organize current chat">Idle</button>
             <button class="secondary-button" id="stop-button">Stop worker</button>
             <button class="icon-button danger" id="delete-button" title="Delete chat" aria-label="Delete chat">⌫</button>
           </div>
@@ -89,6 +93,11 @@
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
                 </button>
               </div>
+              <div class="model-controls composer-model-controls" id="composer-model-controls">
+                <label><span>Model</span><select class="model-select" aria-label="Chat model"></select></label>
+                <label><span>Effort</span><select class="effort-select" aria-label="Chat effort"></select></label>
+                <p class="model-note" role="status"></p>
+              </div>
             </form>
             <p class="composer-hint">Enter to send · Shift + Enter for a new line</p>
           </div>
@@ -103,26 +112,84 @@
             <p class="eyebrow">NEW RUNTIME</p>
             <h2>Create a conversation</h2>
           </div>
-          <button class="icon-button" value="cancel" aria-label="Close">×</button>
+          <button class="icon-button" value="cancel" formnovalidate aria-label="Close">×</button>
         </div>
         <label>
           <span>Agent</span>
           <select id="agent-select" required></select>
         </label>
-        <label>
-          <span>Name</span>
-          <input id="new-chat-title" maxlength="120" placeholder="e.g. Fix the billing flow">
-        </label>
-        <label>
-          <span>Repository source <small>optional</small></span>
-          <input id="workspace-source" placeholder="/path/to/local/git/repo or https://…">
-          <small>Committed files are cloned into a private workspace for this chat.</small>
-        </label>
+        <div class="model-controls" id="new-model-controls"><label><span>Model</span><select class="model-select" aria-label="New chat model"></select></label><label><span>Effort</span><select class="effort-select" aria-label="New chat effort"></select></label><p class="model-note" role="status"></p></div>
+        <label><span>What would you like to work on?</span><textarea id="initial-prompt" rows="3" maxlength="100000" placeholder="Describe the task. Your agent will name this conversation."></textarea></label>
+        <div class="environment-choice"><label><span>Environment</span><select id="environment-select" required></select></label><button type="button" class="icon-button" id="environment-settings" aria-label="Manage selected environment">⚙</button></div>
+        <div id="github-requirement" class="dialog-security"><p>Connect GitHub to choose your repositories.</p><button type="button" class="secondary-button" id="connect-github-button">Connect GitHub</button></div>
+        <div id="repository-picker" hidden>
+          <div id="selected-repositories" class="selected-repositories"></div>
+          <p class="muted" id="repository-group-hint"></p>
+          <details class="repository-picker-dropdown"><summary>Choose repositories</summary><div class="repository-search"><input id="repo-search" type="search" placeholder="Search repositories…" aria-label="Search repositories"><button type="button" class="icon-button" id="refresh-repositories" aria-label="Refresh repositories">↻</button></div><div id="repository-results"></div></details>
+        </div>
         <div class="dialog-security" id="dialog-security"></div>
+        <p id="create-chat-error" class="form-error" role="alert"></p>
         <div class="dialog-actions">
-          <button class="secondary-button" value="cancel">Cancel</button>
+          <button class="secondary-button" value="cancel" formnovalidate>Cancel</button>
           <button class="primary-button" id="create-chat-button" value="default">Create chat</button>
         </div>
+      </form>
+    </dialog>
+
+    <dialog id="github-dialog" aria-labelledby="github-dialog-title">
+      <div class="dialog-card">
+        <div class="dialog-heading"><h2 id="github-dialog-title">Connect GitHub</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close GitHub dialog">×</button></div>
+        <p class="muted" id="github-status"></p>
+        <button type="button" class="primary-button" id="github-local">Use this server’s gh login</button>
+        <button type="button" class="secondary-button" id="github-oauth">Sign in on GitHub</button>
+        <div class="device-code" id="github-device-code"></div>
+        <form id="github-token-form" class="token-form">
+          <label><span>Or use a GitHub access token</span><input type="password" id="github-token" autocomplete="off" required placeholder="Repository read access required"></label>
+          <label><span>Expires at <small>optional, if GitHub does not report it</small></span><input type="datetime-local" id="github-expiry"></label>
+          <button class="secondary-button">Connect with token</button>
+        </form>
+        <p class="form-error" id="github-error" role="alert"></p>
+        <button type="button" class="secondary-button" id="github-disconnect" hidden>Disconnect GitHub</button>
+      </div>
+    </dialog>
+    <dialog id="environments-dialog" aria-labelledby="environments-dialog-title">
+      <div class="dialog-card environment-card">
+        <div class="dialog-heading"><div><p class="eyebrow">WORKSPACE SETTINGS</p><h2 id="environments-dialog-title">Environments</h2></div><button type="button" class="icon-button" data-close-dialog aria-label="Close environments">×</button></div>
+        <div class="environment-navigation"><div id="environment-tabs"></div><button type="button" class="secondary-button" id="add-environment">＋ Add environment</button></div>
+        <form id="environment-form">
+          <label><span>Environment name</span><input id="environment-name" required maxlength="80" placeholder="e.g. Acme staging"></label>
+          <p class="muted" id="environment-backend"></p>
+          <details class="software-settings" open><summary>Installed software</summary><div id="software-options"></div></details>
+          <div class="variables-heading"><h3>Variables</h3><label class="checkbox-label"><input type="checkbox" id="variables-enabled"><span>Enable variables</span></label></div>
+          <p class="muted">Protected values are encrypted and are never injected into agents. Agent-readable variables are passed to tools and can be read by the AI. Local mode still shares the host filesystem—use isolated cloud workers for a strong secret boundary.</p>
+          <div class="variables-toolbar"><input type="search" id="variable-search" placeholder="Search variable names…" aria-label="Search variables"><button type="button" class="primary-button" id="add-variable">＋ Add variable</button></div>
+          <div class="variables-table-wrap"><table class="variables-table"><thead><tr><th>Key</th><th>Visibility</th><th>Value</th><th>Enabled</th></tr></thead><tbody id="variables-table-body"></tbody></table></div>
+          <p class="form-error" id="environment-error" role="alert"></p>
+          <div class="dialog-actions"><span class="muted" id="environment-save-status" role="status"></span><button type="button" class="secondary-button" id="delete-environment">Delete environment</button><button class="primary-button">Save environment</button></div>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog id="group-dialog" aria-labelledby="group-dialog-title">
+      <form class="dialog-card" id="group-form">
+        <div class="dialog-heading"><h2 id="group-dialog-title">Create a group</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close group dialog">×</button></div>
+        <label><span>Group name</span><input id="group-name" required maxlength="80" placeholder="e.g. This week"></label>
+        <p class="muted">Drag chats into this group, or use a chat’s menu. Its original company and repository are always remembered.</p>
+        <p id="group-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button type="button" class="secondary-button danger" id="remove-group-button" hidden>Delete group</button><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button class="primary-button">Save group</button></div>
+      </form>
+    </dialog>
+    <dialog id="organize-dialog" aria-labelledby="organize-dialog-title">
+      <form class="dialog-card" id="organize-form">
+        <div class="dialog-heading"><h2 id="organize-dialog-title">Organize chat</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close organize dialog">×</button></div>
+        <label><span>Title</span><input id="organize-title" required maxlength="120"></label>
+        <label class="checkbox-label"><input type="checkbox" id="organize-pinned"><span>Pin to the top</span></label>
+        <label><span>Move to group</span><select id="organize-group" aria-label="Move to group"></select></label>
+        <p class="muted" id="organize-origin"></p>
+        <label><span>Chat state</span><select id="organize-state" aria-label="Chat state"></select></label>
+        <p class="muted">Working and questions update from the live agent. You can also track states manually; this does not start a worker. Stop a working agent before changing its state. PR states survive autosleep.</p>
+        <p id="organize-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button class="primary-button">Save changes</button></div>
       </form>
     </dialog>
 
@@ -141,6 +208,7 @@
     </dialog>
 
     <div class="toast-region" id="toasts" aria-live="assertive"></div>
+    <div class="sr-only" id="sidebar-announcement" role="status"></div>
     <script type="module" src="app.js"></script>
   </body>
 </html>

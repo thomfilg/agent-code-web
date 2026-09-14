@@ -35,7 +35,12 @@ test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers ap
   };
   adapter = new CodexAdapter({ chat, store, config, broker, gatewayOrigin: "http://127.0.0.1:9", hooks });
   await adapter.start();
-  const result = await adapter.send("fixture turn");
+  let turnParams;
+  const originalRequest = adapter.rpc.request.bind(adapter.rpc);
+  adapter.rpc.request = (method, params, timeout) => { if (method === "turn/start") turnParams = params; return originalRequest(method, params, timeout); };
+  const result = await adapter.send("fixture turn", { model: "fixture-gpt", effort: "high" });
+  assert.equal(turnParams.model, "fixture-gpt");
+  assert.equal(turnParams.effort, "high");
   assert.equal(sessionId, "thr_fixture");
   assert.equal(result.text, "hello world");
   assert.ok(events.some((event) => event.type === "assistant_delta" && event.delta === "hello "));
@@ -70,6 +75,10 @@ test("Claude adapter parses stream-json and retains its resume id", async (t) =>
   assert.equal(result.text, "claude received hello");
   assert.ok(events.some((event) => event.type === "tool" && event.tool === "Read" && event.state === "running"));
   assert.ok(events.some((event) => event.type === "tool" && event.tool === "Read" && event.state === "completed" && event.output === "fixture.txt"));
+  const settings = JSON.parse((await adapter.send("inspect-settings", { model: "sonnet", effort: "low" })).text);
+  assert.equal(settings.model, "sonnet"); assert.equal(settings.effort, "low");
+  const reset = JSON.parse((await adapter.send("inspect-settings", { model: "default", resetEffort: true })).text);
+  assert.equal(reset.model, "default"); assert.equal(reset.effort, null); assert.equal(reset.environmentEffort, "auto");
   await adapter.stop();
 });
 

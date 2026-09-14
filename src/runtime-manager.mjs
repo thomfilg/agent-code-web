@@ -1,9 +1,12 @@
 import { EventEmitter } from "node:events";
 import { clampText, errorMessage, newId, nowIso, redact } from "./utils.mjs";
-import { prepareWorkspace } from "./workspace.mjs";
+import { prepareWorkspace, prepareRepositories } from "./workspace.mjs";
+import { prepareSoftware } from "./software.mjs";
 import { CodexAdapter } from "./adapters/codex.mjs";
 import { ClaudeAdapter } from "./adapters/claude.mjs";
 import { MockAdapter } from "./adapters/mock.mjs";
+import { runtimeWorkflowPatch } from "../public/chat-organization.js";
+import { titlePrompt, extractTitle, TitleStream } from "./title-protocol.mjs";
 
 const ADAPTERS = {
   codex: CodexAdapter,
@@ -31,8 +34,9 @@ export class RuntimeManager extends EventEmitter {
   #queued = new Set();
   #eventIds = new Map();
   #events = new Map();
+  #lifecycleVersions = new Map();
 
-  constructor({ store, config, broker, gatewayOrigin, workerBackend = null, adapterFactory = null }) {
+  constructor({ store, config, broker, gatewayOrigin, workerBackend = null, adapterFactory = null, github = null, environments = null, models = null }) {
     super();
     this.store = store;
     this.config = config;
@@ -44,6 +48,9 @@ export class RuntimeManager extends EventEmitter {
       destroy: async () => {},
     };
     this.adapterFactory = adapterFactory;
+    this.github = github;
+    this.environments = environments;
+    this.models = models;
   }
 
   availableAgents() {
@@ -64,17 +71,31 @@ export class RuntimeManager extends EventEmitter {
     ];
   }
 
+  isBusy(chatId) { return this.#queued.has(chatId) || Boolean(this.#runtimes.get(chatId)?.busy); }
+  publishChat(chat) { if (chat) this.#emit(chat.id, { type: "chat_updated", chat }); }
+
   async createChat(input = {}) {
     const allowed = this.availableAgents().filter((agent) => agent.enabled).map((agent) => agent.id);
     const agent = input.agent || allowed[0];
     if (!allowed.includes(agent)) throw new Error(`agent is not enabled: ${agent}`);
-    const title = input.title ? clampText(input.title, 120, "title") : `New ${agent === "claude" ? "Claude" : "Codex"} chat`;
+    const title = input.title ? clampText(input.title, 120, "title") : agent === "mock" ? "New mock conversation" : "New conversation";
     const source = typeof input.source === "string" ? input.source.trim() : this.config.workspaceSource;
-    const chat = await this.store.create({ title, agent, source });
+    const environment = input.environmentId ? await this.environments?.runtime(input.environmentId) : null;
+    if (environment && environment.backend !== this.config.workerBackend) throw new Error(`This server uses ${this.config.workerBackend} workers. Select an environment with that backend.`);
+    const repositories = input.repositories ? await this.github.resolveSelections(input.repositories) : [];
+    const modelSettings = this.models ? await this.models.validate(agent, input) : {};
+    const chat = await this.store.create({ title, agent, ...modelSettings, modelSelectionSet: Object.hasOwn(input, "model") || Object.hasOwn(input, "effort"), source: repositories.length ? "" : source, repositories,
+      environmentId: environment?.id, environmentName: environment?.name, autoTitle: !input.title });
     try {
+      if (repositories.length) {
+        const updated = await this.store.update(chat.id, { statusDetail: "Repositories selected. They will be cloned when the agent starts." });
+        this.publishChat(updated);
+        return updated;
+      }
       const prepared = await prepareWorkspace({ destination: chat.workspace, source });
       const updated = await this.store.update(chat.id, {
         source: prepared.source,
+        workspaceReady: true,
         statusDetail: prepared.kind === "empty" ? "Empty workspace ready" : `Workspace cloned from ${prepared.source}`,
       });
       this.#emit(chat.id, { type: "chat_updated", chat: updated });
@@ -89,6 +110,7 @@ export class RuntimeManager extends EventEmitter {
     const text = clampText(rawText, 100_000, "message");
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("chat not found"), { statusCode: 404 });
+    if (chat.workflowState === "archived") throw Object.assign(new Error("Unarchive this chat before sending a message"), { statusCode: 409 });
     if (this.#queued.has(chatId) || this.#runtimes.get(chatId)?.busy) {
       throw Object.assign(new Error("this chat already has a running turn"), { statusCode: 409 });
     }
@@ -117,6 +139,7 @@ export class RuntimeManager extends EventEmitter {
       try {
         runtime = await this.#start(chatId);
       } catch (error) {
+        if (error.name === "AbortError") return;
         const message = await this.store.appendMessage(chatId, {
           role: "system",
           kind: "error",
@@ -136,14 +159,22 @@ export class RuntimeManager extends EventEmitter {
     this.#emit(chatId, { type: "turn_started", messageId: assistantMessageId });
 
     try {
-      const result = await runtime.adapter.send(text);
+      const automaticTitle = this.store.get(chatId).autoTitle && this.store.get(chatId).agent !== "mock";
+      runtime.titleStream = automaticTitle ? new TitleStream(event => {
+        runtime.eventQueue = runtime.eventQueue.then(() => this.#agentEvent(chatId, event));
+      }) : null;
+      const settings = this.models ? await this.models.turnSettings(this.store.get(chatId)) : {};
+      const result = await runtime.adapter.send(automaticTitle ? titlePrompt(text) : text, settings);
       if (runtime.generation !== generation) return;
+      runtime.titleStream?.flush();
       await runtime.eventQueue;
+      const output = automaticTitle ? extractTitle(result.text || "") : { text: result.text || "", title: null };
+      if (output.title) await this.#agentEvent(chatId, { type: "title", title: output.title });
       const message = await this.store.appendMessage(chatId, {
         id: assistantMessageId,
         role: "assistant",
         kind: "message",
-        text: result.text || "",
+        text: output.text,
       });
       this.#emit(chatId, { type: "turn_completed", message });
     } catch (error) {
@@ -155,6 +186,7 @@ export class RuntimeManager extends EventEmitter {
       });
       this.#emit(chatId, { type: "turn_failed", message });
     } finally {
+      runtime.titleStream = null;
       if (runtime.generation === generation && this.#runtimes.get(chatId) === runtime) {
         runtime.busy = false;
         await this.#scheduleIdleStop(chatId, runtime);
@@ -165,6 +197,7 @@ export class RuntimeManager extends EventEmitter {
   async stop(chatId, reason = "manual") {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("chat not found"), { statusCode: 404 });
+    this.#lifecycleVersions.set(chatId, (this.#lifecycleVersions.get(chatId) || 0) + 1);
     const runtime = this.#runtimes.get(chatId);
     if (this.config.workerBackend === "ec2" && chat.agent !== "mock") {
       await this.#setStatus(chatId, "stopping", "Stopping EC2 worker", null);
@@ -229,7 +262,8 @@ export class RuntimeManager extends EventEmitter {
       payload = { decision };
     }
     await runtime.adapter.respond(requestId, payload);
-    await this.store.update(chatId, { pendingRequest: null });
+    const updated = await this.store.update(chatId, { pendingRequest: null, workflowState: "working", stateOrigin: "runtime" });
+    this.publishChat(updated);
     this.#emit(chatId, { type: "request_resolved", requestId });
   }
 
@@ -243,11 +277,14 @@ export class RuntimeManager extends EventEmitter {
 
   async #start(chatId) {
     const chat = this.store.get(chatId);
+    const version = this.#lifecycleVersions.get(chatId) || 0;
+    const checkCancelled = () => { if ((this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" }); };
     await this.#setStatus(chatId, "starting", "Starting isolated agent runtime", null);
     let runtime;
     let executor;
     const hooks = {
       onEvent: (event) => {
+        if (event.type === "assistant_delta" && runtime.titleStream) { runtime.titleStream.delta(event.delta || ""); return runtime.eventQueue; }
         runtime.eventQueue = runtime.eventQueue.then(() => this.#agentEvent(chatId, event));
         return runtime.eventQueue;
       },
@@ -264,10 +301,26 @@ export class RuntimeManager extends EventEmitter {
     const Adapter = ADAPTERS[chat.agent];
     if (!Adapter) throw new Error(`unsupported agent: ${chat.agent}`);
     try {
+      if (chat.repositories?.length && !chat.workspaceReady) {
+        const { token } = await this.github.requireConnection();
+        await prepareRepositories({ destination: chat.workspace, repositories: chat.repositories, token,
+          onProgress: detail => this.#setStatus(chatId, "starting", detail, null) });
+        await this.store.update(chatId, { workspaceReady: true });
+      }
+      checkCancelled();
       executor = chat.agent === "mock" ? null : await this.workerBackend.acquire(chat);
       if (executor?.metadata) await this.store.update(chatId, { runtimeMetadata: executor.metadata });
+      checkCancelled();
+      if (executor && chat.environmentId) {
+        const environment = await this.environments.runtime(chat.environmentId);
+        if (environment.backend !== this.config.workerBackend) throw new Error("The environment backend changed. Use the original worker backend to resume this chat.");
+        await prepareSoftware(executor, environment, detail => this.#setStatus(chatId, "starting", detail, null));
+        executor.environmentVariables = { ...environment.variables, ...executor.capabilityVariables };
+      }
+      checkCancelled();
     } catch (error) {
-      await this.#setStatus(chatId, "error", errorMessage(error), null);
+      if (executor) await this.workerBackend.sleep(chat).catch(() => {});
+      if (error.name !== "AbortError") await this.#setStatus(chatId, "error", errorMessage(error), null);
       throw error;
     }
     const adapter = this.adapterFactory
@@ -277,6 +330,7 @@ export class RuntimeManager extends EventEmitter {
     this.#runtimes.set(chatId, runtime);
     try {
       await adapter.start();
+      checkCancelled();
       await this.#setStatus(chatId, "idle", "Runtime ready", null);
       this.#emit(chatId, { type: "runtime_started", agent: chat.agent });
       return runtime;
@@ -284,7 +338,7 @@ export class RuntimeManager extends EventEmitter {
       this.#runtimes.delete(chatId);
       await adapter.stop().catch(() => {});
       if (chat.agent !== "mock") await this.workerBackend.sleep(chat).catch(() => {});
-      await this.#setStatus(chatId, "error", errorMessage(error), null);
+      if (error.name !== "AbortError") await this.#setStatus(chatId, "error", errorMessage(error), null);
       throw error;
     }
   }
@@ -299,16 +353,22 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async #setStatus(chatId, status, statusDetail, idleDeadlineAt) {
-    const chat = await this.store.update(chatId, {
+    const chat = await this.store.update(chatId, current => ({
+      ...runtimeWorkflowPatch(current, status),
       status,
       statusDetail,
       idleDeadlineAt,
       lastActivityAt: nowIso(),
-    });
+    }));
     if (chat) this.#emit(chatId, { type: "chat_updated", chat });
   }
 
   async #agentEvent(chatId, event) {
+    if (event.type === "title") {
+      const chat = this.store.get(chatId);
+      if (chat?.autoTitle && chat.title !== event.title) this.publishChat(await this.store.update(chatId, { title: event.title }));
+      return;
+    }
     if (event.type === "tool" && event.state === "completed") {
       const message = await this.store.appendMessage(chatId, {
         role: "tool",
@@ -330,7 +390,8 @@ export class RuntimeManager extends EventEmitter {
 
   async #agentRequest(chatId, request) {
     const pendingRequest = publicRequest(request);
-    await this.store.update(chatId, { pendingRequest });
+    const updated = await this.store.update(chatId, { pendingRequest, workflowState: "asking_question", stateOrigin: "runtime" });
+    this.publishChat(updated);
     this.#emit(chatId, { type: "request", request: pendingRequest });
   }
 

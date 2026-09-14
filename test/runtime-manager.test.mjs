@@ -51,6 +51,21 @@ test("a chat rejects a second turn while the first is active", async (t) => {
   await first.completion;
 });
 
+test("stopping during adapter startup never starts a late turn or resurrects working state", async t => {
+  const root = await temporaryDirectory(t); const store = new ChatStore(root); await store.initialize();
+  let releaseStart, sends = 0;
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }), gatewayOrigin: "http://localhost",
+    adapterFactory: () => ({ start: () => new Promise(resolve => { releaseStart = resolve; }), stop: async () => {}, send: async () => { sends++; return { text: "unexpected" }; } }),
+  });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "mock" });
+  const turn = await manager.submit(chat.id, "wait");
+  await waitFor(() => releaseStart);
+  await manager.stop(chat.id);
+  releaseStart(); await turn.completion;
+  assert.equal(sends, 0); assert.equal(store.get(chat.id).status, "stopped"); assert.equal(store.get(chat.id).workflowState, "idle");
+});
+
 test("a non-mock chat acquires, sleeps, resumes, and destroys its worker backend", async (t) => {
   const root = await temporaryDirectory(t);
   const config = testConfig(root);

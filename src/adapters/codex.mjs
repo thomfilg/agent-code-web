@@ -91,6 +91,8 @@ export class CodexAdapter {
       capability,
       gatewayOrigin: this.gatewayOrigin,
       ensureDirectory,
+      environmentVariables: this.executor?.environmentVariables,
+      environmentPath: this.executor?.environmentPath,
     });
     await ensureDirectory(env.CODEX_HOME);
 
@@ -101,6 +103,7 @@ export class CodexAdapter {
       "-c", "shell_environment_policy.ignore_default_excludes=false",
       "-c", `shell_environment_policy.exclude=[${toml("AGENT_SESSION_TOKEN")},${toml("OPENAI_API_KEY")},${toml("ANTHROPIC_API_KEY")}]`,
     );
+    for (const [name, value] of Object.entries(this.executor?.environmentVariables || {})) args.push("-c", `shell_environment_policy.set.${name}=${toml(value)}`);
 
     const rpc = new JsonRpcProcess({
       command: this.config.codex.bin,
@@ -159,7 +162,7 @@ export class CodexAdapter {
     }
   }
 
-  async send(text) {
+  async send(text, { model, effort } = {}) {
     if (!this.rpc) await this.start();
     if (this.current) throw new Error("A Codex turn is already running for this chat");
 
@@ -176,6 +179,8 @@ export class CodexAdapter {
       await this.rpc.request("turn/start", {
         threadId: this.threadId,
         input: [{ type: "text", text }],
+        ...(model ? { model } : {}),
+        ...(effort ? { effort } : {}),
       }, 60_000);
       const result = await completion;
       return result;

@@ -32,7 +32,7 @@ export class ClaudeAdapter {
     this.stopped = false;
   }
 
-  async send(text) {
+  async send(text, { model, effort, resetEffort } = {}) {
     if (this.child) throw new Error("A Claude turn is already running for this chat");
     if (this.stopped || (this.config.claude.authMode === "gateway" && !this.capability)) await this.start();
 
@@ -53,8 +53,11 @@ export class ClaudeAdapter {
       capability: this.capability,
       gatewayOrigin: this.gatewayOrigin,
       ensureDirectory,
+      environmentVariables: this.executor?.environmentVariables,
+      environmentPath: this.executor?.environmentPath,
     });
     await ensureDirectory(env.CLAUDE_CONFIG_DIR);
+    if (resetEffort) env.CLAUDE_CODE_EFFORT_LEVEL = "auto";
 
     const args = [
       "--print",
@@ -64,7 +67,8 @@ export class ClaudeAdapter {
       "--permission-mode", "acceptEdits",
       "--prompt-suggestions", "false",
       ...(isNew ? ["--session-id", this.sessionId] : ["--resume", this.sessionId]),
-      ...(this.config.claude.model ? ["--model", this.config.claude.model] : []),
+      ...(model || this.config.claude.model ? ["--model", model || this.config.claude.model] : []),
+      ...(effort ? ["--effort", effort] : []),
     ];
 
     const child = this.executor

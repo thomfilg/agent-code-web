@@ -54,6 +54,15 @@ It installs Node.js, Codex, and Claude Code, verifies their versions, stops the
 builder before snapshotting, creates the AMI, and terminates the builder. It
 never receives model credentials.
 
+The current image also includes Python 3/venv and Docker Engine, Compose and
+Buildx. Docker starts only when enabled by a chat's environment preflight.
+Rebuild existing AMIs to use this capability. The enable helper is limited to
+the dedicated worker; never install it on the control plane. Docker grants
+root-equivalent access within this one-chat VM, so do not attach a sensitive
+IAM role or store master secrets there. The control-plane stop timer still
+stops the complete VM, including its containers. An agent with Docker access
+can bypass the guest watchdog; it cannot bypass AWS StopInstances.
+
 ## 3. Start the control plane
 
 ```bash
