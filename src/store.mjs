@@ -94,6 +94,7 @@ export class ChatStore {
       model,
       effort,
       modelSelectionSet,
+      mode: "accept_edits",
       source,
       repositories,
       environmentId,

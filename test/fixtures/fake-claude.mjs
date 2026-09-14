@@ -8,7 +8,7 @@ process.stdin.on("end", () => {
   send({ type: "system", subtype: "init", session_id: "fixture" });
   if (prompt === "inspect-settings") {
     const flag = name => { const i = process.argv.indexOf(name); return i < 0 ? null : process.argv[i + 1]; };
-    send({ type: "result", subtype: "success", result: JSON.stringify({ model: flag("--model"), effort: flag("--effort"), environmentEffort: process.env.CLAUDE_CODE_EFFORT_LEVEL || null }) }); return;
+    send({ type: "result", subtype: "success", result: JSON.stringify({ model: flag("--model"), effort: flag("--effort"), mode: flag("--permission-mode"), environmentEffort: process.env.CLAUDE_CODE_EFFORT_LEVEL || null }) }); return;
   }
   if (prompt === "force failure") {
     send({ type: "result", subtype: "error_during_execution", is_error: true, result: "fixture failed" });

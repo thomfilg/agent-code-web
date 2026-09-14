@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 import { mkdir } from "node:fs/promises";
+import path from "node:path";
 import { buildWorkerEnvironment, spawnWorker, terminateWorker } from "../worker-process.mjs";
 import { errorMessage, redact } from "../utils.mjs";
+import { claudeUsage } from "../session-info.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks }) {
@@ -32,7 +34,7 @@ export class ClaudeAdapter {
     this.stopped = false;
   }
 
-  async send(text, { model, effort, resetEffort } = {}) {
+  async send(text, { model, effort, resetEffort, mode = "accept_edits" } = {}) {
     if (this.child) throw new Error("A Claude turn is already running for this chat");
     if (this.stopped || (this.config.claude.authMode === "gateway" && !this.capability)) await this.start();
 
@@ -57,6 +59,10 @@ export class ClaudeAdapter {
       environmentPath: this.executor?.environmentPath,
     });
     await ensureDirectory(env.CLAUDE_CONFIG_DIR);
+    // Only this chat's uploaded files join its permitted working directories.
+    // Do not grant access to the controller or other chats' runtime homes.
+    const uploads = path.join(this.runtimeHome, "uploads");
+    await ensureDirectory(uploads);
     if (resetEffort) env.CLAUDE_CODE_EFFORT_LEVEL = "auto";
 
     const args = [
@@ -64,8 +70,9 @@ export class ClaudeAdapter {
       "--verbose",
       "--output-format", "stream-json",
       "--include-partial-messages",
-      "--permission-mode", "acceptEdits",
+      "--permission-mode", mode === "plan" ? "plan" : mode === "auto" ? "auto" : "acceptEdits",
       "--prompt-suggestions", "false",
+      "--add-dir", uploads,
       ...(isNew ? ["--session-id", this.sessionId] : ["--resume", this.sessionId]),
       ...(model || this.config.claude.model ? ["--model", model || this.config.claude.model] : []),
       ...(effort ? ["--effort", effort] : []),
@@ -101,6 +108,7 @@ export class ClaudeAdapter {
     lines.on("line", (line) => {
       let event;
       try { event = JSON.parse(line); } catch { return; }
+      if (event.type === "system" && event.subtype === "init") this.hooks.onEvent?.({ type: "session_capabilities", connectors: (event.mcp_servers || []).map(server => ({ name: server.name, status: server.status })), slashCommands: event.slash_commands || [] });
       if (event.type === "stream_event" && event.event?.type === "content_block_delta") {
         const delta = event.event.delta?.text || "";
         if (delta) {
@@ -129,6 +137,7 @@ export class ClaudeAdapter {
         }
       } else if (event.type === "result") {
         resultMessage = event;
+        this.hooks.onEvent?.({ type: "usage", usage: claudeUsage(event) });
         for (const itemId of activeTools.keys()) completeTool(itemId);
         if (!streamed && !fallback && typeof event.result === "string") fallback = event.result;
       }

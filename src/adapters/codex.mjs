@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { JsonRpcProcess } from "../json-rpc-process.mjs";
 import { buildWorkerEnvironment } from "../worker-process.mjs";
 import { errorMessage, redact } from "../utils.mjs";
+import { codexUsage, safeRateLimits } from "../session-info.mjs";
 
 const toml = (value) => JSON.stringify(value);
 
@@ -127,7 +128,7 @@ export class CodexAdapter {
     rpc.start();
     await rpc.request("initialize", {
       clientInfo: { name: "agent_web_poc", title: "Agent Web POC", version: "0.1.0" },
-      capabilities: { experimentalApi: false },
+      capabilities: { experimentalApi: true },
     });
     rpc.notify("initialized", {});
     await this.#loadThread();
@@ -162,7 +163,7 @@ export class CodexAdapter {
     }
   }
 
-  async send(text, { model, effort } = {}) {
+  async send(text, { model, effort, mode = "accept_edits", images = [] } = {}) {
     if (!this.rpc) await this.start();
     if (this.current) throw new Error("A Codex turn is already running for this chat");
 
@@ -172,20 +173,24 @@ export class CodexAdapter {
       resolveTurn = resolve;
       rejectTurn = reject;
     });
-    const timer = setTimeout(() => rejectTurn(new Error("Codex turn timed out after one hour")), 3_600_000);
+    const timer = setTimeout(() => this.#rejectCurrent(new Error("Codex turn timed out after one hour")), 3_600_000);
     this.current = { text: "", finalText: "", resolveTurn, rejectTurn, timer };
 
     try {
       await this.rpc.request("turn/start", {
         threadId: this.threadId,
-        input: [{ type: "text", text }],
+        input: [{ type: "text", text }, ...images.map(imagePath => ({ type: "localImage", path: imagePath }))],
         ...(model ? { model } : {}),
         ...(effort ? { effort } : {}),
+        approvalPolicy: "on-request",
+        sandboxPolicy: mode === "plan" ? { type: "readOnly" } : { type: "workspaceWrite", writableRoots: [this.workspace], networkAccess: false },
+        collaborationMode: { mode: mode === "plan" ? "plan" : "default", settings: { model: model || this.config.codex.model, reasoning_effort: effort || null, developer_instructions: null } },
       }, 60_000);
       const result = await completion;
       return result;
     } catch (error) {
       this.#rejectCurrent(error);
+      await completion.catch(() => {});
       throw error;
     }
   }
@@ -195,6 +200,26 @@ export class CodexAdapter {
     if (!request || !this.rpc) throw new Error("approval request is no longer active");
     this.requests.delete(requestId);
     this.rpc.respond(request.rpcId, payload);
+  }
+
+  async inspect() {
+    if (!this.rpc) return {};
+    const [limits, connectors] = await Promise.allSettled([
+      this.rpc.request("account/rateLimits/read", {}, 10000),
+      this.rpc.request("mcpServerStatus/list", { limit: 100, detail: "toolsAndAuthOnly" }, 10000),
+    ]);
+    return { rateLimits: limits.status === "fulfilled" ? safeRateLimits(limits.value) : null,
+      connectors: connectors.status === "fulfilled" ? (connectors.value.data || []).map(server => ({ name: server.name, status: server.authStatus || "configured", tools: Object.keys(server.tools || {}).length })) : null };
+  }
+
+  async compact() {
+    if (!this.rpc || this.current) throw new Error("Compaction needs an active, idle Codex session");
+    let resolveTurn, rejectTurn;
+    const complete = new Promise((resolve, reject) => { resolveTurn = resolve; rejectTurn = reject; });
+    const timer = setTimeout(() => this.#rejectCurrent(new Error("Context compaction timed out")), 180000);
+    this.current = { text: "", finalText: "", resolveTurn, rejectTurn, timer };
+    try { await this.rpc.request("thread/compact/start", { threadId: this.threadId }, 10000); return await complete; }
+    catch (error) { this.#rejectCurrent(error); await complete.catch(() => {}); throw error; }
   }
 
   async stop() {
@@ -212,6 +237,9 @@ export class CodexAdapter {
 
   #notification(message) {
     const { method, params = {} } = message;
+    if (method === "thread/tokenUsage/updated") this.hooks.onEvent?.({ type: "usage", usage: codexUsage(params.tokenUsage) });
+    if (method === "account/rateLimits/updated") this.hooks.onEvent?.({ type: "rate_limits", rateLimits: safeRateLimits(params) });
+    if (method === "turn/diff/updated") this.hooks.onEvent?.({ type: "workspace_diff", diff: String(params.diff || "").slice(0, 500000) });
     if (method === "serverRequest/resolved") {
       const requestId = `approval_${params.requestId}`;
       this.requests.delete(requestId);

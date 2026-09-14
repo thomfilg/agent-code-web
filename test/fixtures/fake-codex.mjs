@@ -13,6 +13,13 @@ rl.on("line", (line) => {
     send({ id: message.id, result: { thread: { id: "thr_fixture" } } });
   } else if (message.method === "thread/resume") {
     send({ id: message.id, result: { thread: { id: message.params.threadId } } });
+  } else if (message.method === "thread/compact/start") {
+    send({ id: message.id, result: {} });
+    send({ method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "compact_fixture", status: "completed" } } });
+  } else if (message.method === "account/rateLimits/read") {
+    send({ id: message.id, result: { rateLimits: { primary: { usedPercent: 25, windowDurationMins: 300 } } } });
+  } else if (message.method === "mcpServerStatus/list") {
+    send({ id: message.id, result: { data: [{ name: "fixture", authStatus: "oAuth", tools: { example: {} } }] } });
   } else if (message.method === "turn/start") {
     pendingTurn = { threadId: message.params.threadId, turnId: "turn_fixture" };
     send({ id: message.id, result: { turn: { id: pendingTurn.turnId, status: "inProgress", items: [] } } });

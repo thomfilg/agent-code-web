@@ -18,7 +18,7 @@ export class WorkspaceSettings {
     $("#repo-search").addEventListener("input", () => this.renderRepositories());
     $("#refresh-repositories").addEventListener("click", () => this.loadRepositories(true).catch(error => toast(error.message)));
     $("#environment-select").addEventListener("change", () => this.remember());
-    $("#agent-select").addEventListener("change", async () => { await this.modelPicker.setAgent($("#agent-select").value); this.remember(); });
+    $("#agent-select").addEventListener("change", async () => { await this.modelPicker.setAgent($("#agent-select").value, {}, { useDefaults: true }); this.remember(); });
     $("#environment-settings").addEventListener("click", () => this.openEnvironments($("#environment-select").value));
     $("#environments-button").addEventListener("click", () => this.openEnvironments());
     $("#add-environment").addEventListener("click", () => this.editEnvironment(null));
@@ -41,8 +41,8 @@ export class WorkspaceSettings {
   }
   renderEnvironments() {
     const selected = $("#environment-select").value || this.preferences?.environmentId;
-    $("#environment-select").replaceChildren(...this.environments.map(env => option(env.id, env.name)));
-    if (this.environments.some(env => env.id === selected)) $("#environment-select").value = selected;
+    $("#environment-select").replaceChildren(...this.environments.filter(env => !env.archived).map(env => option(env.id, env.name)));
+    if (this.environments.some(env => env.id === selected && !env.archived)) $("#environment-select").value = selected;
   }
   async openNew() {
     $("#create-chat-error").textContent = "";
@@ -50,7 +50,7 @@ export class WorkspaceSettings {
     this.selected = structuredClone(this.preferences.repositories || []);
     if (this.preferences.agent && [...$("#agent-select").options].some(o => o.value === this.preferences.agent)) $("#agent-select").value = this.preferences.agent;
     this.modelPicker.key = null;
-    await this.modelPicker.setAgent($("#agent-select").value, this.preferences);
+    await this.modelPicker.setAgent($("#agent-select").value, this.preferences, { useDefaults: true });
     $("#repo-search").value = "";
     this.renderSelected();
     if (this.github.connected) await this.loadRepositories();
@@ -140,6 +140,8 @@ export class WorkspaceSettings {
     $("#environment-error").textContent = "";
     $("#environment-tabs").replaceChildren(...this.environments.map(env => button(env.name, () => { if (confirm("Switch environments? Unsaved edits will be discarded.")) this.editEnvironment(env); }, `environment-tab${environment?.id === env.id ? " selected" : ""}`)));
     $("#environment-name").value = this.draft.name;
+    $("#environment-setup-script").value = this.draft.setupScript || "";
+    $("#environment-archived").checked = Boolean(this.draft.archived);
     $("#environment-backend").textContent = `Worker: ${this.draft.backend} · changes apply on the next worker start`;
     $("#variables-enabled").checked = this.draft.variablesEnabled;
     $("#delete-environment").hidden = !this.draft.id;
@@ -178,6 +180,7 @@ export class WorkspaceSettings {
   async saveEnvironment(event) {
     event.preventDefault(); event.submitter.disabled = true;
     this.draft.name = $("#environment-name").value; this.draft.variablesEnabled = $("#variables-enabled").checked;
+    this.draft.setupScript = $("#environment-setup-script").value; this.draft.archived = $("#environment-archived").checked;
     try {
       const { environment } = await this.api(this.draft.id ? `/api/environments/${this.draft.id}` : "/api/environments", { method: this.draft.id ? "PATCH" : "POST", body: JSON.stringify(this.draft) });
       await this.load(); $("#environment-select").value = environment.id; await this.remember(); this.editEnvironment(environment); $("#environment-save-status").textContent = "Saved securely";

@@ -69,7 +69,9 @@ test("GitHub picker preserves repository order, branches, selection and inline e
   await expect(page.locator('[data-section="company:other"]')).toContainText("library");
   await expect(page.getByLabel("Chat model", { exact: true })).toHaveValue("fixture-gpt");
   await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("high");
+  await page.getByLabel("Choose effort", { exact: true }).click();
   await page.getByLabel("Chat effort", { exact: true }).selectOption("low");
+  await page.getByLabel("Choose effort", { exact: true }).click();
   await page.reload(); await page.getByRole("button", { name: /New chat/ }).click();
   await expect(page.locator(".repository-chip").first()).toContainText("Other/library");
   await expect(page.getByLabel("Branch for Acme/api")).toHaveValue("develop");

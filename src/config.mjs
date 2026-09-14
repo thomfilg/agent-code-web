@@ -86,14 +86,16 @@ export function loadConfig(env = process.env) {
     maxBodyBytes: integer(env, "AGENT_MAX_BODY_BYTES", 1_048_576, { min: 1_024, max: 10_485_760 }),
     codex: {
       bin: env.CODEX_BIN || "codex",
-      model: env.CODEX_MODEL || "",
+      model: env.CODEX_MODEL || "gpt-5.6-sol",
+      effort: env.CODEX_EFFORT || "high",
       authMode: codexAuthMode,
       providerKey: env.OPENAI_API_KEY || "",
       upstreamBaseUrl: (env.OPENAI_BASE_URL_UPSTREAM || "https://api.openai.com").replace(/\/$/, ""),
     },
     claude: {
       bin: env.CLAUDE_BIN || "claude",
-      model: env.CLAUDE_MODEL || "",
+      model: env.CLAUDE_MODEL || "opus",
+      effort: env.CLAUDE_EFFORT || "high",
       authMode: claudeAuthMode,
       providerKey: env.ANTHROPIC_API_KEY || "",
       upstreamBaseUrl: (env.ANTHROPIC_BASE_URL_UPSTREAM || "https://api.anthropic.com").replace(/\/$/, ""),

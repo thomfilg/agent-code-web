@@ -65,9 +65,9 @@ export function workflowPatch(chat) {
     const prs = (chat.pullRequests || []).filter(pr => pr.verifiedAt);
     const open = prs.filter(pr => pr.state === "open");
     if (open.length) {
-      workflowState = open.some(pr => pr.checks === "failing") ? "pr_failing" : "pr_open";
+      workflowState = open.some(pr => pr.checks === "failing" || pr.conflicts) ? "pr_failing" : "pr_open";
       stateOrigin = "github";
-      stateDetail = workflowState === "pr_failing" ? "GitHub reports failing or cancelled checks" : open.some(pr => pr.checks === "pending") ? "PR open · checks are still running" : "GitHub confirms an open pull request";
+      stateDetail = open.some(pr => pr.conflicts) ? "GitHub reports merge conflicts" : workflowState === "pr_failing" ? "GitHub reports failing or cancelled checks" : open.some(pr => pr.checks === "pending") ? "PR open · checks are still running" : "GitHub confirms an open pull request";
     } else if (prs.length && prs.every(pr => pr.merged)) { workflowState = "pr_merged"; stateOrigin = "github"; stateDetail = "GitHub confirms the pull request was merged"; }
     else if (prs.length) stateDetail = "Pull request closed without merging";
   }

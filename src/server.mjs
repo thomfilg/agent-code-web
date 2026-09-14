@@ -15,6 +15,7 @@ import { ChatOrganization } from "./chat-organization.mjs";
 import { GitHubConnection } from "./github.mjs";
 import { Environments, SOFTWARE_CATALOG } from "./environments.mjs";
 import { ModelCatalog } from "./models.mjs";
+import { Attachments } from "./attachments.mjs";
 
 const MIME = {
   ".css": "text/css; charset=utf-8",
@@ -45,7 +46,7 @@ function json(response, status, body, headers = {}) {
 }
 
 function summary(chat) {
-  const { messages, pendingRequest, ...rest } = chat;
+  const { messages, pendingRequest, workspaceDiff, workspaceChanges, ...rest } = chat;
   return { ...rest, messageCount: messages.length, hasPendingRequest: Boolean(pendingRequest) };
 }
 
@@ -92,6 +93,7 @@ export async function createAgentWebServer(options = {}) {
   const github = options.github || new GitHubConnection({ records, config: config.github });
   const environments = new Environments(records, config.workerBackend);
   const models = options.models || new ModelCatalog(config);
+  const attachments = new Attachments(records, store);
   await environments.initialize();
   let manager = null;
 
@@ -196,13 +198,33 @@ export async function createAgentWebServer(options = {}) {
       const routed = routeChat(url.pathname);
       if (routed) {
         const { chatId, tail } = routed;
-        if (tail === "model" && request.method === "PATCH") {
+        if (tail === "repositories" && request.method === "POST") return json(response, 200, { chat: await manager.addRepository(chatId, await bodyJson(request, config.maxBodyBytes)) });
+        if (tail === "changes" && request.method === "GET") {
           const chat = store.get(chatId);
           if (!chat) return json(response, 404, { error: "Chat not found" });
-          const settings = await models.validate(chat.agent, await bodyJson(request, config.maxBodyBytes));
-          const updated = await store.update(chatId, { ...settings, modelSelectionSet: true });
-          manager.publishChat(updated);
-          return json(response, 200, { chat: updated });
+          return json(response, 200, chat.workspaceChanges || { files: chat.workspaceDiff ? [{ filename: "Latest Codex turn", patch: chat.workspaceDiff }] : [], note: "A workspace snapshot is captured after the agent's next completed turn. This view does not wake a sleeping worker." });
+        }
+        if (tail === "attachments" && request.method === "POST") return json(response, 201, { attachment: await attachments.upload(chatId, await bodyJson(request, 7 * 1024 * 1024)) });
+        if (tail === "session-info" && request.method === "GET") return json(response, 200, await manager.sessionInfo(chatId));
+        if (tail === "compact" && request.method === "POST") { await manager.compact(chatId); return json(response, 200, { compacted: true }); }
+        if (tail === "pull-requests/files" && request.method === "GET") {
+          return json(response, 200, await manager.pullRequests.files(chatId, url.searchParams.get("repository"), Number(url.searchParams.get("number"))));
+        }
+        if (tail === "pull-requests/auto-merge" && request.method === "PATCH") {
+          const body = await bodyJson(request, config.maxBodyBytes);
+          return json(response, 200, { chat: await manager.pullRequests.autoMerge(chatId, body.repository, body.number, body.enabled) });
+        }
+        if (tail === "pull-requests/refresh" && request.method === "POST") {
+          await manager.pullRequests.refresh(chatId); return json(response, 200, { chat: store.get(chatId) });
+        }
+        if (tail === "mode" && request.method === "PATCH") {
+          return json(response, 200, { chat: await manager.setMode(chatId, (await bodyJson(request, config.maxBodyBytes)).mode) });
+        }
+        if (tail === "agent" && request.method === "PATCH") {
+          return json(response, 200, { chat: await manager.switchAgent(chatId, (await bodyJson(request, config.maxBodyBytes)).agent) });
+        }
+        if (tail === "model" && request.method === "PATCH") {
+          return json(response, 200, { chat: await manager.setModel(chatId, await bodyJson(request, config.maxBodyBytes)) });
         }
         if (!tail && request.method === "PATCH") {
           return json(response, 200, { chat: await organization.patchChat(chatId, await bodyJson(request, config.maxBodyBytes), manager) });
@@ -217,7 +239,7 @@ export async function createAgentWebServer(options = {}) {
         }
         if (tail === "messages" && request.method === "POST") {
           const body = await bodyJson(request, config.maxBodyBytes);
-          const submitted = await manager.submit(chatId, body.text);
+          const submitted = await manager.submit(chatId, body.text, body.attachments || []);
           submitted.completion.catch((error) => console.error(`turn ${chatId}:`, errorMessage(error)));
           return json(response, 202, { accepted: true, message: submitted.message });
         }
@@ -314,6 +336,7 @@ export async function createAgentWebServer(options = {}) {
       github,
       environments,
       models,
+      attachments,
       adapterFactory: options.adapterFactory || null,
     });
     manager.on("event", event => { if (["chat_updated", "message", "chat_deleted"].includes(event.type)) sidebarChanged(); });

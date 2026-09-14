@@ -8,7 +8,10 @@ from a browser. It is intentionally a POC, but the core lifecycle is real:
   and sorting by creation date, update time, or workflow state;
 - connected GitHub repository/branch selection, reusable named environments,
   masked variable editing, and encrypted PostgreSQL records;
-- per-chat model and effort selectors, with agent-generated conversation names;
+- a compact composer with provider switching, model/effort controls, modes,
+  attachments, and agent-generated conversation names;
+- PR links, colored file diffs, CI counts, conflict detection, and opt-in GitHub
+  auto-merge;
 - one independent workspace and worker lifecycle per chat;
 - streamed assistant and tool events over Server-Sent Events;
 - Codex through the official `codex app-server` JSON-RPC protocol;
@@ -146,6 +149,25 @@ and show a warning. Active work/questions take priority over PR milestones; any
 open failing PR makes an otherwise idle chat red, and all tracked PRs must be
 merged for the merged state. Closed, unmerged PRs return to idle.
 
+The PR bar above the composer links to GitHub and shows additions/deletions.
+Click the change count for a side-by-side file viewer (an overlay on mobile),
+with file search and line numbers. Its source picker switches between GitHub's
+PR diff and the last workspace snapshot, including unpushed changes. Snapshots
+are captured after a turn without changing the Git index; opening the viewer
+never wakes an idle worker. Large/binary patches can be omitted or truncated;
+the viewer explains those limits. Local inspection includes up to 30 untracked
+files per repository and at most 1 MB of patch text.
+
+Open CI for passed, skipped, in-progress, and failed counts, a GitHub checks
+link, and merge-conflict warnings. These come from GitHub, not model guesses.
+Select **Auto-merge when ready** and confirm to enable GitHub's native auto-merge
+for that specific verified PR. The repository must allow auto-merge and your
+GitHub credential must have permission to enable it. GitHub enforces its branch
+rules; this app never changes protection rules, bypasses checks, directly
+merges, or force-pushes. The current PR head is verified before enabling.
+Unchecking disables auto-merge. Refresh failures show the last verified state
+with a warning. Auto-fixing CI/comments is not implemented and is disabled.
+
 Archive/unarchive is a separate explicit action, not a state classification.
 Archiving stops an idle worker and prevents new messages until unarchived; stop
 a working turn first. Pins, groups, collapsed
@@ -187,6 +209,15 @@ Both are encrypted in PostgreSQL. A global toggle and per-variable toggles
 control injection. Variable and package changes take effect on the next worker
 start; stop an idle worker first to apply them immediately.
 
+An optional Bash setup script runs after software provisioning and before the
+agent starts, on each worker start. Only enabled **agent-readable** variables
+are available to it; protected values are also excluded from setup scripts.
+Do not embed secrets in a script or write them to an agent-readable file.
+Script failure stops startup and is shown in the chat. Archive a profile to
+hide it from new-chat selection without disrupting existing chats. The network
+field is informational: custom network restrictions require infrastructure
+enforcement and cannot be configured through this POC's UI.
+
 Node 22, pnpm, Yarn and TypeScript install under private versioned per-chat
 prefixes; Python creates a private virtualenv from the base Python 3 runtime;
 jq installs a private binary. The host/image needs Node/npm, Git, curl, and
@@ -219,7 +250,45 @@ effort picker. Claude account/provider policy may limit models or cap effort;
 Fable may bill usage credits in non-interactive mode. See
 [Claude model configuration](https://code.claude.com/docs/en/model-config).
 Changing settings does not interrupt an active turn; they apply to the next
-message. Resetting defaults explicitly clears prior per-session overrides.
+message. New selections default to **Sol/high** for Codex and **Opus/high** for
+Claude. Override with `CODEX_MODEL`, `CODEX_EFFORT`, `CLAUDE_MODEL`, and
+`CLAUDE_EFFORT`; saved explicit per-chat selections are retained. Unsupported
+model selections fail visibly rather than silently switching models.
+
+The composer agent selector switches an idle chat between Codex and Claude.
+Stop active work first. Its chat ID, files, repositories, title, pins, groups,
+and visible transcript stay intact. Switching starts a fresh provider-native
+session on the next message, with up to 80,000 characters of recent conversation
+and tool output passed as a handoff; it does not transfer provider-internal
+context or reuse an incompatible session ID. Switching back also starts a
+fresh session. The target provider's default model/effort are selected.
+
+## Composer and session controls
+
+- **Mode:** Claude uses native Auto, Accept edits, and Plan permissions. Codex
+  uses documented collaboration modes and a read-only sandbox for Plan;
+  Auto/Accept edits retain on-request approvals, not an approval bypass.
+- **Effort:** a compact label opens a discrete slider and accessible selector
+  for the chosen model's available levels.
+- **Files/photos:** upload up to 10 files, 5 MB each and 20 MB total per message.
+  Upload records are encrypted; files sent to an agent are deliberately readable
+  in that chat's worker home. Codex receives supported images as local-image
+  input; Claude can inspect uploaded files through its file-reading tools.
+- **Slash commands:** `/review`, `/test`, and `/plan` are prompt shortcuts;
+  `/plan` also selects Plan mode. These are not arbitrary native CLI commands.
+- **Context/usage:** shows only CLI-reported token, cost, and account-limit data.
+  Missing values are explicitly unavailable; Claude's cumulative token counters
+  are not presented as current context usage. Manual compaction is available
+  for an awake, idle Codex session; Claude manages compaction internally.
+- **Connectors:** a read-only view of MCP servers reported by the CLI. Configure
+  and authorize connectors through the CLI; there is no browser OAuth editor.
+- **Repository menu:** open GitHub, copy branch names, or append repositories to
+  an idle picker-based chat. The original primary repo/group stays unchanged;
+  added repositories clone on the next message.
+- **Chat menu:** organize/rename, show reported tools, open/copy workspace paths,
+  copy a private chat link or transcript, edit its environment, archive, stop,
+  or delete. Detached processes outside the CLI are not tracked as background
+  tasks. Private links retain the server's existing authentication requirement.
 
 ## Verification
 
@@ -229,6 +298,9 @@ then `npm run test:browser`. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to reuse an
 installed Chromium. Browser fixtures use fake GitHub data and mock models.
 `node scripts/smoke-titles.mjs` optionally runs one small, billable turn in each
 locally authenticated CLI to check generated titles; it uses temporary chats.
+`node scripts/smoke-workflow.mjs` verifies real CLI question handling and reads
+this repository's PR state without changing it. Automated auto-merge tests use
+fake GitHub responses and never enable auto-merge on a real PR.
 
 ## Actual EC2 autosleep
 
@@ -252,7 +324,8 @@ control-plane concern and are not placed in the agent environment.
 
 In EC2 mode that committed clone is uploaded once to the chat's encrypted EBS
 workspace. Later stops and starts retain the remote workspace without recopying
-it.
+it. When a repository is added, only its new directory is uploaded; existing
+remote repositories and their uncommitted changes are not overwritten.
 
 The POC persists the Codex thread id or Claude session id alongside browser
 messages. Stopping a worker does not delete either its workspace or CLI session

@@ -1,0 +1,74 @@
+import { test, expect } from "@playwright/test";
+
+test("compact mobile composer switches agents with Sol/Opus high defaults and preserves chat", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 }); await page.goto("/");
+  await page.getByRole("button", { name: "Open chats", exact: true }).click();
+  await page.getByRole("button", { name: "Open Existing alpha", exact: true }).click();
+  await expect(page.locator("#chat-title")).toHaveText("Existing alpha");
+  const url = page.url();
+  await page.getByLabel("Chat agent", { exact: true }).selectOption("codex");
+  await expect(page.getByLabel("Chat model", { exact: true })).toHaveValue("gpt-5.6-sol");
+  await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("high");
+  await expect(page.locator("#composer-model-controls .model-note")).not.toBeVisible();
+  await page.getByLabel("Chat agent", { exact: true }).selectOption("claude");
+  await expect(page.getByLabel("Chat model", { exact: true })).toHaveValue("opus");
+  await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("high");
+  expect(page.url()).toBe(url); await expect(page.locator("#chat-title")).toHaveText("Existing alpha");
+  await page.getByLabel("Agent mode", { exact: true }).click();
+  await page.locator('[data-agent-mode="plan"]').click(); await expect(page.locator("#mode-label")).toHaveText("Plan");
+  await page.getByLabel("Choose effort", { exact: true }).click();
+  await page.getByRole("slider", { name: "Effort level" }).fill("0");
+  await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("low");
+  await page.getByLabel("Chat effort", { exact: true }).selectOption("high");
+  await page.getByLabel("Choose effort", { exact: true }).click();
+  const dimensions = await page.locator(".composer").evaluate(node => ({ width: node.clientWidth, scroll: node.scrollWidth, height: node.clientHeight }));
+  expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.width + 1); expect(dimensions.height).toBeLessThan(140);
+  await page.screenshot({ path: "test-results/compact-mobile-composer.png", fullPage: true });
+  await page.getByLabel("Chat agent", { exact: true }).selectOption("mock");
+});
+
+test("PR bar opens colored diffs, shows CI counts/conflicts, and requires explicit GitHub auto-merge", async ({ page }) => {
+  await page.request.post("/api/github", { data: { method: "local" } });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open PR controls fixture", exact: true }).click();
+  const bar = page.locator(".pull-request-bar");
+  await expect(bar.getByRole("link", { name: "⑂ #42" })).toHaveAttribute("href", "https://github.com/Acme/api/pull/42");
+  await bar.locator(".ci-menu > summary").click();
+  await expect(bar.locator(".ci-count.inProgress strong")).toHaveText("1");
+  await expect(bar.locator(".ci-count.passed strong")).toHaveText("2");
+  await expect(bar.locator(".ci-count.skipped strong")).toHaveText("1");
+  await expect(bar).toContainText("Merge conflicts detected");
+  await expect(bar.getByRole("link", { name: "CI monitoring ↗" })).toHaveAttribute("href", "https://github.com/Acme/api/pull/42/checks");
+  page.once("dialog", dialog => dialog.dismiss());
+  await bar.getByLabel("Auto-merge PR 42").click(); await expect(bar.getByLabel("Auto-merge PR 42")).not.toBeChecked();
+  page.once("dialog", dialog => dialog.accept());
+  await bar.getByLabel("Auto-merge PR 42").check();
+  await expect(bar.getByLabel("Auto-merge PR 42")).toBeChecked();
+  await page.getByRole("button", { name: "View changes for PR 42" }).click();
+  await expect(page.locator("#diff-files")).toContainText("src/example.ts");
+  await expect(page.locator(".diff-line.added")).toContainText("+new value");
+  await expect(page.locator(".diff-line.removed")).toContainText("-old value");
+  await page.screenshot({ path: "test-results/desktop-pr-diff.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("button", { name: "Close changes", exact: true })).toBeInViewport();
+  await page.getByRole("button", { name: "Close changes", exact: true }).click();
+  await page.request.delete("/api/github");
+});
+
+test("upload chips, usage availability, transcript and repository menus are functional", async ({ page }) => {
+  await page.goto("/"); await page.getByRole("button", { name: "Open Existing beta", exact: true }).click();
+  await page.locator("#attachment-input").setInputFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("Fixture notes") });
+  await expect(page.locator("#attachment-chips")).toContainText("notes.txt");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator("#messages")).toContainText("notes.txt");
+  await expect(page.locator("#attachment-chips")).toBeEmpty();
+  await page.getByLabel("Context and usage", { exact: true }).click();
+  await expect(page.locator("#session-usage")).toContainText("Subscription limits unavailable");
+  await expect(page.locator("#session-usage").getByRole("button", { name: "Compact session" })).toBeDisabled();
+  await page.getByLabel("Chat actions", { exact: true }).click();
+  await page.getByRole("button", { name: "Transcript view", exact: true }).click();
+  await expect(page.locator("#controls-content")).toContainText("Please inspect the attached files");
+  await page.getByLabel("Close controls dialog", { exact: true }).click();
+  await page.getByLabel("Repositories", { exact: true }).click();
+  await expect(page.locator("#chat-repositories")).toContainText("Add repository");
+});

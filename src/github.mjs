@@ -47,10 +47,11 @@ export class GitHubConnection {
     return this.status();
   }
   async disconnect() { this.cache = null; this.pending.clear(); await this.records.delete("connection", "github"); return this.status(); }
-  async request(route, { token, raw = false } = {}) {
+  async request(route, { token, raw = false, method = "GET", body } = {}) {
     const auth = token || (await this.requireConnection()).token;
     const response = await this.fetch(`${this.config.apiBase}${route}`, {
-      headers: { accept: "application/vnd.github+json", authorization: `Bearer ${auth}`, "x-github-api-version": "2022-11-28", "user-agent": "agent-code-web" },
+      method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      headers: { accept: "application/vnd.github+json", "content-type": "application/json", authorization: `Bearer ${auth}`, "x-github-api-version": "2022-11-28", "user-agent": "agent-code-web" },
       signal: AbortSignal.timeout(20000), redirect: "error",
     });
     if (response.status === 401) {

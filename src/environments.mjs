@@ -59,6 +59,10 @@ export class Environments {
     const software = [...new Set(input.software || [])];
     if (software.some(id => !SOFTWARE_CATALOG.some(p => p.id === id))) throw new Error("Unsupported software package");
     if (software.includes("docker") && input.backend !== "ec2") throw new Error("Docker requires a dedicated EC2 worker. Sharing the control-plane Docker socket with agents is not supported.");
+    const setupScript = input.setupScript ?? old?.setupScript ?? "";
+    if (typeof setupScript !== "string" || setupScript.length > 50000 || setupScript.includes("\0")) throw new Error("Setup script must be text, at most 50,000 characters");
+    if (input.networkAccess && input.networkAccess !== "worker_default") throw new Error("Network restrictions must be enforced by the worker infrastructure; this backend cannot enforce a custom network policy");
+    if (input.archived !== undefined && typeof input.archived !== "boolean") throw new Error("Archived must be true or false");
     const all = await this.records.list("environment");
     if (all.some(env => env.id !== id && env.name.toLowerCase() === name.toLowerCase())) throw new Error("An environment with this name already exists");
     const value = {
@@ -66,6 +70,7 @@ export class Environments {
       description: String(input.description || "").slice(0, 500),
       variablesEnabled: input.variablesEnabled !== false,
       variables: validateVariables(input.variables || [], old?.variables), software,
+      setupScript, networkAccess: "worker_default", archived: input.archived ?? old?.archived ?? false,
       revision: (old?.revision || 0) + 1, createdAt: old?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
     await this.records.put("environment", value.id, value);
@@ -81,6 +86,7 @@ export class Environments {
     const env = await this.get(id, { reveal: true });
     return {
       id: env.id, name: env.name, revision: env.revision, backend: env.backend, software: env.software,
+      setupScript: env.setupScript || "", archived: Boolean(env.archived),
       variables: Object.fromEntries(env.variables.filter(v => env.variablesEnabled && v.enabled && !v.secret).map(v => [v.key, v.value])),
       protectedKeys: env.variables.filter(v => env.variablesEnabled && v.enabled && v.secret).map(v => v.key),
     };

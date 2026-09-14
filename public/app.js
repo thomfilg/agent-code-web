@@ -1,7 +1,7 @@
 import { ChatSidebar } from "./chat-sidebar.js";
-import { stateLabel } from "./chat-organization.js";
 import { WorkspaceSettings } from "./workspace-settings.js";
 import { ModelPicker } from "./model-picker.js";
+import { ChatControls } from "./chat-controls.js";
 
 const state = {
   config: null,
@@ -28,7 +28,7 @@ const elements = {
   countdown: $("#countdown"),
   input: $("#message-input"),
   send: $("#send-button"),
-  composerAgent: $("#composer-agent"),
+  agentPicker: $("#chat-agent-select"),
   approval: $("#approval-card"),
   newDialog: $("#new-chat-dialog"),
   newForm: $("#new-chat-form"),
@@ -104,12 +104,13 @@ function renderMessage(message, streaming = false) {
   const role = message.role || "system";
   const wrapper = node("article", `message ${role}${message.kind === "error" ? " error" : ""}`);
   wrapper.dataset.messageId = message.id || "stream";
-  wrapper.append(node("div", "message-avatar", role === "assistant" ? glyph(state.active?.agent) : role === "user" ? "YOU" : "!"));
+  wrapper.append(node("div", "message-avatar", role === "assistant" ? glyph(message.agent || state.active?.agent) : role === "user" ? "YOU" : "!"));
   const body = node("div", "message-body");
-  body.append(node("div", "message-label", role === "assistant" ? agentLabel(state.active?.agent) : role));
+  body.append(node("div", "message-label", role === "assistant" ? agentLabel(message.agent || state.active?.agent) : role));
   const text = node("div", "message-text", message.text || "");
   if (streaming) text.append(node("span", "stream-caret"));
   body.append(text);
+  if (message.attachments?.length) body.append(node("p", "muted", message.attachments.map(file => `📎 ${file.name}`).join(" · ")));
   wrapper.append(body);
   return wrapper;
 }
@@ -177,22 +178,30 @@ function renderActive() {
     return;
   }
   elements.title.textContent = chat.title;
-  $("#organize-chat-button").textContent = stateLabel(chat.workflowState);
+  $("#organize-chat-button").textContent = "Rename / organize";
   const runtimeLabel = chat.runtimeMetadata?.instanceId ? ` · ${chat.runtimeMetadata.instanceId}` : "";
   elements.meta.textContent = `${agentLabel(chat.agent)}${runtimeLabel} · ${chat.workspace}`;
   elements.status.textContent = chat.status;
   elements.detail.textContent = chat.statusDetail || "";
   elements.statusDot.className = `status-dot ${chat.status}`;
   $("#stop-button").disabled = chat.status === "stopped";
-  const unavailable = ["running", "starting", "stopping"].includes(chat.status) || chat.workflowState === "archived";
+  const switching = state.switchingChat === chat.id;
+  const unavailable = switching || ["running", "starting", "stopping"].includes(chat.status) || chat.workflowState === "archived";
   elements.send.disabled = unavailable;
   elements.input.disabled = unavailable;
   elements.input.placeholder = chat.workflowState === "archived" ? "Archived · unarchive this chat to continue" : "Ask your agent to build, inspect, or fix something…";
-  elements.composerAgent.replaceChildren(node("span", "agent-glyph", glyph(chat.agent)), node("span", "", agentLabel(chat.agent)));
+  if (!elements.agentPicker.options.length) for (const agent of state.config.agents.filter(item => item.enabled)) {
+    const option = node("option", "", agent.id === "claude" ? "Claude" : agent.label); option.value = agent.id; elements.agentPicker.append(option);
+  }
+  elements.agentPicker.value = chat.agent;
+  elements.agentPicker.disabled = switching || ["running", "starting", "stopping"].includes(chat.status);
+  elements.agentPicker.title = elements.agentPicker.disabled ? "Stop the working agent before switching" : "Switch agent · conversation and workspace are retained";
   activeModelPicker.setAgent(chat.agent, chat);
+  if (switching) { activeModelPicker.model.disabled = true; activeModelPicker.effort.disabled = true; }
   renderMessages();
   renderApproval();
   tickCountdown();
+  chatControls.render(chat);
 }
 
 function tickCountdown() {
@@ -206,18 +215,23 @@ function tickCountdown() {
 }
 
 async function selectChat(id) {
+  const selection = state.selection = (state.selection || 0) + 1;
   await activeModelPicker.saving?.catch(() => {});
+  if (state.selection !== selection) return;
   state.eventSource?.close();
   state.stream = null;
   state.liveTools.clear();
   try {
-    state.active = (await api(`/api/chats/${id}`)).chat;
+    const { chat } = await api(`/api/chats/${id}`);
+    if (state.selection !== selection) return;
+    state.active = chat;
+    history.replaceState(null, "", `#chat=${id}`);
     renderChats();
     renderActive();
     elements.sidebar.classList.remove("open");
     connectEvents(id);
     requestAnimationFrame(() => { elements.messages.scrollTop = elements.messages.scrollHeight; });
-  } catch (error) { toast(error.message); }
+  } catch (error) { if (state.selection === selection) toast(error.message); }
 }
 
 function connectEvents(chatId) {
@@ -337,13 +351,16 @@ async function createChat(event) {
 
 async function sendMessage(event) {
   event.preventDefault();
-  const text = elements.input.value.trim();
+  const files = chatControls.attachments();
+  const text = elements.input.value.trim() || (files.length ? "Please inspect the attached files." : "");
   if (!text || !state.active) return;
+  const chatId = state.active.id;
   elements.input.value = "";
   resizeInput();
   try {
     await activeModelPicker.saving;
-    await api(`/api/chats/${state.active.id}/messages`, { method: "POST", body: JSON.stringify({ text }) });
+    await api(`/api/chats/${chatId}/messages`, { method: "POST", body: JSON.stringify({ text, attachments: files.map(file => file.id) }) });
+    chatControls.clearAttachments(chatId);
   } catch (error) {
     elements.input.value = text;
     resizeInput();
@@ -389,7 +406,7 @@ async function boot() {
     ? "One EC2 worker per chat"
     : state.config.processIsolation === "namespace" ? "Private PID namespaces" : "Process isolation disabled";
   renderChats();
-  if (state.chats.length) await selectChat(state.chats[0].id);
+  if (state.chats.length) await selectChat(state.chats.find(chat => location.hash === `#chat=${chat.id}`)?.id || state.chats[0].id);
   else renderActive();
 }
 
@@ -446,6 +463,11 @@ const sidebar = new ChatSidebar({ state, api, select: selectChat, toast, age: es
   },
 });
 const workspaceSettings = new WorkspaceSettings({ state, api, toast });
+const chatControls = new ChatControls({ state, api, toast,
+  updated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = { ...state.active, ...chat }; renderActive(); } },
+  openEnvironment: () => workspaceSettings.openEnvironments(state.active?.environmentId),
+  openRepositories: () => openNewChat(),
+});
 const activeModelPicker = new ModelPicker({ root: $("#composer-model-controls"), api, onChange: async settings => {
   if (!state.active) return;
   const id = state.active.id;
@@ -453,6 +475,18 @@ const activeModelPicker = new ModelPicker({ root: $("#composer-model-controls"),
   updateChatSummary(chat);
   if (state.active?.id === id) state.active = { ...state.active, ...chat };
 } });
+elements.agentPicker.addEventListener("change", async () => {
+  const chat = state.active; if (!chat) return;
+  const agent = elements.agentPicker.value;
+  state.switchingChat = chat.id; renderActive();
+  try {
+    await activeModelPicker.saving;
+    const result = await api(`/api/chats/${chat.id}/agent`, { method: "PATCH", body: JSON.stringify({ agent }) });
+    updateChatSummary(result.chat);
+    if (state.active?.id === chat.id) { state.active = result.chat; state.stream = null; state.liveTools.clear(); }
+  } catch (error) { toast(error.message); }
+  finally { state.switchingChat = null; activeModelPicker.key = null; renderActive(); }
+});
 setInterval(tickCountdown, 1000);
 
 boot().catch((error) => toast(error.message));

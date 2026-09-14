@@ -38,14 +38,21 @@ test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers ap
   let turnParams;
   const originalRequest = adapter.rpc.request.bind(adapter.rpc);
   adapter.rpc.request = (method, params, timeout) => { if (method === "turn/start") turnParams = params; return originalRequest(method, params, timeout); };
-  const result = await adapter.send("fixture turn", { model: "fixture-gpt", effort: "high" });
+  const result = await adapter.send("fixture turn", { model: "fixture-gpt", effort: "high", mode: "plan", images: ["/tmp/image.png"] });
   assert.equal(turnParams.model, "fixture-gpt");
   assert.equal(turnParams.effort, "high");
+  assert.deepEqual(turnParams.sandboxPolicy, { type: "readOnly" });
+  assert.equal(turnParams.collaborationMode.mode, "plan");
+  assert.deepEqual(turnParams.input[1], { type: "localImage", path: "/tmp/image.png" });
   assert.equal(sessionId, "thr_fixture");
   assert.equal(result.text, "hello world");
   assert.ok(events.some((event) => event.type === "assistant_delta" && event.delta === "hello "));
   assert.ok(events.some((event) => event.type === "tool" && event.state === "completed"));
   assert.ok(events.some(event => event.type === "request_resolved" && event.requestId === "approval_900"));
+  const info = await adapter.inspect(); assert.equal(info.rateLimits[0].windows[0].usedPercent, 25); assert.equal(info.connectors[0].tools, 1);
+  assert.equal((await adapter.compact()).status, "completed");
+  await adapter.send("default mode", { model: "fixture-gpt" });
+  assert.equal(turnParams.collaborationMode.mode, "default"); assert.equal(turnParams.sandboxPolicy.type, "workspaceWrite");
   await adapter.stop();
 
   const resumedChat = { ...chat, agentSessionId: sessionId };
@@ -78,6 +85,8 @@ test("Claude adapter parses stream-json and retains its resume id", async (t) =>
   assert.ok(events.some((event) => event.type === "tool" && event.tool === "Read" && event.state === "completed" && event.output === "fixture.txt"));
   const settings = JSON.parse((await adapter.send("inspect-settings", { model: "sonnet", effort: "low" })).text);
   assert.equal(settings.model, "sonnet"); assert.equal(settings.effort, "low");
+  assert.equal(settings.mode, "acceptEdits");
+  for (const mode of ["plan", "auto"]) assert.equal(JSON.parse((await adapter.send("inspect-settings", { mode })).text).mode, mode);
   const reset = JSON.parse((await adapter.send("inspect-settings", { model: "default", resetEffort: true })).text);
   assert.equal(reset.model, "default"); assert.equal(reset.effort, null); assert.equal(reset.environmentEffort, "auto");
   await adapter.stop();

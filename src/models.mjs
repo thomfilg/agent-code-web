@@ -9,13 +9,25 @@ const fail = message => Object.assign(new Error(message), { statusCode: 400 });
 
 export class ModelCatalog {
   constructor(config) { this.config = config; this.cache = new Map(); this.pending = new Map(); }
+  defaults(agent) { return { model: this.config[agent]?.model || null, effort: this.config[agent]?.effort || null }; }
+  async creationSettings(agent, input = {}) {
+    if (agent === "mock") return this.validate(agent, input);
+    const defaults = this.defaults(agent);
+    const catalog = await this.list(agent);
+    const model = input.model || defaults.model;
+    const selected = catalog.models.find(item => item.id === model);
+    return this.validate(agent, { model, effort: input.effort || (selected?.efforts.includes(defaults.effort) ? defaults.effort : selected?.defaultEffort) || null });
+  }
   async list(agent) {
     if (agent === "mock") return { models: [], source: "mock", note: "Mock mode does not use a model or effort level." };
     if (!["codex", "claude"].includes(agent)) throw fail("Invalid agent");
     const cached = this.cache.get(agent);
     if (cached?.expires > Date.now()) return cached.value;
     if (this.pending.has(agent)) return this.pending.get(agent);
-    const promise = (agent === "codex" ? this.codex() : this.claude()).then(value => { this.cache.set(agent, { value, expires: Date.now() + 300000 }); return value; }).finally(() => this.pending.delete(agent));
+    const promise = (agent === "codex" ? this.codex() : this.claude()).then(value => {
+      value = { ...value, configuredDefault: this.defaults(agent).model, configuredDefaultEffort: this.defaults(agent).effort, defaults: this.defaults(agent) };
+      this.cache.set(agent, { value, expires: Date.now() + 300000 }); return value;
+    }).finally(() => this.pending.delete(agent));
     this.pending.set(agent, promise); return promise;
   }
   async codex() {
@@ -59,9 +71,12 @@ export class ModelCatalog {
     return { model, effort };
   }
   async turnSettings(chat) {
-    if (!chat.model && !chat.effort && !chat.modelSelectionSet) return {};
+    if (chat.agent === "mock") return {};
     const catalog = await this.list(chat.agent);
-    const selected = catalog.models.find(item => item.id === chat.model) || catalog.models.find(item => item.id === catalog.configuredDefault) || catalog.models.find(item => item.isDefault);
-    return { model: chat.model || catalog.configuredDefault || selected?.id || (chat.agent === "claude" ? "default" : null), effort: chat.effort || (chat.agent === "codex" ? selected?.defaultEffort : null) || null, resetEffort: !chat.effort };
+    const target = chat.model || catalog.configuredDefault;
+    const selected = catalog.models.find(item => item.id === target) || (!target ? catalog.models.find(item => item.isDefault) : null);
+    if (target && !selected) throw fail(`Model ${target} is not available. Choose another model before sending a message.`);
+    const effort = chat.effort || (selected?.efforts.includes(catalog.configuredDefaultEffort) ? catalog.configuredDefaultEffort : selected?.defaultEffort) || null;
+    return { model: chat.model || catalog.configuredDefault || selected?.id || (chat.agent === "claude" ? "default" : null), effort, resetEffort: !effort };
   }
 }

@@ -52,9 +52,19 @@
             <div class="chat-meta" id="chat-meta">Independent workspaces. Disposable runtimes.</div>
           </div>
           <div class="topbar-actions" id="chat-actions" hidden>
-            <button class="secondary-button" id="organize-chat-button" aria-label="Organize current chat">Idle</button>
-            <button class="secondary-button" id="stop-button">Stop worker</button>
-            <button class="icon-button danger" id="delete-button" title="Delete chat" aria-label="Delete chat">⌫</button>
+            <details class="control-menu" id="repositories-menu"><summary aria-label="Repositories" title="Repositories">▱</summary><div class="control-popover" id="chat-repositories"></div></details>
+            <button class="icon-button" id="view-changes" title="View changes" aria-label="View changes">▣</button>
+            <button class="icon-button" id="copy-chat-link" title="Copy private chat link" aria-label="Copy chat link">↥</button>
+            <details class="control-menu"><summary aria-label="Chat actions" title="Chat actions">⋮</summary><div class="control-popover">
+              <button type="button" id="background-tasks">Background tasks</button>
+              <button type="button" id="open-workspace">Open in…</button>
+              <button type="button" id="organize-chat-button" aria-label="Organize current chat">Rename / organize</button>
+              <button type="button" id="transcript-view">Transcript view</button>
+              <button type="button" id="edit-chat-environment">Edit environment</button>
+              <button type="button" id="archive-current-chat">Archive</button>
+              <button type="button" id="stop-button">Stop worker</button>
+              <button type="button" class="danger" id="delete-button" aria-label="Delete chat">Delete</button>
+            </div></details>
           </div>
         </header>
 
@@ -85,23 +95,53 @@
           <div class="messages" id="messages" aria-live="polite"></div>
           <div class="approval-card" id="approval-card" hidden></div>
           <div class="composer-wrap">
+            <div id="pull-request-bars" class="pull-request-bars"></div>
             <form class="composer" id="composer">
+              <div id="attachment-chips" class="attachment-chips"></div>
               <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message"></textarea>
               <div class="composer-footer">
-                <div class="composer-agent" id="composer-agent"></div>
+                <div class="composer-pickers">
+                  <details class="control-menu upward"><summary aria-label="Add to message" title="Add to message">＋</summary><div class="control-popover">
+                    <button type="button" id="add-attachments">Add files or photos</button>
+                    <button type="button" id="slash-commands">Slash commands</button>
+                    <button type="button" id="show-connectors">Connectors</button>
+                  </div></details>
+                  <details class="control-menu upward" id="mode-menu"><summary id="mode-label" aria-label="Agent mode">Edits</summary><div class="control-popover">
+                    <p class="menu-caption">Mode · applies next turn</p>
+                    <button type="button" data-agent-mode="auto">Auto<small>Provider-managed approvals</small></button>
+                    <button type="button" data-agent-mode="accept_edits">Accept edits<small>Allow workspace edits; commands may need approval</small></button>
+                    <button type="button" data-agent-mode="plan">Plan<small>Make a plan before changing files</small></button>
+                    <p class="muted" id="mode-provider-note"></p>
+                  </div></details>
+                  <select id="chat-agent-select" aria-label="Chat agent" title="Switch agent · conversation and workspace are retained"></select>
+                  <div class="model-controls compact-model-controls" id="composer-model-controls">
+                    <select class="model-select" aria-label="Chat model" title="Model"></select>
+                    <details class="control-menu upward effort-menu"><summary aria-label="Choose effort" class="effort-label">High</summary><div class="control-popover">
+                      <p class="menu-caption">Effort · applies next turn</p>
+                      <select class="effort-select" aria-label="Chat effort" title="Effort"></select>
+                      <input class="effort-slider" type="range" min="0" max="0" step="1" aria-label="Effort level">
+                      <div class="effort-scale"><span>Faster</span><span>More reasoning</span></div>
+                      <p class="muted">Higher effort can take longer and use more tokens. Available levels come from the selected model.</p>
+                    </div></details>
+                    <p class="model-note" role="status"></p>
+                  </div>
+                </div>
+                <details class="control-menu upward usage-menu" id="usage-menu"><summary aria-label="Context and usage" title="Context and usage"><span id="usage-ring" aria-hidden="true"></span></summary><div class="control-popover" id="session-usage"><p>Loading usage…</p></div></details>
                 <button class="send-button" id="send-button" type="submit" aria-label="Send message">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
                 </button>
               </div>
-              <div class="model-controls composer-model-controls" id="composer-model-controls">
-                <label><span>Model</span><select class="model-select" aria-label="Chat model"></select></label>
-                <label><span>Effort</span><select class="effort-select" aria-label="Chat effort"></select></label>
-                <p class="model-note" role="status"></p>
-              </div>
             </form>
+            <input type="file" id="attachment-input" multiple hidden>
             <p class="composer-hint">Enter to send · Shift + Enter for a new line</p>
           </div>
         </section>
+        <aside class="diff-panel" id="diff-panel" aria-label="Changes" hidden>
+          <div class="diff-heading"><strong id="diff-title">Changes</strong><button type="button" class="icon-button" id="expand-diff" aria-label="Expand changes">⤢</button><button type="button" class="icon-button" id="close-diff" aria-label="Close changes">×</button></div>
+          <input id="diff-search" type="search" placeholder="Find a file…" aria-label="Find changed file">
+          <select id="diff-selection" aria-label="Changes source"></select>
+          <p class="muted" id="diff-source"></p><div id="diff-files"></div>
+        </aside>
       </main>
     </div>
 
@@ -159,7 +199,12 @@
         <form id="environment-form">
           <label><span>Environment name</span><input id="environment-name" required maxlength="80" placeholder="e.g. Acme staging"></label>
           <p class="muted" id="environment-backend"></p>
+          <label><span>Network access</span><select disabled aria-label="Network access"><option>Worker infrastructure default</option></select></label>
+          <p class="muted">Custom egress restrictions are not enforced by this backend. Configure the worker network externally; agent sandbox permissions remain separate.</p>
           <details class="software-settings" open><summary>Installed software</summary><div id="software-options"></div></details>
+          <label><span>Setup script</span><textarea id="environment-setup-script" rows="5" maxlength="50000" spellcheck="false" placeholder="Runs before the agent starts"></textarea></label>
+          <p class="muted">Bash script run on each worker start, before the agent launches. Only agent-readable variables are injected. Do not put secrets directly in the script; its files can be read by the agent.</p>
+          <label class="checkbox-label"><input type="checkbox" id="environment-archived"><span>Archive environment · hide from new chats</span></label>
           <div class="variables-heading"><h3>Variables</h3><label class="checkbox-label"><input type="checkbox" id="variables-enabled"><span>Enable variables</span></label></div>
           <p class="muted">Protected values are encrypted and are never injected into agents. Agent-readable variables are passed to tools and can be read by the AI. Local mode still shares the host filesystem—use isolated cloud workers for a strong secret boundary.</p>
           <div class="variables-toolbar"><input type="search" id="variable-search" placeholder="Search variable names…" aria-label="Search variables"><button type="button" class="primary-button" id="add-variable">＋ Add variable</button></div>
@@ -179,6 +224,7 @@
         <div class="dialog-actions"><button type="button" class="secondary-button danger" id="remove-group-button" hidden>Delete group</button><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button class="primary-button">Save group</button></div>
       </form>
     </dialog>
+    <dialog id="controls-dialog" aria-labelledby="controls-title"><div class="dialog-card"><div class="dialog-heading"><h2 id="controls-title"></h2><button class="icon-button" type="button" data-close-dialog aria-label="Close controls dialog">×</button></div><div id="controls-content"></div></div></dialog>
     <dialog id="organize-dialog" aria-labelledby="organize-dialog-title">
       <form class="dialog-card" id="organize-form">
         <div class="dialog-heading"><h2 id="organize-dialog-title">Organize chat</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close organize dialog">×</button></div>

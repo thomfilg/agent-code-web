@@ -273,7 +273,77 @@ dialog { max-height: calc(100dvh - 28px); }
 .model-controls label { min-width: 0; }
 .model-controls label > span { display: block; font-size: 10px; color: var(--muted); margin-bottom: 5px; }
 .model-controls select { width: 100%; min-width: 0; border: 1px solid var(--line-bright); border-radius: 6px; padding: 7px; color: var(--text); background: var(--panel); font-size: 11px; }
-.composer-model-controls { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--line); }
+.composer-footer { align-items: flex-end; gap: 8px; }
+.composer-pickers { display: flex; align-items: flex-start; gap: 4px; min-width: 0; flex: 1; }
+.composer-pickers select { height: 30px; padding: 4px 2px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; }
+.composer-pickers select:hover, .composer-pickers select:focus-visible { background: var(--panel); color: var(--text); }
+.composer-pickers select:disabled { cursor: default; opacity: .5; }
+.composer-pickers select option { background: var(--panel); color: var(--text); }
+#chat-agent-select { width: 69px; flex: none; }
+.compact-model-controls { display: grid; grid-template-columns: minmax(65px, 125px) minmax(60px, 78px); gap: 4px; min-width: 0; }
+.compact-model-controls .model-note { display: none; }
+.compact-model-controls[data-status="error"] .model-note { display: block; color: var(--red); overflow-wrap: anywhere; }
+.send-button { flex: none; }
+.control-menu { position: relative; flex: none; }
+.control-menu > summary { list-style: none; display: flex; align-items: center; justify-content: center; cursor: pointer; min-height: 30px; padding: 4px; border-radius: 5px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.control-menu > summary::-webkit-details-marker { display: none; }
+.control-menu[open] > summary, .control-menu > summary:hover { background: var(--panel); color: var(--text); }
+.control-popover { position: absolute; top: calc(100% + 7px); right: 0; width: 270px; max-width: calc(100vw - 36px); z-index: 50; background: #242622; color: var(--text); border: 1px solid var(--line-bright); border-radius: 9px; box-shadow: 0 12px 40px #0008; padding: 8px; max-height: 65vh; overflow: auto; }
+.upward > .control-popover { top: auto; bottom: calc(100% + 7px); }
+.composer-pickers > .control-menu > .control-popover { right: auto; left: 0; }
+.control-popover > button, .control-popover > a { display: block; width: 100%; border: 0; border-radius: 5px; background: transparent; color: var(--text); text-align: left; padding: 8px; font-size: 12px; text-decoration: none; overflow-wrap: anywhere; }
+.control-popover > button:hover, .control-popover > a:hover { background: #ffffff0b; }
+.control-popover button:disabled { opacity: .45; cursor: not-allowed; }
+.control-popover small { display: block; font-size: 10px; color: var(--muted); line-height: 1.5; margin-top: 3px; }
+.control-popover .muted { font-size: 10px; line-height: 1.5; }
+.control-popover .checkbox-label { display: flex; align-items: center; gap: 7px; font-size: 11px; margin: 12px 4px; }
+.control-popover .checkbox-label input { accent-color: var(--lime); }
+.control-popover progress { width: 100%; height: 5px; accent-color: var(--lime); }
+.menu-caption { margin: 4px 8px; color: var(--faint); font-size: 10px; }
+.topbar-actions .control-menu > summary { font-size: 20px; width: 30px; }
+.composer-pickers { align-items: center; }
+#chat-agent-select { width: 58px; }
+.compact-model-controls { flex: 1; grid-template-columns: minmax(40px, 1fr) 60px; max-width: 195px; }
+.composer-pickers > .control-menu > summary { padding: 3px; }
+.usage-menu > summary { min-width: 24px; color: var(--blue); }
+#usage-ring { display: block; width: 13px; height: 13px; border-radius: 50%; background: conic-gradient(var(--blue) var(--usage, 0%), #545b50 0); mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 0); }
+.effort-menu > summary { justify-content: flex-end; }
+.effort-slider { width: 100%; accent-color: var(--lime); margin: 16px 0 8px; }
+.effort-scale { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+.pr-deletions { color: #f78181; }
+.pr-closed { color: var(--muted); }
+#diff-selection { width: 100%; margin-top: 8px; padding: 6px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--panel); }
+.pull-request-bars { display: grid; gap: 5px; margin-bottom: 6px; }
+.pull-request-bar { display: flex; align-items: center; gap: 8px; min-height: 34px; border-radius: 8px; background: #242622; border: 1px solid var(--line); padding: 3px 7px; font-size: 11px; }
+.pull-request-bar > a { white-space: nowrap; text-decoration: none; }
+.pr-open { color: #3fb950; }.pr-merged { color: #a371f7; }.pr-failing { color: #f85149; }
+.pr-branch { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); }
+.pr-change-count { white-space: nowrap; border: 0; border-radius: 5px; padding: 4px 6px; color: #80d68c; background: #ffffff0a; font: inherit; }
+.ci-count { display: flex; align-items: center; justify-content: space-between; padding: 5px 8px; font-size: 11px; }
+.ci-count.failed { color: #f85149; }.ci-count.passed { color: #3fb950; }
+.main.diff-open { display: grid; grid-template-columns: minmax(350px, 1fr) minmax(340px, 1.15fr); grid-template-rows: auto minmax(0, 1fr); }
+.main.diff-open > .topbar { grid-column: 1 / -1; }
+.diff-panel { min-width: 0; min-height: 0; overflow: auto; background: #171916; border-left: 1px solid var(--line); grid-column: 2; grid-row: 2; padding: 10px; }
+.diff-panel.expanded { position: fixed; inset: 16px; z-index: 55; border: 1px solid var(--line-bright); border-radius: 10px; }
+.diff-heading { display: flex; align-items: center; gap: 8px; position: sticky; top: -10px; background: #171916; padding: 6px 0; z-index: 1; }
+.diff-heading strong { flex: 1; font-size: 12px; overflow-wrap: anywhere; }
+#diff-search { width: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; color: var(--text); padding: 8px; font-size: 11px; }
+#diff-source { font-size: 10px; line-height: 1.5; }
+.diff-file { margin: 10px 0; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.diff-file > summary { padding: 9px; cursor: pointer; font-size: 11px; background: #242622; overflow-wrap: anywhere; }
+.diff-code { margin: 0; overflow: auto; font: 11px/1.6 ui-monospace, monospace; tab-size: 2; }
+.diff-line { display: flex; gap: 8px; min-width: max-content; padding-right: 10px; }
+.diff-line.added { background: #234429; color: #b5e8b3; }.diff-line.removed { background: #492829; color: #f5b4b4; }.diff-line.hunk { color: #92b4db; background: #24303b; }
+.line-number { width: 38px; padding-left: 4px; flex: none; text-align: right; color: #a2aba0; user-select: none; }
+.transcript { max-height: 60vh; overflow: auto; white-space: pre-wrap; font: 12px/1.6 ui-monospace, monospace; }
+#controls-content { display: grid; gap: 12px; overflow-wrap: anywhere; }
+#controls-content button { border: 1px solid var(--line); padding: 8px; border-radius: 5px; color: var(--text); background: var(--panel); }
+.attachment-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.attachment-chip { display: flex; align-items: center; gap: 4px; max-width: 200px; padding: 3px 6px; font-size: 10px; background: var(--panel); border-radius: 6px; }
+.attachment-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#environment-setup-script { width: 100%; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px; font: 12px/1.5 ui-monospace, monospace; }
+@media (max-width: 1000px) { .main.diff-open { display: flex; } .diff-panel { position: fixed; top: 16px; right: 16px; bottom: 16px; width: min(680px, calc(100vw - 32px)); z-index: 45; border: 1px solid var(--line-bright); border-radius: 10px; box-shadow: 0 15px 60px #0009; } }
+@media (max-width: 480px) { .composer-footer { gap: 3px; } .composer-pickers { gap: 2px; } .composer-pickers select, .composer-pickers .control-menu > summary { font-size: 12px; } #chat-agent-select { width: 65px; } .compact-model-controls { grid-template-columns: minmax(35px, 1fr) auto; gap: 2px; } .pull-request-bar { gap: 5px; } .pr-change-count { font-size: 11px; } }
 .model-note { grid-column: 1 / -1; margin: 0; color: var(--faint); font-size: 10px; line-height: 1.4; }
 .model-note:empty { display: none; }
 

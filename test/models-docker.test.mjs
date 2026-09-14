@@ -10,14 +10,17 @@ import { testConfig } from "./helpers.mjs";
 
 test("model catalog validates provider-specific effort and resets sticky Codex selections", async () => {
   const catalog = new ModelCatalog(testConfig("/tmp/unused-model-fixture"));
-  catalog.codex = async () => ({ models: [{ id: "gpt-fixture", isDefault: true, efforts: ["low", "medium"], defaultEffort: "medium" }, { id: "gpt-second", efforts: ["high"], defaultEffort: "high" }] });
+  catalog.codex = async () => ({ models: [{ id: "gpt-5.6-sol", efforts: ["low", "medium", "high"], defaultEffort: "low" }, { id: "gpt-fixture", isDefault: true, efforts: ["low", "medium"], defaultEffort: "medium" }, { id: "gpt-second", efforts: ["high"], defaultEffort: "high" }] });
   catalog.claude = async () => ({ models: [{ id: "opus", efforts: ["low", "high", "max"] }, { id: "haiku", efforts: [] }] });
   assert.deepEqual(await catalog.validate("codex", { model: "gpt-second", effort: "high" }), { model: "gpt-second", effort: "high" });
   await assert.rejects(catalog.validate("codex", { model: "gpt-second", effort: "low" }), /not supported/);
   await assert.rejects(catalog.validate("codex", { model: "invented" }), /available/);
   await assert.rejects(catalog.validate("claude", { model: "haiku", effort: "high" }), /not supported/);
-  assert.deepEqual(await catalog.turnSettings({ agent: "codex", modelSelectionSet: true }), { model: "gpt-fixture", effort: "medium", resetEffort: true });
-  assert.equal((await catalog.turnSettings({ agent: "claude", modelSelectionSet: true })).model, "default");
+  assert.deepEqual(await catalog.turnSettings({ agent: "codex", modelSelectionSet: true }), { model: "gpt-5.6-sol", effort: "high", resetEffort: false });
+  assert.deepEqual(await catalog.creationSettings("codex"), { model: "gpt-5.6-sol", effort: "high" });
+  assert.deepEqual(await catalog.creationSettings("claude"), { model: "opus", effort: "high" });
+  assert.deepEqual(await catalog.creationSettings("claude", { model: "haiku" }), { model: "haiku", effort: null });
+  assert.deepEqual(await catalog.turnSettings({ agent: "claude", modelSelectionSet: true }), { model: "opus", effort: "high", resetEffort: false });
 });
 test("Docker is persisted as a capability but cannot share a local control-plane daemon", async () => {
   const environments = new Environments(new MemoryRecords());

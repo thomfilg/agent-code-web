@@ -79,7 +79,15 @@ class Ec2Executor {
     const marker = `${chatRoot}/.workspace-seeded`;
     await this.backend.sshCapture(this.host, `install -d -m 700 ${shellQuote(this.workspace)} ${shellQuote(this.runtimeHome)} && touch ${shellQuote(this.heartbeat)}`);
     const seeded = await this.backend.sshCapture(this.host, `test -f ${shellQuote(marker)} && printf ready || true`);
-    if (seeded === "ready") return;
+    if (seeded === "ready") {
+      for (const repo of this.chat.repositories || []) {
+        if (!/^[A-Za-z0-9_.-]+--[A-Za-z0-9_.-]+$/.test(repo.directory)) throw new Error("Invalid repository directory");
+        const target = `${this.workspace}/${repo.directory}`;
+        const exists = await this.backend.sshCapture(this.host, `test -e ${shellQuote(target)} && printf ready || true`);
+        if (exists !== "ready") await this.#uploadWorkspace(marker, repo.directory);
+      }
+      return;
+    }
     await this.#uploadWorkspace(marker);
   }
 
@@ -106,9 +114,9 @@ class Ec2Executor {
     return this.backend.sshCapture(this.host, `install -d -m 700 ${shellQuote(directory)} && touch ${shellQuote(this.heartbeat)}`).then(() => undefined);
   }
 
-  #uploadWorkspace(marker) {
+  #uploadWorkspace(marker, directory = ".") {
     return new Promise((resolve, reject) => {
-      const tar = spawn("tar", ["-C", this.chat.workspace, "-cf", "-", "."], { stdio: ["ignore", "pipe", "pipe"] });
+      const tar = spawn("tar", ["-C", this.chat.workspace, "-cf", "-", "--", directory], { stdio: ["ignore", "pipe", "pipe"] });
       const remote = `tar -xf - -C ${shellQuote(this.workspace)} && touch ${shellQuote(marker)} ${shellQuote(this.heartbeat)}`;
       const ssh = spawn(this.backend.config.ec2.sshBin, [...this.backend.sshArgs(this.host), remote], { stdio: ["pipe", "ignore", "pipe"] });
       tar.stdout.pipe(ssh.stdin);

@@ -57,6 +57,25 @@ export function checkState(runs, combined) {
   return runs.length || combined.total_count > 0 ? "passing" : "none";
 }
 
+export function checkSummary(runs, combined) {
+  const summary = { passed: 0, skipped: 0, inProgress: 0, failed: 0, total: 0 };
+  for (const run of runs) {
+    summary.total++;
+    if (failureConclusions.has(run.conclusion)) summary.failed++;
+    else if (run.status !== "completed") summary.inProgress++;
+    else if (["skipped", "neutral"].includes(run.conclusion)) summary.skipped++;
+    else if (run.conclusion === "success") summary.passed++;
+    else summary.skipped++;
+  }
+  for (const status of combined.statuses || []) {
+    summary.total++;
+    if (["error", "failure"].includes(status.state)) summary.failed++;
+    else if (status.state === "success") summary.passed++;
+    else summary.inProgress++;
+  }
+  return summary;
+}
+
 // Control-plane polling only: never acquire/wake a worker to inspect a PR.
 export class PullRequestMonitor {
   constructor({ store, github, publish, intervalMs = 60000 }) {
@@ -92,6 +111,50 @@ export class PullRequestMonitor {
     const pending = this.sync(id).finally(() => this.inflight.delete(id));
     this.inflight.set(id, pending); return pending;
   }
+  tracked(id, repository, number) {
+    const chat = this.store.get(id);
+    const pr = chat?.pullRequests?.find(pr => pr.repository === repository && pr.number === number && pr.verifiedAt);
+    if (!pr || !validRepo(repository) || !Number.isSafeInteger(number)) throw Object.assign(new Error("Choose a verified PR linked to this chat"), { statusCode: 404 });
+    return pr;
+  }
+  async files(id, repository, number) {
+    this.tracked(id, repository, number);
+    const files = []; let remaining = 1000000, truncated = false;
+    for (let page = 1; page <= 30; page++) {
+      const chunk = await this.github.request(`/repos/${repository}/pulls/${number}/files?per_page=100&page=${page}`);
+      for (const file of chunk) {
+        const patch = file.patch?.slice(0, Math.min(200000, remaining)) || null;
+        truncated ||= (file.patch?.length || 0) > (patch?.length || 0);
+        remaining -= patch?.length || 0;
+        files.push({ filename: file.filename, previousFilename: file.previous_filename || null, status: file.status, additions: file.additions, deletions: file.deletions, patch });
+      }
+      if (remaining <= 0) { truncated = true; break; }
+      if (chunk.length < 100) break;
+    }
+    return { files, source: "GitHub PR", note: `GitHub may omit patches for binary or very large files. Local unpushed changes are not included.${truncated ? " Display limited to 1 MB of patches; open GitHub for the full diff." : ""}` };
+  }
+  async autoMerge(id, repository, number, enabled) {
+    this.tracked(id, repository, number);
+    if (typeof enabled !== "boolean") throw new Error("Auto-merge must be enabled or disabled explicitly");
+    const route = `/repos/${repository}`;
+    const pr = await this.github.request(`${route}/pulls/${number}`);
+    if (pr.state !== "open") throw new Error("Auto-merge is only available for open pull requests");
+    if (pr.base?.repo?.full_name?.toLowerCase() !== repository.toLowerCase()) throw new Error("PR repository mismatch");
+    if (!pr.node_id || (enabled && !/^[a-f0-9]{40,64}$/i.test(pr.head?.sha || ""))) throw new Error("GitHub did not return a verifiable PR head");
+    const repo = enabled ? await this.github.request(route) : null;
+    if (enabled && !repo.allow_auto_merge) throw new Error("Enable Allow auto-merge in this repository's GitHub settings first");
+    const mergeMethod = repo?.allow_squash_merge ? "SQUASH" : repo?.allow_merge_commit ? "MERGE" : "REBASE";
+    const mutation = enabled ? "enablePullRequestAutoMerge" : "disablePullRequestAutoMerge";
+    const result = await this.github.request("/graphql", { method: "POST", body: {
+      query: `mutation($input: ${enabled ? "EnablePullRequestAutoMergeInput" : "DisablePullRequestAutoMergeInput"}!) { ${mutation}(input: $input) { pullRequest { number } } }`,
+      variables: { input: { pullRequestId: pr.node_id, ...(enabled ? { mergeMethod, expectedHeadOid: pr.head.sha } : {}) } },
+    } });
+    if (result.errors?.length || !result.data?.[mutation]) throw new Error("GitHub could not change auto-merge. Check permissions, branch protection, draft status and repository merge rules.");
+    // Only GitHub performs the merge after its requirements pass. Never fall back
+    // to a direct merge, admin bypass, branch-rule changes or force pushes.
+    await this.inflight.get(id); this.requests.clear(); await this.refresh(id);
+    return this.store.get(id);
+  }
   async sync(id) {
     const chat = this.store.get(id);
     if (!chat || chat.archived) return;
@@ -123,7 +186,7 @@ export class PullRequestMonitor {
         const route = `/repos/${candidate.repository}`;
         const pr = await this.request(`${route}/pulls/${candidate.number}`);
         if (pr.base?.repo?.full_name?.toLowerCase() !== candidate.repository.toLowerCase() || pr.number !== candidate.number) throw new Error("PR repository mismatch");
-        let checks = "none", checksStale = false;
+        let checks = "none", checksStale = false, ci = null;
         if (pr.state === "open") {
           try {
             if (!/^[a-f0-9]{40,64}$/i.test(pr.head?.sha || "")) throw new Error("Missing PR head");
@@ -134,16 +197,28 @@ export class PullRequestMonitor {
               runs.push(...result.check_runs);
               if (result.check_runs.length < 100) break;
             }
-            const combined = await this.request(`${route}/commits/${pr.head.sha}/status`);
+            const first = await this.request(`${route}/commits/${pr.head.sha}/status`);
+            const combined = { ...first, statuses: [...(first.statuses || [])] };
+            for (let page = 2; combined.statuses?.length < combined.total_count; page++) {
+              if (this.stopped) return;
+              const more = await this.request(`${route}/commits/${pr.head.sha}/status?page=${page}`);
+              if (!more.statuses?.length) break;
+              combined.statuses.push(...more.statuses);
+            }
             checks = checkState(runs, combined);
+            ci = checkSummary(runs, combined);
           } catch {
             checks = previous?.headSha === pr.head.sha ? previous.checks : "unknown";
             checksStale = true;
+            ci = previous?.headSha === pr.head.sha ? previous.ci : null;
             warning = "PR status verified, but checks could not be refreshed. Check GitHub permissions or the API limit.";
           }
         }
         prs.push({ repository: candidate.repository, number: pr.number, url: `https://github.com/${candidate.repository}/pull/${pr.number}`, title: pr.title,
-          state: pr.state, merged: Boolean(pr.merged_at || pr.merged), headSha: pr.head?.sha || null, checks, checksStale, verifiedAt: new Date().toISOString() });
+          state: pr.state, merged: Boolean(pr.merged_at || pr.merged), headSha: pr.head?.sha || null, headRef: pr.head?.ref || null, baseRef: pr.base?.ref || null,
+          additions: pr.additions || 0, deletions: pr.deletions || 0, changedFiles: pr.changed_files || 0,
+          conflicts: pr.mergeable_state === "dirty" ? true : pr.mergeable === null || pr.mergeable === undefined ? null : pr.mergeable === false,
+          autoMerge: Boolean(pr.auto_merge), draft: Boolean(pr.draft), ci, checks, checksStale, verifiedAt: new Date().toISOString() });
       } catch {
         if (previous) prs.push(previous);
         warning = "GitHub sync unavailable. Check your connection, repository permissions or API limit. Showing last verified status.";
