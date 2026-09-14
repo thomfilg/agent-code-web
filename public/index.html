@@ -33,7 +33,7 @@
         <nav class="chat-list" id="chat-list" aria-label="Conversations"></nav>
 
         <div class="sidebar-footer">
-          <div class="settings-buttons"><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button></div>
+          <div class="settings-buttons"><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button><button class="secondary-button" id="mcps-button">MCP connections</button></div>
           <div class="system-state">
             <span class="live-dot"></span>
             <div>
@@ -95,8 +95,10 @@
           <div class="messages" id="messages" aria-live="polite"></div>
           <div class="approval-card" id="approval-card" hidden></div>
           <div class="composer-wrap">
+            <div id="message-queue" aria-live="polite"></div>
             <div id="pull-request-bars" class="pull-request-bars"></div>
             <form class="composer" id="composer">
+              <div id="slash-menu" role="listbox" aria-label="Commands and skills" hidden></div>
               <div id="attachment-chips" class="attachment-chips"></div>
               <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message"></textarea>
               <div class="composer-footer">
@@ -130,12 +132,17 @@
                 <button class="send-button" id="send-button" type="submit" aria-label="Send message">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
                 </button>
+                <button type="submit" class="secondary-button queue-send" id="queue-message" hidden>Queue</button>
               </div>
             </form>
             <input type="file" id="attachment-input" multiple hidden>
             <p class="composer-hint">Enter to send · Shift + Enter for a new line</p>
           </div>
         </section>
+        <aside class="tools-panel" id="tools-panel" aria-label="Tool activity" hidden>
+          <div class="diff-heading"><strong id="tools-title">Tools used</strong><button type="button" class="icon-button" id="close-tools" aria-label="Close tool activity">×</button></div>
+          <p class="muted">Real calls and results reported by the agent. Failed or denied calls do not imply an action succeeded.</p><div id="tools-list"></div>
+        </aside>
         <aside class="diff-panel" id="diff-panel" aria-label="Changes" hidden>
           <div class="diff-heading"><strong id="diff-title">Changes</strong><button type="button" class="icon-button" id="expand-diff" aria-label="Expand changes">⤢</button><button type="button" class="icon-button" id="close-diff" aria-label="Close changes">×</button></div>
           <input id="diff-search" type="search" placeholder="Find a file…" aria-label="Find changed file">
@@ -145,7 +152,9 @@
       </main>
     </div>
 
+    <dialog id="usage-dialog"><div class="dialog-card usage-card"><div class="dialog-heading"><h2>Usage</h2><button type="button" class="icon-button" id="usage-close" aria-label="Close usage">×</button></div><div class="usage-actions"><button type="button" id="usage-refresh">Refresh</button><button type="button" id="usage-copy">Copy</button></div><div id="usage-details"></div></div></dialog>
     <dialog id="new-chat-dialog">
+      <!-- Conversation creation -->
       <form method="dialog" class="dialog-card" id="new-chat-form">
         <div class="dialog-heading">
           <div>
@@ -197,6 +206,7 @@
         <div class="dialog-heading"><div><p class="eyebrow">WORKSPACE SETTINGS</p><h2 id="environments-dialog-title">Environments</h2></div><button type="button" class="icon-button" data-close-dialog aria-label="Close environments">×</button></div>
         <div class="environment-navigation"><div id="environment-tabs"></div><button type="button" class="secondary-button" id="add-environment">＋ Add environment</button></div>
         <form id="environment-form">
+          <section class="environment-mcps"><h3>MCP connections</h3><div id="environment-mcp-options"></div><p class="muted">Selected connections configure Codex and Claude on the next worker start. Add connections from the sidebar. Trust the service before enabling its tools.</p></section>
           <label><span>Environment name</span><input id="environment-name" required maxlength="80" placeholder="e.g. Acme staging"></label>
           <p class="muted" id="environment-backend"></p>
           <label><span>Network access</span><select disabled aria-label="Network access"><option>Worker infrastructure default</option></select></label>
@@ -214,6 +224,21 @@
         </form>
       </div>
     </dialog>
+
+    <dialog id="mcp-dialog" aria-labelledby="mcp-title"><div class="dialog-card mcp-card">
+      <div class="dialog-heading"><h2 id="mcp-title">MCP connections</h2><button type="button" class="icon-button" id="mcp-close" aria-label="Close MCP connections">×</button></div>
+      <p class="muted">Connect tools once, then select them in each environment. Only enable servers you trust: their tools can access and change data.</p>
+      <div id="mcp-list"></div><button type="button" class="secondary-button" id="mcp-new">＋ Add MCP</button>
+      <form id="mcp-form">
+        <label><span>Connection name</span><input id="mcp-name" required maxlength="64" placeholder="e.g. company-tools"></label>
+        <label><span>Transport</span><select id="mcp-type"><option value="http">Streamable HTTP · protected credentials</option><option value="stdio">Stdio · process on the worker</option></select></label>
+        <div id="mcp-http"><label><span>MCP endpoint URL</span><input id="mcp-url" type="url" placeholder="https://tools.example.com/mcp"></label><label><span>Authentication headers · JSON, encrypted</span><textarea id="mcp-headers" rows="3" spellcheck="false" autocomplete="off"></textarea></label><p class="muted">Blank keeps saved headers; {} clears them. Authentication stays on the controller. The agent gets revocable access to this service, not its upstream credentials. OAuth login is not supported here yet.</p></div>
+        <div id="mcp-stdio" hidden><label><span>Executable</span><input id="mcp-command" placeholder="npx"></label><label><span>Arguments · JSON array</span><textarea id="mcp-args" rows="3" spellcheck="false">[]</textarea></label><p class="muted">Runs on each selected worker with that worker’s permissions. Install its runtime in the environment. Commands and arguments are agent-readable: do not include secrets. Use HTTP for protected authentication.</p></div>
+        <p class="muted">Local workers share the host filesystem; isolated cloud workers provide a stronger secret boundary.</p>
+        <p id="mcp-error" class="form-error" role="alert"></p><p id="mcp-save-status" class="muted" role="status"></p>
+        <div class="dialog-actions"><button type="button" class="secondary-button" id="mcp-delete" hidden>Delete connection</button><button class="primary-button">Save connection</button></div>
+      </form>
+    </div></dialog>
 
     <dialog id="group-dialog" aria-labelledby="group-dialog-title">
       <form class="dialog-card" id="group-form">

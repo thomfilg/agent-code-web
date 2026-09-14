@@ -369,3 +369,61 @@ dialog { max-height: calc(100dvh - 28px); }
   .empty-state h2 { font-size: 39px; }
   .feature-strip { gap: 8px 16px; flex-wrap: wrap; }
 }
+/* Conversation content stays scoped to message bodies. */
+.message.user { display: block; width: fit-content; max-width: min(78%, 680px); margin-left: auto; padding: 12px 17px; background: #242622; border-radius: 13px; }
+.message.user .message-avatar, .message.user .message-label { display: none; }
+.message-text.markdown { white-space: normal; overflow-wrap: anywhere; line-height: 1.65; }
+.markdown > :first-child { margin-top: 0; } .markdown > :last-child { margin-bottom: 0; }
+.markdown p { margin: 0 0 1em; } .markdown h1, .markdown h2, .markdown h3 { font-family: inherit; line-height: 1.35; margin: 1.2em 0 .5em; }
+.markdown h1 { font-size: 1.5em; } .markdown h2 { font-size: 1.3em; } .markdown h3 { font-size: 1.12em; }
+.markdown ul, .markdown ol { padding-left: 24px; margin: .5em 0 1em; }
+.markdown blockquote { margin: 12px 0; padding-left: 14px; border-left: 3px solid var(--line-bright); color: var(--muted); }
+.markdown table { display: block; width: fit-content; max-width: 100%; overflow: auto; border-collapse: collapse; margin: 16px 0; }
+.markdown th, .markdown td { padding: 8px 12px; border: 1px solid var(--line-bright); text-align: left; }
+.markdown th { background: var(--surface); } .markdown a { color: var(--blue); text-decoration: underline; }
+.markdown code { color: #e69d95; background: #252723; padding: 1px 4px; border-radius: 4px; font-size: .9em; }
+.markdown pre { overflow: auto; white-space: pre; max-height: 600px; margin: 0 0 16px; padding: 14px; border: 1px solid var(--line); border-radius: 0 0 8px 8px; background: #171916; }
+.markdown pre code { background: none; padding: 0; color: #ccdbbe; }
+.code-toolbar { display: flex; justify-content: flex-end; padding: 4px 8px; background: #20231d; border: 1px solid var(--line); border-bottom: 0; border-radius: 8px 8px 0 0; }
+.code-toolbar button { padding: 2px 6px; background: none; border: 0; color: var(--muted); font-size: 11px; }
+.html-preview { border: 1px solid var(--line); padding: 8px; border-radius: 8px; margin-bottom: 16px; }
+.html-preview summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.html-preview iframe { display: block; width: 100%; height: 360px; resize: vertical; min-height: 150px; max-height: 80vh; background: white; border: 0; margin-top: 8px; }
+.tool-group-button { display: block; margin: 0 0 18px 41px; padding: 5px 0; color: var(--muted); background: none; border: 0; font-size: 13px; cursor: pointer; }
+.tool-group-button:hover { color: var(--text); }
+.main.tools-open { display: grid; grid-template-columns: minmax(350px, 1fr) minmax(340px, .85fr); grid-template-rows: auto minmax(0, 1fr); }
+.main.tools-open > .topbar { grid-column: 1 / -1; }
+.tools-panel { grid-column: 2; grid-row: 2; min-width: 0; overflow: auto; padding: 15px; border-left: 1px solid var(--line); background: #171916; }
+.tools-panel .tool-details { margin: 12px 0; overflow-wrap: anywhere; }
+.tools-panel .tool-details p, .tools-panel .tool-details h4 { margin: 10px; font-size: 12px; }
+.tools-panel .tool-output { max-height: 420px; }
+#message-queue:not(:empty) { border: 1px solid var(--line); border-radius: 9px; padding: 10px; margin-bottom: 8px; max-height: 180px; overflow: auto; font-size: 12px; }
+#message-queue > button { float: right; font-size: 11px; padding: 3px 7px; }
+.queue-row { display: flex; align-items: center; gap: 12px; margin-top: 6px; } .queue-row span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.queue-send { padding: 4px 7px; font-size: 11px; }
+.composer { position: relative; }
+#slash-menu { position: absolute; bottom: calc(100% + 6px); left: 0; width: min(480px, 100%); max-height: min(360px, 50vh); overflow: auto; padding: 6px; border: 1px solid var(--line-bright); border-radius: 9px; background: #22251f; box-shadow: 0 10px 40px #0008; z-index: 40; }
+.slash-option { display: flex; flex-direction: column; gap: 2px; padding: 7px 10px; border-radius: 5px; cursor: pointer; font-size: 13px; }
+.slash-option small { color: var(--muted); font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.slash-option[aria-selected=true] { background: #3b4134; }
+.mcp-card { width: min(620px, calc(100vw - 32px)); }
+#mcp-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+#mcp-form { margin-top: 18px; } #mcp-form label { display: block; margin: 12px 0; } #mcp-form textarea { width: 100%; }
+.environment-mcps { margin: 16px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.environment-mcps h3 { margin: 0 0 8px; font-size: 14px; }
+.usage-menu .control-popover { width: min(380px, calc(100vw - 35px)); max-height: min(520px, 75vh); font-size: 12px; padding: 12px; }
+.usage-line { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12px; width: 100%; }
+.usage-line span:first-child { flex: 1; } .usage-line .muted { margin-left: auto; font-size: 10px; }
+.usage-context button { padding: 0; background: none; border: 0; color: var(--muted); }
+.context-bar { display: flex; height: 5px; background: #363a33; border-radius: 4px; margin: 9px 0 12px; overflow: hidden; }
+.segment { display: block; height: 100%; background: #4b9ff5; } .segment-1 { background: #e9a248; } .segment-2 { background: #79b17a; } .segment-3 { background: #c3a5db; }
+.usage-limit { margin: 10px 0; } .usage-limit progress { width: 100%; height: 5px; accent-color: #3999fa; display: block; margin-top: 5px; }
+.usage-limit progress.unknown { opacity: .3; } .usage-extra { margin-top: 10px; } .usage-extra summary { cursor: pointer; color: var(--muted); }
+.usage-card { width: min(530px, calc(100vw - 32px)); } .usage-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.usage-actions button { background: none; border: 0; color: var(--muted); font-size: 12px; }
+.usage-session-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 13px; }
+.usage-breakdown { display: grid; grid-template-columns: 1fr auto; font-size: 13px; }
+.usage-breakdown dt, .usage-breakdown dd { margin: 0; padding: 5px 0; border-bottom: 1px solid var(--line); }
+#usage-details > h3 { font-size: 14px; margin: 22px 0 10px; } #usage-details > p { margin: 16px 0 0; }
+@media (max-width: 1000px) { .main.tools-open { display: flex; } .tools-panel { position: fixed; inset: 12px; z-index: 45; border: 1px solid var(--line-bright); border-radius: 10px; box-shadow: 0 15px 60px #0009; } }
+@media (max-width: 600px) { .message.user { max-width: 90%; } .usage-line { font-size: 11px; gap: 5px; } }

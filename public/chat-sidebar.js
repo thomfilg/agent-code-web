@@ -61,7 +61,7 @@ export class ChatSidebar {
     if (!this.pendingPreferences && !savingAtStart && preferencesAtStart === this.preferenceVersion) this.preferences = result.preferences;
     this.render();
     const active = result.chats.find(chat => chat.id === this.state.active?.id);
-    if (active) this.updated(active);
+    if (active && (active.revision || 0) >= (this.state.active?.revision || 0)) this.updated(active);
     if ($("#organize-dialog").open && this.editingChat) {
       const chat = result.chats.find(chat => chat.id === this.editingChat.id);
       if (chat) this.renderChatStatus(chat);

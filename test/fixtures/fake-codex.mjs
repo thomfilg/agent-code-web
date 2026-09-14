@@ -18,6 +18,10 @@ rl.on("line", (line) => {
     send({ method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: "compact_fixture", status: "completed" } } });
   } else if (message.method === "account/rateLimits/read") {
     send({ id: message.id, result: { rateLimits: { primary: { usedPercent: 25, windowDurationMins: 300 } } } });
+  } else if (message.method === "account/read") {
+    send({ id: message.id, result: { account: { planType: "pro" } } });
+  } else if (message.method === "skills/list") {
+    send({ id: message.id, result: { data: [{ skills: [] }] } });
   } else if (message.method === "mcpServerStatus/list") {
     send({ id: message.id, result: { data: [{ name: "fixture", authStatus: "oAuth", tools: { example: {} } }] } });
   } else if (message.method === "turn/start") {

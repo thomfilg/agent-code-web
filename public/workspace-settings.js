@@ -29,7 +29,8 @@ export class WorkspaceSettings {
     $("#environments-dialog").addEventListener("close", () => { this.draft = null; $("#variables-table-body").replaceChildren(); });
   }
   async load() {
-    const [github, environments, saved] = await Promise.all([this.api("/api/github"), this.api("/api/environments"), this.api("/api/preferences")]);
+    const [github, environments, saved, mcps] = await Promise.all([this.api("/api/github"), this.api("/api/environments"), this.api("/api/preferences"), this.api("/api/mcps")]);
+    this.mcps = mcps.connections;
     this.github = github; this.environments = environments.environments; this.software = environments.software;
     this.preferences = saved.preferences;
     if (!$("#new-chat-dialog").open) this.selected = structuredClone(saved.preferences.repositories || []);
@@ -140,6 +141,13 @@ export class WorkspaceSettings {
     $("#environment-error").textContent = "";
     $("#environment-tabs").replaceChildren(...this.environments.map(env => button(env.name, () => { if (confirm("Switch environments? Unsaved edits will be discarded.")) this.editEnvironment(env); }, `environment-tab${environment?.id === env.id ? " selected" : ""}`)));
     $("#environment-name").value = this.draft.name;
+    this.draft.mcpIds ||= [];
+    $("#environment-mcp-options").replaceChildren(...this.mcps.map(connection => {
+      const label = el("label", "checkbox-label"), input = el("input"); input.type = "checkbox"; input.checked = this.draft.mcpIds.includes(connection.id);
+      input.onchange = () => { this.draft.mcpIds = input.checked ? [...this.draft.mcpIds, connection.id] : this.draft.mcpIds.filter(id => id !== connection.id); };
+      label.append(input, el("span", "", `${connection.name} · ${connection.type}`)); return label;
+    }));
+    if (!this.mcps.length) $("#environment-mcp-options").append(el("p", "muted", "No saved connections. Add an MCP from the sidebar first."));
     $("#environment-setup-script").value = this.draft.setupScript || "";
     $("#environment-archived").checked = Boolean(this.draft.archived);
     $("#environment-backend").textContent = `Worker: ${this.draft.backend} · changes apply on the next worker start`;

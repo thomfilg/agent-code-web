@@ -13,7 +13,7 @@ test("switching providers retains chat/workspace and hands off history without r
   const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }), gatewayOrigin: "http://localhost",
     adapterFactory: ({ chat, hooks: callbacks }) => {
       hooks = callbacks; calls.push({ agent: chat.agent, session: chat.agentSessionId });
-      return { start: async () => callbacks.onSessionId(`${chat.agent}-session`), send: prompt => { calls.push({ prompt }); return new Promise(resolve => { finish = resolve; }); }, stop: async () => { finish?.({ text: "stopped" }); } };
+      return { start: async () => callbacks.onSessionId(`${chat.agent}-session`), send: (prompt, options) => { calls.push({ prompt, options }); return new Promise(resolve => { finish = resolve; }); }, stop: async () => { finish?.({ text: "stopped" }); } };
     },
   }); t.after(() => manager.shutdown());
   const chat = await manager.createChat({ agent: "codex", title: "Keep this title" });
@@ -25,7 +25,7 @@ test("switching providers retains chat/workspace and hands off history without r
   assert.equal(switched.model, "opus"); assert.equal(switched.effort, "high");
   assert.equal(switched.workspace, chat.workspace); assert.equal(switched.messages.length, 2); assert.equal(switched.title, chat.title);
   finish = null; const followup = await manager.submit(chat.id, "continue"); await waitFor(() => finish);
-  assert.match(calls.at(-1).prompt, /staging branch/); assert.match(calls.at(-1).prompt, /Current user message:\ncontinue/);
+  assert.match(calls.at(-1).options.systemPrompt, /staging branch/); assert.equal(calls.at(-1).prompt, "continue");
   assert.equal(calls.filter(call => call.agent).at(-1).session, null);
   await hooks.onEvent({ type: "assistant_delta", delta: "Continuing" });
   finish({ text: "Continuing <relay-waiting>no</relay-waiting>" }); await followup.completion;

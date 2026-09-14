@@ -51,7 +51,7 @@ test("ordinary questions persist across autosleep/restart, then clear on the nex
     const root = await temporaryDirectory(t); const records = new MemoryRecords(); const store = new ChatStore(root, records); await store.initialize();
     let finish, hooks;
     const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }), gatewayOrigin: "http://localhost",
-      adapterFactory: ({ hooks: callbacks }) => { hooks = callbacks; return { start: async () => {}, send: prompt => { assert.match(prompt, /relay-waiting/); return new Promise(resolve => { finish = resolve; }); }, stop: async () => {}, respond: async () => {} }; },
+      adapterFactory: ({ hooks: callbacks }) => { hooks = callbacks; return { start: async () => {}, send: (prompt, options) => { assert.match(agent === "claude" ? options.systemPrompt : prompt, /relay-waiting/); return new Promise(resolve => { finish = resolve; }); }, stop: async () => {}, respond: async () => {} }; },
     }); t.after(() => manager.shutdown());
     const chat = await manager.createChat({ agent, title: "Manual title" });
     const turn = await manager.submit(chat.id, "Ask which branch to use"); await waitFor(() => finish);

@@ -10,6 +10,8 @@ import { responsePrompt, extractResponse, ResponseStream } from "./response-prot
 import { PullRequestMonitor, inspectBranches } from "./pull-requests.mjs";
 import { handoffPrompt } from "./agent-handoff.mjs";
 import { snapshotChanges } from "./workspace-changes.mjs";
+import { mergeUsage } from "./session-info.mjs";
+import { legacyClaudeContext } from "./legacy-usage.mjs";
 
 const ADAPTERS = {
   codex: CodexAdapter,
@@ -39,8 +41,52 @@ export class RuntimeManager extends EventEmitter {
   #events = new Map();
   #lifecycleVersions = new Map();
   #switching = new Set();
+  #draining = new Set();
 
-  constructor({ store, config, broker, gatewayOrigin, workerBackend = null, adapterFactory = null, github = null, environments = null, models = null, attachments = null }) {
+  async enqueue(chatId, rawText, attachmentIds = []) {
+    const text = clampText(rawText, 100_000, "message");
+    if (!this.store.get(chatId)) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    if (this.attachments) await this.attachments.resolve(chatId, attachmentIds);
+    const item = { id: newId("queued"), text, attachmentIds, createdAt: nowIso() };
+    const chat = await this.store.update(chatId, current => {
+      if (current.archived) throw new Error("Unarchive this chat before queueing messages");
+      if ((current.queuedMessages || []).length >= 20) throw new Error("Queue holds at most 20 messages");
+      return { queuedMessages: [...(current.queuedMessages || []), item] };
+    });
+    this.publishChat(chat);
+    void this.#drainQueue(chatId);
+    return chat;
+  }
+
+  async editQueue(chatId, { removeId, resume = false } = {}) {
+    const chat = await this.store.update(chatId, current => ({
+      queuedMessages: (current.queuedMessages || []).filter(item => item.id !== removeId),
+      queuePaused: resume ? false : Boolean(current.queuePaused), queueError: null,
+    }));
+    if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    this.publishChat(chat);
+    if (resume) void this.#drainQueue(chatId);
+    return chat;
+  }
+
+  async #drainQueue(chatId) {
+    if (this.#draining.has(chatId)) return;
+    this.#draining.add(chatId);
+    try {
+      while (true) {
+        const chat = this.store.get(chatId);
+        if (!chat || chat.queuePaused || chat.archived || this.isBusy(chatId) || chat.status === "stopping" || !chat.queuedMessages?.length) break;
+        const item = chat.queuedMessages[0];
+        const submitted = await this.submit(chatId, item.text, item.attachmentIds);
+        this.publishChat(await this.store.update(chatId, current => ({ queuedMessages: (current.queuedMessages || []).filter(entry => entry.id !== item.id) })));
+        await submitted.completion;
+      }
+    } catch (error) {
+      this.publishChat(await this.store.update(chatId, { queuePaused: true, queueError: error.name === "AbortError" ? null : errorMessage(error) }));
+    } finally { this.#draining.delete(chatId); }
+  }
+
+  constructor({ store, config, broker, gatewayOrigin, workerBackend = null, adapterFactory = null, github = null, environments = null, models = null, attachments = null, mcps = null, commands = null }) {
     super();
     this.store = store;
     this.config = config;
@@ -56,6 +102,8 @@ export class RuntimeManager extends EventEmitter {
     this.environments = environments;
     this.models = models;
     this.attachments = attachments;
+    this.mcps = mcps;
+    this.commands = commands;
     this.pullRequests = new PullRequestMonitor({ store, github, publish: chat => this.publishChat(chat) });
   }
 
@@ -92,7 +140,7 @@ export class RuntimeManager extends EventEmitter {
       await this.stop(chatId, "agent-switch");
       const updated = await this.store.update(chatId, current => ({ agent, ...settings, modelSelectionSet: true,
         agentSessionId: null, needsAgentHandoff: true, pendingRequest: null, awaitingUser: false,
-        usage: null, rateLimits: null, connectors: null, slashCommands: [],
+        usage: null, rateLimits: null, connectors: null, slashCommands: [], commandCatalog: [],
         messages: current.messages.map(message => ["assistant", "tool"].includes(message.role) ? { ...message, agent: message.agent || current.agent } : message),
         statusDetail: `Switched to ${agent === "claude" ? "Claude Code" : agent === "codex" ? "Codex" : "Mock"}. Conversation and workspace retained.`,
         ...workflowPatch({ ...current, awaitingUser: false, pendingRequest: null }),
@@ -137,12 +185,21 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async sessionInfo(chatId) {
-    const chat = this.store.get(chatId);
+    let chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     const runtime = this.#runtimes.get(chatId);
-    const live = runtime?.adapter.inspect ? await runtime.adapter.inspect() : {};
-    return { usage: chat.usage || null, rateLimits: live.rateLimits || chat.rateLimits || null, connectors: live.connectors || chat.connectors || null,
-      slashCommands: chat.slashCommands || [], canCompact: Boolean(runtime?.adapter.compact && !this.isBusy(chatId)),
+    const identity = `${chat.agent}:${chat.agentSessionId}`;
+    let live = runtime?.adapter.inspect ? await runtime.adapter.inspect() : {};
+    let legacy = await legacyClaudeContext(chat, this.config);
+    // Usage can arrive during inspection: do not return its earlier snapshot.
+    await runtime?.eventQueue;
+    chat = this.store.get(chatId);
+    if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    if (`${chat.agent}:${chat.agentSessionId}` !== identity) { live = {}; legacy = null; }
+    if (chat.usage?.version === 2) legacy = null;
+    return { usage: legacy ? { ...chat.usage, ...legacy } : chat.usage || null, rateLimits: live.rateLimits || chat.rateLimits || null, connectors: live.connectors || chat.connectors || null,
+      agent: chat.agent, model: chat.model, authMode: this.config[chat.agent]?.authMode || "none", account: live.account || null,
+      slashCommands: chat.slashCommands || [], canCompact: Boolean(runtime && this.#runtimes.get(chatId) === runtime && runtime.adapter.compact && !this.isBusy(chatId)),
       note: runtime ? "Provider-reported usage only. Missing context or subscription limits are unavailable from this CLI/auth mode." : "Worker asleep. Showing last reported usage; opening this panel does not wake it." };
   }
 
@@ -152,7 +209,7 @@ export class RuntimeManager extends EventEmitter {
     runtime.busy = true; clearTimeout(runtime.idleTimer);
     await this.#setStatus(chatId, "running", "Compacting context", null);
     try { await runtime.adapter.compact(); await runtime.eventQueue; }
-    finally { runtime.busy = false; if (this.#runtimes.get(chatId) === runtime) await this.#scheduleIdleStop(chatId, runtime); }
+    finally { runtime.busy = false; if (this.#runtimes.get(chatId) === runtime) await this.#scheduleIdleStop(chatId, runtime); void this.#drainQueue(chatId); }
   }
 
   async createChat(input = {}) {
@@ -197,13 +254,23 @@ export class RuntimeManager extends EventEmitter {
       throw Object.assign(new Error("this chat already has a running turn"), { statusCode: 409 });
     }
     this.#queued.add(chatId);
+    const version = this.#lifecycleVersions.get(chatId) || 0;
 
     try {
       const files = this.attachments ? await this.attachments.resolve(chatId, attachmentIds) : [];
-      await this.store.update(chatId, { awaitingUser: false, pendingRequest: null });
+      let skill = null;
+      const slash = /^\/([\w:.-]+)(?:\s|$)/.exec(text);
+      if (chat.agent === "codex" && slash && this.commands) {
+        const command = (await this.commands.list(chat)).commands.find(item => item.name === slash[1]);
+        if (command?.kind === "Skill" && command.path) skill = { name: command.name, path: command.path };
+        else if (command) throw new Error(`/${slash[1]} is a native terminal command, not a supported web action yet. Use the corresponding web control or describe your task.`);
+      }
+      if (version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(new Error("Turn cancelled"), { name: "AbortError" });
+      await this.store.update(chatId, { awaitingUser: false, pendingRequest: null, ...(!chat.queuedMessages?.length ? { queuePaused: false, queueError: null } : {}) });
       const userMessage = await this.store.appendMessage(chatId, { role: "user", kind: "message", text, ...(files.length ? { attachments: files.map(file => this.attachments.public(file)) } : {}) });
       this.#emit(chatId, { type: "message", message: userMessage });
-      const completion = this.#runTurn(chatId, text, files, userMessage.id).finally(() => this.#queued.delete(chatId));
+      if (version !== (this.#lifecycleVersions.get(chatId) || 0)) { this.#queued.delete(chatId); return { message: userMessage, completion: Promise.resolve() }; }
+      const completion = this.#runTurn(chatId, text, files, userMessage.id, skill).finally(() => { this.#queued.delete(chatId); void this.#drainQueue(chatId); });
       return { message: userMessage, completion };
     } catch (error) {
       this.#queued.delete(chatId);
@@ -216,7 +283,7 @@ export class RuntimeManager extends EventEmitter {
     await submitted.completion;
   }
 
-  async #runTurn(chatId, text, files = [], userMessageId = null) {
+  async #runTurn(chatId, text, files = [], userMessageId = null, skill = null) {
     let runtime = this.#runtimes.get(chatId);
 
     if (!runtime) {
@@ -224,6 +291,7 @@ export class RuntimeManager extends EventEmitter {
         runtime = await this.#start(chatId);
       } catch (error) {
         if (error.name === "AbortError") return;
+        this.publishChat(await this.store.update(chatId, { queuePaused: true, queueError: errorMessage(error) }));
         const message = await this.store.appendMessage(chatId, {
           role: "system",
           kind: "error",
@@ -252,8 +320,17 @@ export class RuntimeManager extends EventEmitter {
       const materialized = files.length ? await this.attachments.materialize(this.store.get(chatId), runtime.executor, files) : [];
       if (materialized.length) await this.store.update(chatId, current => ({ messages: current.messages.map(message => message.id === userMessageId ? { ...message, attachments: materialized } : message) }));
       const attached = materialized.length ? `\n\nUser attachments (read these files as needed):\n${materialized.map(file => JSON.stringify({ name: file.name, path: file.path, mime: file.mime })).join("\n")}` : "";
-      const prompt = handoffPrompt(this.store.get(chatId), text + attached);
-      const result = await runtime.adapter.send(metadata ? responsePrompt(prompt, automaticTitle) : prompt, { ...settings, mode: this.store.get(chatId).mode || "accept_edits", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) });
+      const currentChat = this.store.get(chatId);
+      if (runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
+      const raw = (skill ? text.replace(/^\/[\w:.-]+/, `$${skill.name}`) : text) + attached;
+      const prompt = handoffPrompt(currentChat, raw);
+      // Keep Claude slash commands at the beginning of the user input. Relay's
+      // metadata/handoff instructions belong in the appended system prompt.
+      const claude = currentChat.agent === "claude";
+      const result = await runtime.adapter.send(claude ? raw : metadata ? responsePrompt(prompt, automaticTitle) : prompt, {
+        ...settings, ...(skill ? { skills: [skill] } : {}),
+        ...(claude ? { systemPrompt: responsePrompt("", automaticTitle) + (currentChat.needsAgentHandoff ? handoffPrompt(currentChat, "") : "") } : {}),
+        mode: currentChat.mode || "accept_edits", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) });
       if (runtime.generation !== generation) return;
       runtime.titleStream?.flush();
       await runtime.eventQueue;
@@ -275,6 +352,7 @@ export class RuntimeManager extends EventEmitter {
       if (runtime.generation === generation) await this.store.update(chatId, { gitBranches, workspaceChanges });
     } catch (error) {
       if (runtime.generation !== generation) return;
+      this.publishChat(await this.store.update(chatId, { queuePaused: true, queueError: errorMessage(error) }));
       const message = await this.store.appendMessage(chatId, {
         role: "system",
         kind: "error",
@@ -295,6 +373,8 @@ export class RuntimeManager extends EventEmitter {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("chat not found"), { statusCode: 404 });
     this.#lifecycleVersions.set(chatId, (this.#lifecycleVersions.get(chatId) || 0) + 1);
+    this.mcps?.revokeChat(chatId);
+    this.publishChat(await this.store.update(chatId, { queuePaused: true }));
     const runtime = this.#runtimes.get(chatId);
     if (this.config.workerBackend === "ec2" && chat.agent !== "mock") {
       await this.#setStatus(chatId, "stopping", "Stopping EC2 worker", null);
@@ -415,6 +495,7 @@ export class RuntimeManager extends EventEmitter {
         if (environment.backend !== this.config.workerBackend) throw new Error("The environment backend changed. Use the original worker backend to resume this chat.");
         await prepareSoftware(executor, environment, detail => this.#setStatus(chatId, "starting", detail, null));
         executor.environmentVariables = { ...environment.variables, ...executor.capabilityVariables };
+        executor.mcpServers = await this.mcps?.runtime(chatId, environment.mcpIds || [], executor.gatewayOrigin || this.gatewayOrigin) || {};
         if (environment.setupScript) {
           await this.#setStatus(chatId, "starting", "Running environment setup script", null);
           try {
@@ -425,6 +506,7 @@ export class RuntimeManager extends EventEmitter {
       }
       checkCancelled();
     } catch (error) {
+      this.mcps?.revokeChat(chatId);
       if (executor) await this.workerBackend.sleep(chat).catch(() => {});
       if (error.name !== "AbortError") await this.#setStatus(chatId, "error", errorMessage(error), null);
       throw error;
@@ -442,6 +524,7 @@ export class RuntimeManager extends EventEmitter {
       return runtime;
     } catch (error) {
       this.#runtimes.delete(chatId);
+      this.mcps?.revokeChat(chatId);
       await adapter.stop().catch(() => {});
       if (chat.agent !== "mock") await this.workerBackend.sleep(chat).catch(() => {});
       if (error.name !== "AbortError") await this.#setStatus(chatId, "error", errorMessage(error), null);
@@ -470,9 +553,14 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async #agentEvent(chatId, event) {
-    if (["usage", "rate_limits", "workspace_diff", "session_capabilities"].includes(event.type)) {
-      const patch = event.type === "usage" ? { usage: event.usage } : event.type === "rate_limits" ? { rateLimits: event.rateLimits } : event.type === "workspace_diff" ? { workspaceDiff: event.diff } : { connectors: event.connectors, slashCommands: event.slashCommands };
-      this.publishChat(await this.store.update(chatId, patch)); return;
+    if (event.type === "command_catalog") { this.publishChat(await this.store.update(chatId, { commandCatalog: event.commands })); return; }
+    if (["usage", "context_usage", "rate_limits", "workspace_diff", "session_capabilities"].includes(event.type)) {
+      this.publishChat(await this.store.update(chatId, chat => {
+        if (event.type === "usage") return { usage: mergeUsage(chat.usage, event.usage) };
+        if (event.type === "context_usage") return { usage: { ...chat.usage, ...event.usage } };
+        if (event.type === "rate_limits") return { rateLimits: event.merge ? [...new Map([...(chat.rateLimits || []), ...event.rateLimits].map(limit => [limit.id, limit])).values()] : event.rateLimits };
+        return event.type === "workspace_diff" ? { workspaceDiff: event.diff } : { connectors: event.connectors, slashCommands: event.slashCommands };
+      })); return;
     }
     if (event.type === "request_resolved") {
       const chat = this.store.get(chatId);
@@ -516,6 +604,7 @@ export class RuntimeManager extends EventEmitter {
     if (runtime.idleTimer) clearTimeout(runtime.idleTimer);
     this.#runtimes.delete(chatId);
     this.broker.revokeChat(chatId);
+    this.mcps?.revokeChat(chatId);
     await runtime.adapter.stop().catch(() => {});
     const chat = this.store.get(chatId);
     if (chat && chat.agent !== "mock") await this.workerBackend.sleep(chat).catch(() => {});

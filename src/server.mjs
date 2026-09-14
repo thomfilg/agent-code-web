@@ -16,6 +16,8 @@ import { GitHubConnection } from "./github.mjs";
 import { Environments, SOFTWARE_CATALOG } from "./environments.mjs";
 import { ModelCatalog } from "./models.mjs";
 import { Attachments } from "./attachments.mjs";
+import { CommandCatalog } from "./command-catalog.mjs";
+import { McpConnections } from "./mcp-connections.mjs";
 
 const MIME = {
   ".css": "text/css; charset=utf-8",
@@ -91,9 +93,11 @@ export async function createAgentWebServer(options = {}) {
   const sidebarChanged = () => { for (const response of sidebarClients) response.write('data: {"type":"sidebar_changed"}\n\n'); };
   const organization = new ChatOrganization({ records, store, changed: sidebarChanged });
   const github = options.github || new GitHubConnection({ records, config: config.github });
-  const environments = new Environments(records, config.workerBackend);
+  const mcps = new McpConnections(records, { ttlMs: config.sessionCapabilityTtlMs });
+  const environments = new Environments(records, config.workerBackend, mcps);
   const models = options.models || new ModelCatalog(config);
   const attachments = new Attachments(records, store);
+  const commands = options.commands || new CommandCatalog(config);
   await environments.initialize();
   let manager = null;
 
@@ -102,6 +106,16 @@ export async function createAgentWebServer(options = {}) {
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
     try {
       if (await gateway.handle(request, response, url)) return;
+      if (await mcps.handle(request, response, url)) return;
+      if (url.pathname === "/preview.html") {
+        response.removeHeader("x-frame-options");
+        response.setHeader("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts");
+      }
+      const vendor = { "/vendor/marked.js": "marked/lib/marked.esm.js", "/vendor/purify.js": "dompurify/dist/purify.es.mjs", "/vendor/purify-classic.js": "dompurify/dist/purify.min.js" }[url.pathname];
+      if (vendor && request.method === "GET") {
+        response.setHeader("content-type", "text/javascript; charset=utf-8");
+        return response.end(await readFile(new URL(`../node_modules/${vendor}`, import.meta.url)));
+      }
       if (!validateOrigin(request)) return json(response, 403, { error: "cross-origin request rejected" });
 
       if (url.pathname === "/api/auth" && request.method === "GET") {
@@ -136,6 +150,11 @@ export async function createAgentWebServer(options = {}) {
         });
       }
       if (url.pathname === "/api/github" && request.method === "GET") return json(response, 200, await github.status());
+      if (url.pathname === "/api/mcps" && request.method === "GET") return json(response, 200, { connections: await mcps.list() });
+      if (url.pathname === "/api/mcps" && request.method === "POST") return json(response, 201, { connection: await mcps.save(await bodyJson(request, config.maxBodyBytes)) });
+      const mcpRoute = /^\/api\/mcps\/(mcp_[a-f0-9-]{36})$/.exec(url.pathname);
+      if (mcpRoute && request.method === "PATCH") return json(response, 200, { connection: await mcps.save(await bodyJson(request, config.maxBodyBytes), mcpRoute[1]) });
+      if (mcpRoute && request.method === "DELETE") { await mcps.remove(mcpRoute[1]); return json(response, 200, { removed: true }); }
       if (url.pathname === "/api/models" && request.method === "GET") return json(response, 200, await models.list(url.searchParams.get("agent")));
       if (url.pathname === "/api/github" && request.method === "POST") return json(response, 200, await github.connect(await bodyJson(request, config.maxBodyBytes)));
       if (url.pathname === "/api/github" && request.method === "DELETE") return json(response, 200, await github.disconnect());
@@ -198,6 +217,15 @@ export async function createAgentWebServer(options = {}) {
       const routed = routeChat(url.pathname);
       if (routed) {
         const { chatId, tail } = routed;
+        if (tail === "commands" && request.method === "GET") {
+          const chat = store.get(chatId); if (!chat) return json(response, 404, { error: "Chat not found" });
+          return json(response, 200, await commands.list(chat));
+        }
+        if (tail === "queue" && request.method === "POST") {
+          const body = await bodyJson(request, config.maxBodyBytes);
+          return json(response, 202, { chat: await manager.enqueue(chatId, body.text, body.attachments || []) });
+        }
+        if (tail === "queue" && request.method === "PATCH") return json(response, 200, { chat: await manager.editQueue(chatId, await bodyJson(request, config.maxBodyBytes)) });
         if (tail === "repositories" && request.method === "POST") return json(response, 200, { chat: await manager.addRepository(chatId, await bodyJson(request, config.maxBodyBytes)) });
         if (tail === "changes" && request.method === "GET") {
           const chat = store.get(chatId);
@@ -337,6 +365,8 @@ export async function createAgentWebServer(options = {}) {
       environments,
       models,
       attachments,
+      mcps,
+      commands,
       adapterFactory: options.adapterFactory || null,
     });
     manager.on("event", event => { if (["chat_updated", "message", "chat_deleted"].includes(event.type)) sidebarChanged(); });

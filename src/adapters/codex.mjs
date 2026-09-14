@@ -3,6 +3,7 @@ import { JsonRpcProcess } from "../json-rpc-process.mjs";
 import { buildWorkerEnvironment } from "../worker-process.mjs";
 import { errorMessage, redact } from "../utils.mjs";
 import { codexUsage, safeRateLimits } from "../session-info.mjs";
+import { codexMcpArgs } from "../mcp-connections.mjs";
 
 const toml = (value) => JSON.stringify(value);
 
@@ -28,6 +29,7 @@ function safeToolEvent(item, state) {
       title: redact(item.command || "Shell command"),
       output: state === "completed" ? redact(item.aggregatedOutput || "").slice(-16_000) : "",
       exitCode: item.exitCode ?? null,
+      failed: item.exitCode != null && item.exitCode !== 0,
     };
   }
   if (item.type === "fileChange") {
@@ -98,6 +100,7 @@ export class CodexAdapter {
     await ensureDirectory(env.CODEX_HOME);
 
     const args = ["app-server"];
+    args.push(...codexMcpArgs(this.executor?.mcpServers));
     if (authMode === "gateway") args.push(...gatewayArgs(this.gatewayOrigin));
     args.push(
       "-c", `shell_environment_policy.inherit=${toml("core")}`,
@@ -132,6 +135,10 @@ export class CodexAdapter {
     });
     rpc.notify("initialized", {});
     await this.#loadThread();
+    try {
+      const result = await rpc.request("skills/list", { cwds: [this.workspace] }, 10000);
+      this.hooks.onEvent?.({ type: "command_catalog", commands: (result.data || []).flatMap(entry => (entry.skills || []).filter(skill => skill.enabled !== false).map(skill => ({ name: skill.name, description: skill.description, path: skill.path, kind: "Skill" }))) });
+    } catch { /* Older workers can still run without skill discovery. */ }
   }
 
   async #loadThread() {
@@ -163,7 +170,7 @@ export class CodexAdapter {
     }
   }
 
-  async send(text, { model, effort, mode = "accept_edits", images = [] } = {}) {
+  async send(text, { model, effort, mode = "accept_edits", images = [], skills = [] } = {}) {
     if (!this.rpc) await this.start();
     if (this.current) throw new Error("A Codex turn is already running for this chat");
 
@@ -179,7 +186,7 @@ export class CodexAdapter {
     try {
       await this.rpc.request("turn/start", {
         threadId: this.threadId,
-        input: [{ type: "text", text }, ...images.map(imagePath => ({ type: "localImage", path: imagePath }))],
+        input: [{ type: "text", text }, ...images.map(imagePath => ({ type: "localImage", path: imagePath })), ...skills.map(skill => ({ type: "skill", name: skill.name, path: skill.path }))],
         ...(model ? { model } : {}),
         ...(effort ? { effort } : {}),
         approvalPolicy: "on-request",
@@ -204,11 +211,13 @@ export class CodexAdapter {
 
   async inspect() {
     if (!this.rpc) return {};
-    const [limits, connectors] = await Promise.allSettled([
+    const [limits, connectors, account] = await Promise.allSettled([
       this.rpc.request("account/rateLimits/read", {}, 10000),
       this.rpc.request("mcpServerStatus/list", { limit: 100, detail: "toolsAndAuthOnly" }, 10000),
+      this.rpc.request("account/read", {}, 10000),
     ]);
     return { rateLimits: limits.status === "fulfilled" ? safeRateLimits(limits.value) : null,
+      account: account.status === "fulfilled" ? { planType: account.value.account?.planType || null } : null,
       connectors: connectors.status === "fulfilled" ? (connectors.value.data || []).map(server => ({ name: server.name, status: server.authStatus || "configured", tools: Object.keys(server.tools || {}).length })) : null };
   }
 

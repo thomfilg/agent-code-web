@@ -19,9 +19,7 @@ export class ChatControls {
     $("#archive-current-chat").addEventListener("click", () => this.patch({ archived: !this.state.active.archived }));
     $("#background-tasks").addEventListener("click", () => this.tasks());
     $("#open-workspace").addEventListener("click", () => this.workspace());
-    $("#slash-commands").addEventListener("click", () => this.commands());
     $("#show-connectors").addEventListener("click", () => this.connectors());
-    $("#usage-menu").addEventListener("toggle", () => { if ($("#usage-menu").open) this.usage(); });
     document.querySelectorAll("[data-agent-mode]").forEach(node => node.addEventListener("click", async () => {
       try { const { chat } = await this.api(`/api/chats/${this.state.active.id}/mode`, { method: "PATCH", body: JSON.stringify({ mode: node.dataset.agentMode }) }); this.updated(chat); $("#mode-menu").open = false; }
       catch (error) { this.toast(error.message); }
@@ -120,6 +118,7 @@ export class ChatControls {
     }
   }
   async showChanges(pr = this.state.active?.pullRequests?.at(-1)) {
+    $("#tools-panel").hidden = true; $(".main").classList.remove("tools-open");
     const chat = this.state.active; if (!chat) return;
     const version = this.diffVersion = (this.diffVersion || 0) + 1;
     const selection = $("#diff-selection"); selection.replaceChildren();
@@ -166,45 +165,10 @@ export class ChatControls {
     this.dialog("Open in…", el("p", "Workspace path", "muted"), el("code", chat.workspace), button("Copy workspace path", () => this.copy(chat.workspace)),
       ...(chat.repositories || []).filter(repo => ghUrl(repo.fullName)).map(repo => link(`${repo.fullName} ↗`, ghUrl(repo.fullName))));
   }
-  async commands() {
-    const items = [["/review", "Review the current changes for bugs and regressions."], ["/test", "Run the relevant tests and report any failures."], ["/plan", "Plan the next changes without editing files."]];
-    this.dialog("Slash commands", el("p", "Prompt shortcuts · choose one, then send it to the agent. /plan also selects Plan mode.", "muted"), ...items.map(([name, prompt]) => button(name, async () => {
-      try {
-        if (name === "/plan") { const { chat } = await this.api(`/api/chats/${this.state.active.id}/mode`, { method: "PATCH", body: JSON.stringify({ mode: "plan" }) }); this.updated(chat); }
-        $("#message-input").value = prompt; $("#controls-dialog").close(); $("#message-input").focus();
-      } catch (error) { this.toast(error.message); }
-    })));
-  }
   async connectors() {
     this.dialog("Connectors", el("p", "Loading connected tools…"));
-    try { const info = await this.api(`/api/chats/${this.state.active.id}/session-info`); $("#controls-content").replaceChildren(el("p", "Read-only view of the CLI's configured MCP servers. Connect or authorize new servers in the CLI; credentials are not editable here.", "muted"), ...(info.connectors?.length ? info.connectors.map(server => el("p", `${server.name} · ${server.status}`)) : [el("p", "No connector information reported yet.")])); }
+    try { const info = await this.api(`/api/chats/${this.state.active.id}/session-info`); $("#controls-content").replaceChildren(el("p", "Worker-reported MCP status. Save connections in the sidebar’s MCP connections section, then select them in this chat’s environment. Changes apply on the next worker start.", "muted"), ...(info.connectors?.length ? info.connectors.map(server => el("p", `${server.name} · ${server.status}`)) : [el("p", "No connector information reported yet.")])); }
     catch (error) { $("#controls-content").replaceChildren(el("p", error.message, "form-error")); }
-  }
-  async usage() {
-    const root = $("#session-usage"), chatId = this.state.active?.id; if (!chatId) return;
-    root.replaceChildren(el("p", "Loading reported usage…"));
-    try {
-      const info = await this.api(`/api/chats/${chatId}/session-info`); if (this.state.active?.id !== chatId) return;
-      root.replaceChildren(el("p", "Context window", "menu-caption"));
-      const usage = info.usage;
-      root.append(el("p", `${count(usage?.contextTokens)} / ${count(usage?.contextWindow)}`));
-      if (usage?.contextTokens !== null && usage?.contextWindow) { const meter = el("progress"); meter.max = usage.contextWindow; meter.value = usage.contextTokens; root.append(meter); }
-      if (usage) root.append(el("p", `Input ${count(usage.inputTokens)} · Output ${count(usage.outputTokens)} · Cached ${count(usage.cachedTokens)}`, "muted"));
-      if (usage?.costUsd !== null && usage?.costUsd !== undefined) root.append(el("p", `Reported cost: $${usage.costUsd.toFixed(4)}`, "muted"));
-      const compact = button("Compact session", async () => {
-        if (!confirm("Compact this session's context now? This can use model tokens.")) return;
-        compact.disabled = true;
-        try { await this.api(`/api/chats/${chatId}/compact`, { method: "POST", body: "{}" }); this.usage(); }
-        catch (error) { root.append(el("p", error.message, "form-error")); }
-      }); compact.disabled = !info.canCompact; root.append(compact);
-      for (const limit of info.rateLimits || []) for (const window of limit.windows) {
-        root.append(el("p", `${limit.name} · ${window.minutes ? `${window.minutes / 60}h window` : "usage limit"}`));
-        const meter = el("progress"); meter.max = 100; meter.value = window.usedPercent || 0;
-        root.append(meter, el("p", `${window.usedPercent ?? "?"}% used${window.resetsAt ? ` · resets ${new Date(window.resetsAt * 1000).toLocaleString()}` : ""}`, "muted"));
-      }
-      if (!info.rateLimits?.length) root.append(el("p", "Subscription limits unavailable", "muted"));
-      root.append(el("p", info.note, "muted"));
-    } catch (error) { root.replaceChildren(el("p", error.message, "form-error")); }
   }
   attachments() { return this.drafts.get(this.state.active?.id) || []; }
   renderAttachments() {

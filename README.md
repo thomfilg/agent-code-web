@@ -274,14 +274,16 @@ fresh session. The target provider's default model/effort are selected.
   Upload records are encrypted; files sent to an agent are deliberately readable
   in that chat's worker home. Codex receives supported images as local-image
   input; Claude can inspect uploaded files through its file-reading tools.
-- **Slash commands:** `/review`, `/test`, and `/plan` are prompt shortcuts;
-  `/plan` also selects Plan mode. These are not arbitrary native CLI commands.
+- **Slash commands:** type `/` to discover installed skills, plugin aliases and
+  native commands; arrows navigate and Enter inserts. See Conversation controls
+  below for the distinction between web actions and terminal-only commands.
 - **Context/usage:** shows only CLI-reported token, cost, and account-limit data.
   Missing values are explicitly unavailable; Claude's cumulative token counters
   are not presented as current context usage. Manual compaction is available
   for an awake, idle Codex session; Claude manages compaction internally.
-- **Connectors:** a read-only view of MCP servers reported by the CLI. Configure
-  and authorize connectors through the CLI; there is no browser OAuth editor.
+- **Connectors:** shows MCP servers reported by the CLI. The sidebar's MCP
+  connections editor saves reusable connections for environments; OAuth login
+  remains a CLI concern.
 - **Repository menu:** open GitHub, copy branch names, or append repositories to
   an idle picker-based chat. The original primary repo/group stays unchanged;
   added repositories clone on the next message.
@@ -330,6 +332,57 @@ remote repositories and their uncommitted changes are not overwritten.
 The POC persists the Codex thread id or Claude session id alongside browser
 messages. Stopping a worker does not delete either its workspace or CLI session
 state.
+
+## Conversation controls
+
+- User messages are right-aligned bubbles. Agent Markdown renders headings,
+  tables, lists, links and fenced code, with code-copy buttons. HTML blocks have
+  an opt-in preview in an opaque-origin iframe: generated scripts, forms,
+  navigation and network resources are disabled; styles and malformed markup
+  cannot escape into the chat UI.
+- Each user turn has one **Tools used: N** row. Open it to inspect actual tool
+  names, inputs, output, running state, failures and permission denials in a
+  side panel. Missing results are not reported as successful execution.
+- Type while an agent works and press Enter or **Queue**. The square **Stop**
+  button interrupts the worker and pauses pending messages. Remove pending
+  items or choose **Resume queue**. Queues persist through controller restarts
+  and stay paused until explicitly resumed.
+- `/` opens command/skill completion; type to filter, use Up/Down to select,
+  and Enter or Tab to insert without sending. Claude reports installed commands,
+  plugin aliases and native commands through its initialize response. Codex
+  skills come from `skills/list`, and invoke the native structured skill input.
+  Codex terminal-only commands are labelled as such; listing one does not imply
+  the web client implements it. Web controls include `/usage`, `/model`,
+  `/effort`, `/plan`, `/diff`, `/mcp`, `/skills`, `/stop`, `/rename` and `/archive`.
+  Cloud discovery uses the last worker-reported catalog without waking a worker.
+- Usage has a compact context/limits popover and a detailed session breakdown.
+  Current context is distinct from cumulative tokens. Claude context includes
+  the last main request's cache reads and writes; Codex cached input is already
+  included in its input total. CLI cost is an API-price estimate, not a bill.
+  Missing quota percentages and per-MCP attribution remain explicitly unreported.
+  Historical records may have partial detail until new turns are collected.
+
+## MCP connections
+
+Use **MCP connections** in the sidebar to save a Streamable HTTP endpoint or
+stdio command, then select it under **Environments → MCP connections**. Changes
+apply on the next worker start. Both Codex and Claude receive per-worker MCP
+configuration without modifying shared CLI config files.
+
+HTTP authentication headers are encrypted in controller records and omitted
+from settings responses and worker configuration. A revocable per-chat capability
+proxies only the selected endpoint. Redirects are blocked, and credentials are
+not forwarded to other hosts. Plain HTTP is supported only on loopback; remote
+endpoints require HTTPS. OAuth login and legacy SSE transport are not implemented
+in this connection editor. Connected MCPs are trusted services: they can return
+sensitive data and their tools can perform actions.
+
+Stdio commands run on the worker with its permissions and installed runtimes.
+Do not include secrets in their arguments; protected stdio environment injection
+is intentionally unsupported. Use HTTP for protected credentials. Local workers
+still share the controller's OS account and filesystem, so encrypted storage
+alone is not a strong boundary against a malicious local agent. Use dedicated
+cloud workers when that boundary matters.
 
 ## POC boundaries
 

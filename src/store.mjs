@@ -6,7 +6,8 @@ import { runtimeWorkflowPatch } from "../public/chat-organization.js";
 function restored(chat) {
   chat = { ...chat, archived: chat.archived ?? chat.workflowState === "archived" };
   return { pinned: false, customGroupId: null, workflowState: "idle", ...chat,
-    ...runtimeWorkflowPatch(chat, "stopped"), status: "stopped", pendingRequest: null, idleDeadlineAt: null };
+    ...runtimeWorkflowPatch(chat, "stopped"), status: "stopped", pendingRequest: null, idleDeadlineAt: null,
+    queuePaused: Boolean(chat.queuedMessages?.length) || Boolean(chat.queuePaused) };
 }
 
 function clone(value) {

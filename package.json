@@ -16,7 +16,9 @@
     "node": ">=22"
   },
   "dependencies": {
+    "dompurify": "^3.4.15",
     "embedded-postgres": "^17.10.0-beta.17",
+    "marked": "^18.0.13",
     "pg": "^8.23.0"
   },
   "devDependencies": {

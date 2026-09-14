@@ -2,6 +2,11 @@ import { ChatSidebar } from "./chat-sidebar.js";
 import { WorkspaceSettings } from "./workspace-settings.js";
 import { ModelPicker } from "./model-picker.js";
 import { ChatControls } from "./chat-controls.js";
+import { renderContent } from "./message-content.js";
+import { ToolActivity, groupTools } from "./tool-activity.js";
+import { UsagePanel } from "./usage-panel.js";
+import { SlashComposer } from "./slash-composer.js";
+import { McpSettings } from "./mcp-settings.js";
 
 const state = {
   config: null,
@@ -107,7 +112,8 @@ function renderMessage(message, streaming = false) {
   wrapper.append(node("div", "message-avatar", role === "assistant" ? glyph(message.agent || state.active?.agent) : role === "user" ? "YOU" : "!"));
   const body = node("div", "message-body");
   body.append(node("div", "message-label", role === "assistant" ? agentLabel(message.agent || state.active?.agent) : role));
-  const text = node("div", "message-text", message.text || "");
+  const text = node("div", "message-text");
+  renderContent(text, message.text || "");
   if (streaming) text.append(node("span", "stream-caret"));
   body.append(text);
   if (message.attachments?.length) body.append(node("p", "muted", message.attachments.map(file => `📎 ${file.name}`).join(" · ")));
@@ -123,10 +129,9 @@ function renderMessages({ pinBottom = false } = {}) {
   if (!persisted.length && !state.stream && !state.liveTools.size) {
     elements.messages.append(node("div", "messages-empty", "This workspace is ready.\nSend a message to wake the agent."));
   } else {
-    for (const message of persisted) elements.messages.append(renderMessage(message));
-    for (const tool of state.liveTools.values()) {
-      elements.messages.append(renderMessage({ id: `live-${tool.itemId}`, kind: "tool", role: "tool", text: tool.title, meta: tool }));
-    }
+    const { rows, groups } = groupTools(persisted, [...state.liveTools.values()]);
+    toolActivity.update(state.active.id, groups);
+    for (const message of rows) elements.messages.append(message.kind === "tool_group" ? toolActivity.button(message.key) : renderMessage(message));
     if (state.stream) elements.messages.append(renderMessage({ id: state.stream.id, role: "assistant", text: state.stream.text }, true));
   }
   if (pinBottom || wasNearBottom) elements.messages.scrollTop = elements.messages.scrollHeight;
@@ -186,9 +191,15 @@ function renderActive() {
   elements.statusDot.className = `status-dot ${chat.status}`;
   $("#stop-button").disabled = chat.status === "stopped";
   const switching = state.switchingChat === chat.id;
-  const unavailable = switching || ["running", "starting", "stopping"].includes(chat.status) || chat.workflowState === "archived";
+  const busy = ["running", "starting"].includes(chat.status);
+  const unavailable = switching || chat.status === "stopping" || chat.workflowState === "archived";
   elements.send.disabled = unavailable;
   elements.input.disabled = unavailable;
+  elements.send.type = busy ? "button" : "submit";
+  elements.send.setAttribute("aria-label", busy ? "Stop agent" : "Send message");
+  elements.send.querySelector("path").setAttribute("d", busy ? "M7 7h10v10H7z" : "m5 12 7-7 7 7M12 5v14");
+  $("#queue-message").hidden = !busy; $("#queue-message").disabled = unavailable;
+  $(".composer-hint").textContent = busy ? "Enter to queue · Stop pauses the queue · Shift + Enter for a new line" : "Enter to send · Shift + Enter for a new line";
   elements.input.placeholder = chat.workflowState === "archived" ? "Archived · unarchive this chat to continue" : "Ask your agent to build, inspect, or fix something…";
   if (!elements.agentPicker.options.length) for (const agent of state.config.agents.filter(item => item.enabled)) {
     const option = node("option", "", agent.id === "claude" ? "Claude" : agent.label); option.value = agent.id; elements.agentPicker.append(option);
@@ -202,6 +213,18 @@ function renderActive() {
   renderApproval();
   tickCountdown();
   chatControls.render(chat);
+  usagePanel.render();
+  renderQueue();
+}
+
+function renderQueue() {
+  const root = $("#message-queue"), chat = state.active; root.replaceChildren();
+  if (!chat?.queuedMessages?.length) return;
+  root.append(node("strong", "", `${chat.queuePaused ? "Paused queue" : "Queued messages"} · ${chat.queuedMessages.length}`));
+  const edit = async body => { try { const result = await api(`/api/chats/${chat.id}/queue`, { method: "PATCH", body: JSON.stringify(body) }); if (state.active?.id === chat.id) { state.active = { ...state.active, ...result.chat }; renderActive(); } } catch (error) { toast(error.message); } };
+  if (chat.queuePaused) { const resume = node("button", "secondary-button", "Resume queue"); resume.type = "button"; resume.onclick = () => edit({ resume: true }); root.append(resume); }
+  for (const item of chat.queuedMessages) { const row = node("div", "queue-row"), remove = node("button", "small-icon", "×"); remove.type = "button"; remove.setAttribute("aria-label", "Remove queued message"); remove.onclick = () => edit({ removeId: item.id }); row.append(node("span", "", item.text), remove); root.append(row); }
+  if (chat.queueError) root.append(node("p", "form-error", chat.queueError));
 }
 
 function tickCountdown() {
@@ -355,17 +378,35 @@ async function sendMessage(event) {
   const text = elements.input.value.trim() || (files.length ? "Please inspect the attached files." : "");
   if (!text || !state.active) return;
   const chatId = state.active.id;
+  if (text === "/skills" && !files.length) { elements.input.value = "/"; elements.input.focus(); void slashComposer.update(); return; }
+  if (!files.length && await runWebCommand(text)) { elements.input.value = ""; resizeInput(); return; }
+  const queued = ["starting", "running"].includes(state.active.status) || state.active.queuedMessages?.length;
   elements.input.value = "";
   resizeInput();
   try {
     await activeModelPicker.saving;
-    await api(`/api/chats/${chatId}/messages`, { method: "POST", body: JSON.stringify({ text, attachments: files.map(file => file.id) }) });
+    await api(`/api/chats/${chatId}/${queued ? "queue" : "messages"}`, { method: "POST", body: JSON.stringify({ text, attachments: files.map(file => file.id) }) });
     chatControls.clearAttachments(chatId);
   } catch (error) {
     elements.input.value = text;
     resizeInput();
     toast(error.message);
   }
+}
+
+async function runWebCommand(text) {
+  if (["/usage", "/status", "/context"].includes(text)) { usagePanel.detailed(); return true; }
+  if (text === "/model") { $("#composer-model-controls .model-select").focus(); return true; }
+  if (text === "/effort") { $("#composer-model-controls .effort-menu").open = true; return true; }
+  if (text === "/diff") { void chatControls.showChanges(); return true; }
+  if (text === "/mcp") { void mcpSettings.open(); return true; }
+  if (text === "/stop") { $("#stop-button").click(); return true; }
+  if (text === "/new") { openNewChat(); return true; }
+  if (text === "/rename") { $("#organize-chat-button").click(); return true; }
+  if (text === "/archive") { void chatControls.patch({ archived: true }); return true; }
+  if (text === "/compact") { if (confirm("Compact this session? This can use model tokens.")) try { await api(`/api/chats/${state.active.id}/compact`, { method: "POST", body: "{}" }); } catch (error) { toast(error.message); } return true; }
+  if (text === "/plan") { try { const { chat } = await api(`/api/chats/${state.active.id}/mode`, { method: "PATCH", body: JSON.stringify({ mode: "plan" }) }); state.active = { ...state.active, ...chat }; renderActive(); } catch (error) { toast(error.message); } return true; }
+  return false;
 }
 
 function resizeInput() {
@@ -423,8 +464,10 @@ $("#welcome-new-chat").addEventListener("click", openNewChat);
 elements.newForm.addEventListener("submit", createChat);
 elements.agentSelect.addEventListener("change", renderSecurityHint);
 $("#composer").addEventListener("submit", sendMessage);
+elements.send.addEventListener("click", () => { if (elements.send.type === "button") $("#stop-button").click(); });
 elements.input.addEventListener("input", resizeInput);
 elements.input.addEventListener("keydown", (event) => {
+  if (event.isComposing || slashComposer.keydown(event)) return;
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     $("#composer").requestSubmit();
@@ -463,11 +506,15 @@ const sidebar = new ChatSidebar({ state, api, select: selectChat, toast, age: es
   },
 });
 const workspaceSettings = new WorkspaceSettings({ state, api, toast });
+const mcpSettings = new McpSettings({ api, toast });
+const toolActivity = new ToolActivity();
+const usagePanel = new UsagePanel({ state, api, toast });
 const chatControls = new ChatControls({ state, api, toast,
   updated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = { ...state.active, ...chat }; renderActive(); } },
   openEnvironment: () => workspaceSettings.openEnvironments(state.active?.environmentId),
   openRepositories: () => openNewChat(),
 });
+const slashComposer = new SlashComposer({ state, api });
 const activeModelPicker = new ModelPicker({ root: $("#composer-model-controls"), api, onChange: async settings => {
   if (!state.active) return;
   const id = state.active.id;

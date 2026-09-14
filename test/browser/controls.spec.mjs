@@ -63,7 +63,7 @@ test("upload chips, usage availability, transcript and repository menus are func
   await expect(page.locator("#messages")).toContainText("notes.txt");
   await expect(page.locator("#attachment-chips")).toBeEmpty();
   await page.getByLabel("Context and usage", { exact: true }).click();
-  await expect(page.locator("#session-usage")).toContainText("Subscription limits unavailable");
+  await expect(page.locator("#session-usage")).toContainText("Subscription limits not reported");
   await expect(page.locator("#session-usage").getByRole("button", { name: "Compact session" })).toBeDisabled();
   await page.getByLabel("Chat actions", { exact: true }).click();
   await page.getByRole("button", { name: "Transcript view", exact: true }).click();

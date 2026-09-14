@@ -33,7 +33,7 @@ function publicEnvironment(environment) {
 }
 
 export class Environments {
-  constructor(records, defaultBackend = "local") { this.records = records; this.defaultBackend = defaultBackend; this.queue = Promise.resolve(); }
+  constructor(records, defaultBackend = "local", mcps = null) { this.records = records; this.defaultBackend = defaultBackend; this.mcps = mcps; this.queue = Promise.resolve(); }
   async initialize() {
     if (!(await this.records.list("environment")).length) {
       await this.save({ name: "Default", backend: this.defaultBackend, variablesEnabled: true, software: [], variables: [] });
@@ -64,9 +64,13 @@ export class Environments {
     if (input.networkAccess && input.networkAccess !== "worker_default") throw new Error("Network restrictions must be enforced by the worker infrastructure; this backend cannot enforce a custom network policy");
     if (input.archived !== undefined && typeof input.archived !== "boolean") throw new Error("Archived must be true or false");
     const all = await this.records.list("environment");
+    const mcpIds = input.mcpIds ?? old?.mcpIds ?? [];
+    if (this.mcps) await this.mcps.validateSelection(mcpIds);
+    else if (mcpIds.length) throw new Error("MCP connections are unavailable");
     if (all.some(env => env.id !== id && env.name.toLowerCase() === name.toLowerCase())) throw new Error("An environment with this name already exists");
     const value = {
       id: id || `env_${randomUUID()}`, name, backend: input.backend,
+      mcpIds,
       description: String(input.description || "").slice(0, 500),
       variablesEnabled: input.variablesEnabled !== false,
       variables: validateVariables(input.variables || [], old?.variables), software,
@@ -86,6 +90,7 @@ export class Environments {
     const env = await this.get(id, { reveal: true });
     return {
       id: env.id, name: env.name, revision: env.revision, backend: env.backend, software: env.software,
+      mcpIds: env.mcpIds || [],
       setupScript: env.setupScript || "", archived: Boolean(env.archived),
       variables: Object.fromEntries(env.variables.filter(v => env.variablesEnabled && v.enabled && !v.secret).map(v => [v.key, v.value])),
       protectedKeys: env.variables.filter(v => env.variablesEnabled && v.enabled && v.secret).map(v => v.key),

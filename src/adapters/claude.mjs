@@ -4,7 +4,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { buildWorkerEnvironment, spawnWorker, terminateWorker } from "../worker-process.mjs";
 import { errorMessage, redact } from "../utils.mjs";
-import { claudeUsage } from "../session-info.mjs";
+import { claudeUsage, claudeContext, claudeRateLimits } from "../session-info.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks }) {
@@ -34,7 +34,7 @@ export class ClaudeAdapter {
     this.stopped = false;
   }
 
-  async send(text, { model, effort, resetEffort, mode = "accept_edits" } = {}) {
+  async send(text, { model, effort, resetEffort, mode = "accept_edits", systemPrompt } = {}) {
     if (this.child) throw new Error("A Claude turn is already running for this chat");
     if (this.stopped || (this.config.claude.authMode === "gateway" && !this.capability)) await this.start();
 
@@ -73,6 +73,8 @@ export class ClaudeAdapter {
       "--permission-mode", mode === "plan" ? "plan" : mode === "auto" ? "auto" : "acceptEdits",
       "--prompt-suggestions", "false",
       "--add-dir", uploads,
+      ...(systemPrompt ? ["--append-system-prompt", systemPrompt] : []),
+      ...(this.executor?.mcpServers && Object.keys(this.executor.mcpServers).length ? ["--mcp-config", JSON.stringify({ mcpServers: this.executor.mcpServers })] : []),
       ...(isNew ? ["--session-id", this.sessionId] : ["--resume", this.sessionId]),
       ...(model || this.config.claude.model ? ["--model", model || this.config.claude.model] : []),
       ...(effort ? ["--effort", effort] : []),
@@ -96,18 +98,26 @@ export class ClaudeAdapter {
     let streamed = "";
     let fallback = "";
     let resultMessage = null;
+    let lastRequest = null;
+    const sampleId = randomUUID();
     let stderr = "";
     const activeTools = new Map();
-    const completeTool = (itemId, output = "") => {
+    const completeTool = (itemId, output = "", failed = false, resultMissing = false) => {
       const tool = activeTools.get(itemId);
       if (!tool) return;
       activeTools.delete(itemId);
-      this.hooks.onEvent?.({ ...tool, state: "completed", output });
+      this.hooks.onEvent?.({ ...tool, state: "completed", failed, resultMissing, output });
     };
     const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     lines.on("line", (line) => {
       let event;
       try { event = JSON.parse(line); } catch { return; }
+      if (event.type === "rate_limit_event") this.hooks.onEvent?.({ type: "rate_limits", rateLimits: claudeRateLimits(event.rate_limit_info), merge: true });
+      if (event.type === "assistant" && !event.parent_tool_use_id && event.message?.usage) {
+        lastRequest = event.message;
+        const usage = claudeContext(lastRequest);
+        if (usage) this.hooks.onEvent?.({ type: "context_usage", usage });
+      }
       if (event.type === "system" && event.subtype === "init") this.hooks.onEvent?.({ type: "session_capabilities", connectors: (event.mcp_servers || []).map(server => ({ name: server.name, status: server.status })), slashCommands: event.slash_commands || [] });
       if (event.type === "stream_event" && event.event?.type === "content_block_delta") {
         const delta = event.event.delta?.text || "";
@@ -122,7 +132,9 @@ export class ClaudeAdapter {
           .join("");
         for (const block of event.message?.content || []) {
           if (block.type === "tool_use" && !activeTools.has(block.id)) {
-            const tool = { type: "tool", tool: block.name || "tool", itemId: block.id, title: block.name || "Tool call" };
+            const input = redact(JSON.stringify(block.input || {}, null, 2)).slice(0, 16000);
+            const title = redact(block.input?.command || block.input?.file_path || block.input?.pattern || block.name || "Tool call").slice(0, 500);
+            const tool = { type: "tool", tool: block.name || "tool", itemId: block.id, title, input };
             activeTools.set(block.id, tool);
             this.hooks.onEvent?.({ ...tool, state: "running", output: "" });
           }
@@ -133,12 +145,12 @@ export class ClaudeAdapter {
           const content = typeof block.content === "string"
             ? block.content
             : JSON.stringify(block.content ?? "");
-          completeTool(block.tool_use_id, redact(content).slice(-16_000));
+          completeTool(block.tool_use_id, redact(content).slice(-16_000), block.is_error === true);
         }
       } else if (event.type === "result") {
         resultMessage = event;
-        this.hooks.onEvent?.({ type: "usage", usage: claudeUsage(event) });
-        for (const itemId of activeTools.keys()) completeTool(itemId);
+        this.hooks.onEvent?.({ type: "usage", usage: claudeUsage(event, lastRequest, sampleId) });
+        for (const itemId of activeTools.keys()) completeTool(itemId, "", false, true);
         if (!streamed && !fallback && typeof event.result === "string") fallback = event.result;
       }
     });
