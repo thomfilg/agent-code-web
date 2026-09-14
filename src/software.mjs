@@ -1,6 +1,7 @@
 import path from "node:path";
 import { SOFTWARE_CATALOG } from "./environments.mjs";
 import { terminateWorker } from "./worker-process.mjs";
+import { prepareChrome } from "./chrome-software.mjs";
 
 export function captureWorker(executor, command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -28,7 +29,10 @@ export async function prepareSoftware(executor, environment, onProgress) {
     if (!item) throw new Error(`Unknown software: ${id}`);
     await onProgress(`Preparing ${item.name}…`);
     const packages = { node: "node@22", pnpm: "pnpm@10", yarn: "yarn@1", typescript: "typescript@5" };
-    if (id === "docker") {
+    if (id === "chrome") {
+      const executable = await prepareChrome(executor, captureWorker, onProgress);
+      if (executable !== `${prefix}/bin/google-chrome`) await captureWorker(executor, "ln", ["-sfn", executable, `${prefix}/bin/google-chrome`], { cwd: executor.runtimeHome, env });
+    } else if (id === "docker") {
       if (executor.metadata?.backend !== "ec2") throw new Error("Docker requires a dedicated EC2 worker; the control-plane Docker socket is never exposed.");
       try { await captureWorker(executor, "sudo", ["-n", "/usr/local/sbin/agent-web-enable-docker"], { cwd: executor.runtimeHome, env }); }
       catch { throw new Error("Docker capability is missing from this worker image. Rebuild it with the updated worker-cloud-init.yaml."); }

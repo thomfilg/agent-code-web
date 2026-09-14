@@ -52,6 +52,7 @@
             <div class="chat-meta" id="chat-meta">Independent workspaces. Disposable runtimes.</div>
           </div>
           <div class="topbar-actions" id="chat-actions" hidden>
+            <button type="button" class="secondary-button" id="open-browser" title="Open the Chrome shared with your agent" aria-label="Open shared Chrome">◉ <span>Browser</span></button>
             <details class="control-menu" id="repositories-menu"><summary aria-label="Repositories" title="Repositories">▱</summary><div class="control-popover" id="chat-repositories"></div></details>
             <button class="icon-button" id="view-changes" title="View changes" aria-label="View changes">▣</button>
             <button class="icon-button" id="copy-chat-link" title="Copy private chat link" aria-label="Copy chat link">↥</button>
@@ -147,6 +148,16 @@
             <div class="composer-help"><span>Type <kbd>/</kbd> for commands</span><p class="composer-hint" id="composer-keyboard-hint">Enter to send · Shift + Enter for a new line</p></div>
           </div>
         </section>
+        <aside class="browser-panel" id="browser-panel" aria-labelledby="browser-title" hidden>
+          <div class="preview-heading"><strong id="browser-title">Shared Chrome</strong><span class="browser-profile-label">Separate profile</span><button type="button" class="icon-button" id="expand-browser" aria-label="Expand browser" aria-pressed="false">⤢</button><button type="button" class="icon-button" id="close-browser" aria-label="Close browser panel">×</button></div>
+          <div class="browser-tabbar"><select id="browser-tabs" aria-label="Browser tabs"></select><button type="button" class="icon-button" id="browser-new-tab" aria-label="New browser tab">+</button><button type="button" class="icon-button" id="browser-close-tab" aria-label="Close current browser tab">×</button></div>
+          <form id="browser-address-form" class="browser-toolbar"><button type="button" class="icon-button" id="browser-back" aria-label="Browser back">←</button><button type="button" class="icon-button" id="browser-forward" aria-label="Browser forward">→</button><button type="button" class="icon-button" id="browser-reload" aria-label="Reload browser page">↻</button><input type="text" id="browser-address" aria-label="Browser address" placeholder="http://localhost:3000" autocomplete="off" spellcheck="false"><button type="submit" class="secondary-button">Go</button></form>
+          <div class="browser-options"><button type="button" class="secondary-button" id="browser-localhost">localhost:3000</button><label><span class="sr-only">Browser viewport</span><select id="browser-viewport" aria-label="Browser viewport"><option value="1280x800">Desktop · 1280 × 800</option><option value="834x1112">Tablet · 834 × 1112</option><option value="390x844">Phone · 390 × 844</option></select></label><button type="button" class="secondary-button" id="browser-stop">Stop Chrome</button></div>
+          <p id="browser-status" class="muted" role="status">Chrome starts when you connect. Website content runs in the worker, not in this app.</p>
+          <div class="browser-surface" id="browser-surface"><canvas id="browser-canvas" width="1280" height="800" tabindex="0" aria-label="Shared Chrome page. Click to interact, then type. Press Escape to leave browser input."></canvas><button type="button" class="primary-button" id="browser-connect">Connect to Chrome</button></div>
+          <div id="browser-dialog" class="browser-dialog" hidden><p id="browser-dialog-text"></p><input id="browser-dialog-input" aria-label="Website prompt answer" autocomplete="off"><button type="button" id="browser-dialog-accept">OK</button><button type="button" id="browser-dialog-dismiss">Cancel</button></div>
+          <p class="browser-footnote muted">You and the agent share this page. Localhost reaches the chat’s worker. Your personal Chrome and its saved logins are not connected.</p>
+        </aside>
         <aside class="tools-panel" id="tools-panel" aria-label="Tool activity" hidden>
           <div class="diff-heading"><strong id="tools-title">Tools used</strong><button type="button" class="icon-button" id="close-tools" aria-label="Close tool activity">×</button></div>
           <p class="muted">Real calls and results reported by the agent. Failed or denied calls do not imply an action succeeded.</p><div id="tools-list"></div>

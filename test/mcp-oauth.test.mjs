@@ -106,10 +106,13 @@ test("environment selections reach both adapters; grants revoke on stop and fres
   for (const agent of ["codex", "claude"]) {
     const chat = await app.manager.createChat({ agent, title: "MCP worker", environmentId: environment.id });
     await app.manager.send(chat.id, "load tools"); const runtime = seen.at(-1);
-    assert.equal(runtime.agent, agent); assert.deepEqual(Object.keys(runtime.servers), ["relay_selected"]);
+    assert.equal(runtime.agent, agent); assert.deepEqual(Object.keys(runtime.servers), ["relay_selected", "relay_browser"]);
+    const browserToken = runtime.servers.relay_browser.headers.Authorization.slice(7);
+    assert.equal(app.manager.browsers.grants.validate(browserToken, "browser").chatId, chat.id);
     assert.ok(!JSON.stringify(runtime).includes("upstream-secret"));
     const token = runtime.servers.relay_selected.headers.Authorization.slice(7); assert.ok(mcps.broker.validate(token, "mcp"));
     await app.manager.stop(chat.id); assert.equal(mcps.broker.validate(token, "mcp"), null);
+    assert.equal(app.manager.browsers.grants.validate(browserToken, "browser"), null);
     await app.manager.send(chat.id, "restart tools"); assert.notEqual(seen.at(-1).servers.relay_selected.headers.Authorization, runtime.servers.relay_selected.headers.Authorization);
     await app.manager.stop(chat.id);
   }

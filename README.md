@@ -14,6 +14,7 @@ from a browser. It is intentionally a POC, but the core lifecycle is real:
   auto-merge;
 - one independent workspace and worker lifecycle per chat;
 - streamed assistant and tool events over Server-Sent Events;
+- interactive shared Chrome over an authenticated WebSocket, in a third column;
 - Codex through the official `codex app-server` JSON-RPC protocol;
 - Claude Code through `claude --print --output-format stream-json`;
 - automatic process shutdown five minutes after a completed turn;
@@ -106,8 +107,57 @@ the long-lived provider secret.
 | `AGENT_ENABLE_MOCK` | `0` | expose the deterministic Mock agent |
 | `AGENT_WORKER_BACKEND` | `local` | `local` process workers or per-chat `ec2` workers |
 | `AGENT_PROCESS_ISOLATION` | `namespace` on Linux | `namespace` or `none` for local workers |
+| `AGENT_CHROME_BIN` | `google-chrome` | Chrome executable in the worker; never a personal profile path |
 | `CODEX_AUTH_MODE` | `gateway` | `gateway` or `host` |
 | `CLAUDE_AUTH_MODE` | `gateway` | `gateway` or `host` |
+
+## Shared Chrome (in progress)
+
+Open **Browser** in a chat’s top-right toolbar. The desktop view is a third
+column; narrow screens use an overlay. You and the agent see and interact with
+the same page. The address bar accepts `http://localhost:3000` or another dev
+server port: localhost belongs to the chat’s worker, including EC2 workers.
+The site’s WebSockets/HMR run in Chrome normally. This is an interactive live
+view, not a reverse proxy that puts untrusted website HTML on Relay’s origin.
+
+Both agents receive the built-in `relay_browser` MCP server when their worker
+starts. It provides navigation, accessibility snapshots, screenshots, clicks,
+typing, tabs, viewport sizing and page JavaScript evaluation. The browser starts
+on demand, without an extra model request. Ask the agent to run a dev server and
+open it with `browser_navigate`; use the Browser column to test it yourself.
+Click the page to type, or paste text. Escape returns focus to the address bar.
+
+Each chat starts with a fresh, separate Chrome profile. It does **not** import
+your personal Chrome cookies or passwords. Closing the panel disconnects only
+the viewer; Chrome sleeps after inactivity. An open viewer keeps the browser
+and an otherwise-idle agent worker awake. **Stop Chrome** discards the separate
+profile; **Stop worker** also revokes the browser tool capability. Inspecting
+browser status does not wake a worker. Tab content and typed input are not
+automatically added to the transcript; explicit agent tool results can be.
+
+Chrome uses its native sandbox and private debugging pipe descriptors. No CDP,
+VNC or worker web port is exposed publicly. WebSocket upgrades require the UI
+login and a same-origin browser request; the MCP endpoint accepts only a
+short-lived, chat-scoped agent capability. Local workers still share the host
+filesystem/network trust boundary described above; this is not multi-tenant
+isolation.
+
+**Chrome installation:** the environment catalog includes Google Chrome. It
+uses an installed system Chrome/Chromium, or downloads Chrome for Testing into
+the worker’s private runtime directory through the pinned official Puppeteer
+browser installer. Node/npm, unzip and Chrome system libraries are required.
+The Ubuntu 24.04 amd64 AMI recipe installs Chrome and its libraries. Existing
+AMIs need rebuilding; selecting Chrome cannot add system packages with sudo.
+No sandbox-disable fallback is used. A custom binary can be selected with
+`AGENT_CHROME_BIN`. Installation runs in the worker, not in your personal Chrome.
+
+**Not implemented yet:** private per-user saved signed-in connections, personal
+Chrome pairing, and the top-right **Use my signed-in Chrome** toggle. The final
+permission model keeps normal guest browsing available at all times; saving a
+login must not grant agent access. Access to a saved connection must be explicit
+per chat and revocable without signing the user out. Do not use a shared app
+token as a substitute for per-user authorization. These remain part of the
+active shared-browser work, not completed features.
 
 ## Chat organization
 

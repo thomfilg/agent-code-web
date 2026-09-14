@@ -79,6 +79,7 @@ export function loadConfig(env = process.env) {
     workspaceSource: env.AGENT_WORKSPACE_SOURCE || "",
     workerBackend,
     enableMock: boolean(env, "AGENT_ENABLE_MOCK", false),
+    chromeBin: env.AGENT_CHROME_BIN || "google-chrome",
     processIsolation: choice(env, "AGENT_PROCESS_ISOLATION", isolationDefault, ["namespace", "none"]),
     sessionCapabilityTtlMs: integer(env, "AGENT_CAPABILITY_TTL_MS", 3_600_000, {
       min: 10_000,

@@ -9,6 +9,7 @@ import { JsonRpcProcess } from "../src/json-rpc-process.mjs";
 import { spawnWorker, terminateWorker } from "../src/worker-process.mjs";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
+import { SharedBrowsers } from "../src/shared-browser.mjs";
 
 // No model calls, account credentials, user config writes, or real tool actions.
 const root = await mkdtemp("/tmp/relay-real-mcps-");
@@ -16,9 +17,14 @@ const service = await startMcpFixture({ requireAuth: false });
 const mcps = new McpConnections(new MemoryRecords());
 const connection = await mcps.save({ name: "smoke", type: "http", url: `${service.origin}/mcp`, authMode: "none" });
 const stdio = await mcps.save({ name: "stdio", type: "stdio", command: process.execPath, args: [fileURLToPath(new URL("../test/fixtures/mcp-stdio.mjs", import.meta.url))] });
-const gateway = http.createServer((req, res) => mcps.handle(req, res, new URL(req.url, "http://localhost")));
+const browsers = new SharedBrowsers({ store: { get: id => id === "smoke" ? { id } : null }, config: { sessionCapabilityTtlMs: 60000 }, acquire: async () => { throw new Error("Discovery must not start Chrome"); } });
+const gateway = http.createServer(async (req, res) => {
+  const url = new URL(req.url, "http://localhost");
+  if (!await mcps.handle(req, res, url) && !await browsers.handle(req, res, url)) { res.writeHead(404); res.end(); }
+});
 await new Promise(resolve => gateway.listen(0, "127.0.0.1", resolve));
-const servers = await mcps.runtime("smoke", [connection.id, stdio.id], `http://127.0.0.1:${gateway.address().port}`);
+const origin = `http://127.0.0.1:${gateway.address().port}`;
+const servers = { ...await mcps.runtime("smoke", [connection.id, stdio.id], origin), ...browsers.runtime("smoke", origin) };
 let rpc, child;
 try {
   await mkdir(path.join(root, "codex")); await mkdir(path.join(root, "claude"));
@@ -30,7 +36,8 @@ try {
   const server = status.data.find(item => item.name === "relay_smoke");
   assert.ok(Object.keys(server?.tools || {}).some(name => name.includes("fixture_echo")), "Codex did not discover the selected MCP tool");
   assert.ok(Object.keys(status.data.find(s => s.name === "relay_stdio")?.tools || {}).some(name => name.includes("stdio_echo")), "Codex did not discover the selected stdio MCP");
-  console.log("Real Codex: selected HTTP and stdio MCP tools discovered"); await rpc.stop(); rpc = null;
+  assert.ok(Object.keys(status.data.find(s => s.name === "relay_browser")?.tools || {}).some(name => name.includes("browser_navigate")), "Codex did not discover shared Chrome tools");
+  console.log("Real Codex: selected HTTP, stdio and shared Chrome tools discovered"); await rpc.stop(); rpc = null;
 
   child = spawnWorker("claude", ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: servers })], { cwd: root, env, isolation: "none", stdio: ["pipe", "pipe", "pipe"] });
   child.stderr.resume(); const lines = readline.createInterface({ input: child.stdout }); const pending = new Map();
@@ -41,19 +48,21 @@ try {
     child.stdin.write(`${JSON.stringify({ type: "control_request", request_id: id, request: { subtype } })}\n`);
   });
   await request("init", "initialize");
-  let selected, selectedStdio;
+  let selected, selectedStdio, selectedBrowser;
   for (let attempt = 0; attempt < 40; attempt++) {
     const result = await request(`mcp-status-${attempt}`, "mcp_status");
     selected = result.mcpServers?.find(item => item.name === "relay_smoke");
     selectedStdio = result.mcpServers?.find(item => item.name === "relay_stdio");
-    if (selected?.status === "connected" && selectedStdio?.status === "connected" || selected?.status === "failed" || selectedStdio?.status === "failed") break;
+    selectedBrowser = result.mcpServers?.find(item => item.name === "relay_browser");
+    if ([selected, selectedStdio, selectedBrowser].every(item => item?.status === "connected") || [selected, selectedStdio, selectedBrowser].some(item => item?.status === "failed")) break;
     await new Promise(resolve => setTimeout(resolve, 250));
   }
   assert.equal(selected?.status, "connected", "Claude did not connect to the selected MCP");
   assert.equal(selectedStdio?.status, "connected", "Claude did not connect to the selected stdio MCP");
-  console.log("Real Claude: selected HTTP and stdio MCPs connected");
+  assert.equal(selectedBrowser?.status, "connected", "Claude did not connect to shared Chrome tools");
+  console.log("Real Claude: selected HTTP, stdio and shared Chrome MCPs connected");
   lines.close();
 } finally {
   await rpc?.stop(); if (child) await terminateWorker(child);
-  mcps.revokeChat("smoke"); gateway.close(); gateway.closeAllConnections(); await service.close(); await rm(root, { recursive: true, force: true });
+  mcps.revokeChat("smoke"); await browsers.shutdown(); gateway.close(); gateway.closeAllConnections(); await service.close(); await rm(root, { recursive: true, force: true });
 }

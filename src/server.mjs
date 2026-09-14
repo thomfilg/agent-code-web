@@ -20,6 +20,8 @@ import { CommandCatalog } from "./command-catalog.mjs";
 import { McpConnections } from "./mcp-connections.mjs";
 import { MCP_PRESETS } from "./mcp-presets.mjs";
 import { safeMcpUrl, oauthCookieName } from "./mcp-oauth.mjs";
+import { SharedBrowsers } from "./shared-browser.mjs";
+import { WebSocketServer } from "ws";
 
 const MIME = {
   ".css": "text/css; charset=utf-8",
@@ -103,6 +105,7 @@ export async function createAgentWebServer(options = {}) {
   const commands = options.commands || new CommandCatalog(config);
   await environments.initialize();
   let manager = null;
+  const browserSockets = new WebSocketServer({ noServer: true, maxPayload: 100000, perMessageDeflate: false });
 
   const server = http.createServer(async (request, response) => {
     securityHeaders(response);
@@ -110,6 +113,7 @@ export async function createAgentWebServer(options = {}) {
     try {
       if (await gateway.handle(request, response, url)) return;
       if (await mcps.handle(request, response, url)) return;
+      if (await manager?.browsers?.handle(request, response, url)) return;
       if (url.pathname === "/oauth/mcp/callback" && request.method === "GET") {
         // Browser session cookies are Strict. This callback instead requires its
         // own Lax, HttpOnly flow cookie, minted by an authenticated same-origin POST.
@@ -248,6 +252,9 @@ export async function createAgentWebServer(options = {}) {
       const routed = routeChat(url.pathname);
       if (routed) {
         const { chatId, tail } = routed;
+        if (tail === "browser" && request.method === "GET") return json(response, 200, manager.browsers.info(chatId));
+        if (tail === "browser" && request.method === "POST") { await manager.browsers.ensure(chatId); return json(response, 200, manager.browsers.info(chatId)); }
+        if (tail === "browser" && request.method === "DELETE") { await manager.browsers.stop(chatId, false); await manager.browserIdle(chatId); return json(response, 200, { stopped: true }); }
         if (tail === "copy" && request.method === "POST") return json(response, 201, { chat: await manager.copyTranscript(chatId, await bodyJson(request, config.maxBodyBytes)) });
         if (tail === "commands" && request.method === "GET") {
           const chat = store.get(chatId); if (!chat) return json(response, 404, { error: "Chat not found" });
@@ -366,6 +373,28 @@ export async function createAgentWebServer(options = {}) {
     }
   });
 
+  server.on("upgrade", (request, socket, head) => {
+    const reject = code => { socket.end(`HTTP/1.1 ${code}\r\nConnection: close\r\n\r\n`); };
+    let url, origin;
+    try { url = new URL(request.url, `http://${request.headers.host}`); origin = new URL(request.headers.origin); }
+    catch { reject("403 Forbidden"); return; }
+    const routed = routeChat(url.pathname);
+    const expectedProtocol = config.cookieSecure ? "https:" : "http:";
+    if (origin.host !== request.headers.host || origin.protocol !== expectedProtocol || url.search || !auth.authenticated(request)) { reject("403 Forbidden"); return; }
+    if (!manager || !routed || routed.tail !== "browser/live" || !store.get(routed.chatId)) { reject("404 Not Found"); return; }
+    browserSockets.handleUpgrade(request, socket, head, ws => {
+      ws.on("error", () => {});
+      let alive = true;
+      ws.on("pong", () => { alive = true; });
+      const heartbeat = setInterval(() => { if (!alive || !auth.authenticated(request)) { ws.terminate(); return; } alive = false; ws.ping(); }, 15000);
+      heartbeat.unref?.(); ws.once("close", () => clearInterval(heartbeat));
+      void manager.browsers.attach(routed.chatId, ws).catch(error => {
+        if (ws.readyState === 1) ws.send(JSON.stringify({ event: "closed", value: { message: errorMessage(error) } }));
+        ws.close(1011, "Browser unavailable");
+      });
+    });
+  });
+
   async function start() {
     await new Promise((resolve, reject) => {
       server.once("error", reject);
@@ -401,6 +430,7 @@ export async function createAgentWebServer(options = {}) {
       commands,
       adapterFactory: options.adapterFactory || null,
     });
+    manager.browsers = new SharedBrowsers({ store, config, acquire: chatId => manager.browserExecutor(chatId), onIdle: chatId => manager.browserIdle(chatId), ...options.browserOptions });
     manager.on("event", event => { if (["chat_updated", "message", "chat_deleted"].includes(event.type)) sidebarChanged(); });
     manager.pullRequests.start();
     return { host: config.host, port, url: `http://${config.host.includes(":") ? `[${config.host}]` : config.host}:${port}` };
@@ -412,6 +442,8 @@ export async function createAgentWebServer(options = {}) {
     sseClients.clear();
     for (const response of sidebarClients) response.end();
     sidebarClients.clear();
+    for (const socket of browserSockets.clients) socket.terminate();
+    await new Promise(resolve => browserSockets.close(resolve));
     await new Promise((resolve) => server.close(resolve));
     if (!options.records) await records.close();
   }

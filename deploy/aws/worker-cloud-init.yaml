@@ -12,6 +12,22 @@ packages:
   - python3-venv
   - rsync
   - tar
+  - unzip
+  - fonts-liberation
+  - libasound2t64
+  - libatk-bridge2.0-0
+  - libatk1.0-0
+  - libatspi2.0-0
+  - libcups2
+  - libdrm2
+  - libgbm1
+  - libgtk-3-0
+  - libnss3
+  - libxcomposite1
+  - libxdamage1
+  - libxfixes3
+  - libxkbcommon0
+  - libxrandr2
 
 users:
   - default
@@ -21,6 +37,19 @@ users:
     shell: /bin/bash
 
 write_files:
+  - path: /usr/local/sbin/agent-web-install-chrome
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      # The AMI baker selects Ubuntu 24.04 amd64. Google's package includes the
+      # supported sandbox/AppArmor integration; never launch with --no-sandbox.
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://dl.google.com/linux/linux_signing_key.pub -o /etc/apt/keyrings/google-chrome.asc
+      printf '%s\n' 'deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.asc] https://dl.google.com/linux/chrome/deb/ stable main' > /etc/apt/sources.list.d/google-chrome.list
+      apt-get update
+      apt-get install -y google-chrome-stable
   - path: /usr/local/sbin/agent-web-enable-docker
     owner: root:root
     permissions: "0755"
@@ -126,11 +155,13 @@ runcmd:
   - bash /tmp/nodesource-setup.sh
   - apt-get install -y nodejs
   - /usr/local/sbin/agent-web-install-docker
+  - /usr/local/sbin/agent-web-install-chrome
   - npm install --global @openai/codex @anthropic-ai/claude-code
   - install -d -o agent -g agent -m 0700 /opt/agent-web /opt/agent-web/chats
   - install -o agent -g agent -m 0600 /dev/null /opt/agent-web/.heartbeat
   - sh -c 'codex --version > /opt/agent-web/versions.txt'
   - sh -c 'claude --version >> /opt/agent-web/versions.txt'
+  - sh -c 'google-chrome --version >> /opt/agent-web/versions.txt'
   - chown agent:agent /opt/agent-web/versions.txt
   - systemctl daemon-reload
   - systemctl enable agent-web-heartbeat.service agent-web-idle-watchdog.timer

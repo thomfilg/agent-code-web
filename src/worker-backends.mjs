@@ -41,6 +41,12 @@ class LocalExecutor {
     return spawnWorker(command, args, { ...options, isolation: this.config.processIsolation });
   }
 
+  // Chrome keeps its native renderer sandbox. Mapping the launcher to UID 0
+  // inside the CLI PID namespace would force disabling that sandbox.
+  spawnBrowser(command, args, options) {
+    return spawnWorker(command, args, { ...options, isolation: "none" });
+  }
+
   mkdir(directory) {
     return mkdir(directory, { recursive: true, mode: 0o700 });
   }

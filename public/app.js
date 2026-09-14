@@ -11,6 +11,7 @@ import { McpSettings } from "./mcp-settings.js";
 import { MessageHistory } from "./message-history.js";
 import { MessageNavigator } from "./message-navigator.js";
 import { DocumentPreview } from "./document-preview.js";
+import { SharedBrowserPanel } from "./shared-browser.js";
 
 const state = {
   config: null,
@@ -180,6 +181,7 @@ function renderApproval() {
 function renderActive() {
   const chat = state.active;
   documentPreview.setChat(chat?.id);
+  sharedBrowser.setChat(chat?.id);
   elements.welcome.hidden = Boolean(chat);
   elements.conversation.hidden = !chat;
   elements.actions.hidden = !chat;
@@ -536,6 +538,7 @@ const mcpSettings = new McpSettings({ api, toast, state });
 const toolActivity = new ToolActivity();
 const usagePanel = new UsagePanel({ state, api, toast });
 const documentPreview = new DocumentPreview();
+const sharedBrowser = new SharedBrowserPanel({ api });
 const chatControls = new ChatControls({ state, api, toast,
   preview: documentPreview,
   updated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = { ...state.active, ...chat }; renderActive(); } },
