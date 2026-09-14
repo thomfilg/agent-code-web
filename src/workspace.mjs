@@ -1,0 +1,87 @@
+import { spawn } from "node:child_process";
+import { access, mkdir, realpath, stat, rm, rename } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+
+function run(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+    const timer = setTimeout(() => child.kill("SIGKILL"), 180000);
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { output += chunk; });
+    child.once("error", error => { clearTimeout(timer); reject(error); });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(output.trim());
+      else reject(new Error(`${command} failed (${signal || code}): ${output.slice(-2_000).trim()}`));
+    });
+  });
+}
+
+export async function prepareRepositories({ destination, repositories, token, onProgress = () => {} }) {
+  await mkdir(destination, { recursive: true, mode: 0o700 });
+  const auth = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+  const env = {
+    PATH: process.env.PATH, LANG: process.env.LANG || "C.UTF-8", GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "",
+    GIT_CONFIG_KEY_1: "http.https://github.com/.extraheader", GIT_CONFIG_VALUE_1: auth,
+    GIT_CONFIG_KEY_2: "http.followRedirects", GIT_CONFIG_VALUE_2: "false",
+  };
+  for (const repo of repositories) {
+    if (!/^[A-Za-z0-9_.-]+--[A-Za-z0-9_.-]+$/.test(repo.directory)) throw new Error("Invalid repository directory");
+    const target = path.join(destination, repo.directory);
+    try { await access(path.join(target, ".git")); continue; } catch {}
+    await onProgress(`Preparing ${repo.fullName} (${repo.branch})…`);
+    const temporary = `${target}.clone-${randomUUID()}`;
+    try {
+      await run("git", ["clone", "--no-hardlinks", ...(repo.empty ? [] : ["--branch", repo.branch]), "--", repo.cloneUrl, temporary], { env });
+      await rename(temporary, target);
+    } catch (error) {
+      await rm(temporary, { recursive: true, force: true });
+      throw new Error(`Could not clone ${repo.fullName}. Check the branch and your GitHub permissions. ${error.message.replaceAll(token, "[redacted]").replaceAll(auth, "[redacted]")}`);
+    }
+  }
+}
+
+function cloneEnv() {
+  const keys = ["PATH", "HOME", "LANG", "LC_ALL", "SSH_AUTH_SOCK", "GIT_SSH_COMMAND"];
+  return Object.fromEntries(keys.filter((key) => process.env[key]).map((key) => [key, process.env[key]]));
+}
+
+function isRemoteSource(source) {
+  return /^(https:\/\/|ssh:\/\/|git@)/.test(source);
+}
+
+function validateRemoteSource(source) {
+  if (source.startsWith("https://")) {
+    const parsed = new URL(source);
+    if (parsed.username || parsed.password) {
+      throw new Error("Repository URLs containing credentials are not allowed");
+    }
+  }
+  if (/[\r\n\0]/.test(source) || source.length > 2_048) throw new Error("Invalid repository source");
+}
+
+export async function prepareWorkspace({ destination, source = "" }) {
+  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+  if (!source) {
+    await mkdir(destination, { recursive: true, mode: 0o700 });
+    await run("git", ["init", "--quiet", destination], { env: cloneEnv() });
+    return { source: "", kind: "empty" };
+  }
+
+  const env = { ...cloneEnv(), GIT_TERMINAL_PROMPT: "0" };
+  if (isRemoteSource(source)) {
+    validateRemoteSource(source);
+    await run("git", ["clone", "--", source, destination], { env });
+    return { source, kind: "remote-git" };
+  }
+
+  const resolved = await realpath(path.resolve(source));
+  if (!(await stat(resolved)).isDirectory()) throw new Error("Workspace source must be a directory or Git URL");
+  await access(path.join(resolved, ".git"));
+  await run("git", ["clone", "--no-hardlinks", "--", resolved, destination], { env });
+  return { source: resolved, kind: "local-git" };
+}

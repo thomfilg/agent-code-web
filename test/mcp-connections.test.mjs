@@ -1,0 +1,37 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import http from "node:http";
+import { McpConnections, codexMcpArgs } from "../src/mcp-connections.mjs";
+import { MemoryRecords } from "../src/database.mjs";
+import { Environments } from "../src/environments.mjs";
+test("saved MCP credentials stay masked, selections validate, revisions conflict and stdio has no secret env", async () => {
+  const records = new MemoryRecords(), mcps = new McpConnections(records), envs = new Environments(records, "local", mcps);
+  const connection = await mcps.save({ name: "tools", type: "http", url: "https://tools.example/mcp", headers: { Authorization: "Bearer protected" } });
+  assert.equal(connection.headers, undefined); assert.equal(connection.hasCredentials, true); assert.ok(!JSON.stringify(await mcps.list()).includes("protected"));
+  const environment = await envs.save({ name: "MCP env", backend: "local", mcpIds: [connection.id] });
+  assert.deepEqual((await envs.runtime(environment.id)).mcpIds, [connection.id]);
+  await assert.rejects(mcps.remove(connection.id), /environments/);
+  await assert.rejects(mcps.save({ ...connection, name: "changed", revision: 0 }, connection.id), /changed/);
+  await assert.rejects(mcps.validateSelection(["missing"]), /Choose/);
+  await assert.rejects(mcps.save({ name: "stdio", type: "stdio", command: "npx", args: [], env: { SECRET: "secret" } }), /Protected credentials/);
+  const runtime = await mcps.runtime("chat-a", [connection.id], "http://localhost:8787");
+  assert.ok(!JSON.stringify(runtime).includes("protected")); assert.match(codexMcpArgs(runtime).join(" "), /http_headers/);
+});
+test("MCP gateway scopes capabilities, preserves protocol headers, blocks redirects and revokes on sleep", async t => {
+  const records = new MemoryRecords(); let received, redirect = false;
+  const mcps = new McpConnections(records, { fetchImpl: async (url, options) => { received = { url, headers: options.headers }; return redirect ? new Response(null, { status: 302, headers: { location: "https://evil.example" } }) : Response.json({ jsonrpc: "2.0", id: 1, result: {} }, { headers: { "mcp-session-id": "scoped-session" } }); } });
+  const connection = await mcps.save({ name: "tools", type: "http", url: "https://tools.example/mcp", headers: { Authorization: "Bearer protected" } });
+  const other = await mcps.save({ name: "other", type: "http", url: "https://other.example/mcp" });
+  const runtime = await mcps.runtime("a", [connection.id], "http://localhost"), auth = runtime.relay_tools.headers.Authorization;
+  const server = http.createServer(async (req, res) => { if (!await mcps.handle(req, res, new URL(req.url, "http://localhost"))) { res.statusCode = 404; res.end(); } });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve)); t.after(() => new Promise(resolve => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`, url = `${origin}/gateway/mcp/${connection.id}`;
+  const response = await fetch(url, { method: "POST", body: "{}", headers: { Authorization: auth, "mcp-protocol-version": "2025-06-18" } });
+  assert.equal(response.status, 200); assert.equal(response.headers.get("mcp-session-id"), "scoped-session"); await response.text();
+  assert.equal(received.headers.get("authorization"), "Bearer protected"); assert.equal(received.headers.get("mcp-protocol-version"), "2025-06-18");
+  const second = await mcps.runtime("b", [connection.id], "http://localhost");
+  assert.equal((await fetch(url, { headers: { Authorization: second.relay_tools.headers.Authorization, "mcp-session-id": "scoped-session" } })).status, 403);
+  assert.equal((await fetch(`${origin}/gateway/mcp/${other.id}`, { headers: { Authorization: auth } })).status, 401);
+  redirect = true; assert.equal((await fetch(url, { headers: { Authorization: auth } })).status, 502);
+  mcps.revokeChat("a"); assert.equal((await fetch(url, { headers: { Authorization: auth } })).status, 401);
+});

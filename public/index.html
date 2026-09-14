@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#10110f">
+    <title>Agent Relay</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand-row">
+          <a class="brand" href="/" aria-label="Agent Relay home">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 32 32" role="img"><path d="M7 16a9 9 0 0 1 15.8-5.9M25 16a9 9 0 0 1-15.8 5.9"/><path d="m20 6 3 4-5 1M12 26l-3-4 5-1"/></svg>
+            </span>
+            <span>Agent Relay</span>
+          </a>
+          <button class="icon-button mobile-only" id="close-sidebar" aria-label="Close chats">×</button>
+        </div>
+
+        <button class="new-chat-button" id="new-chat-button">
+          <span aria-hidden="true">＋</span>
+          New chat
+          <kbd>⌘ K</kbd>
+        </button>
+
+        <div class="sidebar-heading"><span class="sidebar-label">Conversations</span><button class="small-icon" id="add-group-button" aria-label="Create custom group" title="Create custom group">＋</button></div>
+        <label class="sidebar-sort"><span class="sr-only">Sort chats</span><select id="chat-sort"></select></label>
+        <span class="sidebar-sync" id="sidebar-sync" role="status"></span>
+        <nav class="chat-list" id="chat-list" aria-label="Conversations"></nav>
+
+        <div class="sidebar-footer">
+          <div class="settings-buttons"><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button><button class="secondary-button" id="mcps-button">MCP connections</button></div>
+          <div class="system-state">
+            <span class="live-dot"></span>
+            <div>
+              <strong>Control plane online</strong>
+              <span id="isolation-label">Worker isolation loading…</span>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button class="icon-button mobile-only" id="open-sidebar" aria-label="Open chats">☰</button>
+          <div class="chat-heading">
+            <h1 id="chat-title">Agent Relay</h1>
+            <div class="chat-meta" id="chat-meta">Independent workspaces. Disposable runtimes.</div>
+          </div>
+          <div class="topbar-actions" id="chat-actions" hidden>
+            <details class="control-menu" id="repositories-menu"><summary aria-label="Repositories" title="Repositories">▱</summary><div class="control-popover" id="chat-repositories"></div></details>
+            <button class="icon-button" id="view-changes" title="View changes" aria-label="View changes">▣</button>
+            <button class="icon-button" id="copy-chat-link" title="Copy private chat link" aria-label="Copy chat link">↥</button>
+            <details class="control-menu"><summary aria-label="Chat actions" title="Chat actions">⋮</summary><div class="control-popover">
+              <button type="button" id="background-tasks">Background tasks</button>
+              <button type="button" id="open-workspace">Open in…</button>
+              <button type="button" id="organize-chat-button" aria-label="Organize current chat">Rename / organize</button>
+              <button type="button" id="transcript-view">Transcript view</button>
+              <button type="button" id="edit-chat-environment">Edit environment</button>
+              <button type="button" id="archive-current-chat">Archive</button>
+              <button type="button" id="stop-button">Stop worker</button>
+              <button type="button" class="danger" id="delete-button" aria-label="Delete chat">Delete</button>
+            </div></details>
+          </div>
+        </header>
+
+        <section class="empty-state" id="welcome">
+          <div class="empty-orbit" aria-hidden="true"><span></span></div>
+          <p class="eyebrow">YOUR AGENTS, ON DEMAND</p>
+          <h2>Start work here.<br>Let the machine disappear later.</h2>
+          <p>Create an isolated chat workspace for Codex or Claude Code. Responses stream here, state survives, and idle workers shut down automatically.</p>
+          <button class="primary-button" id="welcome-new-chat">Create your first chat <span>→</span></button>
+          <div class="feature-strip">
+            <span>Separate workspace</span>
+            <span>Live CLI events</span>
+            <span>5-minute autosleep</span>
+          </div>
+        </section>
+
+        <section class="conversation" id="conversation" hidden>
+          <div class="runtime-banner" id="runtime-banner">
+            <div class="runtime-copy">
+              <span class="status-dot" id="status-dot"></span>
+              <div>
+                <strong id="runtime-status">Stopped</strong>
+                <span id="runtime-detail">The worker starts with your next message.</span>
+              </div>
+            </div>
+            <div class="countdown" id="countdown"></div>
+          </div>
+          <div class="messages" id="messages" aria-live="polite"></div>
+          <div class="approval-card" id="approval-card" hidden></div>
+          <div class="composer-wrap">
+            <div id="message-queue" aria-live="polite"></div>
+            <div id="pull-request-bars" class="pull-request-bars"></div>
+            <form class="composer" id="composer">
+              <div id="slash-menu" role="listbox" aria-label="Commands and skills" hidden></div>
+              <div id="attachment-chips" class="attachment-chips"></div>
+              <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message"></textarea>
+              <div class="composer-footer">
+                <div class="composer-pickers">
+                  <details class="control-menu upward"><summary aria-label="Add to message" title="Add to message">＋</summary><div class="control-popover">
+                    <button type="button" id="add-attachments">Add files or photos</button>
+                    <button type="button" id="slash-commands">Slash commands</button>
+                    <button type="button" id="show-connectors">Connectors</button>
+                  </div></details>
+                  <details class="control-menu upward" id="mode-menu"><summary id="mode-label" aria-label="Agent mode">Edits</summary><div class="control-popover">
+                    <p class="menu-caption">Mode · applies next turn</p>
+                    <button type="button" data-agent-mode="auto">Auto<small>Provider-managed approvals</small></button>
+                    <button type="button" data-agent-mode="accept_edits">Accept edits<small>Allow workspace edits; commands may need approval</small></button>
+                    <button type="button" data-agent-mode="plan">Plan<small>Make a plan before changing files</small></button>
+                    <p class="muted" id="mode-provider-note"></p>
+                  </div></details>
+                  <select id="chat-agent-select" aria-label="Chat agent" title="Switch agent · conversation and workspace are retained"></select>
+                  <div class="model-controls compact-model-controls" id="composer-model-controls">
+                    <select class="model-select" aria-label="Chat model" title="Model"></select>
+                    <details class="control-menu upward effort-menu"><summary aria-label="Choose effort" class="effort-label">High</summary><div class="control-popover">
+                      <p class="menu-caption">Effort · applies next turn</p>
+                      <select class="effort-select" aria-label="Chat effort" title="Effort"></select>
+                      <input class="effort-slider" type="range" min="0" max="0" step="1" aria-label="Effort level">
+                      <div class="effort-scale"><span>Faster</span><span>More reasoning</span></div>
+                      <p class="muted">Higher effort can take longer and use more tokens. Available levels come from the selected model.</p>
+                    </div></details>
+                    <p class="model-note" role="status"></p>
+                  </div>
+                </div>
+                <details class="control-menu upward usage-menu" id="usage-menu"><summary aria-label="Context and usage" title="Context and usage"><span id="usage-ring" aria-hidden="true"></span></summary><div class="control-popover" id="session-usage"><p>Loading usage…</p></div></details>
+                <button class="send-button" id="send-button" type="submit" aria-label="Send message">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
+                </button>
+                <button type="submit" class="secondary-button queue-send" id="queue-message" hidden>Queue</button>
+              </div>
+            </form>
+            <input type="file" id="attachment-input" multiple hidden>
+            <p class="composer-hint">Enter to send · Shift + Enter for a new line</p>
+          </div>
+        </section>
+        <aside class="tools-panel" id="tools-panel" aria-label="Tool activity" hidden>
+          <div class="diff-heading"><strong id="tools-title">Tools used</strong><button type="button" class="icon-button" id="close-tools" aria-label="Close tool activity">×</button></div>
+          <p class="muted">Real calls and results reported by the agent. Failed or denied calls do not imply an action succeeded.</p><div id="tools-list"></div>
+        </aside>
+        <aside class="diff-panel" id="diff-panel" aria-label="Changes" hidden>
+          <div class="diff-heading"><strong id="diff-title">Changes</strong><button type="button" class="icon-button" id="expand-diff" aria-label="Expand changes">⤢</button><button type="button" class="icon-button" id="close-diff" aria-label="Close changes">×</button></div>
+          <input id="diff-search" type="search" placeholder="Find a file…" aria-label="Find changed file">
+          <select id="diff-selection" aria-label="Changes source"></select>
+          <p class="muted" id="diff-source"></p><div id="diff-files"></div>
+        </aside>
+      </main>
+    </div>
+
+    <dialog id="usage-dialog"><div class="dialog-card usage-card"><div class="dialog-heading"><h2>Usage</h2><button type="button" class="icon-button" id="usage-close" aria-label="Close usage">×</button></div><div class="usage-actions"><button type="button" id="usage-refresh">Refresh</button><button type="button" id="usage-copy">Copy</button></div><div id="usage-details"></div></div></dialog>
+    <dialog id="new-chat-dialog">
+      <!-- Conversation creation -->
+      <form method="dialog" class="dialog-card" id="new-chat-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">NEW RUNTIME</p>
+            <h2>Create a conversation</h2>
+          </div>
+          <button class="icon-button" value="cancel" formnovalidate aria-label="Close">×</button>
+        </div>
+        <label>
+          <span>Agent</span>
+          <select id="agent-select" required></select>
+        </label>
+        <div class="model-controls" id="new-model-controls"><label><span>Model</span><select class="model-select" aria-label="New chat model"></select></label><label><span>Effort</span><select class="effort-select" aria-label="New chat effort"></select></label><p class="model-note" role="status"></p></div>
+        <label><span>What would you like to work on?</span><textarea id="initial-prompt" rows="3" maxlength="100000" placeholder="Describe the task. Your agent will name this conversation."></textarea></label>
+        <div class="environment-choice"><label><span>Environment</span><select id="environment-select" required></select></label><button type="button" class="icon-button" id="environment-settings" aria-label="Manage selected environment">⚙</button></div>
+        <div id="github-requirement" class="dialog-security"><p>Connect GitHub to choose your repositories.</p><button type="button" class="secondary-button" id="connect-github-button">Connect GitHub</button></div>
+        <div id="repository-picker" hidden>
+          <div id="selected-repositories" class="selected-repositories"></div>
+          <p class="muted" id="repository-group-hint"></p>
+          <details class="repository-picker-dropdown"><summary>Choose repositories</summary><div class="repository-search"><input id="repo-search" type="search" placeholder="Search repositories…" aria-label="Search repositories"><button type="button" class="icon-button" id="refresh-repositories" aria-label="Refresh repositories">↻</button></div><div id="repository-results"></div></details>
+        </div>
+        <div class="dialog-security" id="dialog-security"></div>
+        <p id="create-chat-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button class="secondary-button" value="cancel" formnovalidate>Cancel</button>
+          <button class="primary-button" id="create-chat-button" value="default">Create chat</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="github-dialog" aria-labelledby="github-dialog-title">
+      <div class="dialog-card">
+        <div class="dialog-heading"><h2 id="github-dialog-title">Connect GitHub</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close GitHub dialog">×</button></div>
+        <p class="muted" id="github-status"></p>
+        <button type="button" class="primary-button" id="github-local">Use this server’s gh login</button>
+        <button type="button" class="secondary-button" id="github-oauth">Sign in on GitHub</button>
+        <div class="device-code" id="github-device-code"></div>
+        <form id="github-token-form" class="token-form">
+          <label><span>Or use a GitHub access token</span><input type="password" id="github-token" autocomplete="off" required placeholder="Repository read access required"></label>
+          <label><span>Expires at <small>optional, if GitHub does not report it</small></span><input type="datetime-local" id="github-expiry"></label>
+          <button class="secondary-button">Connect with token</button>
+        </form>
+        <p class="form-error" id="github-error" role="alert"></p>
+        <button type="button" class="secondary-button" id="github-disconnect" hidden>Disconnect GitHub</button>
+      </div>
+    </dialog>
+    <dialog id="environments-dialog" aria-labelledby="environments-dialog-title">
+      <div class="dialog-card environment-card">
+        <div class="dialog-heading"><div><p class="eyebrow">WORKSPACE SETTINGS</p><h2 id="environments-dialog-title">Environments</h2></div><button type="button" class="icon-button" data-close-dialog aria-label="Close environments">×</button></div>
+        <div class="environment-navigation"><div id="environment-tabs"></div><button type="button" class="secondary-button" id="add-environment">＋ Add environment</button></div>
+        <form id="environment-form">
+          <section class="environment-mcps"><h3>MCP connections</h3><div id="environment-mcp-options"></div><p class="muted">Selected connections configure Codex and Claude on the next worker start. Add connections from the sidebar. Trust the service before enabling its tools.</p></section>
+          <label><span>Environment name</span><input id="environment-name" required maxlength="80" placeholder="e.g. Acme staging"></label>
+          <p class="muted" id="environment-backend"></p>
+          <label><span>Network access</span><select disabled aria-label="Network access"><option>Worker infrastructure default</option></select></label>
+          <p class="muted">Custom egress restrictions are not enforced by this backend. Configure the worker network externally; agent sandbox permissions remain separate.</p>
+          <details class="software-settings" open><summary>Installed software</summary><div id="software-options"></div></details>
+          <label><span>Setup script</span><textarea id="environment-setup-script" rows="5" maxlength="50000" spellcheck="false" placeholder="Runs before the agent starts"></textarea></label>
+          <p class="muted">Bash script run on each worker start, before the agent launches. Only agent-readable variables are injected. Do not put secrets directly in the script; its files can be read by the agent.</p>
+          <label class="checkbox-label"><input type="checkbox" id="environment-archived"><span>Archive environment · hide from new chats</span></label>
+          <div class="variables-heading"><h3>Variables</h3><label class="checkbox-label"><input type="checkbox" id="variables-enabled"><span>Enable variables</span></label></div>
+          <p class="muted">Protected values are encrypted and are never injected into agents. Agent-readable variables are passed to tools and can be read by the AI. Local mode still shares the host filesystem—use isolated cloud workers for a strong secret boundary.</p>
+          <div class="variables-toolbar"><input type="search" id="variable-search" placeholder="Search variable names…" aria-label="Search variables"><button type="button" class="primary-button" id="add-variable">＋ Add variable</button></div>
+          <div class="variables-table-wrap"><table class="variables-table"><thead><tr><th>Key</th><th>Visibility</th><th>Value</th><th>Enabled</th></tr></thead><tbody id="variables-table-body"></tbody></table></div>
+          <p class="form-error" id="environment-error" role="alert"></p>
+          <div class="dialog-actions"><span class="muted" id="environment-save-status" role="status"></span><button type="button" class="secondary-button" id="delete-environment">Delete environment</button><button class="primary-button">Save environment</button></div>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog id="mcp-dialog" aria-labelledby="mcp-title"><div class="dialog-card mcp-card">
+      <div class="dialog-heading"><h2 id="mcp-title">MCP connections</h2><button type="button" class="icon-button" id="mcp-close" aria-label="Close MCP connections">×</button></div>
+      <p class="muted">Connect tools once, then select them in each environment. Only enable servers you trust: their tools can access and change data.</p>
+      <div id="mcp-list"></div><button type="button" class="secondary-button" id="mcp-new">＋ Add MCP</button>
+      <form id="mcp-form">
+        <label><span>Connection name</span><input id="mcp-name" required maxlength="64" placeholder="e.g. company-tools"></label>
+        <label><span>Transport</span><select id="mcp-type"><option value="http">Streamable HTTP · protected credentials</option><option value="stdio">Stdio · process on the worker</option></select></label>
+        <div id="mcp-http"><label><span>MCP endpoint URL</span><input id="mcp-url" type="url" placeholder="https://tools.example.com/mcp"></label><label><span>Authentication headers · JSON, encrypted</span><textarea id="mcp-headers" rows="3" spellcheck="false" autocomplete="off"></textarea></label><p class="muted">Blank keeps saved headers; {} clears them. Authentication stays on the controller. The agent gets revocable access to this service, not its upstream credentials. OAuth login is not supported here yet.</p></div>
+        <div id="mcp-stdio" hidden><label><span>Executable</span><input id="mcp-command" placeholder="npx"></label><label><span>Arguments · JSON array</span><textarea id="mcp-args" rows="3" spellcheck="false">[]</textarea></label><p class="muted">Runs on each selected worker with that worker’s permissions. Install its runtime in the environment. Commands and arguments are agent-readable: do not include secrets. Use HTTP for protected authentication.</p></div>
+        <p class="muted">Local workers share the host filesystem; isolated cloud workers provide a stronger secret boundary.</p>
+        <p id="mcp-error" class="form-error" role="alert"></p><p id="mcp-save-status" class="muted" role="status"></p>
+        <div class="dialog-actions"><button type="button" class="secondary-button" id="mcp-delete" hidden>Delete connection</button><button class="primary-button">Save connection</button></div>
+      </form>
+    </div></dialog>
+
+    <dialog id="group-dialog" aria-labelledby="group-dialog-title">
+      <form class="dialog-card" id="group-form">
+        <div class="dialog-heading"><h2 id="group-dialog-title">Create a group</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close group dialog">×</button></div>
+        <label><span>Group name</span><input id="group-name" required maxlength="80" placeholder="e.g. This week"></label>
+        <p class="muted">Drag chats into this group, or use a chat’s menu. Its original company and repository are always remembered.</p>
+        <p id="group-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button type="button" class="secondary-button danger" id="remove-group-button" hidden>Delete group</button><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button class="primary-button">Save group</button></div>
+      </form>
+    </dialog>
+    <dialog id="controls-dialog" aria-labelledby="controls-title"><div class="dialog-card"><div class="dialog-heading"><h2 id="controls-title"></h2><button class="icon-button" type="button" data-close-dialog aria-label="Close controls dialog">×</button></div><div id="controls-content"></div></div></dialog>
+    <dialog id="organize-dialog" aria-labelledby="organize-dialog-title">
+      <form class="dialog-card" id="organize-form">
+        <div class="dialog-heading"><h2 id="organize-dialog-title">Organize chat</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close organize dialog">×</button></div>
+        <label><span>Title</span><input id="organize-title" required maxlength="120"></label>
+        <label class="checkbox-label"><input type="checkbox" id="organize-pinned"><span>Pin to the top</span></label>
+        <label><span>Move to group</span><select id="organize-group" aria-label="Move to group"></select></label>
+        <p class="muted" id="organize-origin"></p>
+        <div class="automatic-status"><span class="muted">Automatic status</span><div id="organize-status" role="status"></div><p class="muted" id="organize-status-detail"></p><div id="organize-pull-requests"></div><p id="organize-sync-warning" class="muted" role="status"></p></div>
+        <p class="muted">Agent activity, questions and GitHub PR checks update automatically. GitHub is checked every minute, even while the worker sleeps.</p>
+        <p id="organize-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions"><button type="button" class="secondary-button" id="archive-chat-button">Archive chat</button><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button class="primary-button">Save changes</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="login-dialog">
+      <form method="dialog" class="dialog-card compact" id="login-form">
+        <p class="eyebrow">PRIVATE CONTROL PLANE</p>
+        <h2>Enter your access token</h2>
+        <p class="muted">This establishes an HttpOnly browser session. It is never sent to an agent worker.</p>
+        <label>
+          <span>Access token</span>
+          <input id="login-token" type="password" autocomplete="current-password" required>
+        </label>
+        <p class="form-error" id="login-error"></p>
+        <button class="primary-button full" value="default">Continue</button>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toasts" aria-live="assertive"></div>
+    <div class="sr-only" id="sidebar-announcement" role="status"></div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

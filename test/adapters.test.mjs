@@ -1,0 +1,109 @@
+import assert from "node:assert/strict";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+import { CodexAdapter } from "../src/adapters/codex.mjs";
+import { ClaudeAdapter } from "../src/adapters/claude.mjs";
+import { CapabilityBroker } from "../src/capabilities.mjs";
+import { ChatStore } from "../src/store.mjs";
+import { prepareWorkspace } from "../src/workspace.mjs";
+import { temporaryDirectory, testConfig } from "./helpers.mjs";
+
+const fixtureDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
+
+async function fixtureChat(t, agent) {
+  const root = await temporaryDirectory(t);
+  const store = new ChatStore(root);
+  await store.initialize();
+  const chat = await store.create({ title: "Adapter", agent, source: "" });
+  await prepareWorkspace({ destination: chat.workspace, source: "" });
+  return { root, store, chat };
+}
+
+test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers approval", async (t) => {
+  const { root, store, chat } = await fixtureChat(t, "codex");
+  const config = testConfig(root, { CODEX_BIN: path.join(fixtureDir, "fake-codex.mjs") });
+  const broker = new CapabilityBroker({ ttlMs: 10_000 });
+  const events = [];
+  let sessionId;
+  let adapter;
+  const hooks = {
+    onEvent: (event) => events.push(event),
+    onSessionId: (id) => { sessionId = id; },
+    onRequest: (request) => setImmediate(() => adapter.respond(request.requestId, { decision: "accept" })),
+    onFatal: (error) => { throw error; },
+  };
+  adapter = new CodexAdapter({ chat, store, config, broker, gatewayOrigin: "http://127.0.0.1:9", hooks });
+  await adapter.start();
+  let turnParams;
+  const originalRequest = adapter.rpc.request.bind(adapter.rpc);
+  adapter.rpc.request = (method, params, timeout) => { if (method === "turn/start") turnParams = params; return originalRequest(method, params, timeout); };
+  const result = await adapter.send("fixture turn", { model: "fixture-gpt", effort: "high", mode: "plan", images: ["/tmp/image.png"] });
+  assert.equal(turnParams.model, "fixture-gpt");
+  assert.equal(turnParams.effort, "high");
+  assert.deepEqual(turnParams.sandboxPolicy, { type: "readOnly" });
+  assert.equal(turnParams.collaborationMode.mode, "plan");
+  assert.deepEqual(turnParams.input[1], { type: "localImage", path: "/tmp/image.png" });
+  assert.equal(sessionId, "thr_fixture");
+  assert.equal(result.text, "hello world");
+  assert.ok(events.some((event) => event.type === "assistant_delta" && event.delta === "hello "));
+  assert.ok(events.some((event) => event.type === "tool" && event.state === "completed"));
+  assert.ok(events.some(event => event.type === "request_resolved" && event.requestId === "approval_900"));
+  const info = await adapter.inspect(); assert.equal(info.rateLimits[0].windows[0].usedPercent, 25); assert.equal(info.connectors[0].tools, 1);
+  assert.equal((await adapter.compact()).status, "completed");
+  await adapter.send("default mode", { model: "fixture-gpt" });
+  assert.equal(turnParams.collaborationMode.mode, "default"); assert.equal(turnParams.sandboxPolicy.type, "workspaceWrite");
+  await adapter.stop();
+
+  const resumedChat = { ...chat, agentSessionId: sessionId };
+  const resumed = new CodexAdapter({ resumedChat, chat: resumedChat, store, config, broker, gatewayOrigin: "http://127.0.0.1:9", hooks: { ...hooks, onSessionId: () => assert.fail("resume should retain session") } });
+  adapter = resumed;
+  await resumed.start();
+  assert.equal((await resumed.send("resumed")).text, "hello world");
+  await resumed.stop();
+});
+
+test("Claude adapter parses stream-json and retains its resume id", async (t) => {
+  const { root, store, chat } = await fixtureChat(t, "claude");
+  const config = testConfig(root, { CLAUDE_BIN: path.join(fixtureDir, "fake-claude.mjs") });
+  const broker = new CapabilityBroker({ ttlMs: 10_000 });
+  const events = [];
+  let sessionId;
+  const adapter = new ClaudeAdapter({
+    chat,
+    store,
+    config,
+    broker,
+    gatewayOrigin: "http://127.0.0.1:9",
+    hooks: { onEvent: (event) => events.push(event), onSessionId: (id) => { sessionId = id; } },
+  });
+  await adapter.start();
+  const result = await adapter.send("hello");
+  assert.match(sessionId, /^[a-f0-9-]{36}$/);
+  assert.equal(result.text, "claude received hello");
+  assert.ok(events.some((event) => event.type === "tool" && event.tool === "Read" && event.state === "running"));
+  assert.ok(events.some((event) => event.type === "tool" && event.tool === "Read" && event.state === "completed" && event.output === "fixture.txt"));
+  const settings = JSON.parse((await adapter.send("inspect-settings", { model: "sonnet", effort: "low" })).text);
+  assert.equal(settings.model, "sonnet"); assert.equal(settings.effort, "low");
+  assert.equal(settings.mode, "acceptEdits");
+  for (const mode of ["plan", "auto"]) assert.equal(JSON.parse((await adapter.send("inspect-settings", { mode })).text).mode, mode);
+  const reset = JSON.parse((await adapter.send("inspect-settings", { model: "default", resetEffort: true })).text);
+  assert.equal(reset.model, "default"); assert.equal(reset.effort, null); assert.equal(reset.environmentEffort, "auto");
+  await adapter.stop();
+});
+
+test("Claude adapter rejects structured error results even when the CLI exits zero", async (t) => {
+  const { root, store, chat } = await fixtureChat(t, "claude");
+  const config = testConfig(root, { CLAUDE_BIN: path.join(fixtureDir, "fake-claude.mjs") });
+  const adapter = new ClaudeAdapter({
+    chat,
+    store,
+    config,
+    broker: new CapabilityBroker({ ttlMs: 10_000 }),
+    gatewayOrigin: "http://127.0.0.1:9",
+    hooks: {},
+  });
+  await adapter.start();
+  await assert.rejects(adapter.send("force failure"), /fixture failed/);
+  await adapter.stop();
+});

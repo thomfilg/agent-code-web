@@ -1,0 +1,110 @@
+import { test, expect } from "@playwright/test";
+
+test("automatic sidebar status symbols use the requested colors and accessible labels", async ({ page }) => {
+  const states = [
+    ["working", "Working", "rgb(139, 143, 135)"], ["asking_question", "Asking question", "rgb(234, 191, 85)"],
+    ["pr_open", "PR open", "rgb(63, 185, 80)"], ["pr_merged", "PR merged", "rgb(163, 113, 247)"], ["pr_failing", "PR not passing", "rgb(248, 81, 73)"],
+  ];
+  await page.route("**/api/sidebar", async route => {
+    const response = await route.fetch(); const data = await response.json();
+    const base = data.chats[0];
+    data.chats = states.map(([workflowState, title], index) => ({ ...base, id: index === 0 ? base.id : `chat_${String(index).padStart(32, "0")}`, title, workflowState, pinned: true }));
+    await route.fulfill({ response, json: data });
+  });
+  await page.goto("/");
+  for (const [state, label, color] of states) {
+    const icon = page.locator(`.chat-status-icon.${state}`);
+    await expect(icon).toHaveAttribute("aria-label", label);
+    await expect(icon).toHaveCSS("color", color);
+    await expect(icon.locator("svg")).toHaveCount(state.startsWith("pr_") ? 1 : 0);
+  }
+  await page.screenshot({ path: "test-results/automatic-status-icons.png", fullPage: true });
+});
+
+test("pin, drag to a custom group, restore grouping, sort, and persist across tabs", async ({ page, context }) => {
+  const errors = []; page.on("pageerror", error => errors.push(error.message));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pin Existing alpha", exact: true }).click();
+  await expect(page.locator('[data-section="pinned"]')).toContainText("Existing alpha");
+  await page.getByRole("button", { name: "Create custom group" }).click();
+  await page.getByLabel("Group name", { exact: true }).fill("Sprint planning");
+  await page.getByRole("button", { name: "Save group", exact: true }).click();
+  const row = page.locator(".chat-row").filter({ hasText: "Existing beta" });
+  const target = page.locator('[data-drop-target="Sprint planning"]');
+  await row.dragTo(target.locator("summary"));
+  await expect(target).toContainText("Existing beta");
+  await page.getByLabel("Sort chats").selectOption("created_asc");
+  const other = await context.newPage(); await other.goto("/");
+  await expect(other.getByLabel("Sort chats")).toHaveValue("created_asc");
+  await expect(other.locator('[data-drop-target="Sprint planning"]')).toContainText("Existing beta");
+  await other.getByRole("button", { name: "Organize Existing beta", exact: true }).click();
+  await other.getByLabel("Move to group", { exact: true }).selectOption("");
+  await expect(other.locator("#organize-state")).toHaveCount(0);
+  await expect(other.locator("#organize-status")).toContainText("Idle");
+  await other.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(page.locator('[data-section="company:personal"]')).toContainText("Existing beta");
+  await expect(page.locator(".chat-row").filter({ hasText: "Existing beta" })).toContainText("Idle");
+  await page.reload(); await expect(page.locator('[data-section="pinned"]')).toContainText("Existing alpha");
+  expect(errors).toEqual([]);
+});
+
+test("GitHub picker preserves repository order, branches, selection and inline errors", async ({ page }) => {
+  await page.goto("/"); await page.getByRole("button", { name: /New chat/ }).click();
+  await expect(page.locator("#new-chat-title")).toHaveCount(0);
+  await page.locator("#connect-github-button").click();
+  await page.getByRole("button", { name: "Use this server’s gh login" }).click();
+  await expect(page.locator("#github-dialog")).not.toBeVisible();
+  await page.locator(".repository-picker-dropdown > summary").click();
+  await page.getByLabel("Acme/api", { exact: false }).check();
+  await page.getByLabel("Other/library", { exact: false }).check();
+  await page.getByLabel("Branch for Acme/api").focus();
+  await expect(page.getByLabel("Branch for Acme/api").locator("option")).toHaveCount(2);
+  await page.getByLabel("Branch for Acme/api").selectOption("develop");
+  await page.getByLabel("Make Other/library primary").click();
+  await page.getByLabel("New chat model", { exact: true }).selectOption("fixture-gpt");
+  await page.getByLabel("New chat effort", { exact: true }).selectOption("high");
+  await expect(page.locator("#repository-group-hint")).toContainText("Other → library");
+  await page.getByRole("button", { name: "Create chat", exact: true }).click();
+  await expect(page.locator("#new-chat-dialog")).not.toBeVisible();
+  await expect(page.locator('[data-section="company:other"]')).toContainText("library");
+  await expect(page.getByLabel("Chat model", { exact: true })).toHaveValue("fixture-gpt");
+  await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("high");
+  await page.getByLabel("Choose effort", { exact: true }).click();
+  await page.getByLabel("Chat effort", { exact: true }).selectOption("low");
+  await page.getByLabel("Choose effort", { exact: true }).click();
+  await page.reload(); await page.getByRole("button", { name: /New chat/ }).click();
+  await expect(page.locator(".repository-chip").first()).toContainText("Other/library");
+  await expect(page.getByLabel("Branch for Acme/api")).toHaveValue("develop");
+  await expect(page.getByLabel("New chat effort", { exact: true })).toHaveValue("high");
+  await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("low");
+  await page.route("**/api/chats", route => route.request().method() === "POST" ? route.fulfill({ status: 403, json: { error: "GitHub permission revoked. Reconnect your account." } }) : route.continue());
+  await page.getByRole("button", { name: "Create chat", exact: true }).click();
+  await expect(page.locator("#create-chat-error")).toBeVisible();
+  await expect(page.locator("#create-chat-error")).toContainText("permission revoked");
+  await expect(page.getByRole("button", { name: "Create chat", exact: true })).toBeEnabled();
+});
+
+test("mobile group menu and masked environment editor", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 }); await page.goto("/");
+  await page.getByRole("button", { name: "Open chats", exact: true }).click();
+  await page.getByRole("button", { name: "Organize Existing alpha", exact: true }).click();
+  await page.getByRole("button", { name: "Archive chat", exact: true }).click();
+  await expect(page.locator(".chat-row").filter({ hasText: "Existing alpha" })).toContainText("Archived");
+  await page.getByRole("button", { name: "Organize Existing alpha", exact: true }).click();
+  await page.getByRole("button", { name: "Unarchive chat", exact: true }).click();
+  await expect(page.locator(".chat-row").filter({ hasText: "Existing alpha" })).toContainText("Idle");
+  await page.getByRole("button", { name: "Environments", exact: true }).click();
+  await page.getByRole("button", { name: "Add environment", exact: false }).click();
+  await page.getByLabel("Environment name", { exact: true }).fill("Browser sandbox");
+  await page.getByRole("button", { name: "Add variable", exact: false }).click();
+  await page.getByLabel("Variable 1 name", { exact: true }).fill("SERVICE_TOKEN");
+  await page.getByLabel("Variable 1 value", { exact: true }).fill("private-test-only");
+  await page.getByRole("button", { name: "Save environment", exact: true }).click();
+  await expect(page.locator("#environment-save-status")).toHaveText("Saved securely");
+  await expect(page.getByLabel("Variable 1 value", { exact: true })).toHaveValue("");
+  await page.getByRole("button", { name: "Show", exact: true }).click();
+  await expect(page.getByLabel("Variable 1 value", { exact: true })).toHaveValue("private-test-only");
+  await page.getByRole("button", { name: "Hide", exact: true }).click();
+  await expect(page.getByLabel("Variable 1 value", { exact: true })).toHaveAttribute("type", "password");
+  await page.screenshot({ path: "test-results/mobile-environments.png", fullPage: true });
+});
