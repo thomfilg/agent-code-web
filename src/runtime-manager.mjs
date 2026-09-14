@@ -257,6 +257,25 @@ export class RuntimeManager extends EventEmitter {
     }
   }
 
+  async copyTranscript(chatId, input = {}) {
+    const source = this.store.get(chatId);
+    if (!source) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    const title = input.title ? clampText(input.title, 120, "title") : `Copy of ${source.title}`.slice(0, 120);
+    // Copy the transcript only. Never reuse a runtime, workspace, credentials,
+    // queued prompts, PR automation, or usage counters from the source chat.
+    const copy = await this.store.create({ title, agent: source.agent, model: source.model, effort: source.effort, modelSelectionSet: source.modelSelectionSet, autoTitle: false });
+    try {
+      await prepareWorkspace({ destination: copy.workspace, source: "" });
+      const messages = source.messages.map(message => ({ ...message, id: newId("msg"),
+        ...(["assistant", "tool"].includes(message.role) ? { agent: message.agent || source.agent } : {}),
+        ...(message.attachments ? { attachments: message.attachments.map(file => ({ name: file.name, mimeType: file.mimeType, copied: true })) } : {}),
+      }));
+      const updated = await this.store.update(copy.id, { messages, copiedFromChatId: chatId, needsAgentHandoff: true, workspaceReady: true,
+        statusDetail: "Transcript copy · workspace files and agent session are not copied" });
+      this.publishChat(updated); return updated;
+    } catch (error) { await this.store.remove(copy.id); throw error; }
+  }
+
   async submit(chatId, rawText, attachmentIds = []) {
     const text = clampText(rawText, 100_000, "message");
     const chat = this.store.get(chatId);

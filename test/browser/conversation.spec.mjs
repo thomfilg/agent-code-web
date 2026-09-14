@@ -130,6 +130,59 @@ test("slash prefix filters; arrows and Enter insert without submitting; Escape c
   await expect(page.locator("#messages .message.user")).toHaveCount(0);
   await input.fill("/w"); await input.press("Escape"); await expect(page.locator("#slash-menu")).not.toBeVisible();
 });
+
+test("composer and command picker have readable controls and fit desktop and mobile", async ({ page }) => {
+  await openFixture(page, [], { agent: "claude", model: "opus", effort: "high" });
+  await page.route("**/api/chats/chat_*/commands", route => route.fulfill({ json: { commands: [
+    { name: "usage", description: "View context and plan usage", kind: "Web control", web: true },
+    { name: "work", description: "Work through an issue with your installed workflow", kind: "Skill" },
+    { name: "workflow:bootstrap", description: "Prepare the repository for a new task", kind: "Skill" },
+  ] } }));
+  const input = page.getByLabel("Message", { exact: true });
+  for (const width of [1440, 1024, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 }); await input.fill("/");
+    await expect(page.locator("#slash-caption")).toHaveText("Claude · available in this chat");
+    await expect(page.locator("#slash-count")).toHaveText("3");
+    await expect(page.locator("#slash-options .slash-kind")).toHaveText(["Control", "Skill", "Skill"]);
+    await expect(page.locator("#slash-menu")).toBeInViewport({ ratio: 1 });
+    for (const selector of ["#composer", "#slash-menu"]) expect(await page.locator(selector).evaluate(n => n.scrollWidth <= n.clientWidth + 1)).toBe(true);
+    await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeInViewport();
+    const compact = await page.locator(".composer-wrap").evaluate(n => n.clientWidth <= 540);
+    await expect(page.getByLabel("Chat model", { exact: true })).toHaveCSS("font-size", compact ? "12px" : "13px");
+    if (width === 1440 || width === 390) await page.screenshot({ path: `test-results/composer-commands-${width}.png`, fullPage: true });
+    await input.press("Escape");
+  }
+  await input.fill("/w"); await page.getByRole("option", { name: "/work Work through an issue with your installed workflow", exact: true }).click();
+  await expect(input).toHaveValue("/work "); await expect(page.locator("#slash-menu")).not.toBeVisible();
+  await input.fill("/no-such-command"); await expect(page.locator("#slash-status")).toContainText("No matches");
+  await input.press("Tab"); await expect(input).not.toBeFocused(); await expect(page.locator("#slash-menu")).not.toBeVisible();
+  await expect(page.locator("#messages .message.user")).toHaveCount(0);
+});
+
+test("slow slash discovery is deduplicated and Escape does not allow late results to reopen it", async ({ page }) => {
+  await openFixture(page); let release, requests = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  await page.route("**/api/chats/chat_*/commands", async route => { requests++; await gate; await route.fulfill({ json: { commands: [{ name: "work", description: "Installed skill", kind: "Skill" }] } }); });
+  const input = page.getByLabel("Message", { exact: true });
+  await input.fill("/"); await expect(page.locator("#slash-status")).toContainText("Loading");
+  await input.fill("/w"); await input.press("Enter"); await expect(input).toHaveValue("/w");
+  await input.press("Escape");
+  const response = page.waitForResponse(r => r.url().endsWith("/commands")); release(); await response;
+  await expect(page.locator("#slash-menu")).not.toBeVisible(); expect(requests).toBe(1);
+  await input.click(); await expect(page.getByRole("option", { name: "/work Installed skill", exact: true })).toBeVisible();
+  await input.press("Enter"); await expect(input).toHaveValue("/work "); expect(requests).toBe(1);
+  await expect(page.locator("#messages .message.user")).toHaveCount(0);
+});
+
+test("slash loading errors are visible, cannot submit a stale choice, and can be retried", async ({ page }) => {
+  await openFixture(page); let fail = true;
+  await page.route("**/api/chats/chat_*/commands", route => fail ? route.fulfill({ status: 503, json: { error: "Discovery unavailable" } }) : route.fulfill({ json: { commands: [{ name: "work", description: "Installed skill" }] } }));
+  const input = page.getByLabel("Message", { exact: true }); await input.fill("/w");
+  await expect(page.locator("#slash-status")).toContainText("Could not load commands"); await expect(input).not.toHaveAttribute("aria-activedescendant");
+  await input.press("Enter"); await expect(input).toHaveValue("/w"); await expect(page.locator("#messages .message.user")).toHaveCount(0);
+  fail = false; await input.click(); await expect(page.getByRole("option", { name: "/work Installed skill", exact: true })).toBeVisible();
+  await input.press("Tab"); await expect(input).toHaveValue("/work "); await expect(input).toBeFocused();
+});
 test("usage compact card and detailed breakdown use separate live context and cumulative totals", async ({ page }) => {
   await page.addInitScript(() => { const Native = window.EventSource; window.relaySources = []; window.EventSource = class extends Native { constructor(...args) { super(...args); window.relaySources.push(this); } }; });
   const usage = { version: 2, contextTokens: 155100, contextWindow: 1000000, recordedAt: new Date().toISOString(), context: { inputTokens: 10000, cacheReadTokens: 145100 }, totals: { inputTokens: 138, outputTokens: 267, cacheReadTokens: 8400000, cacheWriteTokens: 238400, costUsd: 3.65, durationMs: 275000, apiDurationMs: 241000 } };

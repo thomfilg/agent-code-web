@@ -99,12 +99,17 @@
             <div id="message-queue" aria-live="polite"></div>
             <div id="pull-request-bars" class="pull-request-bars"></div>
             <form class="composer" id="composer">
-              <div id="slash-menu" role="listbox" aria-label="Commands and skills" hidden></div>
+              <div id="slash-menu" hidden>
+                <div class="slash-heading"><span class="slash-symbol" aria-hidden="true">/</span><div><strong>Commands &amp; skills</strong><span id="slash-caption"></span></div><span id="slash-count"></span></div>
+                <div id="slash-options" role="listbox" aria-label="Commands and skills"></div>
+                <p id="slash-status" role="status" hidden></p>
+                <div class="slash-footer" aria-hidden="true"><span><kbd>↑</kbd> <kbd>↓</kbd> Navigate</span><span><kbd>↵</kbd> Insert</span><span><kbd>esc</kbd> Close</span></div>
+              </div>
               <div id="attachment-chips" class="attachment-chips"></div>
-              <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message"></textarea>
+              <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message" aria-describedby="composer-keyboard-hint"></textarea>
               <div class="composer-footer">
                 <div class="composer-pickers">
-                  <details class="control-menu upward"><summary aria-label="Add to message" title="Add to message">＋</summary><div class="control-popover">
+                  <details class="control-menu upward composer-add"><summary aria-label="Add to message" title="Add files, commands or connectors">+</summary><div class="control-popover">
                     <button type="button" id="add-attachments">Add files or photos</button>
                     <button type="button" id="slash-commands">Slash commands</button>
                     <button type="button" id="show-connectors">Connectors</button>
@@ -129,15 +134,17 @@
                     <p class="model-note" role="status"></p>
                   </div>
                 </div>
+                <div class="composer-actions">
                 <details class="control-menu upward usage-menu" id="usage-menu"><summary aria-label="Context and usage" title="Context and usage"><span id="usage-ring" aria-hidden="true"></span></summary><div class="control-popover" id="session-usage"><p>Loading usage…</p></div></details>
                 <button class="send-button" id="send-button" type="submit" aria-label="Send message">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
                 </button>
                 <button type="submit" class="secondary-button queue-send" id="queue-message" hidden>Queue</button>
+                </div>
               </div>
             </form>
             <input type="file" id="attachment-input" multiple hidden>
-            <p class="composer-hint">Enter to send · Shift + Enter for a new line</p>
+            <div class="composer-help"><span>Type <kbd>/</kbd> for commands</span><p class="composer-hint" id="composer-keyboard-hint">Enter to send · Shift + Enter for a new line</p></div>
           </div>
         </section>
         <aside class="tools-panel" id="tools-panel" aria-label="Tool activity" hidden>

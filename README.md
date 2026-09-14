@@ -127,6 +127,11 @@ attachments, and workspace after confirmation. A running worker is stopped first
 Archive remains available when you want to keep the chat instead. Deleting a
 different chat does not disturb the active conversation or its draft.
 
+`POST /api/chats/:id/copy` (optional JSON `title`) makes a stopped transcript copy
+for rendering or a fresh conversation. It preserves message and tool history,
+but does not copy workspace files, attachment contents, runtime sessions,
+environment connections, queued prompts, usage counters, or PR automation.
+
 Sort within each section by creation time, last update (both directions), or
 state: working, asking question, idle, PR not passing, PR open, PR merged, archived.
 States are automatic and read-only: a gray dot indicates work, yellow indicates
@@ -342,6 +347,10 @@ state.
 
 ## Conversation controls
 
+- The composer uses grouped, higher-contrast controls and a responsive toolbar.
+  The `/` picker shows command descriptions, source types, and keyboard hints;
+  arrows select, Enter/Tab insert without sending, and Escape dismisses it.
+  Loading, empty, and error states never select a stale command.
 - User messages are right-aligned bubbles. Agent Markdown renders headings,
   tables, lists, links and fenced code, with code-copy buttons. **Open preview**
   opens HTML, Markdown, SVG, or plain text in the third desktop column, sharing

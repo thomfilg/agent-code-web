@@ -248,6 +248,7 @@ export async function createAgentWebServer(options = {}) {
       const routed = routeChat(url.pathname);
       if (routed) {
         const { chatId, tail } = routed;
+        if (tail === "copy" && request.method === "POST") return json(response, 201, { chat: await manager.copyTranscript(chatId, await bodyJson(request, config.maxBodyBytes)) });
         if (tail === "commands" && request.method === "GET") {
           const chat = store.get(chatId); if (!chat) return json(response, 404, { error: "Chat not found" });
           return json(response, 200, await commands.list(chat));
