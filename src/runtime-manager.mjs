@@ -508,7 +508,7 @@ export class RuntimeManager extends EventEmitter {
         if (environment.backend !== this.config.workerBackend) throw new Error("The environment backend changed. Use the original worker backend to resume this chat.");
         await prepareSoftware(executor, environment, detail => this.#setStatus(chatId, "starting", detail, null));
         executor.environmentVariables = { ...environment.variables, ...executor.capabilityVariables };
-        executor.mcpServers = await this.mcps?.runtime(chatId, environment.mcpIds || [], executor.gatewayOrigin || this.gatewayOrigin) || {};
+        executor.mcpServers = await this.mcps?.runtime(chatId, environment.mcpIds || [], executor.gatewayOrigin || this.gatewayOrigin, chat) || {};
         if (environment.setupScript) {
           await this.#setStatus(chatId, "starting", "Running environment setup script", null);
           try {

@@ -1,4 +1,5 @@
 import { ChatSidebar } from "./chat-sidebar.js";
+import { closeSidePanel } from "./side-panels.js";
 import { WorkspaceSettings } from "./workspace-settings.js";
 import { ModelPicker } from "./model-picker.js";
 import { ChatControls } from "./chat-controls.js";
@@ -9,6 +10,7 @@ import { SlashComposer } from "./slash-composer.js";
 import { McpSettings } from "./mcp-settings.js";
 import { MessageHistory } from "./message-history.js";
 import { MessageNavigator } from "./message-navigator.js";
+import { DocumentPreview } from "./document-preview.js";
 
 const state = {
   config: null,
@@ -115,7 +117,7 @@ function renderMessage(message, streaming = false) {
   const body = node("div", "message-body");
   body.append(node("div", "message-label", role === "assistant" ? agentLabel(message.agent || state.active?.agent) : role));
   const text = node("div", "message-text");
-  renderContent(text, message.text || "");
+  renderContent(text, message.text || "", { onPreview: preview => documentPreview.open({ ...preview, messageId: message.id }) });
   if (streaming) text.append(node("span", "stream-caret"));
   body.append(text);
   if (message.attachments?.length) body.append(node("p", "muted", message.attachments.map(file => `📎 ${file.name}`).join(" · ")));
@@ -177,10 +179,13 @@ function renderApproval() {
 
 function renderActive() {
   const chat = state.active;
+  documentPreview.setChat(chat?.id);
   elements.welcome.hidden = Boolean(chat);
   elements.conversation.hidden = !chat;
   elements.actions.hidden = !chat;
   if (!chat) {
+    closeSidePanel("diff"); toolActivity.update(null, new Map());
+    elements.messages.replaceChildren();
     elements.title.textContent = "Agent Relay";
     elements.meta.textContent = "Independent workspaces. Disposable runtimes.";
     return;
@@ -311,6 +316,8 @@ function connectEvents(chatId) {
       renderApproval();
     } else if (event.type === "runtime_error") {
       toast(event.text);
+    } else if (event.type === "chat_deleted") {
+      forgetChat(chatId).catch(error => toast(error.message));
     }
   };
   source.onerror = () => {
@@ -484,18 +491,31 @@ $("#stop-button").addEventListener("click", async () => {
   try { await api(`/api/chats/${state.active.id}/stop`, { method: "POST", body: "{}" }); }
   catch (error) { toast(error.message); }
 });
-$("#delete-button").addEventListener("click", async () => {
-  if (!state.active || !confirm(`Delete “${state.active.title}” and its workspace?`)) return;
-  try {
-    const id = state.active.id;
-    await api(`/api/chats/${id}`, { method: "DELETE" });
+async function deleteChat(chat) {
+  if (!chat || !confirm(`Permanently delete “${chat.title}”, its messages, and its workspace files? Any running agent will be stopped. This cannot be undone.`)) return false;
+  const id = chat.id;
+  await api(`/api/chats/${id}`, { method: "DELETE" });
+  await forgetChat(id);
+  toast("Chat and workspace permanently deleted.");
+  return true;
+}
+async function forgetChat(id) {
+  state.chats = state.chats.filter(item => item.id !== id);
+  chatControls.drafts.delete(id);
+  if (state.active?.id === id) {
     state.eventSource?.close();
-    state.chats = state.chats.filter((chat) => chat.id !== id);
+    state.selection = (state.selection || 0) + 1;
+    state.stream = null; state.liveTools.clear();
     state.active = null;
-    renderChats();
-    if (state.chats.length) await selectChat(state.chats[0].id);
-    else renderActive();
-  } catch (error) { toast(error.message); }
+    messageHistory.select(null);
+    history.replaceState(null, "", location.pathname);
+    renderActive();
+    if (state.chats.length) await selectChat(state.chats[0].id).catch(error => toast(error.message));
+  }
+  renderChats();
+}
+$("#delete-button").addEventListener("click", () => {
+  deleteChat(state.active).catch(error => toast(error.message));
 });
 $("#open-sidebar").addEventListener("click", () => elements.sidebar.classList.add("open"));
 $("#close-sidebar").addEventListener("click", () => elements.sidebar.classList.remove("open"));
@@ -505,17 +525,19 @@ document.addEventListener("keydown", (event) => {
     openNewChat();
   }
 });
-const sidebar = new ChatSidebar({ state, api, select: selectChat, toast, age: escapeTime, agentLabel,
+const sidebar = new ChatSidebar({ state, api, select: selectChat, remove: deleteChat, toast, agentLabel,
   updated: chat => {
     updateChatSummary(chat);
     if (state.active?.id === chat.id) { state.active = { ...state.active, ...chat }; renderActive(); }
   },
 });
 const workspaceSettings = new WorkspaceSettings({ state, api, toast });
-const mcpSettings = new McpSettings({ api, toast });
+const mcpSettings = new McpSettings({ api, toast, state });
 const toolActivity = new ToolActivity();
 const usagePanel = new UsagePanel({ state, api, toast });
+const documentPreview = new DocumentPreview();
 const chatControls = new ChatControls({ state, api, toast,
+  preview: documentPreview,
   updated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = { ...state.active, ...chat }; renderActive(); } },
   openEnvironment: () => workspaceSettings.openEnvironments(state.active?.environmentId),
   openRepositories: () => openNewChat(),

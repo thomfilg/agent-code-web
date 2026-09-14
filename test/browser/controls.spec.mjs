@@ -67,8 +67,8 @@ test("upload chips, usage availability, transcript and repository menus are func
   await expect(page.locator("#session-usage").getByRole("button", { name: "Compact session" })).toBeDisabled();
   await page.getByLabel("Chat actions", { exact: true }).click();
   await page.getByRole("button", { name: "Transcript view", exact: true }).click();
-  await expect(page.locator("#controls-content")).toContainText("Please inspect the attached files");
-  await page.getByLabel("Close controls dialog", { exact: true }).click();
+  await expect(page.locator("#preview-content")).toContainText("Please inspect the attached files");
+  await page.getByLabel("Close preview", { exact: true }).click();
   await page.getByLabel("Repositories", { exact: true }).click();
   await expect(page.locator("#chat-repositories")).toContainText("Add repository");
 });

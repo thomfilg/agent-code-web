@@ -120,6 +120,13 @@ use ↑ in the repository chips to change the primary before creating the chat.
 Legacy URL-based chats are grouped from their GitHub URL; scratch chats go
 under Personal / No repository.
 
+Chats use a single compact row: status icon, title, pin, and organize menu.
+Status details and timestamps remain available on hover and in Organize chat.
+Choose **Organize chat → Delete chat** to permanently remove that chat, messages,
+attachments, and workspace after confirmation. A running worker is stopped first.
+Archive remains available when you want to keep the chat instead. Deleting a
+different chat does not disturb the active conversation or its draft.
+
 Sort within each section by creation time, last update (both directions), or
 state: working, asking question, idle, PR not passing, PR open, PR merged, archived.
 States are automatic and read-only: a gray dot indicates work, yellow indicates
@@ -336,8 +343,14 @@ state.
 ## Conversation controls
 
 - User messages are right-aligned bubbles. Agent Markdown renders headings,
-  tables, lists, links and fenced code, with code-copy buttons. HTML blocks have
-  an opt-in preview in an opaque-origin iframe: generated scripts, forms,
+  tables, lists, links and fenced code, with code-copy buttons. **Open preview**
+  opens HTML, Markdown, SVG, or plain text in the third desktop column, sharing
+  space with Workspace changes and tool activity (one panel at a time). Narrow
+  screens use an overlay with a close button. Transcript view uses this panel
+  too. Previews support expand/restore, source copy, and Escape; live chat updates
+  do not replace an open document. HTML has readable default typography, spacing,
+  and striped, bordered tables; its own CSS can override these defaults.
+  Rich previews use an opaque-origin iframe: generated scripts, forms,
   navigation and network resources are disabled; styles and malformed markup
   cannot escape into the chat UI.
 - Each user turn has one **Tools used: N** row. Open it to inspect actual tool
@@ -382,6 +395,18 @@ form; they do not grant account access. Save, connect/test, then select the save
 connection under **Environments → MCP connections**. Changes
 apply on the next worker start. Both Codex and Claude receive per-worker MCP
 configuration without modifying shared CLI config files.
+
+For separate accounts per project, set **Organization** to the GitHub owner of
+the chat's primary repository (for example, `12-apps` or `g2i`). You can save
+`linear` in both organizations and complete OAuth separately for each; tokens,
+connection health, and disconnect actions are independent. Select both in an
+environment if it serves both organizations. On worker startup, the controller
+only grants selected connections matching the **first** repository's owner,
+plus selected **Shared** connections (blank Organization). Secondary repositories
+and sidebar groups do not expand access. Scratch chats receive only Shared
+connections. Existing unscoped connections remain Shared. This is routing within
+the private control plane, not separate user-account tenancy or a sandbox between
+repositories in the same workspace.
 
 ### Browser OAuth (including custom servers)
 

@@ -37,8 +37,8 @@ function statusIcon(chat) {
 }
 
 export class ChatSidebar {
-  constructor({ state, api, select, updated, toast, age, agentLabel }) {
-    Object.assign(this, { state, api, select, updated, toast, age, agentLabel });
+  constructor({ state, api, select, updated, remove, toast, agentLabel }) {
+    Object.assign(this, { state, api, select, updated, remove, toast, agentLabel });
     this.groups = []; this.preferences = { sort: "updated_desc", collapsed: [] };
     this.dragging = false; this.pendingPreferences = 0; this.preferenceVersion = 0; this.refreshVersion = 0;
     for (const [value, label] of SORT_OPTIONS) { const option = el("option", "", label); option.value = value; $("#chat-sort").append(option); }
@@ -48,6 +48,12 @@ export class ChatSidebar {
     $("#group-form").addEventListener("submit", event => this.saveGroup(event));
     $("#organize-form").addEventListener("submit", event => this.saveChat(event));
     $("#archive-chat-button").addEventListener("click", () => this.toggleArchive());
+    $("#organize-delete-chat").addEventListener("click", async event => {
+      event.currentTarget.disabled = true;
+      try { if (await this.remove(this.editingChat)) $("#organize-dialog").close(); }
+      catch (error) { $("#organize-error").textContent = error.message; }
+      finally { $("#organize-delete-chat").disabled = false; }
+    });
     $("#remove-group-button").addEventListener("click", () => this.removeGroup());
     document.addEventListener("dragend", () => { this.dragging = false; document.querySelectorAll(".drop-over").forEach(item => item.classList.remove("drop-over")); this.scheduleRefresh(); });
     document.querySelectorAll("[data-close-dialog]").forEach(item => item.addEventListener("click", () => item.closest("dialog").close()));
@@ -136,14 +142,9 @@ export class ChatSidebar {
     select.setAttribute("aria-current", String(this.state.active?.id === chat.id));
     const top = el("div", "chat-item-top");
     top.append(statusIcon(chat), el("span", "chat-item-title", chat.title));
-    const meta = el("div", "chat-item-meta");
-    meta.append(el("span", "", stateLabel(chat.workflowState)), el("time", "chat-age", `· ${this.age(chat.updatedAt)}`));
-    meta.lastChild.dateTime = chat.updatedAt;
-    meta.lastChild.title = `Created: ${new Date(chat.createdAt).toLocaleString()}\nUpdated: ${new Date(chat.updatedAt).toLocaleString()}`;
-    select.append(top, meta);
+    select.append(top);
     const origin = repositoryGroup(chat);
-    select.title = `${chat.title}\n${origin.company} / ${origin.repository}\n${this.agentLabel(chat.agent)}`;
-    if (showOrigin) select.append(el("div", "chat-origin", `${origin.company} / ${origin.repository}${chat.pinned && chat.customGroupId ? ` · ${this.groups.find(g => g.id === chat.customGroupId)?.name || ""}` : ""}`));
+    select.title = `${chat.title}\n${origin.company} / ${origin.repository}\n${this.agentLabel(chat.agent)} · ${stateLabel(chat.workflowState)}\nUpdated: ${new Date(chat.updatedAt).toLocaleString()}${showOrigin && chat.customGroupId ? `\nGroup: ${this.groups.find(g => g.id === chat.customGroupId)?.name || ""}` : ""}`;
     const controls = el("div", "chat-row-actions");
     const pin = button(chat.pinned ? "★" : "☆", `${chat.pinned ? "Unpin" : "Pin"} ${chat.title}`, () => this.patch(chat.id, { pinned: !chat.pinned }).catch(error => this.toast(error.message)));
     pin.setAttribute("aria-pressed", String(Boolean(chat.pinned))); pin.dataset.focusKey = `pin-${chat.id}`;

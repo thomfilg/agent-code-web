@@ -145,7 +145,7 @@ export class WorkspaceSettings {
     $("#environment-mcp-options").replaceChildren(...this.mcps.map(connection => {
       const label = el("label", "checkbox-label"), input = el("input"); input.type = "checkbox"; input.checked = this.draft.mcpIds.includes(connection.id);
       input.onchange = () => { this.draft.mcpIds = input.checked ? [...this.draft.mcpIds, connection.id] : this.draft.mcpIds.filter(id => id !== connection.id); };
-      label.append(input, el("span", "", `${connection.name} · ${connection.type}`)); return label;
+      label.append(input, el("span", "", `${connection.name} · ${connection.type} · ${connection.organization || "Shared"}`)); return label;
     }));
     if (!this.mcps.length) $("#environment-mcp-options").append(el("p", "muted", "No saved connections. Add an MCP from the sidebar first."));
     $("#environment-setup-script").value = this.draft.setupScript || "";

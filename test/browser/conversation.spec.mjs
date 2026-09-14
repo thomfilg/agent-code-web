@@ -13,6 +13,87 @@ async function openFixture(page, messages = [], extra = {}) {
   await page.getByRole("button", { name: `Open ${chat.title}`, exact: true }).click();
   return chat;
 }
+
+test("document previews use the desktop column, styled defaults, and mutually exclusive panels", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  const html = '<h1>Viewport report</h1><p>A readable document.</p><table><thead><tr><th>Device</th><th>Width</th></tr></thead><tbody><tr><td>Phone</td><td align="right">390</td></tr><tr><td>Tablet</td><td>744</td></tr></tbody></table>';
+  await openFixture(page, [
+    { id: "u", role: "user", text: "Show samples" },
+    { id: "t", role: "tool", kind: "tool", meta: { itemId: "one", tool: "Read", output: "Real result", state: "completed" } },
+    { id: "a", role: "assistant", text: `\`\`\`html\n${html}\n\`\`\`\n\n\`\`\`markdown\n# Markdown document\n\n| Item | Status |\n| --- | --- |\n| Unit | Passed |\n\`\`\`\n\n\`\`\`text\n<b>Literal text</b>\n\`\`\`\n\n\`\`\`svg\n<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><circle cx="50" cy="50" r="30" fill="blue" /></svg>\n\`\`\`` },
+  ]);
+  const input = page.getByLabel("Message", { exact: true }); await input.fill("Keep my draft");
+  const open = page.getByRole("button", { name: "Open HTML preview ↗" }); await open.click();
+  const panel = page.locator("#preview-panel"), frame = page.frameLocator("#preview-content iframe");
+  await expect(frame.locator("h1")).toHaveText("Viewport report");
+  await expect(frame.locator("th").first()).toHaveCSS("background-color", "rgb(237, 241, 245)");
+  await expect(frame.locator("td").first()).toHaveCSS("padding-left", "12px");
+  await expect(frame.locator('[align="right"]')).toHaveCSS("text-align", "right");
+  const geometry = await page.evaluate(() => Object.fromEntries(["sidebar", "conversation", "preview-panel"].map(id => { const n = document.getElementById(id).getBoundingClientRect(); return [id, { left: n.left, right: n.right, height: n.height }]; })));
+  expect(geometry.sidebar.right).toBeLessThanOrEqual(geometry.conversation.left);
+  expect(geometry.conversation.right).toBeLessThanOrEqual(geometry["preview-panel"].left + 1);
+  expect(geometry["preview-panel"].height).toBeGreaterThan(800);
+  await expect(page.locator("#messages iframe")).toHaveCount(0);
+  await expect(frame.locator("h1")).toBeInViewport();
+  await frame.locator("body").evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.screenshot({ path: "test-results/desktop-document-preview.png", fullPage: true });
+  await page.getByLabel("Expand preview", { exact: true }).click(); await expect(panel).toHaveClass(/expanded/);
+  await page.getByLabel("Restore preview size", { exact: true }).click(); await expect(panel).not.toHaveClass(/expanded/);
+  await page.keyboard.press("Escape"); await expect(panel).not.toBeVisible(); await expect(open).toBeFocused();
+  await page.getByRole("button", { name: "Open Markdown preview ↗" }).click();
+  await expect(frame.locator("h1")).toHaveText("Markdown document"); await expect(frame.locator("td").last()).toHaveText("Passed");
+  await frame.locator("h1").click(); await page.keyboard.press("Escape"); await expect(panel).not.toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Markdown preview ↗" })).toBeFocused();
+  await page.getByRole("button", { name: "Open Text preview ↗" }).click();
+  await expect(panel.locator("pre")).toHaveText("<b>Literal text</b>\n"); await expect(panel.locator("iframe")).toHaveCount(0);
+  await page.getByRole("button", { name: "Open SVG preview ↗" }).click(); await expect(frame.locator("circle")).toHaveAttribute("fill", "blue");
+  await page.getByRole("button", { name: "Tools used: 1 ›" }).click(); await expect(panel).not.toBeVisible(); await expect(panel.locator("iframe")).toHaveCount(0);
+  await page.locator("#view-changes").click(); await expect(page.locator("#diff-panel")).toBeVisible(); await expect(page.locator("#tools-panel")).not.toBeVisible();
+  await open.click(); await expect(page.locator("#diff-panel")).not.toBeVisible(); await expect(panel).toBeVisible();
+  await expect(input).toHaveValue("Keep my draft");
+  await page.getByRole("button", { name: "Open Existing beta", exact: true }).click(); await expect(panel).not.toBeVisible(); await expect(panel.locator("iframe")).toHaveCount(0);
+});
+
+test("preview survives live message updates and fits narrow screens without horizontal overflow", async ({ page }) => {
+  await page.addInitScript(() => { const Native = window.EventSource; window.relaySources = []; window.EventSource = class extends Native { constructor(...args) { super(...args); window.relaySources.push(this); } }; });
+  const chat = await openFixture(page, [{ id: "a", role: "assistant", text: `\`\`\`html\n<h1>Long document</h1>${"<p>Content</p>".repeat(100)}\n\`\`\`` }]);
+  const open = page.getByRole("button", { name: "Open HTML preview ↗" }); await open.click();
+  const frame = page.frameLocator("#preview-content iframe"); await expect(frame.locator("h1")).toHaveText("Long document");
+  await frame.locator("body").evaluate(() => { window.scrollTo(0, 500); window.previewSentinel = true; });
+  await page.evaluate(id => window.relaySources.find(s => s.url.includes(`/chats/${id}/events`)).dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "message", message: { id: "later", role: "assistant", text: "New update" } }) })), chat.id);
+  await expect(page.locator("#messages")).toContainText("New update");
+  expect(await frame.locator("body").evaluate(() => window.previewSentinel && window.scrollY === 500)).toBe(true);
+  await page.getByLabel("Close preview", { exact: true }).click(); await expect(open).toBeFocused();
+  for (const width of [1024, 1000, 744, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 }); await open.click();
+    await expect(page.getByLabel("Close preview", { exact: true })).toBeInViewport();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(await page.locator("#preview-panel").evaluate(n => n.scrollWidth <= n.clientWidth)).toBe(true);
+    if (width === 390) await page.screenshot({ path: "test-results/mobile-document-preview.png", fullPage: true });
+    await page.getByLabel("Close preview", { exact: true }).click(); await expect(page.locator("#preview-panel")).not.toBeVisible();
+  }
+});
+
+test("delete errors stay actionable and deleting the last chat clears its preview", async ({ page }) => {
+  const chat = await openFixture(page, [{ id: "a", role: "assistant", text: "```html\n<h1>Delete preview fixture</h1>\n```" }]);
+  await page.route("**/api/sidebar", async route => { const response = await route.fetch(), data = await response.json(); data.chats = data.chats.filter(c => c.id === chat.id); await route.fulfill({ json: data }); });
+  await page.reload();
+  await page.getByRole("button", { name: "Open HTML preview ↗" }).click();
+  await page.getByRole("button", { name: `Organize ${chat.title}`, exact: true }).click();
+  let failDelete = true;
+  await page.route(`**/api/chats/${chat.id}`, route => {
+    if (route.request().method() !== "DELETE") return route.fallback();
+    if (failDelete) return route.fulfill({ status: 503, json: { error: "Could not stop worker. Please retry." } });
+    return route.continue();
+  });
+  page.once("dialog", dialog => dialog.accept()); await page.locator("#organize-delete-chat").click();
+  await expect(page.locator("#organize-error")).toContainText("Please retry"); await expect(page.locator("#organize-delete-chat")).toBeEnabled();
+  expect((await page.request.get(`/api/chats/${chat.id}`)).ok()).toBe(true);
+  failDelete = false; page.once("dialog", dialog => dialog.accept()); await page.locator("#organize-delete-chat").click();
+  await expect(page.locator("#organize-dialog")).not.toBeVisible(); await expect(page.locator("#welcome")).toBeVisible();
+  await expect(page.locator("#preview-panel")).not.toBeVisible(); await expect(page.locator("#preview-content iframe")).toHaveCount(0);
+  await expect(page.locator("#messages")).toBeEmpty(); await expect(page.locator(".chat-row")).toHaveCount(0);
+});
 test("Markdown renders tables and bubbles; HTML preview cannot leak styles, execute scripts or access parent", async ({ page }) => {
   const errors = []; page.on("pageerror", e => errors.push(e.message));
   await openFixture(page, [
@@ -23,13 +104,14 @@ test("Markdown renders tables and bubbles; HTML preview cannot leak styles, exec
   const bounds = await page.locator(".message.user").evaluate(n => ({ width: n.getBoundingClientRect().width, parent: n.parentElement.clientWidth, marginLeft: getComputedStyle(n).marginLeft, display: getComputedStyle(n).display }));
   expect(bounds.width).toBeLessThan(bounds.parent * .8); expect(parseFloat(bounds.marginLeft)).toBeGreaterThan(0);
   const background = await page.locator("body").evaluate(n => getComputedStyle(n).backgroundColor);
-  await page.locator(".html-preview summary").click();
-  const frame = page.frameLocator(".html-preview iframe"); await expect(frame.locator("h1")).toHaveText("Preview works");
+  await page.getByRole("button", { name: "Open HTML preview ↗" }).click();
+  await expect(page.locator("#messages iframe")).toHaveCount(0);
+  const frame = page.frameLocator("#preview-content iframe"); await expect(frame.locator("h1")).toHaveText("Preview works");
   await expect(frame.locator("body")).toHaveCSS("background-color", "rgb(255, 0, 0)");
   await expect(frame.locator("body script")).toHaveCount(0); await expect(page.locator(".message.assistant")).toContainText("Still here");
   expect(await page.locator("body").evaluate(n => getComputedStyle(n).backgroundColor)).toBe(background);
-  expect(await page.locator(".html-preview iframe").getAttribute("sandbox")).toBe("allow-scripts");
-  expect(await page.locator(".html-preview iframe").evaluate(n => n.contentDocument)).toBeNull();
+  expect(await page.locator("#preview-content iframe").getAttribute("sandbox")).toBe("allow-scripts");
+  expect(await page.locator("#preview-content iframe").evaluate(n => n.contentDocument)).toBeNull();
   await expect(page.locator('.markdown a[href^="javascript:"]')).toHaveCount(0); expect(errors).toEqual([]);
   await page.screenshot({ path: "test-results/conversation-markdown.png", fullPage: true });
 });
@@ -85,6 +167,31 @@ test("MCP connection can be saved masked then selected in an environment", async
   await page.locator("#environment-mcp-options").getByRole("checkbox", { name: "browser-tools · http" }).check();
   await page.getByRole("button", { name: "Save environment" }).click(); await expect(page.locator("#environment-save-status")).toContainText("Saved securely");
   const { environments } = await (await page.request.get("/api/environments")).json(); expect(environments.some(e => e.mcpIds?.length)).toBe(true);
+});
+
+test("same-name MCP connections can have independent organization scopes in one environment", async ({ page }) => {
+  const ids = []; let env;
+  try {
+    await page.goto("/"); await page.getByRole("button", { name: "MCP connections", exact: true }).click();
+    for (const org of ["12-apps", "g2i"]) {
+      await page.getByRole("button", { name: "Custom MCP" }).click();
+      await page.getByLabel("Connection name", { exact: true }).fill("linear-scoped");
+      await page.getByLabel("Organization", { exact: true }).fill(org);
+      await page.getByLabel("MCP endpoint URL").fill("https://mcp.linear.app/mcp");
+      await page.getByRole("button", { name: "Save connection" }).click(); await expect(page.locator("#mcp-save-status")).toContainText("Saved");
+      await expect(page.locator("#mcp-list")).toContainText(`${org} · linear-scoped · Sign-in required`);
+    }
+    const { connections } = await (await page.request.get("/api/mcps")).json(); ids.push(...connections.filter(c => c.name === "linear-scoped").map(c => c.id)); expect(ids.length).toBe(2);
+    await page.locator("#mcp-list").getByRole("button", { name: /^12-apps · linear-scoped/ }).click(); await expect(page.getByLabel("Organization", { exact: true })).toHaveValue("12-apps");
+    await page.getByLabel("Close MCP connections").click(); await page.getByRole("button", { name: "Environments", exact: true }).click();
+    await page.getByRole("button", { name: "Add environment", exact: false }).click(); await page.getByLabel("Environment name", { exact: true }).fill("Scoped MCP test");
+    for (const org of ["12-apps", "g2i"]) await page.locator("#environment-mcp-options").getByRole("checkbox", { name: `linear-scoped · http · ${org}`, exact: true }).check();
+    await page.getByRole("button", { name: "Save environment" }).click(); await expect(page.locator("#environment-save-status")).toContainText("Saved securely");
+    const { environments } = await (await page.request.get("/api/environments")).json(); env = environments.find(e => e.name === "Scoped MCP test"); expect(env.mcpIds.sort()).toEqual(ids.sort());
+  } finally {
+    if (env) await page.request.delete(`/api/environments/${env.id}`);
+    for (const id of ids) await page.request.delete(`/api/mcps/${id}`);
+  }
 });
 
 test("MCP presets, custom OAuth consent, real tool discovery and mobile layout", async ({ page }) => {

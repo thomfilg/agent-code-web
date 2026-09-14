@@ -4,6 +4,7 @@ import { CapabilityBroker } from "./capabilities.mjs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpOAuth } from "./mcp-oauth.mjs";
+import { repositoryGroup } from "../public/chat-organization.js";
 const fail = message => Object.assign(new Error(message), { statusCode: 400 });
 const publicConnection = ({ headers, oauth, oauthClientSecret, authGeneration, ...connection }) => ({ ...connection, authMode: connection.authMode || (Object.keys(headers || {}).length ? "headers" : "none"), headerNames: Object.keys(headers || {}), hasCredentials: Boolean(Object.keys(headers || {}).length), oauthConnected: Boolean(oauth?.tokens), hasClientSecret: Boolean(oauthClientSecret), health: connection.health || { status: "unverified" } });
 
@@ -30,7 +31,9 @@ export class McpConnections {
     if (old && input.revision !== old.revision) throw Object.assign(new Error("Connection changed; reload before saving"), { statusCode: 409 });
     const name = String(input.name || "").trim();
     if (!/^[a-zA-Z][\w-]{0,63}$/.test(name)) throw fail("MCP name must start with a letter and use up to 64 letters, numbers, underscores or hyphens");
-    if ((await this.list()).some(c => c.id !== id && c.name.toLowerCase() === name.toLowerCase())) throw fail("An MCP connection with this name already exists");
+    const organization = String(input.organization === undefined ? old?.organization || "" : input.organization || "").trim().toLowerCase();
+    if (organization && !/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(organization)) throw fail("Organization must be a GitHub owner, such as 12-apps or g2i (leave blank for shared)");
+    if ((await this.list()).some(c => c.id !== id && c.name.toLowerCase() === name.toLowerCase() && (c.organization || "").toLowerCase() === organization)) throw fail("An MCP connection with this name already exists in this organization or shared scope");
     if (!["http", "stdio"].includes(input.type)) throw fail("Choose HTTP or stdio transport");
     let data;
     if (input.type === "http") {
@@ -56,7 +59,7 @@ export class McpConnections {
       if (input.headers && Object.keys(input.headers).length || input.env && Object.keys(input.env).length) throw fail("Protected credentials are supported with HTTP MCP connections. Do not put secrets in stdio commands or arguments.");
       data = { command: input.command.trim(), args: input.args };
     }
-    const value = { id: id || `mcp_${randomUUID()}`, name, type: input.type, ...data, authGeneration: randomUUID(), health: { status: input.type === "stdio" ? "worker_pending" : data.authMode === "oauth" && !data.oauth ? "needs_auth" : "unverified" }, revision: (old?.revision || 0) + 1, updatedAt: new Date().toISOString() };
+    const value = { id: id || `mcp_${randomUUID()}`, name, organization: organization || null, type: input.type, ...data, authGeneration: randomUUID(), health: { status: input.type === "stdio" ? "worker_pending" : data.authMode === "oauth" && !data.oauth ? "needs_auth" : "unverified" }, revision: (old?.revision || 0) + 1, updatedAt: new Date().toISOString() };
     await this.records.put("mcp", value.id, value); if (old) this.revokeConnection(value.id); return publicConnection(value);
   }
   async validateSelection(ids) {
@@ -101,14 +104,26 @@ export class McpConnections {
     }
     return this.update(id, connection.revision, current => ({ ...current, health }));
   }
-  async runtime(chatId, ids, origin) {
+  async runtime(chatId, ids, origin, chat = {}) {
     await this.validateSelection(ids); this.revokeChat(chatId);
-    const token = ids.length ? this.broker.issue({ chatId, provider: "mcp" }) : null;
-    const connections = await Promise.all(ids.map(id => this.get(id)));
+    const primary = repositoryGroup(chat), organization = primary.fullName ? primary.company.toLowerCase() : null;
+    // Match the primary repository, never secondary repositories or display groups.
+    // Filter before granting credentials, including for stdio servers.
+    const connections = (await Promise.all(ids.map(id => this.get(id)))).filter(c => !c.organization || c.organization.toLowerCase() === organization);
+    const token = connections.length ? this.broker.issue({ chatId, provider: "mcp" }) : null;
     this.grants.set(chatId, new Map(connections.map(connection => [connection.id, { connection, sessions: new Set(), streams: new Set() }])));
-    return Object.fromEntries(connections.map(c => [`relay_${c.name}`, c.type === "http"
+    const names = new Set(connections.filter(c => !c.organization).map(c => `relay_${c.name}`));
+    return Object.fromEntries(connections.map(c => {
+      let name = `relay_${c.name}`;
+      if (c.organization) {
+        name = `relay_${c.name.slice(0, 20)}_${c.id.slice(4).replaceAll("-", "")}`;
+        while (names.has(name)) name += "_";
+        names.add(name);
+      }
+      return [name, c.type === "http"
       ? { type: "http", url: `${origin}/gateway/mcp/${c.id}`, headers: { Authorization: `Bearer ${token}` } }
-      : { type: "stdio", command: c.command, args: c.args }]));
+      : { type: "stdio", command: c.command, args: c.args }];
+    }));
   }
   revokeChat(chatId) { for (const selected of this.grants.get(chatId)?.values() || []) for (const controller of selected.streams) controller.abort(); this.broker.revokeChat(chatId); this.grants.delete(chatId); }
   revokeConnection(id) { for (const connections of this.grants.values()) { for (const controller of connections.get(id)?.streams || []) controller.abort(); connections.delete(id); } }
