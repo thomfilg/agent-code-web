@@ -140,7 +140,7 @@ export class RuntimeManager extends EventEmitter {
       await this.stop(chatId, "agent-switch");
       const updated = await this.store.update(chatId, current => ({ agent, ...settings, modelSelectionSet: true,
         agentSessionId: null, needsAgentHandoff: true, pendingRequest: null, awaitingUser: false,
-        usage: null, rateLimits: null, connectors: null, slashCommands: [], commandCatalog: [],
+        usage: null, usageAccount: null, rateLimits: null, connectors: null, slashCommands: [], commandCatalog: [],
         messages: current.messages.map(message => ["assistant", "tool"].includes(message.role) ? { ...message, agent: message.agent || current.agent } : message),
         statusDetail: `Switched to ${agent === "claude" ? "Claude Code" : agent === "codex" ? "Codex" : "Mock"}. Conversation and workspace retained.`,
         ...workflowPatch({ ...current, awaitingUser: false, pendingRequest: null }),
@@ -197,10 +197,22 @@ export class RuntimeManager extends EventEmitter {
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     if (`${chat.agent}:${chat.agentSessionId}` !== identity) { live = {}; legacy = null; }
     if (chat.usage?.version === 2) legacy = null;
-    return { usage: legacy ? { ...chat.usage, ...legacy } : chat.usage || null, rateLimits: live.rateLimits || chat.rateLimits || null, connectors: live.connectors || chat.connectors || null,
-      agent: chat.agent, model: chat.model, authMode: this.config[chat.agent]?.authMode || "none", account: live.account || null,
+    // Persist recovered transcript counters and inspection-only fields in the
+    // controller DB, not the disposable worker or the browser's memory cache.
+    const different = (value, saved) => value != null && JSON.stringify(value) !== JSON.stringify(saved);
+    if (legacy || different(live.rateLimits, chat.rateLimits) || different(live.connectors, chat.connectors) || different(live.account, chat.usageAccount)) {
+      chat = await this.store.update(chatId, current => {
+        if (`${current.agent}:${current.agentSessionId}` !== identity) return {};
+        return { ...(legacy && current.usage?.version !== 2 ? { usage: { ...current.usage, ...legacy, persistedSnapshot: true } } : {}),
+          ...(live.rateLimits ? { rateLimits: live.rateLimits } : {}), ...(live.connectors ? { connectors: live.connectors } : {}),
+          ...(live.account ? { usageAccount: live.account } : {}) };
+      });
+    }
+    const awake = this.#runtimes.get(chatId) === runtime && Boolean(runtime);
+    return { usage: chat.usage || null, rateLimits: chat.rateLimits || null, connectors: chat.connectors || null,
+      agent: chat.agent, model: chat.model, authMode: this.config[chat.agent]?.authMode || "none", account: chat.usageAccount || null, snapshot: !awake, recordedAt: chat.usage?.recordedAt || null,
       slashCommands: chat.slashCommands || [], canCompact: Boolean(runtime && this.#runtimes.get(chatId) === runtime && runtime.adapter.compact && !this.isBusy(chatId)),
-      note: runtime ? "Provider-reported usage only. Missing context or subscription limits are unavailable from this CLI/auth mode." : "Worker asleep. Showing last reported usage; opening this panel does not wake it." };
+      note: awake ? "Provider-reported usage only. Missing context or subscription limits are unavailable from this CLI/auth mode." : "Worker stopped. Showing the last snapshot saved outside the worker; opening this panel does not wake it." };
   }
 
   async compact(chatId) {
@@ -384,6 +396,7 @@ export class RuntimeManager extends EventEmitter {
       if (runtime.idleTimer) clearTimeout(runtime.idleTimer);
       this.#runtimes.delete(chatId);
       await runtime.adapter.stop().catch((error) => this.#emit(chatId, { type: "runtime_log", text: `Adapter stop warning: ${errorMessage(error)}` }));
+      await runtime.eventQueue; // Flush final context/usage before worker storage disappears.
     }
     try {
       if (chat.agent !== "mock") await this.workerBackend.sleep(chat);
@@ -512,7 +525,7 @@ export class RuntimeManager extends EventEmitter {
       throw error;
     }
     const adapter = this.adapterFactory
-      ? this.adapterFactory({ chat, hooks })
+      ? this.adapterFactory({ chat, hooks, executor })
       : new Adapter({ chat, store: this.store, config: this.config, broker: this.broker, gatewayOrigin: this.gatewayOrigin, executor, hooks });
     runtime = { adapter, executor, busy: false, idleTimer: null, generation: 0, eventQueue: Promise.resolve() };
     this.#runtimes.set(chatId, runtime);

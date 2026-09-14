@@ -7,6 +7,8 @@ import { ToolActivity, groupTools } from "./tool-activity.js";
 import { UsagePanel } from "./usage-panel.js";
 import { SlashComposer } from "./slash-composer.js";
 import { McpSettings } from "./mcp-settings.js";
+import { MessageHistory } from "./message-history.js";
+import { MessageNavigator } from "./message-navigator.js";
 
 const state = {
   config: null,
@@ -134,7 +136,8 @@ function renderMessages({ pinBottom = false } = {}) {
     for (const message of rows) elements.messages.append(message.kind === "tool_group" ? toolActivity.button(message.key) : renderMessage(message));
     if (state.stream) elements.messages.append(renderMessage({ id: state.stream.id, role: "assistant", text: state.stream.text }, true));
   }
-  if (pinBottom || wasNearBottom) elements.messages.scrollTop = elements.messages.scrollHeight;
+  messageNavigator.update();
+  if (!messageNavigator.readingHistory && (pinBottom || wasNearBottom)) elements.messages.scrollTop = elements.messages.scrollHeight;
 }
 
 function renderApproval() {
@@ -248,6 +251,8 @@ async function selectChat(id) {
     const { chat } = await api(`/api/chats/${id}`);
     if (state.selection !== selection) return;
     state.active = chat;
+    messageHistory.select(chat.id);
+    slashComposer.close();
     history.replaceState(null, "", `#chat=${id}`);
     renderChats();
     renderActive();
@@ -382,6 +387,7 @@ async function sendMessage(event) {
   if (!files.length && await runWebCommand(text)) { elements.input.value = ""; resizeInput(); return; }
   const queued = ["starting", "running"].includes(state.active.status) || state.active.queuedMessages?.length;
   elements.input.value = "";
+  messageHistory.reset();
   resizeInput();
   try {
     await activeModelPicker.saving;
@@ -467,7 +473,7 @@ $("#composer").addEventListener("submit", sendMessage);
 elements.send.addEventListener("click", () => { if (elements.send.type === "button") $("#stop-button").click(); });
 elements.input.addEventListener("input", resizeInput);
 elements.input.addEventListener("keydown", (event) => {
-  if (event.isComposing || slashComposer.keydown(event)) return;
+  if (event.isComposing || slashComposer.keydown(event) || messageHistory.keydown(event)) return;
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     $("#composer").requestSubmit();
@@ -515,6 +521,8 @@ const chatControls = new ChatControls({ state, api, toast,
   openRepositories: () => openNewChat(),
 });
 const slashComposer = new SlashComposer({ state, api });
+const messageHistory = new MessageHistory({ input: elements.input, state, onChange: resizeInput });
+const messageNavigator = new MessageNavigator({ state, scroller: elements.messages, root: $("#message-navigator") });
 const activeModelPicker = new ModelPicker({ root: $("#composer-model-controls"), api, onChange: async settings => {
   if (!state.active) return;
   const id = state.active.id;

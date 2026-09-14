@@ -406,7 +406,28 @@ dialog { max-height: calc(100dvh - 28px); }
 .slash-option { display: flex; flex-direction: column; gap: 2px; padding: 7px 10px; border-radius: 5px; cursor: pointer; font-size: 13px; }
 .slash-option small { color: var(--muted); font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .slash-option[aria-selected=true] { background: #3b4134; }
-.mcp-card { width: min(620px, calc(100vw - 32px)); }
+#mcp-dialog { width: min(660px, calc(100vw - 28px)); }
+.mcp-card { width: 100%; min-width: 0; }
+.topbar { position: relative; z-index: 10; }
+.conversation { position: relative; }
+.message-navigator { position: absolute; right: 3px; top: 20%; bottom: 28%; z-index: 8; display: flex; align-items: center; }
+.message-nav-toggle { width: 30px; height: 100%; max-height: 300px; padding: 8px; background: transparent; border-radius: 6px; }
+.message-nav-toggle:focus-visible { outline: 1px solid var(--lime); }
+.message-nav-ticks { display: flex; flex-direction: column; justify-content: center; gap: 5px; max-height: 100%; overflow: hidden; }
+.message-nav-tick { height: 2px; min-height: 1px; flex-shrink: 1; background: var(--faint); width: 14px; }
+.message-nav-tick.active { background: var(--text); }
+.message-nav-list { display: none; position: absolute; right: 28px; top: 50%; transform: translateY(-50%); width: min(330px, calc(100vw - 70px)); max-height: min(65vh, 620px); overflow-y: auto; padding: 6px; border-radius: 12px; border: 1px solid var(--line-bright); background: var(--panel-soft); box-shadow: 0 12px 40px #0008; }
+.message-navigator:not([data-dismissed=true]):hover .message-nav-list, .message-navigator:not([data-dismissed=true]):focus-within .message-nav-list, .message-navigator[data-open=true] .message-nav-list { display: block; }
+.message-nav-item { display: block; width: 100%; border-radius: 7px; padding: 10px; text-align: left; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text); background: transparent; font-size: 13px; }
+.message-nav-item:hover, .message-nav-item:focus-visible, .message-nav-item[aria-current=true] { background: var(--line-bright); }
+.message-jump-target { outline: 1px solid var(--line-bright); outline-offset: 5px; }
+.mcp-presets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.mcp-preset { text-align: left; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: inherit; cursor: pointer; }
+.mcp-preset strong, .mcp-preset span { display: block; } .mcp-preset span { margin-top: 4px; font-size: 12px; }
+#mcp-catalog { margin-top: 18px; } #mcp-connection-status { margin: 12px 0; overflow-wrap: anywhere; }
+.mcp-connect-actions { display: flex; flex-wrap: wrap; gap: 8px; } .mcp-tool-list { max-height: 240px; overflow-y: auto; padding-left: 20px; }
+.oauth-result { max-width: 600px; margin: 12vh auto; padding: 24px; } #mcp-callback-url { overflow-wrap: anywhere; }
+@media (max-width: 480px) { .mcp-presets { grid-template-columns: 1fr; } }
 #mcp-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
 #mcp-form { margin-top: 18px; } #mcp-form label { display: block; margin: 12px 0; } #mcp-form textarea { width: 100%; }
 .environment-mcps { margin: 16px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }

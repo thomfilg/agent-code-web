@@ -39,7 +39,9 @@ export class UsagePanel {
       const parts = usage.context ? [usage.context.inputTokens, usage.context.cacheReadTokens, usage.context.cacheWriteTokens, usage.context.outputTokens] : [usage.contextTokens];
       for (const [i, value] of parts.entries()) { const segment = el("span", undefined, `segment segment-${i}`); const width = Math.min(remaining, (value || 0) / usage.contextWindow * 100); segment.style.width = `${width}%`; remaining -= width; bar.append(segment); }
     }
-    row.append(bar); return row;
+    row.append(bar);
+    if (usage.recordedAt) row.append(el("p", `${info.snapshot || this.state.active?.status === "stopped" ? "Saved snapshot" : "Last updated"} · ${new Date(usage.recordedAt).toLocaleString()}`, "muted usage-snapshot"));
+    return row;
   }
   limits(info) {
     const root = el("section", undefined, "usage-limits");

@@ -7,7 +7,7 @@ import { claudeContext } from "./session-info.mjs";
 // Recover only the last main-agent request counters from this chat's exact
 // native transcript. No provider call and no sleeping worker wake-up.
 export async function legacyClaudeContext(chat, config) {
-  if (chat.agent !== "claude" || chat.usage?.version === 2 || config.workerBackend !== "local" || !/^[a-f0-9-]{36}$/.test(chat.agentSessionId || "")) return null;
+  if (chat.agent !== "claude" || chat.usage?.version === 2 || chat.usage?.persistedSnapshot || config.workerBackend !== "local" || !/^[a-f0-9-]{36}$/.test(chat.agentSessionId || "")) return null;
   const home = config.claude.authMode === "host" ? process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude") : path.join(path.dirname(chat.workspace), "runtime-home", "claude");
   const base = path.join(home, "projects"), filename = path.join(base, chat.workspace.replace(/[^a-zA-Z0-9]/g, "-"), `${chat.agentSessionId}.jsonl`);
   let file;

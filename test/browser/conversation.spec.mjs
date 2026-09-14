@@ -77,11 +77,56 @@ test("MCP connection can be saved masked then selected in an environment", async
   await page.goto("/"); await page.getByRole("button", { name: "MCP connections", exact: true }).click();
   await page.getByLabel("Connection name", { exact: true }).fill("browser-tools");
   await page.getByLabel("MCP endpoint URL").fill("https://mcp.example.com/mcp");
-  await page.getByLabel("Authentication headers", { exact: false }).fill('{"Authorization":"Bearer fixture-secret"}');
+  await page.locator("#mcp-auth").selectOption("headers");
+  await page.locator("#mcp-headers").fill('{"Authorization":"Bearer fixture-secret"}');
   await page.getByRole("button", { name: "Save connection" }).click(); await expect(page.locator("#mcp-save-status")).toContainText("Saved");
   await expect(page.locator("#mcp-headers")).toHaveValue("");
   await page.getByLabel("Close MCP connections").click(); await page.getByRole("button", { name: "Environments", exact: true }).click();
   await page.locator("#environment-mcp-options").getByRole("checkbox", { name: "browser-tools · http" }).check();
   await page.getByRole("button", { name: "Save environment" }).click(); await expect(page.locator("#environment-save-status")).toContainText("Saved securely");
   const { environments } = await (await page.request.get("/api/environments")).json(); expect(environments.some(e => e.mcpIds?.length)).toBe(true);
+});
+
+test("MCP presets, custom OAuth consent, real tool discovery and mobile layout", async ({ page }) => {
+  await page.goto("/"); await page.getByRole("button", { name: "MCP connections", exact: true }).click();
+  await page.locator("#mcp-presets").getByRole("button", { name: /^Linear/ }).click();
+  await expect(page.locator("#mcp-url")).toHaveValue("https://mcp.linear.app/mcp"); await expect(page.locator("#mcp-auth")).toHaveValue("oauth");
+  await page.getByRole("button", { name: "Custom MCP" }).click(); await expect(page.locator("#mcp-url")).toHaveValue("");
+  await page.locator("#mcp-name").fill("oauth-fixture"); await page.locator("#mcp-url").fill("http://127.0.0.1:8881/mcp");
+  await page.getByRole("button", { name: "Save connection" }).click(); await expect(page.locator("#mcp-connection-status")).toContainText("Sign-in required");
+  const popupReady = page.waitForEvent("popup"); await page.getByRole("button", { name: "Connect with OAuth" }).click();
+  const popup = await popupReady; await popup.getByRole("link", { name: "Approve access" }).click();
+  await expect(popup.getByRole("heading", { name: "MCP connected" })).toBeVisible();
+  await expect(page.locator("#mcp-connection-status")).toContainText("Connected · 1 tools");
+  await page.getByText("Available tools", { exact: true }).click(); await expect(page.locator(".mcp-tool-list")).toContainText("fixture_echo");
+  const { connections } = await (await page.request.get("/api/mcps")).json(); const connection = connections.find(c => c.name === "oauth-fixture");
+  expect(connection.oauthConnected).toBe(true); expect(JSON.stringify(connections)).not.toContain("fixture-access-secret");
+  await popup.close(); await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("button", { name: "Test connection" })).toBeVisible();
+  expect(await page.locator("#mcp-dialog").evaluate(n => n.scrollWidth <= n.clientWidth + 2)).toBe(true);
+  await page.screenshot({ path: "test-results/mcp-mobile.png", fullPage: true });
+  await page.request.delete(`/api/mcps/${connection.id}`);
+});
+
+test("composer arrows recall messages and restore the current draft without sending", async ({ page }) => {
+  await openFixture(page, [{ id: "history-1", role: "user", text: "First message" }, { id: "history-2", role: "user", text: "Second\nmessage" }]);
+  const input = page.getByLabel("Message", { exact: true });
+  await input.press("ArrowUp"); await expect(input).toHaveValue("Second\nmessage");
+  await input.press("ArrowUp"); await expect(input).toHaveValue("First message");
+  await input.press("Control+End"); await input.press("ArrowDown"); await expect(input).toHaveValue("Second\nmessage");
+  await input.press("ArrowDown"); await expect(input).toHaveValue("");
+  await input.fill("My draft"); await input.press("Control+Home"); await input.press("ArrowUp"); await expect(input).toHaveValue("Second\nmessage");
+  await input.press("Control+End"); await input.press("ArrowDown"); await expect(input).toHaveValue("My draft");
+  await expect(page.locator("#messages .message.user")).toHaveCount(2);
+});
+
+test("message rail expands on hover and touch; clicking a preview jumps to the corresponding message", async ({ page }) => {
+  const messages = Array.from({ length: 15 }, (_, i) => [{ id: `nav-u-${i}`, role: "user", text: `Request ${i + 1}: inspect this part` }, { id: `nav-a-${i}`, role: "assistant", text: "A lengthy answer.\n\n".repeat(10) }]).flat();
+  await openFixture(page, messages);
+  await page.getByRole("button", { name: "Message navigator", exact: true }).hover();
+  const first = page.getByRole("button", { name: "Jump to message 1:", exact: false }); await expect(first).toBeVisible(); await first.click();
+  const target = page.locator('[data-message-id="nav-u-0"]'); await expect(target).toBeFocused();
+  expect(await target.evaluate(n => { const s = document.querySelector("#messages").getBoundingClientRect(); return n.getBoundingClientRect().top >= s.top && n.getBoundingClientRect().bottom <= s.bottom; })).toBe(true);
+  await page.setViewportSize({ width: 390, height: 844 }); await page.getByRole("button", { name: "Message navigator", exact: true }).click();
+  await expect(page.locator("#message-nav-list")).toBeVisible(); await page.keyboard.press("Escape"); await expect(page.locator("#message-nav-list")).not.toBeVisible();
 });

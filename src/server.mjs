@@ -18,6 +18,8 @@ import { ModelCatalog } from "./models.mjs";
 import { Attachments } from "./attachments.mjs";
 import { CommandCatalog } from "./command-catalog.mjs";
 import { McpConnections } from "./mcp-connections.mjs";
+import { MCP_PRESETS } from "./mcp-presets.mjs";
+import { safeMcpUrl, oauthCookieName } from "./mcp-oauth.mjs";
 
 const MIME = {
   ".css": "text/css; charset=utf-8",
@@ -94,6 +96,7 @@ export async function createAgentWebServer(options = {}) {
   const organization = new ChatOrganization({ records, store, changed: sidebarChanged });
   const github = options.github || new GitHubConnection({ records, config: config.github });
   const mcps = new McpConnections(records, { ttlMs: config.sessionCapabilityTtlMs });
+  const publicOrigin = config.publicOrigin ? safeMcpUrl(config.publicOrigin).origin : null;
   const environments = new Environments(records, config.workerBackend, mcps);
   const models = options.models || new ModelCatalog(config);
   const attachments = new Attachments(records, store);
@@ -107,6 +110,19 @@ export async function createAgentWebServer(options = {}) {
     try {
       if (await gateway.handle(request, response, url)) return;
       if (await mcps.handle(request, response, url)) return;
+      if (url.pathname === "/oauth/mcp/callback" && request.method === "GET") {
+        // Browser session cookies are Strict. This callback instead requires its
+        // own Lax, HttpOnly flow cookie, minted by an authenticated same-origin POST.
+        const cookies = Object.fromEntries((request.headers.cookie || "").split(";").map(part => { const i = part.indexOf("="); return [part.slice(0, i).trim(), part.slice(i + 1)]; }));
+        let ok = false, message;
+        try { await mcps.oauth.finish(url.searchParams, cookies); ok = true; message = "Signed in successfully. Return to MCP connections to test and select this connection in an environment."; }
+        catch (error) { message = error.statusCode ? error.message : "OAuth sign-in failed. Start again from MCP connections."; }
+        const state = url.searchParams.get("state") || "";
+        if (/^[\w-]{43}$/.test(state)) response.setHeader("set-cookie", `${oauthCookieName(state)}=; Path=/oauth/mcp/; HttpOnly; SameSite=Lax; Max-Age=0${config.cookieSecure || publicOrigin?.startsWith("https:") ? "; Secure" : ""}`);
+        const escape = value => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
+        response.writeHead(ok ? 200 : 400, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        return response.end(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>MCP sign-in</title><link rel="stylesheet" href="/styles.css"><body><main class="oauth-result" data-success="${ok}"><h1>${ok ? "MCP connected" : "Unable to connect"}</h1><p>${escape(message)}</p><a href="/#mcp-connections">Return to MCP connections</a></main><script type="module" src="/mcp-oauth-result.js"></script></body></html>`);
+      }
       if (url.pathname === "/preview.html") {
         response.removeHeader("x-frame-options");
         response.setHeader("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts");
@@ -151,10 +167,25 @@ export async function createAgentWebServer(options = {}) {
       }
       if (url.pathname === "/api/github" && request.method === "GET") return json(response, 200, await github.status());
       if (url.pathname === "/api/mcps" && request.method === "GET") return json(response, 200, { connections: await mcps.list() });
+      if (url.pathname === "/api/mcps/presets" && request.method === "GET") return json(response, 200, { presets: MCP_PRESETS });
       if (url.pathname === "/api/mcps" && request.method === "POST") return json(response, 201, { connection: await mcps.save(await bodyJson(request, config.maxBodyBytes)) });
       const mcpRoute = /^\/api\/mcps\/(mcp_[a-f0-9-]{36})$/.exec(url.pathname);
       if (mcpRoute && request.method === "PATCH") return json(response, 200, { connection: await mcps.save(await bodyJson(request, config.maxBodyBytes), mcpRoute[1]) });
       if (mcpRoute && request.method === "DELETE") { await mcps.remove(mcpRoute[1]); return json(response, 200, { removed: true }); }
+      const mcpAction = /^\/api\/mcps\/(mcp_[a-f0-9-]{36})\/(test|oauth|disconnect)$/.exec(url.pathname);
+      if (mcpAction && request.method === "POST") {
+        const [, id, action] = mcpAction;
+        if (action === "test") return json(response, 200, { connection: await mcps.test(id) });
+        if (action === "disconnect") return json(response, 200, { connection: await mcps.oauth.disconnect(id) });
+        let origin = publicOrigin;
+        if (!origin) {
+          const candidate = safeMcpUrl(`http://${request.headers.host}`);
+          if (!["localhost", "127.0.0.1", "[::1]"].includes(candidate.hostname) || Number(candidate.port || 80) !== server.address().port) return json(response, 400, { error: "Set AGENT_WEB_PUBLIC_URL to this app’s public HTTPS address for OAuth callbacks." });
+          origin = candidate.origin;
+        }
+        const flow = await mcps.oauth.begin(id, `${origin}/oauth/mcp/callback`);
+        return json(response, 200, { authorizationUrl: flow.authorizationUrl }, { "set-cookie": `${oauthCookieName(flow.state)}=${flow.cookie}; Path=/oauth/mcp/; HttpOnly; SameSite=Lax; Max-Age=600${origin.startsWith("https:") || config.cookieSecure ? "; Secure" : ""}` });
+      }
       if (url.pathname === "/api/models" && request.method === "GET") return json(response, 200, await models.list(url.searchParams.get("agent")));
       if (url.pathname === "/api/github" && request.method === "POST") return json(response, 200, await github.connect(await bodyJson(request, config.maxBodyBytes)));
       if (url.pathname === "/api/github" && request.method === "DELETE") return json(response, 200, await github.disconnect());
