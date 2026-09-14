@@ -1,0 +1,17 @@
+{
+  "name": "agent-web-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A lightweight multi-chat web control plane for Codex and Claude Code CLI workers.",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "AGENT_ENABLE_MOCK=1 node --watch src/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "find src public scripts test -type f \\( -name '*.mjs' -o -name '*.js' \\) -print0 | xargs -0 -n1 node --check && node --test test/*.test.mjs",
+    "smoke:codex": "node scripts/smoke-real-codex.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

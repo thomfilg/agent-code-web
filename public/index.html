@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#10110f">
+    <title>Agent Relay</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand-row">
+          <a class="brand" href="/" aria-label="Agent Relay home">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 32 32" role="img"><path d="M7 16a9 9 0 0 1 15.8-5.9M25 16a9 9 0 0 1-15.8 5.9"/><path d="m20 6 3 4-5 1M12 26l-3-4 5-1"/></svg>
+            </span>
+            <span>Agent Relay</span>
+          </a>
+          <button class="icon-button mobile-only" id="close-sidebar" aria-label="Close chats">×</button>
+        </div>
+
+        <button class="new-chat-button" id="new-chat-button">
+          <span aria-hidden="true">＋</span>
+          New chat
+          <kbd>⌘ K</kbd>
+        </button>
+
+        <div class="sidebar-label">Conversations</div>
+        <nav class="chat-list" id="chat-list" aria-label="Conversations"></nav>
+
+        <div class="sidebar-footer">
+          <div class="system-state">
+            <span class="live-dot"></span>
+            <div>
+              <strong>Control plane online</strong>
+              <span id="isolation-label">Worker isolation loading…</span>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button class="icon-button mobile-only" id="open-sidebar" aria-label="Open chats">☰</button>
+          <div class="chat-heading">
+            <h1 id="chat-title">Agent Relay</h1>
+            <div class="chat-meta" id="chat-meta">Independent workspaces. Disposable runtimes.</div>
+          </div>
+          <div class="topbar-actions" id="chat-actions" hidden>
+            <button class="secondary-button" id="stop-button">Stop worker</button>
+            <button class="icon-button danger" id="delete-button" title="Delete chat" aria-label="Delete chat">⌫</button>
+          </div>
+        </header>
+
+        <section class="empty-state" id="welcome">
+          <div class="empty-orbit" aria-hidden="true"><span></span></div>
+          <p class="eyebrow">YOUR AGENTS, ON DEMAND</p>
+          <h2>Start work here.<br>Let the machine disappear later.</h2>
+          <p>Create an isolated chat workspace for Codex or Claude Code. Responses stream here, state survives, and idle workers shut down automatically.</p>
+          <button class="primary-button" id="welcome-new-chat">Create your first chat <span>→</span></button>
+          <div class="feature-strip">
+            <span>Separate workspace</span>
+            <span>Live CLI events</span>
+            <span>5-minute autosleep</span>
+          </div>
+        </section>
+
+        <section class="conversation" id="conversation" hidden>
+          <div class="runtime-banner" id="runtime-banner">
+            <div class="runtime-copy">
+              <span class="status-dot" id="status-dot"></span>
+              <div>
+                <strong id="runtime-status">Stopped</strong>
+                <span id="runtime-detail">The worker starts with your next message.</span>
+              </div>
+            </div>
+            <div class="countdown" id="countdown"></div>
+          </div>
+          <div class="messages" id="messages" aria-live="polite"></div>
+          <div class="approval-card" id="approval-card" hidden></div>
+          <div class="composer-wrap">
+            <form class="composer" id="composer">
+              <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message"></textarea>
+              <div class="composer-footer">
+                <div class="composer-agent" id="composer-agent"></div>
+                <button class="send-button" id="send-button" type="submit" aria-label="Send message">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
+                </button>
+              </div>
+            </form>
+            <p class="composer-hint">Enter to send · Shift + Enter for a new line</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="new-chat-dialog">
+      <form method="dialog" class="dialog-card" id="new-chat-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">NEW RUNTIME</p>
+            <h2>Create a conversation</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="Close">×</button>
+        </div>
+        <label>
+          <span>Agent</span>
+          <select id="agent-select" required></select>
+        </label>
+        <label>
+          <span>Name</span>
+          <input id="new-chat-title" maxlength="120" placeholder="e.g. Fix the billing flow">
+        </label>
+        <label>
+          <span>Repository source <small>optional</small></span>
+          <input id="workspace-source" placeholder="/path/to/local/git/repo or https://…">
+          <small>Committed files are cloned into a private workspace for this chat.</small>
+        </label>
+        <div class="dialog-security" id="dialog-security"></div>
+        <div class="dialog-actions">
+          <button class="secondary-button" value="cancel">Cancel</button>
+          <button class="primary-button" id="create-chat-button" value="default">Create chat</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="login-dialog">
+      <form method="dialog" class="dialog-card compact" id="login-form">
+        <p class="eyebrow">PRIVATE CONTROL PLANE</p>
+        <h2>Enter your access token</h2>
+        <p class="muted">This establishes an HttpOnly browser session. It is never sent to an agent worker.</p>
+        <label>
+          <span>Access token</span>
+          <input id="login-token" type="password" autocomplete="current-password" required>
+        </label>
+        <p class="form-error" id="login-error"></p>
+        <button class="primary-button full" value="default">Continue</button>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toasts" aria-live="assertive"></div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

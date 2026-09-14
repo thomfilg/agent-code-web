@@ -1,0 +1,105 @@
+#cloud-config
+# Builds a credential-free Agent Relay worker. Provider keys belong only on the
+# control plane and must never be added here, in an AMI, or in EC2 user-data.
+package_update: true
+package_upgrade: true
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - rsync
+  - tar
+
+users:
+  - default
+  - name: agent
+    gecos: Agent Relay worker
+    lock_passwd: true
+    shell: /bin/bash
+
+write_files:
+  - path: /etc/sudoers.d/91-agent-web-transport
+    owner: root:root
+    permissions: "0440"
+    content: |
+      ubuntu ALL=(agent) NOPASSWD: /bin/sh
+  - path: /usr/local/sbin/agent-web-force-command
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # EC2 injects the launch key for ubuntu. Keep that transport account, but
+      # force every SSH command to execute as the non-sudo agent account.
+      [ -n "${SSH_ORIGINAL_COMMAND:-}" ] || exit 64
+      exec sudo -n -u agent -- /bin/sh -c "${SSH_ORIGINAL_COMMAND}"
+  - path: /usr/local/sbin/agent-web-idle-watchdog
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      marker=/opt/agent-web/.heartbeat
+      [ -f "$marker" ] || exit 0
+      now=$(date +%s)
+      modified=$(stat -c %Y "$marker")
+      [ $((now - modified)) -lt 420 ] || /usr/sbin/shutdown -h now
+  - path: /etc/systemd/system/agent-web-heartbeat.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Refresh Agent Relay worker heartbeat at boot
+      [Service]
+      Type=oneshot
+      User=agent
+      ExecStart=/usr/bin/touch /opt/agent-web/.heartbeat
+      [Install]
+      WantedBy=multi-user.target
+  - path: /etc/systemd/system/agent-web-idle-watchdog.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Stop an abandoned Agent Relay worker
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/agent-web-idle-watchdog
+  - path: /etc/systemd/system/agent-web-idle-watchdog.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Check Agent Relay worker idle heartbeat
+      After=agent-web-heartbeat.service
+      [Timer]
+      OnBootSec=1min
+      OnUnitActiveSec=1min
+      AccuracySec=10s
+      [Install]
+      WantedBy=timers.target
+  - path: /etc/ssh/sshd_config.d/90-agent-worker.conf
+    permissions: "0644"
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin no
+      Match User ubuntu
+        ForceCommand /usr/local/sbin/agent-web-force-command
+        AllowTcpForwarding no
+        X11Forwarding no
+        PermitTunnel no
+        PermitTTY no
+
+runcmd:
+  - curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource-setup.sh
+  - bash /tmp/nodesource-setup.sh
+  - apt-get install -y nodejs
+  - npm install --global @openai/codex @anthropic-ai/claude-code
+  - install -d -o agent -g agent -m 0700 /opt/agent-web /opt/agent-web/chats
+  - install -o agent -g agent -m 0600 /dev/null /opt/agent-web/.heartbeat
+  - sh -c 'codex --version > /opt/agent-web/versions.txt'
+  - sh -c 'claude --version >> /opt/agent-web/versions.txt'
+  - chown agent:agent /opt/agent-web/versions.txt
+  - systemctl daemon-reload
+  - systemctl enable agent-web-heartbeat.service agent-web-idle-watchdog.timer
+  - systemctl restart ssh
+  - rm -f /tmp/nodesource-setup.sh
+  - touch /opt/agent-web/READY
