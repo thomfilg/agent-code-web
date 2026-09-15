@@ -111,7 +111,7 @@ the long-lived provider secret.
 | `CODEX_AUTH_MODE` | `gateway` | `gateway` or `host` |
 | `CLAUDE_AUTH_MODE` | `gateway` | `gateway` or `host` |
 
-## Shared Chrome (in progress)
+## Shared Chrome
 
 Open **Browser** in a chat’s top-right toolbar. The desktop view is a third
 column; narrow screens use an overlay. You and the agent see and interact with
@@ -151,13 +151,74 @@ AMIs need rebuilding; selecting Chrome cannot add system packages with sudo.
 No sandbox-disable fallback is used. A custom binary can be selected with
 `AGENT_CHROME_BIN`. Installation runs in the worker, not in your personal Chrome.
 
-**Not implemented yet:** private per-user saved signed-in connections, personal
-Chrome pairing, and the top-right **Use my signed-in Chrome** toggle. The final
-permission model keeps normal guest browsing available at all times; saving a
-login must not grant agent access. Access to a saved connection must be explicit
-per chat and revocable without signing the user out. Do not use a shared app
-token as a substitute for per-user authorization. These remain part of the
-active shared-browser work, not completed features.
+### Optional signed-in personal Chrome
+
+The top-right **Signed-in Chrome** switch is **off by default**. Normal browser
+tools always use the separate guest profile until you explicitly authorize a
+saved personal connection for that chat. Pairing alone never grants access.
+
+1. Open **Browser connections** in the sidebar. Create or sign into your private
+   Relay account. This is a separate username/password, **not** your Google login.
+2. Download and extract the extension ZIP from that dialog. In your personal
+   Chrome, open `chrome://extensions`, enable Developer mode, select **Load
+   unpacked**, and choose the extracted `agent-relay-chrome` folder. Installation
+   is manual; Relay cannot silently install an extension in your personal profile.
+3. Name the connection and generate a five-minute, single-use pairing code.
+   Open the extension and enter Relay's origin (for example,
+   `http://127.0.0.1:8787`) and that code. Use HTTPS for non-loopback deployments.
+4. Sign into websites normally in that Chrome profile. The logins stay in Chrome;
+   Relay never exports its cookies, passwords, or profile files into a worker.
+5. In a chat, turn on **Signed-in Chrome**, choose your saved connection, and
+   confirm the permission. An existing shared chat becomes private to your
+   account first; its transcript/workspace stay intact and its queue stays paused.
+   Stop a running agent before claiming a shared chat. Chats created while signed
+   into a private account are private from creation.
+
+Sharing creates one separate automation tab in that profile; existing personal
+tabs are never listed or controlled. The Browser column and `relay_browser` MCP
+tools both operate on this tab. Chrome displays its native debugger warning and
+the extension badge shows **ON**. The agent can read and act on websites using
+your logins, so enable it only for trusted work. Sign-in popups should be used in
+your normal tabs before sharing; automation popups are closed to keep access
+confined to one tab.
+
+Turning the switch off invalidates pending tool results, disconnects personal
+viewers, and closes the automation tab. It returns tools to guest Chrome without
+signing you out of websites. The extension's **Stop agent access**, closing its
+automation tab, disconnecting, signing out of Relay, stopping the worker, or
+permission expiry also revokes access. Changes already made on a website cannot
+be undone by revocation. Sharing expires after `AGENT_CAPABILITY_TTL_MS` (one hour
+by default), or sooner if the private account session expires.
+
+Each user sees only their own saved connections and private chats through the
+API, sidebar, transcript stream and browser viewer. Passwords use salted scrypt;
+account sessions and connection hashes live in Relay's encrypted control-plane
+database, outside workers. The extension saves its connection token in local
+extension storage, not Chrome Sync. Saved pairing and website logins survive
+restarts, but active agent permission **never** survives a controller or Chrome
+reconnection. You must enable it again.
+
+**Localhost differs by mode:** guest Chrome reaches the worker's development
+server, including when the worker is remote. Personal Chrome runs on **your
+computer**, so its localhost is not an EC2 worker. Use guest mode for remote
+worker previews, or a development URL already reachable from your computer.
+Personal automation also blocks Relay's own hostname (on every port) to protect
+the account controlling its permissions; use guest mode for that hostname.
+
+Private browser accounts enforce application authorization, not hostile-tenant
+isolation of local CLI processes. Local workers still share the controller's
+OS/filesystem trust boundary. Host administrators and untrusted local agent code
+must not be treated as separate tenants; use dedicated worker infrastructure for
+that boundary. The AMI Chrome recipe is included, but cloud deployment requires
+building/deploying your worker image separately.
+
+Verification: `npm run check` includes a real extension test in a fresh Chrome
+profile (requires `npx playwright install chromium`). It exercises account and
+pairing UI, explicit consent, live MCP/viewer access, off/revoke, and persisted
+pairing/login after Chrome and Relay restart without making model calls.
+`npm run test:browser` covers interactive guest Chrome on desktop/mobile;
+`npm run smoke:mcps` verifies both real CLIs discover the browser tools without
+running a model turn.
 
 ## Chat organization
 

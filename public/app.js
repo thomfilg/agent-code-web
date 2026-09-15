@@ -12,6 +12,7 @@ import { MessageHistory } from "./message-history.js";
 import { MessageNavigator } from "./message-navigator.js";
 import { DocumentPreview } from "./document-preview.js";
 import { SharedBrowserPanel } from "./shared-browser.js";
+import { BrowserConnectionSettings } from "./browser-connections.js";
 
 const state = {
   config: null,
@@ -182,6 +183,7 @@ function renderActive() {
   const chat = state.active;
   documentPreview.setChat(chat?.id);
   sharedBrowser.setChat(chat?.id);
+  browserConnectionSettings.setChat(chat?.id);
   elements.welcome.hidden = Boolean(chat);
   elements.conversation.hidden = !chat;
   elements.actions.hidden = !chat;
@@ -539,6 +541,15 @@ const toolActivity = new ToolActivity();
 const usagePanel = new UsagePanel({ state, api, toast });
 const documentPreview = new DocumentPreview();
 const sharedBrowser = new SharedBrowserPanel({ api });
+const browserConnectionSettings = new BrowserConnectionSettings({ api, state, toast, browser: sharedBrowser,
+  accountChanged: async () => {
+    await sidebar.refresh();
+    if (state.active && !state.chats.some(chat => chat.id === state.active.id)) { state.eventSource?.close(); state.active = null; state.stream = null; }
+    if (state.active) await selectChat(state.active.id); else if (state.chats.length) await selectChat(state.chats[0].id); else renderActive();
+    renderChats();
+  },
+  chatUpdated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = chat; renderActive(); } },
+});
 const chatControls = new ChatControls({ state, api, toast,
   preview: documentPreview,
   updated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = { ...state.active, ...chat }; renderActive(); } },

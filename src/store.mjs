@@ -84,11 +84,12 @@ export class ChatStore {
     return chat ? clone(chat) : null;
   }
 
-  async create({ title, agent, source = "", repositories = [], environmentId = null, environmentName = null, autoTitle = true, model = null, effort = null, modelSelectionSet = false }) {
+  async create({ title, agent, source = "", repositories = [], environmentId = null, environmentName = null, autoTitle = true, model = null, effort = null, modelSelectionSet = false, ownerId = null }) {
     const id = newId("chat");
     const timestamp = nowIso();
     const chat = {
       id,
+      ownerId,
       revision: 1,
       title,
       agent,

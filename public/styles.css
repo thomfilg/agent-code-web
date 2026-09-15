@@ -326,6 +326,25 @@ dialog { max-height: calc(100dvh - 28px); }
 .browser-panel.expanded { position: fixed; inset: 12px; z-index: 55; border: 1px solid var(--line-bright); border-radius: 12px; }
 .browser-panel .preview-heading { flex-shrink: 0; }
 .browser-profile-label { margin-left: auto; color: var(--muted); font-size: 11px; }
+.signed-chrome-toggle { position: relative; display: inline-flex; align-items: center; gap: 7px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 11px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.signed-chrome-toggle input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.toggle-track { width: 25px; height: 14px; flex: none; border-radius: 12px; background: #41473a; position: relative; }
+.toggle-track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: #b2bba9; transition: transform .15s; }
+.signed-chrome-toggle:has(input:checked) { color: var(--amber); border-color: #766033; }
+.signed-chrome-toggle input:checked + .toggle-track { background: #8d6625; }
+.signed-chrome-toggle input:checked + .toggle-track::after { transform: translateX(11px); background: #ffdd97; }
+.signed-chrome-toggle:has(input:focus-visible) { outline: 2px solid var(--lime); }
+.signed-chrome-toggle:has(input:disabled) { opacity: .5; cursor: wait; }
+.browser-connections-card { width: min(650px, calc(100vw - 36px)); }
+.browser-account-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+#browser-account-logout { margin-left: auto; }
+.browser-connection-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; margin: 8px 0; border: 1px solid var(--line); border-radius: 8px; }
+.browser-connection-row small { display: block; }
+#browser-pair-instructions { margin-top: 18px; }
+#browser-pair-instructions summary { cursor: pointer; }
+#browser-pair-instructions li { margin-bottom: 10px; }
+#browser-settings-error, #browser-share-error { color: var(--red); font-size: 12px; }
+@media (max-width: 700px) { .signed-chrome-toggle .toggle-text { display: none; } .signed-chrome-toggle { padding: 10px 6px; } }
 .browser-tabbar, .browser-toolbar, .browser-options { display: flex; align-items: center; gap: 6px; }
 .browser-tabbar select, .browser-toolbar input { min-width: 0; flex: 1; }
 .browser-panel input, .browser-panel select { color: var(--text); background: var(--panel); border: 1px solid var(--line-bright); border-radius: 7px; }

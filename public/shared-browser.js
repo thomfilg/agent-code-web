@@ -11,8 +11,8 @@ export class SharedBrowserPanel {
     $("#expand-browser").onclick = () => { const expanded = this.panel.classList.toggle("expanded"); $("#expand-browser").setAttribute("aria-pressed", String(expanded)); };
     $("#browser-connect").onclick = () => this.connect();
     $("#browser-stop").onclick = async () => {
-      const chatId = this.chatId; this.disconnect();
-      try { await this.api(`/api/chats/${chatId}/browser`, { method: "DELETE" }); if (this.chatId === chatId) this.status("Chrome stopped. Its separate profile has been discarded."); }
+      const chatId = this.chatId, personal = this.mode === "personal"; this.disconnect();
+      try { await this.api(`/api/chats/${chatId}/browser`, { method: "DELETE" }); if (this.chatId === chatId) this.status(personal ? "Chrome stopped. Signed-in access is off; your personal logins stay saved." : "Chrome stopped. Its separate profile has been discarded."); }
       catch (error) { if (this.chatId === chatId) this.status(error.message); }
     };
     $("#browser-address-form").onsubmit = event => { event.preventDefault(); this.navigate($("#browser-address").value.trim()); };
@@ -63,6 +63,7 @@ export class SharedBrowserPanel {
     this.connect();
   }
   close() { closeSidePanel("browser"); this.disconnect(); }
+  accessChanged() { this.disconnect(); if (!this.panel.hidden) this.connect(); }
   disconnect() {
     const socket = this.socket; this.socket = null; socket?.close(); this.connected = false;
     this.frameVersion = (this.frameVersion || 0) + 1;
@@ -72,7 +73,7 @@ export class SharedBrowserPanel {
   }
   connect() {
     if (!this.chatId || this.socket) return;
-    this.status("Connecting to Chrome in this chat’s worker…"); $("#browser-connect").disabled = true;
+    this.status("Connecting to this chat’s shared Chrome…"); $("#browser-connect").disabled = true;
     const url = new URL(`/api/chats/${this.chatId}/browser/live`, location.href); url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(url); this.socket = socket;
     socket.onmessage = event => {
@@ -81,6 +82,10 @@ export class SharedBrowserPanel {
       if (message.error) { this.status(message.error); return; }
       if (message.event === "status") {
         this.connected = true; $("#browser-connect").hidden = true;
+        this.mode = message.value.mode;
+        $("#browser-new-tab").disabled = this.mode === "personal"; $("#browser-close-tab").disabled = this.mode === "personal"; $("#browser-tabs").disabled = this.mode === "personal";
+        $("#browser-profile-label").textContent = this.mode === "personal" ? "Your signed-in Chrome" : "Separate profile";
+        $("#browser-footnote").textContent = this.mode === "personal" ? "Signed-in sharing is ON for this chat. Localhost is your computer, not a remote worker. Turn off the top-right switch to revoke access and close the automation tab." : "You and the agent share this page. Localhost reaches the chat’s worker. Your personal Chrome and its saved logins are not connected.";
         this.status("Live · click or type in the page. Chrome stays awake while this panel is connected.");
         this.renderTabs(message.value);
       }
@@ -93,7 +98,7 @@ export class SharedBrowserPanel {
       }
     };
     socket.onerror = () => { if (this.socket === socket) this.status("Unable to connect. Check that Chrome is installed in the worker and that you are signed into Agent Relay."); };
-    socket.onclose = () => { if (this.socket === socket) { this.disconnect(); this.status("Browser connection closed. Reconnect when you’re ready."); } };
+    socket.onclose = event => { if (this.socket === socket) { this.disconnect(); if (event.code === 4001 && !this.panel.hidden) { this.connect(); return; } this.status("Browser connection closed. Reconnect when you’re ready."); } };
   }
   send(action, params = {}) {
     if (!this.connected || this.socket?.readyState !== WebSocket.OPEN) { this.status("Connect to Chrome before interacting with the page."); return; }

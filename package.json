@@ -9,7 +9,7 @@
     "dev": "AGENT_ENABLE_MOCK=1 node --watch src/server.mjs",
     "test": "node --test test/*.test.mjs",
     "test:browser": "playwright test",
-    "check": "find src public scripts test -type f \\( -name '*.mjs' -o -name '*.js' \\) -print0 | xargs -0 -n1 node --check && node --test test/*.test.mjs",
+    "check": "find src public scripts test chrome-extension -type f \\( -name '*.mjs' -o -name '*.js' \\) -print0 | xargs -0 -n1 node --check && node --test test/*.test.mjs",
     "smoke:codex": "node scripts/smoke-real-codex.mjs",
     "smoke:mcps": "node scripts/smoke-real-mcps.mjs"
   },
@@ -20,6 +20,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "dompurify": "^3.4.15",
     "embedded-postgres": "^17.10.0-beta.17",
+    "fflate": "^0.8.3",
     "marked": "^18.0.13",
     "pg": "^8.23.0",
     "ws": "^8.21.3",

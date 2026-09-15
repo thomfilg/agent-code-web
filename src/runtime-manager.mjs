@@ -158,6 +158,19 @@ export class RuntimeManager extends EventEmitter {
     if (!this.#runtimes.has(chatId) && !this.isBusy(chatId) && !this.browsers?.entries.has(chatId) && this.store.get(chatId)) await this.stop(chatId, "idle-timeout");
   }
 
+  async makePrivate(chatId, ownerId) {
+    const chat = this.store.get(chatId);
+    if (!chat || chat.ownerId && chat.ownerId !== ownerId) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    if (chat.ownerId === ownerId) return chat;
+    if (this.isBusy(chatId) || ["starting", "stopping"].includes(chat.status)) throw Object.assign(new Error("Stop the agent before making this chat private"), { statusCode: 409 });
+    this.#switching.add(chatId);
+    try {
+      await this.stop(chatId, "private-browser");
+      const updated = await this.store.update(chatId, { ownerId, queuePaused: true });
+      this.publishChat(updated); return updated;
+    } finally { this.#switching.delete(chatId); }
+  }
+
   async switchAgent(chatId, agent) {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
@@ -254,7 +267,7 @@ export class RuntimeManager extends EventEmitter {
     finally { runtime.busy = false; if (this.#runtimes.get(chatId) === runtime) await this.#scheduleIdleStop(chatId, runtime); void this.#drainQueue(chatId); }
   }
 
-  async createChat(input = {}) {
+  async createChat(input = {}, ownerId = null) {
     const allowed = this.availableAgents().filter((agent) => agent.enabled).map((agent) => agent.id);
     const agent = input.agent || allowed[0];
     if (!allowed.includes(agent)) throw new Error(`agent is not enabled: ${agent}`);
@@ -265,7 +278,7 @@ export class RuntimeManager extends EventEmitter {
     if (environment && environment.backend !== this.config.workerBackend) throw new Error(`This server uses ${this.config.workerBackend} workers. Select an environment with that backend.`);
     const repositories = input.repositories ? await this.github.resolveSelections(input.repositories) : [];
     const modelSettings = this.models ? await this.models.creationSettings(agent, input) : {};
-    const chat = await this.store.create({ title, agent, ...modelSettings, modelSelectionSet: Object.hasOwn(input, "model") || Object.hasOwn(input, "effort"), source: repositories.length ? "" : source, repositories,
+    const chat = await this.store.create({ title, agent, ownerId, ...modelSettings, modelSelectionSet: Object.hasOwn(input, "model") || Object.hasOwn(input, "effort"), source: repositories.length ? "" : source, repositories,
       environmentId: environment?.id, environmentName: environment?.name, autoTitle: !input.title });
     try {
       if (repositories.length) {
@@ -287,13 +300,13 @@ export class RuntimeManager extends EventEmitter {
     }
   }
 
-  async copyTranscript(chatId, input = {}) {
+  async copyTranscript(chatId, input = {}, ownerId = null) {
     const source = this.store.get(chatId);
     if (!source) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     const title = input.title ? clampText(input.title, 120, "title") : `Copy of ${source.title}`.slice(0, 120);
     // Copy the transcript only. Never reuse a runtime, workspace, credentials,
     // queued prompts, PR automation, or usage counters from the source chat.
-    const copy = await this.store.create({ title, agent: source.agent, model: source.model, effort: source.effort, modelSelectionSet: source.modelSelectionSet, autoTitle: false });
+    const copy = await this.store.create({ title, ownerId: source.ownerId || ownerId, agent: source.agent, model: source.model, effort: source.effort, modelSelectionSet: source.modelSelectionSet, autoTitle: false });
     try {
       await prepareWorkspace({ destination: copy.workspace, source: "" });
       const messages = source.messages.map(message => ({ ...message, id: newId("msg"),
@@ -384,7 +397,7 @@ export class RuntimeManager extends EventEmitter {
       const currentChat = this.store.get(chatId);
       if (runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
       const raw = (skill ? text.replace(/^\/[\w:.-]+/, `$${skill.name}`) : text) + attached;
-      const browserPrompt = this.browsers ? "\n\nShared Chrome is available through the relay_browser MCP tools. Use that browser for live verification so the user sees the same page in the Browser panel. Start development servers in this worker; browser_navigate can open http://localhost:3000 (or the actual dev port). Keep the server running while the user tests it. The default profile has none of the user's saved logins. Signing in is the user's action; never request passwords or cookies in chat.\n" : "";
+      const browserPrompt = this.browsers ? "\n\nShared Chrome is available through the relay_browser MCP tools. Use that browser for live verification so the user sees the same page in the Browser panel. Start development servers in this worker; guest Chrome can open http://localhost:3000 (or the actual dev port). Keep the server running while the user tests it. The default guest profile has none of the user's saved logins. browser_tabs reports the current mode. The user can explicitly enable their personal Chrome: then localhost is their own computer, not a remote worker, and only a separate automation tab is shared. Never enable personal access yourself or request passwords or cookies in chat. Signing in and granting access are the user's actions.\n" : "";
       const prompt = handoffPrompt(currentChat, raw) + browserPrompt;
       // Keep Claude slash commands at the beginning of the user input. Relay's
       // metadata/handoff instructions belong in the appended system prompt.

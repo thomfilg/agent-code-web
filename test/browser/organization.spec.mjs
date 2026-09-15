@@ -61,6 +61,9 @@ test("automatic sidebar status symbols use the requested colors and accessible l
 });
 
 test("pin, drag to a custom group, restore grouping, sort, and persist across tabs", async ({ page, context }) => {
+  // Keep both drag endpoints visible; the settings footer leaves less room in
+  // a short viewport, and dragTo cannot auto-scroll between clipped endpoints.
+  await page.setViewportSize({ width: 1280, height: 1000 });
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   await page.goto("/");
   await page.getByRole("button", { name: "Pin Existing alpha", exact: true }).click();

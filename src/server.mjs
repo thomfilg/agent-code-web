@@ -22,6 +22,9 @@ import { MCP_PRESETS } from "./mcp-presets.mjs";
 import { safeMcpUrl, oauthCookieName } from "./mcp-oauth.mjs";
 import { SharedBrowsers } from "./shared-browser.mjs";
 import { WebSocketServer } from "ws";
+import { BrowserUsers } from "./browser-users.mjs";
+import { BrowserConnections } from "./browser-connections.mjs";
+import { zipSync } from "fflate";
 
 const MIME = {
   ".css": "text/css; charset=utf-8",
@@ -64,6 +67,7 @@ async function bodyJson(request, limit) {
     if (size > limit) throw Object.assign(new Error("request body too large"), { statusCode: 413 });
     chunks.push(chunk);
   }
+  request.guardChat?.();
   if (!chunks.length) return {};
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -91,6 +95,7 @@ export async function createAgentWebServer(options = {}) {
   await store.initialize();
   const broker = options.broker || new CapabilityBroker({ ttlMs: config.sessionCapabilityTtlMs });
   const auth = new BrowserAuth({ token: config.authToken, secure: config.cookieSecure });
+  const browserUsers = new BrowserUsers(records, { secure: config.cookieSecure });
   const gateway = new ProviderGateway({ config, broker });
   const sseClients = new Set();
   const sidebarClients = new Set();
@@ -106,6 +111,13 @@ export async function createAgentWebServer(options = {}) {
   await environments.initialize();
   let manager = null;
   const browserSockets = new WebSocketServer({ noServer: true, maxPayload: 100000, perMessageDeflate: false });
+  const personalSockets = new WebSocketServer({ noServer: true, maxPayload: 4 * 1024 * 1024, perMessageDeflate: false });
+  const releaseIdentity = async user => {
+    if (!user) return;
+    await manager?.browsers.personal?.revokeOwner(user.id);
+    for (const client of sseClients) if (client.ownerId === user.id) client.close();
+    for (const socket of browserSockets.clients) if (socket.ownerId === user.id) socket.close(1000, "Signed out");
+  };
 
   const server = http.createServer(async (request, response) => {
     securityHeaders(response);
@@ -148,16 +160,45 @@ export async function createAgentWebServer(options = {}) {
         return json(response, 200, { authenticated: true }, headers);
       }
       if (url.pathname === "/api/session" && request.method === "DELETE") {
-        return json(response, 200, { authenticated: false }, { "set-cookie": auth.clearCookie() });
+        await releaseIdentity(await browserUsers.logout(request));
+        return json(response, 200, { authenticated: false }, { "set-cookie": [auth.clearCookie(), browserUsers.cookie()] });
       }
 
       if (url.pathname.startsWith("/api/") && !auth.authenticated(request)) {
         return json(response, 401, { error: "authentication required" });
       }
       if (!manager && url.pathname.startsWith("/api/")) return json(response, 503, { error: "control plane is starting" });
+      const user = url.pathname.startsWith("/api/") ? await browserUsers.session(request) : null;
+      const visibleChats = () => store.list().filter(chat => browserUsers.canRead(chat, user));
+      if (url.pathname === "/api/browser-account" && request.method === "GET") return json(response, 200, { user: browserUsers.public(user) });
+      if (["/api/browser-account/register", "/api/browser-account/login"].includes(url.pathname) && request.method === "POST") {
+        const input = await bodyJson(request, 10000);
+        const result = await browserUsers[url.pathname.endsWith("register") ? "register" : "login"](input, request.socket.remoteAddress);
+        await browserUsers.logout(request); await releaseIdentity(user);
+        return json(response, 200, { user: result.user }, { "set-cookie": result.cookie });
+      }
+      if (url.pathname === "/api/browser-account" && request.method === "DELETE") {
+        await browserUsers.logout(request);
+        await releaseIdentity(user);
+        return json(response, 200, { user: null }, { "set-cookie": browserUsers.cookie() });
+      }
+      if (url.pathname === "/api/browser-connections" && request.method === "GET") return json(response, 200, { connections: await manager.browsers.personal.list(user) });
+      if (url.pathname === "/api/browser-extension/download" && request.method === "GET") {
+        const files = {};
+        for (const name of ["manifest.json", "worker.js", "popup.html", "popup.css", "popup.js"]) files[`agent-relay-chrome/${name}`] = new Uint8Array(await readFile(new URL(`../chrome-extension/${name}`, import.meta.url)));
+        const archive = zipSync(files);
+        response.writeHead(200, { "content-type": "application/zip", "content-disposition": 'attachment; filename="agent-relay-chrome.zip"', "cache-control": "no-store" });
+        response.end(Buffer.from(archive)); return;
+      }
+      if (url.pathname === "/api/browser-connections" && request.method === "POST") {
+        browserUsers.require(user);
+        return json(response, 201, await manager.browsers.personal.pair(user, await bodyJson(request, 2000)));
+      }
+      const browserConnection = /^\/api\/browser-connections\/(browser_[a-f0-9-]{36})$/.exec(url.pathname);
+      if (browserConnection && request.method === "DELETE") { await manager.browsers.personal.remove(browserConnection[1], user); return json(response, 200, { removed: true }); }
 
       if (url.pathname === "/api/health" && request.method === "GET") {
-        return json(response, 200, { ok: true, chats: store.list().length, activeCapabilities: broker.size });
+        return json(response, 200, { ok: true, chats: visibleChats().length, activeCapabilities: broker.size });
       }
       if (url.pathname === "/api/config" && request.method === "GET") {
         return json(response, 200, {
@@ -221,14 +262,14 @@ export async function createAgentWebServer(options = {}) {
         return json(response, 200, { preferences });
       }
       if (url.pathname === "/api/chats" && request.method === "GET") {
-        return json(response, 200, { chats: store.list().map(summary) });
+        return json(response, 200, { chats: visibleChats().map(summary) });
       }
       if (url.pathname === "/api/chats" && request.method === "POST") {
-        const chat = await manager.createChat(await bodyJson(request, config.maxBodyBytes));
+        const chat = await manager.createChat(await bodyJson(request, config.maxBodyBytes), user?.id);
         return json(response, 201, { chat });
       }
       if (url.pathname === "/api/sidebar" && request.method === "GET") {
-        return json(response, 200, { chats: store.list().map(summary), groups: await organization.listGroups(), preferences: await organization.preferences() });
+        return json(response, 200, { chats: visibleChats().map(summary), groups: await organization.listGroups(), preferences: await organization.preferences() });
       }
       if (url.pathname === "/api/sidebar/preferences" && request.method === "PATCH") {
         return json(response, 200, { preferences: await organization.savePreferences(await bodyJson(request, config.maxBodyBytes)) });
@@ -247,15 +288,37 @@ export async function createAgentWebServer(options = {}) {
       }
       const groupRoute = /^\/api\/groups\/(group_[a-f0-9-]{36})$/.exec(url.pathname);
       if (groupRoute && request.method === "PATCH") return json(response, 200, { group: await organization.saveGroup(await bodyJson(request, config.maxBodyBytes), groupRoute[1]) });
-      if (groupRoute && request.method === "DELETE") { await organization.removeGroup(groupRoute[1]); return json(response, 200, { removed: true }); }
+      if (groupRoute && request.method === "DELETE") {
+        if (store.list().some(chat => chat.customGroupId === groupRoute[1] && !browserUsers.canRead(chat, user))) return json(response, 403, { error: "This group contains private chats you cannot modify" });
+        await organization.removeGroup(groupRoute[1]); return json(response, 200, { removed: true });
+      }
 
       const routed = routeChat(url.pathname);
       if (routed) {
         const { chatId, tail } = routed;
+        request.guardChat = () => { if (!browserUsers.canRead(store.get(chatId), user)) throw Object.assign(new Error("Chat not found"), { statusCode: 404 }); };
+        request.guardChat();
+        if (tail === "browser/access" && request.method === "GET") return json(response, 200, manager.browsers.personal.info(chatId, user));
+        if (tail === "browser/access" && request.method === "PATCH") {
+          browserUsers.require(user); const input = await bodyJson(request, 2000);
+          if (input.enabled === true) {
+            if (input.confirm !== true) throw new Error("Confirm granting this chat access to your signed-in Chrome profile");
+            return json(response, 200, await manager.browsers.personal.enable(chatId, user, input.connectionId));
+          }
+          if (input.enabled !== false) throw new Error("enabled must be true or false");
+          await manager.browsers.personal.revokeChat(chatId);
+          return json(response, 200, manager.browsers.personal.info(chatId, user));
+        }
+        if (tail === "privacy" && request.method === "POST") {
+          browserUsers.require(user);
+          const body = await bodyJson(request, 1000);
+          if (body.confirm !== true) throw new Error("Confirm making this chat private to your account");
+          return json(response, 200, { chat: await manager.makePrivate(chatId, user.id) });
+        }
         if (tail === "browser" && request.method === "GET") return json(response, 200, manager.browsers.info(chatId));
         if (tail === "browser" && request.method === "POST") { await manager.browsers.ensure(chatId); return json(response, 200, manager.browsers.info(chatId)); }
         if (tail === "browser" && request.method === "DELETE") { await manager.browsers.stop(chatId, false); await manager.browserIdle(chatId); return json(response, 200, { stopped: true }); }
-        if (tail === "copy" && request.method === "POST") return json(response, 201, { chat: await manager.copyTranscript(chatId, await bodyJson(request, config.maxBodyBytes)) });
+        if (tail === "copy" && request.method === "POST") return json(response, 201, { chat: await manager.copyTranscript(chatId, await bodyJson(request, config.maxBodyBytes), user?.id) });
         if (tail === "commands" && request.method === "GET") {
           const chat = store.get(chatId); if (!chat) return json(response, 404, { error: "Chat not found" });
           return json(response, 200, await commands.list(chat));
@@ -334,12 +397,18 @@ export async function createAgentWebServer(options = {}) {
             response.write(`id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`);
           }
           const onEvent = (event) => {
+            if (!auth.authenticated(request) || store.get(chatId) && !browserUsers.canRead(store.get(chatId), user)) { client.close(); return; }
             if (event.chatId === chatId) response.write(`id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`);
           };
           manager.on("event", onEvent);
-          const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15_000);
+          const heartbeat = setInterval(() => {
+            void browserUsers.session(request).then(current => {
+              if (!auth.authenticated(request) || user && current?.id !== user.id || !browserUsers.canRead(store.get(chatId), current)) { client.close(); return; }
+              if (!response.writableEnded) response.write(": heartbeat\n\n");
+            }).catch(() => client.close());
+          }, 15_000);
           heartbeat.unref?.();
-          const client = { response, close: () => { clearInterval(heartbeat); manager.off("event", onEvent); response.end(); } };
+          const client = { response, ownerId: user?.id, close: () => { clearInterval(heartbeat); manager.off("event", onEvent); response.end(); } };
           sseClients.add(client);
           request.once("close", () => { clearInterval(heartbeat); manager.off("event", onEvent); sseClients.delete(client); });
           return;
@@ -373,20 +442,30 @@ export async function createAgentWebServer(options = {}) {
     }
   });
 
-  server.on("upgrade", (request, socket, head) => {
+  server.on("upgrade", async (request, socket, head) => {
     const reject = code => { socket.end(`HTTP/1.1 ${code}\r\nConnection: close\r\n\r\n`); };
     let url, origin;
     try { url = new URL(request.url, `http://${request.headers.host}`); origin = new URL(request.headers.origin); }
     catch { reject("403 Forbidden"); return; }
+    if (url.pathname === "/browser/connect") {
+      if (!manager || url.search || !/^chrome-extension:\/\/[a-p]{32}$/.test(request.headers.origin || "") || personalSockets.clients.size >= 100) { reject("403 Forbidden"); return; }
+      personalSockets.handleUpgrade(request, socket, head, ws => manager.browsers.personal.accept(ws, origin.hostname)); return;
+    }
     const routed = routeChat(url.pathname);
     const expectedProtocol = config.cookieSecure ? "https:" : "http:";
     if (origin.host !== request.headers.host || origin.protocol !== expectedProtocol || url.search || !auth.authenticated(request)) { reject("403 Forbidden"); return; }
-    if (!manager || !routed || routed.tail !== "browser/live" || !store.get(routed.chatId)) { reject("404 Not Found"); return; }
+    let user; try { user = await browserUsers.session(request); } catch { reject("503 Service Unavailable"); return; }
+    if (!manager || !routed || routed.tail !== "browser/live" || !browserUsers.canRead(store.get(routed.chatId), user)) { reject("404 Not Found"); return; }
     browserSockets.handleUpgrade(request, socket, head, ws => {
+      ws.ownerId = user?.id;
       ws.on("error", () => {});
       let alive = true;
       ws.on("pong", () => { alive = true; });
-      const heartbeat = setInterval(() => { if (!alive || !auth.authenticated(request)) { ws.terminate(); return; } alive = false; ws.ping(); }, 15000);
+      const heartbeat = setInterval(() => {
+        if (!alive || !auth.authenticated(request) || !browserUsers.canRead(store.get(routed.chatId), user)) { ws.terminate(); return; }
+        if (user) void browserUsers.session(request).then(current => { if (current?.id !== user.id) ws.terminate(); }).catch(() => ws.terminate());
+        alive = false; ws.ping();
+      }, 15000);
       heartbeat.unref?.(); ws.once("close", () => clearInterval(heartbeat));
       void manager.browsers.attach(routed.chatId, ws).catch(error => {
         if (ws.readyState === 1) ws.send(JSON.stringify({ event: "closed", value: { message: errorMessage(error) } }));
@@ -431,6 +510,11 @@ export async function createAgentWebServer(options = {}) {
       adapterFactory: options.adapterFactory || null,
     });
     manager.browsers = new SharedBrowsers({ store, config, acquire: chatId => manager.browserExecutor(chatId), onIdle: chatId => manager.browserIdle(chatId), ...options.browserOptions });
+    manager.browsers.personal = new BrowserConnections({ records, store, ttlMs: config.sessionCapabilityTtlMs });
+    manager.browsers.personal.on("changed", chatId => {
+      manager.browsers.touch(chatId);
+      for (const socket of manager.browsers.entries.get(chatId)?.viewers || []) socket.close(4001, "Browser access changed");
+    });
     manager.on("event", event => { if (["chat_updated", "message", "chat_deleted"].includes(event.type)) sidebarChanged(); });
     manager.pullRequests.start();
     return { host: config.host, port, url: `http://${config.host.includes(":") ? `[${config.host}]` : config.host}:${port}` };
@@ -444,11 +528,13 @@ export async function createAgentWebServer(options = {}) {
     sidebarClients.clear();
     for (const socket of browserSockets.clients) socket.terminate();
     await new Promise(resolve => browserSockets.close(resolve));
+    for (const socket of personalSockets.clients) socket.terminate();
+    await new Promise(resolve => personalSockets.close(resolve));
     await new Promise((resolve) => server.close(resolve));
     if (!options.records) await records.close();
   }
 
-  return { server, store, records, organization, broker, config, start, stop, get manager() { return manager; } };
+  return { server, store, records, organization, broker, config, browserUsers, start, stop, get manager() { return manager; } };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

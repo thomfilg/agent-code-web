@@ -29,7 +29,7 @@ test("multiple chats stream independently, persist responses, autosleep, and res
   assert.notEqual(first.workspace, second.workspace);
   assert.ok(events.some((event) => event.chatId === first.id && event.type === "assistant_delta"));
 
-  await waitFor(() => store.get(first.id).status === "stopped");
+  await waitFor(() => store.get(first.id).status === "stopped" && store.get(second.id).status === "stopped");
   assert.equal(store.get(second.id).status, "stopped");
   const startsBefore = events.filter((event) => event.chatId === first.id && event.type === "runtime_started").length;
   await manager.send(first.id, "wake again");
