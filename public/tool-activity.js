@@ -1,3 +1,4 @@
+import { openSidePanel, closeSidePanel } from "./side-panels.js";
 const el = (tag, text, cls) => { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; };
 export function groupTools(messages, live = []) {
   const rows = [], groups = new Map(); let key = "initial";
@@ -15,7 +16,7 @@ export class ToolActivity {
     document.querySelector("#close-tools").onclick = () => this.close();
     document.addEventListener("keydown", event => { if (event.key === "Escape" && !this.panel.hidden) this.close(); });
   }
-  close() { this.panel.hidden = true; document.querySelector(".main").classList.remove("tools-open"); this.trigger?.focus(); }
+  close() { if (closeSidePanel("tools")) this.trigger?.focus(); }
   update(chatId, groups) {
     if (this.chatId !== chatId) { this.close(); this.chatId = chatId; }
     this.groups = groups;
@@ -26,8 +27,7 @@ export class ToolActivity {
     const b = el("button", `Tools used: ${count} ›`, "tool-group-button"); b.type = "button"; b.setAttribute("aria-controls", "tools-panel");
     b.onclick = () => {
       this.selected = key; this.trigger = b;
-      document.querySelector("#diff-panel").hidden = true; document.querySelector(".main").classList.remove("diff-open");
-      this.panel.hidden = false; document.querySelector(".main").classList.add("tools-open"); this.render(); document.querySelector("#close-tools").focus();
+      openSidePanel("tools"); this.render(); document.querySelector("#close-tools").focus();
     }; return b;
   }
   render() {

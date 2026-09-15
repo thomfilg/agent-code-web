@@ -1,3 +1,4 @@
+import { openSidePanel, closeSidePanel } from "./side-panels.js";
 const $ = selector => document.querySelector(selector);
 const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
 function button(label, action, cls) { const node = el("button", label, cls); node.type = "button"; node.addEventListener("click", action); return node; }
@@ -10,7 +11,7 @@ export class ChatControls {
     Object.assign(this, options); this.drafts = new Map(); this.hiddenPRs = new Set();
     $("#copy-chat-link").addEventListener("click", () => this.copy(`${location.origin}/#chat=${this.state.active.id}`, "Private chat link copied"));
     $("#view-changes").addEventListener("click", () => this.showChanges());
-    $("#close-diff").addEventListener("click", () => { $("#diff-panel").hidden = true; $(".main").classList.remove("diff-open"); });
+    $("#close-diff").addEventListener("click", () => closeSidePanel("diff"));
     $("#expand-diff").addEventListener("click", () => $("#diff-panel").classList.toggle("expanded"));
     $("#diff-search").addEventListener("input", () => this.filterDiff());
     $("#diff-selection").addEventListener("change", event => this.showChanges(event.target.value === "workspace" ? null : this.state.active.pullRequests[Number(event.target.value)]));
@@ -42,7 +43,7 @@ export class ChatControls {
   render(chat) {
     if (this.chatId !== chat.id) {
       this.chatId = chat.id; this.diffVersion = (this.diffVersion || 0) + 1;
-      $("#diff-panel").hidden = true; $("#diff-panel").classList.remove("expanded"); $(".main").classList.remove("diff-open");
+      closeSidePanel("diff");
       document.querySelectorAll(".control-menu[open]").forEach(menu => menu.open = false);
     }
     $("#mode-label").textContent = { auto: "Auto", accept_edits: "Edits", plan: "Plan" }[chat.mode || "accept_edits"];
@@ -118,8 +119,8 @@ export class ChatControls {
     }
   }
   async showChanges(pr = this.state.active?.pullRequests?.at(-1)) {
-    $("#tools-panel").hidden = true; $(".main").classList.remove("tools-open");
     const chat = this.state.active; if (!chat) return;
+    openSidePanel("diff");
     const version = this.diffVersion = (this.diffVersion || 0) + 1;
     const selection = $("#diff-selection"); selection.replaceChildren();
     const workspace = el("option", "Workspace · last local snapshot"); workspace.value = "workspace"; selection.append(workspace);
@@ -154,7 +155,7 @@ export class ChatControls {
   filterDiff() { for (const file of $("#diff-files").children) file.hidden = !file.dataset.filename?.includes($("#diff-search").value.toLowerCase()); }
   transcript() {
     const text = (this.state.active.messages || []).map(message => `${message.role.toUpperCase()}\n${message.text || ""}${message.meta?.output ? `\n${message.meta.output}` : ""}`).join("\n\n");
-    this.dialog("Transcript", button("Copy transcript", () => this.copy(text)), el("pre", text || "No messages yet", "transcript"));
+    this.preview.open({ title: "Transcript", source: text || "No messages yet", format: "text" });
   }
   tasks() {
     const live = [...this.state.liveTools.values()];

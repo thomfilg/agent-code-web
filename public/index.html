@@ -33,7 +33,7 @@
         <nav class="chat-list" id="chat-list" aria-label="Conversations"></nav>
 
         <div class="sidebar-footer">
-          <div class="settings-buttons"><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button><button class="secondary-button" id="mcps-button">MCP connections</button></div>
+          <div class="settings-buttons"><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button><button class="secondary-button" id="mcps-button">MCP connections</button><button class="secondary-button" id="browser-connections-button">Browser connections</button></div>
           <div class="system-state">
             <span class="live-dot"></span>
             <div>
@@ -52,6 +52,8 @@
             <div class="chat-meta" id="chat-meta">Independent workspaces. Disposable runtimes.</div>
           </div>
           <div class="topbar-actions" id="chat-actions" hidden>
+            <label class="signed-chrome-toggle" title="Use my signed-in Chrome · off by default"><input type="checkbox" role="switch" id="signed-chrome-toggle" aria-label="Use my signed-in Chrome"><span class="toggle-track" aria-hidden="true"></span><span class="toggle-text">Signed-in Chrome</span></label>
+            <button type="button" class="secondary-button" id="open-browser" title="Open the Chrome shared with your agent" aria-label="Open shared Chrome">◉ <span>Browser</span></button>
             <details class="control-menu" id="repositories-menu"><summary aria-label="Repositories" title="Repositories">▱</summary><div class="control-popover" id="chat-repositories"></div></details>
             <button class="icon-button" id="view-changes" title="View changes" aria-label="View changes">▣</button>
             <button class="icon-button" id="copy-chat-link" title="Copy private chat link" aria-label="Copy chat link">↥</button>
@@ -93,17 +95,23 @@
             <div class="countdown" id="countdown"></div>
           </div>
           <div class="messages" id="messages" aria-live="polite"></div>
+          <nav id="message-navigator" class="message-navigator" aria-label="Message navigation" hidden><button type="button" class="message-nav-toggle" aria-label="Message navigator" aria-controls="message-nav-list" aria-expanded="false"><span class="message-nav-ticks" aria-hidden="true"></span></button><div id="message-nav-list" class="message-nav-list"></div></nav>
           <div class="approval-card" id="approval-card" hidden></div>
           <div class="composer-wrap">
             <div id="message-queue" aria-live="polite"></div>
             <div id="pull-request-bars" class="pull-request-bars"></div>
             <form class="composer" id="composer">
-              <div id="slash-menu" role="listbox" aria-label="Commands and skills" hidden></div>
+              <div id="slash-menu" hidden>
+                <div class="slash-heading"><span class="slash-symbol" aria-hidden="true">/</span><div><strong>Commands &amp; skills</strong><span id="slash-caption"></span></div><span id="slash-count"></span></div>
+                <div id="slash-options" role="listbox" aria-label="Commands and skills"></div>
+                <p id="slash-status" role="status" hidden></p>
+                <div class="slash-footer" aria-hidden="true"><span><kbd>↑</kbd> <kbd>↓</kbd> Navigate</span><span><kbd>↵</kbd> Insert</span><span><kbd>esc</kbd> Close</span></div>
+              </div>
               <div id="attachment-chips" class="attachment-chips"></div>
-              <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message"></textarea>
+              <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message" aria-describedby="composer-keyboard-hint"></textarea>
               <div class="composer-footer">
                 <div class="composer-pickers">
-                  <details class="control-menu upward"><summary aria-label="Add to message" title="Add to message">＋</summary><div class="control-popover">
+                  <details class="control-menu upward composer-add"><summary aria-label="Add to message" title="Add files, commands or connectors">+</summary><div class="control-popover">
                     <button type="button" id="add-attachments">Add files or photos</button>
                     <button type="button" id="slash-commands">Slash commands</button>
                     <button type="button" id="show-connectors">Connectors</button>
@@ -128,20 +136,36 @@
                     <p class="model-note" role="status"></p>
                   </div>
                 </div>
+                <div class="composer-actions">
                 <details class="control-menu upward usage-menu" id="usage-menu"><summary aria-label="Context and usage" title="Context and usage"><span id="usage-ring" aria-hidden="true"></span></summary><div class="control-popover" id="session-usage"><p>Loading usage…</p></div></details>
                 <button class="send-button" id="send-button" type="submit" aria-label="Send message">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
                 </button>
                 <button type="submit" class="secondary-button queue-send" id="queue-message" hidden>Queue</button>
+                </div>
               </div>
             </form>
             <input type="file" id="attachment-input" multiple hidden>
-            <p class="composer-hint">Enter to send · Shift + Enter for a new line</p>
+            <div class="composer-help"><span>Type <kbd>/</kbd> for commands</span><p class="composer-hint" id="composer-keyboard-hint">Enter to send · Shift + Enter for a new line</p></div>
           </div>
         </section>
+        <aside class="browser-panel" id="browser-panel" aria-labelledby="browser-title" hidden>
+          <div class="preview-heading"><strong id="browser-title">Shared Chrome</strong><span class="browser-profile-label" id="browser-profile-label">Separate profile</span><button type="button" class="icon-button" id="expand-browser" aria-label="Expand browser" aria-pressed="false">⤢</button><button type="button" class="icon-button" id="close-browser" aria-label="Close browser panel">×</button></div>
+          <div class="browser-tabbar"><select id="browser-tabs" aria-label="Browser tabs"></select><button type="button" class="icon-button" id="browser-new-tab" aria-label="New browser tab">+</button><button type="button" class="icon-button" id="browser-close-tab" aria-label="Close current browser tab">×</button></div>
+          <form id="browser-address-form" class="browser-toolbar"><button type="button" class="icon-button" id="browser-back" aria-label="Browser back">←</button><button type="button" class="icon-button" id="browser-forward" aria-label="Browser forward">→</button><button type="button" class="icon-button" id="browser-reload" aria-label="Reload browser page">↻</button><input type="text" id="browser-address" aria-label="Browser address" placeholder="http://localhost:3000" autocomplete="off" spellcheck="false"><button type="submit" class="secondary-button">Go</button></form>
+          <div class="browser-options"><button type="button" class="secondary-button" id="browser-localhost">localhost:3000</button><label><span class="sr-only">Browser viewport</span><select id="browser-viewport" aria-label="Browser viewport"><option value="1280x800">Desktop · 1280 × 800</option><option value="834x1112">Tablet · 834 × 1112</option><option value="390x844">Phone · 390 × 844</option></select></label><button type="button" class="secondary-button" id="browser-stop">Stop Chrome</button></div>
+          <p id="browser-status" class="muted" role="status">Chrome starts when you connect. Website content runs in the worker, not in this app.</p>
+          <div class="browser-surface" id="browser-surface"><canvas id="browser-canvas" width="1280" height="800" tabindex="0" aria-label="Shared Chrome page. Click to interact, then type. Press Escape to leave browser input."></canvas><button type="button" class="primary-button" id="browser-connect">Connect to Chrome</button></div>
+          <div id="browser-dialog" class="browser-dialog" hidden><p id="browser-dialog-text"></p><input id="browser-dialog-input" aria-label="Website prompt answer" autocomplete="off"><button type="button" id="browser-dialog-accept">OK</button><button type="button" id="browser-dialog-dismiss">Cancel</button></div>
+          <p class="browser-footnote muted" id="browser-footnote">You and the agent share this page. Localhost reaches the chat’s worker. Your personal Chrome and its saved logins are not connected.</p>
+        </aside>
         <aside class="tools-panel" id="tools-panel" aria-label="Tool activity" hidden>
           <div class="diff-heading"><strong id="tools-title">Tools used</strong><button type="button" class="icon-button" id="close-tools" aria-label="Close tool activity">×</button></div>
           <p class="muted">Real calls and results reported by the agent. Failed or denied calls do not imply an action succeeded.</p><div id="tools-list"></div>
+        </aside>
+        <aside class="preview-panel" id="preview-panel" aria-labelledby="preview-title" hidden>
+          <div class="preview-heading"><strong id="preview-title">Document preview</strong><button type="button" class="secondary-button" id="copy-preview">Copy source</button><button type="button" class="icon-button" id="expand-preview" aria-label="Expand preview" aria-pressed="false">⤢</button><button type="button" class="icon-button" id="close-preview" aria-label="Close preview">×</button></div>
+          <p class="muted" id="preview-note"></p><div id="preview-content"></div>
         </aside>
         <aside class="diff-panel" id="diff-panel" aria-label="Changes" hidden>
           <div class="diff-heading"><strong id="diff-title">Changes</strong><button type="button" class="icon-button" id="expand-diff" aria-label="Expand changes">⤢</button><button type="button" class="icon-button" id="close-diff" aria-label="Close changes">×</button></div>
@@ -152,6 +176,17 @@
       </main>
     </div>
 
+    <dialog id="browser-connections-dialog"><div class="dialog-card browser-connections-card">
+      <div class="dialog-heading"><h2>Browser connections</h2><button type="button" class="icon-button" id="browser-connections-close" aria-label="Close browser connections">×</button></div>
+      <p class="muted">Your website logins stay in your Chrome profile. Pairing and signing in do not enable agent access.</p>
+      <form id="browser-account-form"><h3>Your private account</h3><p class="muted">A separate account protects your connections and private chats from other app users. This is not your Google password.</p><label><span>Username</span><input id="browser-username" autocomplete="username" minlength="3" maxlength="40" required></label><label><span>Account password</span><input id="browser-password" type="password" autocomplete="current-password" minlength="12" maxlength="1024" required></label><div class="browser-account-actions"><button type="submit" class="primary-button" value="login">Sign in</button><button type="submit" class="secondary-button" value="register">Create private account</button></div></form>
+      <div id="browser-account-signed-in" hidden><div class="browser-account-actions"><strong id="browser-account-name"></strong><button type="button" class="secondary-button" id="browser-account-logout">Sign out</button></div><h3>Your Chrome profiles</h3><div id="browser-connection-list"></div>
+        <details id="browser-pair-instructions"><summary>Pair a Chrome profile</summary><ol><li><a href="/api/browser-extension/download" download>Download the Chrome extension</a> and extract the ZIP.</li><li>In your personal Chrome, open <code>chrome://extensions</code>, enable Developer mode, click <strong>Load unpacked</strong>, and choose the extracted <code>agent-relay-chrome</code> folder.</li><li>Give the connection a name, generate a code below, then paste this app’s address and the code into the extension.</li><li>Sign into your websites normally in Chrome. Enable the top-right switch in a chat only when you want to share your signed-in profile.</li></ol><p class="muted">The extension requests Chrome’s debugger permission for a separate automation tab. It cannot be installed silently. Your existing tabs are not shared. Disabling access closes the automation tab, not your Chrome profile.</p>
+        <form id="browser-pair-form"><label><span>Chrome connection name</span><input id="browser-connection-name" value="My Chrome" maxlength="80" required></label><button type="submit" class="secondary-button">Generate pairing code</button></form>
+        <div id="browser-pair-result" hidden><label><span>Agent Relay address</span><input id="browser-pair-origin" readonly></label><label><span>One-time code · expires in 5 minutes</span><input id="browser-pair-code" readonly autocomplete="off"></label><button type="button" class="secondary-button" id="browser-pair-copy">Copy code</button><p class="muted">Keep this code private. It pairs only this profile with your account; sharing stays off.</p></div></details>
+      </div><p id="browser-settings-error" role="alert"></p>
+    </div></dialog>
+    <dialog id="browser-share-dialog"><form class="dialog-card" id="browser-share-form"><div class="dialog-heading"><h2>Share signed-in Chrome?</h2><button type="button" class="icon-button" id="browser-share-close" aria-label="Cancel Chrome sharing">×</button></div><p>The agent will be able to read and act on websites using this Chrome profile’s saved logins. Only enable this for work you trust.</p><label><span>Your connection</span><select id="browser-share-connection" required></select></label><p id="browser-share-privacy" class="muted"></p><p class="muted">Sharing opens a separate automation tab. Turning the switch off revokes access and closes that tab without signing you out. Actions already taken cannot be undone. Localhost in personal Chrome means your computer, not a remote worker.</p><label class="checkbox-row"><input type="checkbox" id="browser-share-confirm" required><span>I authorize signed-in browser access for this chat.</span></label><p id="browser-share-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary-button" id="browser-share-manage">Manage connections</button><button type="submit" class="primary-button" id="browser-share-enable">Enable for this chat</button></div></form></dialog>
     <dialog id="usage-dialog"><div class="dialog-card usage-card"><div class="dialog-heading"><h2>Usage</h2><button type="button" class="icon-button" id="usage-close" aria-label="Close usage">×</button></div><div class="usage-actions"><button type="button" id="usage-refresh">Refresh</button><button type="button" id="usage-copy">Copy</button></div><div id="usage-details"></div></div></dialog>
     <dialog id="new-chat-dialog">
       <!-- Conversation creation -->
@@ -206,7 +241,7 @@
         <div class="dialog-heading"><div><p class="eyebrow">WORKSPACE SETTINGS</p><h2 id="environments-dialog-title">Environments</h2></div><button type="button" class="icon-button" data-close-dialog aria-label="Close environments">×</button></div>
         <div class="environment-navigation"><div id="environment-tabs"></div><button type="button" class="secondary-button" id="add-environment">＋ Add environment</button></div>
         <form id="environment-form">
-          <section class="environment-mcps"><h3>MCP connections</h3><div id="environment-mcp-options"></div><p class="muted">Selected connections configure Codex and Claude on the next worker start. Add connections from the sidebar. Trust the service before enabling its tools.</p></section>
+          <section class="environment-mcps"><h3>MCP connections</h3><div id="environment-mcp-options"></div><p class="muted">On the next worker start, Codex and Claude receive selected shared connections and those matching the first repository’s organization. Other organizations’ connections are excluded. Trust the service before enabling its tools.</p></section>
           <label><span>Environment name</span><input id="environment-name" required maxlength="80" placeholder="e.g. Acme staging"></label>
           <p class="muted" id="environment-backend"></p>
           <label><span>Network access</span><select disabled aria-label="Network access"><option>Worker infrastructure default</option></select></label>
@@ -228,14 +263,26 @@
     <dialog id="mcp-dialog" aria-labelledby="mcp-title"><div class="dialog-card mcp-card">
       <div class="dialog-heading"><h2 id="mcp-title">MCP connections</h2><button type="button" class="icon-button" id="mcp-close" aria-label="Close MCP connections">×</button></div>
       <p class="muted">Connect tools once, then select them in each environment. Only enable servers you trust: their tools can access and change data.</p>
-      <div id="mcp-list"></div><button type="button" class="secondary-button" id="mcp-new">＋ Add MCP</button>
+      <h3>Your connections</h3><div id="mcp-list"></div><button type="button" class="secondary-button" id="mcp-new">＋ Custom MCP</button>
+      <details id="mcp-catalog" open><summary>Add a development tool</summary><div id="mcp-presets" class="mcp-presets"></div></details>
       <form id="mcp-form">
         <label><span>Connection name</span><input id="mcp-name" required maxlength="64" placeholder="e.g. company-tools"></label>
+        <label><span>Organization</span><input id="mcp-organization" list="mcp-organizations" maxlength="39" placeholder="Shared · all organizations" aria-describedby="mcp-organization-help"></label>
+        <datalist id="mcp-organizations"></datalist>
+        <p class="muted" id="mcp-organization-help">Use the GitHub owner of the chat’s first repository, e.g. 12-apps or g2i. Leave blank to share across organizations. Save a separate connection and sign in for each organization, then select them in an environment.</p>
         <label><span>Transport</span><select id="mcp-type"><option value="http">Streamable HTTP · protected credentials</option><option value="stdio">Stdio · process on the worker</option></select></label>
-        <div id="mcp-http"><label><span>MCP endpoint URL</span><input id="mcp-url" type="url" placeholder="https://tools.example.com/mcp"></label><label><span>Authentication headers · JSON, encrypted</span><textarea id="mcp-headers" rows="3" spellcheck="false" autocomplete="off"></textarea></label><p class="muted">Blank keeps saved headers; {} clears them. Authentication stays on the controller. The agent gets revocable access to this service, not its upstream credentials. OAuth login is not supported here yet.</p></div>
+        <div id="mcp-http">
+          <label><span>MCP endpoint URL</span><input id="mcp-url" type="url" placeholder="https://paladira.com/api/mcp"></label>
+          <label><span>Authentication</span><select id="mcp-auth"><option value="oauth">OAuth · sign in with your browser</option><option value="headers">Authentication headers / API token</option><option value="none">No authentication</option></select></label>
+          <div id="mcp-header-fields" hidden><label><span>Authentication headers · JSON, encrypted</span><textarea id="mcp-headers" rows="3" spellcheck="false" autocomplete="off"></textarea></label><p class="muted">Blank keeps saved headers for the same URL; {} clears them. Changing the endpoint clears existing credentials.</p></div>
+          <details id="mcp-oauth-fields"><summary>Advanced OAuth settings</summary><p class="muted">Normally discovered automatically. Only fill these if the provider requires a pre-registered client or specific scopes.</p><label><span>OAuth client ID</span><input id="mcp-client-id" autocomplete="off"></label><label><span>OAuth client secret · optional, encrypted</span><input id="mcp-client-secret" type="password" autocomplete="new-password"></label><label><span>OAuth scopes · space separated</span><input id="mcp-scopes" placeholder="Leave blank to use server-advertised scopes"></label><p class="muted">Callback: <code id="mcp-callback-url"></code></p></details>
+          <p class="muted">Authentication stays encrypted on the controller. The agent gets revocable access, not the service’s credentials. Only approve permissions you want the agent to use.</p>
+        </div>
         <div id="mcp-stdio" hidden><label><span>Executable</span><input id="mcp-command" placeholder="npx"></label><label><span>Arguments · JSON array</span><textarea id="mcp-args" rows="3" spellcheck="false">[]</textarea></label><p class="muted">Runs on each selected worker with that worker’s permissions. Install its runtime in the environment. Commands and arguments are agent-readable: do not include secrets. Use HTTP for protected authentication.</p></div>
         <p class="muted">Local workers share the host filesystem; isolated cloud workers provide a stronger secret boundary.</p>
         <p id="mcp-error" class="form-error" role="alert"></p><p id="mcp-save-status" class="muted" role="status"></p>
+        <section id="mcp-connection-status" aria-live="polite"></section>
+        <div class="mcp-connect-actions"><button type="button" class="secondary-button" id="mcp-connect" hidden>Connect with OAuth</button><button type="button" class="secondary-button" id="mcp-test" hidden>Test connection</button><button type="button" class="secondary-button" id="mcp-disconnect" hidden>Disconnect OAuth</button></div>
         <div class="dialog-actions"><button type="button" class="secondary-button" id="mcp-delete" hidden>Delete connection</button><button class="primary-button">Save connection</button></div>
       </form>
     </div></dialog>
@@ -260,7 +307,7 @@
         <div class="automatic-status"><span class="muted">Automatic status</span><div id="organize-status" role="status"></div><p class="muted" id="organize-status-detail"></p><div id="organize-pull-requests"></div><p id="organize-sync-warning" class="muted" role="status"></p></div>
         <p class="muted">Agent activity, questions and GitHub PR checks update automatically. GitHub is checked every minute, even while the worker sleeps.</p>
         <p id="organize-error" class="form-error" role="alert"></p>
-        <div class="dialog-actions"><button type="button" class="secondary-button" id="archive-chat-button">Archive chat</button><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button class="primary-button">Save changes</button></div>
+        <div class="dialog-actions"><button type="button" class="secondary-button danger" id="organize-delete-chat">Delete chat</button><button type="button" class="secondary-button" id="archive-chat-button">Archive chat</button><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button class="primary-button">Save changes</button></div>
       </form>
     </dialog>
 

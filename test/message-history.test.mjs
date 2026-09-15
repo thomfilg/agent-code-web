@@ -1,0 +1,20 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { MessageHistory } from "../public/message-history.js";
+test("composer history traverses boundaries, preserves edits and draft, and isolates chats", () => {
+  const input = { value: "", selectionStart: 0, selectionEnd: 0, setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; } };
+  const state = { active: { messages: [{ role: "user", text: "first" }, { role: "assistant", text: "ignored" }, { role: "user", text: "second\nline" }] } };
+  const history = new MessageHistory({ input, state, onChange() {} }); history.select("a");
+  const key = (key, extra = {}) => history.keydown({ key, preventDefault() {}, ...extra });
+  input.value = "unfinished draft"; input.setSelectionRange(0, 0);
+  assert.equal(key("ArrowUp"), true); assert.equal(input.value, "second\nline");
+  assert.equal(key("ArrowUp"), true); assert.equal(input.value, "first");
+  key("ArrowUp"); assert.equal(input.value, "first");
+  input.value = "edited first"; input.setSelectionRange(3, 3); assert.equal(key("ArrowDown"), false);
+  input.setSelectionRange(input.value.length, input.value.length); key("ArrowDown"); assert.equal(input.value, "second\nline");
+  key("ArrowDown"); assert.equal(input.value, "unfinished draft");
+  input.setSelectionRange(0, 0); key("ArrowUp"); key("ArrowUp"); assert.equal(input.value, "first");
+  history.select("b"); assert.equal(input.value, ""); input.value = "other draft"; history.select("a"); assert.equal(input.value, "first");
+  history.select("b"); assert.equal(input.value, "other draft");
+  input.setSelectionRange(0, 0); assert.equal(key("ArrowUp", { shiftKey: true }), false); assert.equal(key("ArrowUp", { isComposing: true }), false);
+});

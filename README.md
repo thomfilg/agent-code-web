@@ -14,6 +14,7 @@ from a browser. It is intentionally a POC, but the core lifecycle is real:
   auto-merge;
 - one independent workspace and worker lifecycle per chat;
 - streamed assistant and tool events over Server-Sent Events;
+- interactive shared Chrome over an authenticated WebSocket, in a third column;
 - Codex through the official `codex app-server` JSON-RPC protocol;
 - Claude Code through `claude --print --output-format stream-json`;
 - automatic process shutdown five minutes after a completed turn;
@@ -106,8 +107,118 @@ the long-lived provider secret.
 | `AGENT_ENABLE_MOCK` | `0` | expose the deterministic Mock agent |
 | `AGENT_WORKER_BACKEND` | `local` | `local` process workers or per-chat `ec2` workers |
 | `AGENT_PROCESS_ISOLATION` | `namespace` on Linux | `namespace` or `none` for local workers |
+| `AGENT_CHROME_BIN` | `google-chrome` | Chrome executable in the worker; never a personal profile path |
 | `CODEX_AUTH_MODE` | `gateway` | `gateway` or `host` |
 | `CLAUDE_AUTH_MODE` | `gateway` | `gateway` or `host` |
+
+## Shared Chrome
+
+Open **Browser** in a chat’s top-right toolbar. The desktop view is a third
+column; narrow screens use an overlay. You and the agent see and interact with
+the same page. The address bar accepts `http://localhost:3000` or another dev
+server port: localhost belongs to the chat’s worker, including EC2 workers.
+The site’s WebSockets/HMR run in Chrome normally. This is an interactive live
+view, not a reverse proxy that puts untrusted website HTML on Relay’s origin.
+
+Both agents receive the built-in `relay_browser` MCP server when their worker
+starts. It provides navigation, accessibility snapshots, screenshots, clicks,
+typing, tabs, viewport sizing and page JavaScript evaluation. The browser starts
+on demand, without an extra model request. Ask the agent to run a dev server and
+open it with `browser_navigate`; use the Browser column to test it yourself.
+Click the page to type, or paste text. Escape returns focus to the address bar.
+
+Each chat starts with a fresh, separate Chrome profile. It does **not** import
+your personal Chrome cookies or passwords. Closing the panel disconnects only
+the viewer; Chrome sleeps after inactivity. An open viewer keeps the browser
+and an otherwise-idle agent worker awake. **Stop Chrome** discards the separate
+profile; **Stop worker** also revokes the browser tool capability. Inspecting
+browser status does not wake a worker. Tab content and typed input are not
+automatically added to the transcript; explicit agent tool results can be.
+
+Chrome uses its native sandbox and private debugging pipe descriptors. No CDP,
+VNC or worker web port is exposed publicly. WebSocket upgrades require the UI
+login and a same-origin browser request; the MCP endpoint accepts only a
+short-lived, chat-scoped agent capability. Local workers still share the host
+filesystem/network trust boundary described above; this is not multi-tenant
+isolation.
+
+**Chrome installation:** the environment catalog includes Google Chrome. It
+uses an installed system Chrome/Chromium, or downloads Chrome for Testing into
+the worker’s private runtime directory through the pinned official Puppeteer
+browser installer. Node/npm, unzip and Chrome system libraries are required.
+The Ubuntu 24.04 amd64 AMI recipe installs Chrome and its libraries. Existing
+AMIs need rebuilding; selecting Chrome cannot add system packages with sudo.
+No sandbox-disable fallback is used. A custom binary can be selected with
+`AGENT_CHROME_BIN`. Installation runs in the worker, not in your personal Chrome.
+
+### Optional signed-in personal Chrome
+
+The top-right **Signed-in Chrome** switch is **off by default**. Normal browser
+tools always use the separate guest profile until you explicitly authorize a
+saved personal connection for that chat. Pairing alone never grants access.
+
+1. Open **Browser connections** in the sidebar. Create or sign into your private
+   Relay account. This is a separate username/password, **not** your Google login.
+2. Download and extract the extension ZIP from that dialog. In your personal
+   Chrome, open `chrome://extensions`, enable Developer mode, select **Load
+   unpacked**, and choose the extracted `agent-relay-chrome` folder. Installation
+   is manual; Relay cannot silently install an extension in your personal profile.
+3. Name the connection and generate a five-minute, single-use pairing code.
+   Open the extension and enter Relay's origin (for example,
+   `http://127.0.0.1:8787`) and that code. Use HTTPS for non-loopback deployments.
+4. Sign into websites normally in that Chrome profile. The logins stay in Chrome;
+   Relay never exports its cookies, passwords, or profile files into a worker.
+5. In a chat, turn on **Signed-in Chrome**, choose your saved connection, and
+   confirm the permission. An existing shared chat becomes private to your
+   account first; its transcript/workspace stay intact and its queue stays paused.
+   Stop a running agent before claiming a shared chat. Chats created while signed
+   into a private account are private from creation.
+
+Sharing creates one separate automation tab in that profile; existing personal
+tabs are never listed or controlled. The Browser column and `relay_browser` MCP
+tools both operate on this tab. Chrome displays its native debugger warning and
+the extension badge shows **ON**. The agent can read and act on websites using
+your logins, so enable it only for trusted work. Sign-in popups should be used in
+your normal tabs before sharing; automation popups are closed to keep access
+confined to one tab.
+
+Turning the switch off invalidates pending tool results, disconnects personal
+viewers, and closes the automation tab. It returns tools to guest Chrome without
+signing you out of websites. The extension's **Stop agent access**, closing its
+automation tab, disconnecting, signing out of Relay, stopping the worker, or
+permission expiry also revokes access. Changes already made on a website cannot
+be undone by revocation. Sharing expires after `AGENT_CAPABILITY_TTL_MS` (one hour
+by default), or sooner if the private account session expires.
+
+Each user sees only their own saved connections and private chats through the
+API, sidebar, transcript stream and browser viewer. Passwords use salted scrypt;
+account sessions and connection hashes live in Relay's encrypted control-plane
+database, outside workers. The extension saves its connection token in local
+extension storage, not Chrome Sync. Saved pairing and website logins survive
+restarts, but active agent permission **never** survives a controller or Chrome
+reconnection. You must enable it again.
+
+**Localhost differs by mode:** guest Chrome reaches the worker's development
+server, including when the worker is remote. Personal Chrome runs on **your
+computer**, so its localhost is not an EC2 worker. Use guest mode for remote
+worker previews, or a development URL already reachable from your computer.
+Personal automation also blocks Relay's own hostname (on every port) to protect
+the account controlling its permissions; use guest mode for that hostname.
+
+Private browser accounts enforce application authorization, not hostile-tenant
+isolation of local CLI processes. Local workers still share the controller's
+OS/filesystem trust boundary. Host administrators and untrusted local agent code
+must not be treated as separate tenants; use dedicated worker infrastructure for
+that boundary. The AMI Chrome recipe is included, but cloud deployment requires
+building/deploying your worker image separately.
+
+Verification: `npm run check` includes a real extension test in a fresh Chrome
+profile (requires `npx playwright install chromium`). It exercises account and
+pairing UI, explicit consent, live MCP/viewer access, off/revoke, and persisted
+pairing/login after Chrome and Relay restart without making model calls.
+`npm run test:browser` covers interactive guest Chrome on desktop/mobile;
+`npm run smoke:mcps` verifies both real CLIs discover the browser tools without
+running a model turn.
 
 ## Chat organization
 
@@ -119,6 +230,18 @@ The first selected repository determines the GitHub owner (company) and repo;
 use ↑ in the repository chips to change the primary before creating the chat.
 Legacy URL-based chats are grouped from their GitHub URL; scratch chats go
 under Personal / No repository.
+
+Chats use a single compact row: status icon, title, pin, and organize menu.
+Status details and timestamps remain available on hover and in Organize chat.
+Choose **Organize chat → Delete chat** to permanently remove that chat, messages,
+attachments, and workspace after confirmation. A running worker is stopped first.
+Archive remains available when you want to keep the chat instead. Deleting a
+different chat does not disturb the active conversation or its draft.
+
+`POST /api/chats/:id/copy` (optional JSON `title`) makes a stopped transcript copy
+for rendering or a fresh conversation. It preserves message and tool history,
+but does not copy workspace files, attachment contents, runtime sessions,
+environment connections, queued prompts, usage counters, or PR automation.
 
 Sort within each section by creation time, last update (both directions), or
 state: working, asking question, idle, PR not passing, PR open, PR merged, archived.
@@ -282,8 +405,8 @@ fresh session. The target provider's default model/effort are selected.
   are not presented as current context usage. Manual compaction is available
   for an awake, idle Codex session; Claude manages compaction internally.
 - **Connectors:** shows MCP servers reported by the CLI. The sidebar's MCP
-  connections editor saves reusable connections for environments; OAuth login
-  remains a CLI concern.
+  connections editor supports presets, custom servers, browser OAuth and tool
+  discovery. Select saved connections separately for each environment.
 - **Repository menu:** open GitHub, copy branch names, or append repositories to
   an idle picker-based chat. The original primary repo/group stays unchanged;
   added repositories clone on the next message.
@@ -335,9 +458,19 @@ state.
 
 ## Conversation controls
 
+- The composer uses grouped, higher-contrast controls and a responsive toolbar.
+  The `/` picker shows command descriptions, source types, and keyboard hints;
+  arrows select, Enter/Tab insert without sending, and Escape dismisses it.
+  Loading, empty, and error states never select a stale command.
 - User messages are right-aligned bubbles. Agent Markdown renders headings,
-  tables, lists, links and fenced code, with code-copy buttons. HTML blocks have
-  an opt-in preview in an opaque-origin iframe: generated scripts, forms,
+  tables, lists, links and fenced code, with code-copy buttons. **Open preview**
+  opens HTML, Markdown, SVG, or plain text in the third desktop column, sharing
+  space with Workspace changes and tool activity (one panel at a time). Narrow
+  screens use an overlay with a close button. Transcript view uses this panel
+  too. Previews support expand/restore, source copy, and Escape; live chat updates
+  do not replace an open document. HTML has readable default typography, spacing,
+  and striped, bordered tables; its own CSS can override these defaults.
+  Rich previews use an opaque-origin iframe: generated scripts, forms,
   navigation and network resources are disabled; styles and malformed markup
   cannot escape into the chat UI.
 - Each user turn has one **Tools used: N** row. Open it to inspect actual tool
@@ -361,20 +494,77 @@ state.
   included in its input total. CLI cost is an API-price estimate, not a bill.
   Missing quota percentages and per-MCP attribution remain explicitly unreported.
   Historical records may have partial detail until new turns are collected.
+- Context/usage snapshots and inspected account-limit metadata are saved in the
+  controller database, outside worker storage. Stopped workers show the last
+  recorded values and timestamp without waking. This is a usage snapshot, not a
+  live count while offline. Native conversation transcripts use the existing
+  workspace/session persistence; this feature does not invent missing counters.
+- In the composer, Up from empty text (or the first character) recalls previous
+  user messages. Down at the end moves forward and eventually restores the draft.
+  Normal multiline cursor movement, text selection, and slash-menu arrows retain
+  their behavior. Drafts/history navigation are isolated per chat.
+- Hover or focus the right-side message rail to see your messages; tap on touch
+  screens. Select a preview to jump to that message. Escape closes the list.
 
 ## MCP connections
 
-Use **MCP connections** in the sidebar to save a Streamable HTTP endpoint or
-stdio command, then select it under **Environments → MCP connections**. Changes
+Use **MCP connections** in the sidebar. Choose Linear, Atlassian (Jira/Confluence/
+Bitbucket), GitHub, Sentry, Figma, Notion or Context7, or choose **Custom MCP** for
+any compatible Streamable HTTP endpoint or stdio command. Presets only fill the
+form; they do not grant account access. Save, connect/test, then select the saved
+connection under **Environments → MCP connections**. Changes
 apply on the next worker start. Both Codex and Claude receive per-worker MCP
 configuration without modifying shared CLI config files.
+
+For separate accounts per project, set **Organization** to the GitHub owner of
+the chat's primary repository (for example, `12-apps` or `g2i`). You can save
+`linear` in both organizations and complete OAuth separately for each; tokens,
+connection health, and disconnect actions are independent. Select both in an
+environment if it serves both organizations. On worker startup, the controller
+only grants selected connections matching the **first** repository's owner,
+plus selected **Shared** connections (blank Organization). Secondary repositories
+and sidebar groups do not expand access. Scratch chats receive only Shared
+connections. Existing unscoped connections remain Shared. This is routing within
+the private control plane, not separate user-account tenancy or a sandbox between
+repositories in the same workspace.
+
+### Browser OAuth (including custom servers)
+
+For example, choose **Custom MCP**, enter `https://paladira.com/api/mcp`, select
+**OAuth**, and save. Click **Connect with OAuth**, sign in and approve the requested
+access in the opened browser window. Successful consent triggers a connection
+test and tool discovery. Choose it in an environment to enable it for that
+environment's next Codex or Claude worker. MCP initialization alone is not proof
+of authentication: some servers allow it before sign-in.
+
+OAuth uses the official MCP SDK's discovery, dynamic client registration, PKCE
+S256 and refresh-token flow. Tokens and client secrets are encrypted at rest and
+never returned to the frontend or worker. Expiring tokens refresh on the controller.
+Callback state is single-use, browser-cookie-bound, issuer-checked and expires
+after ten minutes. Restarting the controller during sign-in requires trying again.
+Changing a connection or disconnecting invalidates its existing worker grants.
+Disconnect removes local OAuth tokens; revoke the app in the provider's account
+settings too if you want to remove the provider-side grant.
+
+For remote deployments, set `AGENT_WEB_PUBLIC_URL=https://your-relay-host` and
+`AGENT_COOKIE_SECURE=1`. The callback is `/oauth/mcp/callback` on that origin.
+Loopback callbacks work without extra configuration. Providers without dynamic
+registration require an OAuth client ID (and sometimes a secret) in **Advanced
+OAuth settings**; register the exact callback shown there. A provider's app/domain
+allowlists may require administrator approval. GitHub's preset uses a PAT header;
+it does not reuse an unrelated CLI OAuth client. Context7's preset allows anonymous
+access; higher limits may require an authentication header.
+
+**Test connection** performs MCP initialization and lists tools; it never calls
+tools. It distinguishes connected, sign-in required, failed and untested states.
+Stdio connections are checked by the actual worker, not executed on the controller.
 
 HTTP authentication headers are encrypted in controller records and omitted
 from settings responses and worker configuration. A revocable per-chat capability
 proxies only the selected endpoint. Redirects are blocked, and credentials are
 not forwarded to other hosts. Plain HTTP is supported only on loopback; remote
-endpoints require HTTPS. OAuth login and legacy SSE transport are not implemented
-in this connection editor. Connected MCPs are trusted services: they can return
+endpoints require HTTPS. Legacy SSE transport is not supported by this editor;
+use the provider's Streamable HTTP endpoint. Connected MCPs are trusted services: they can return
 sensitive data and their tools can perform actions.
 
 Stdio commands run on the worker with its permissions and installed runtimes.
@@ -383,6 +573,10 @@ is intentionally unsupported. Use HTTP for protected credentials. Local workers
 still share the controller's OS account and filesystem, so encrypted storage
 alone is not a strong boundary against a malicious local agent. Use dedicated
 cloud workers when that boundary matters.
+
+`npm run smoke:mcps` checks selected HTTP and stdio MCPs using the installed real
+Codex and Claude CLIs, isolated temporary configuration, and a local fixture. It
+does not make model calls, use account credentials, or modify shared CLI config.
 
 ## POC boundaries
 

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 export const SOFTWARE_CATALOG = [
+  { id: "chrome", name: "Google Chrome", version: "Stable", description: "Shared live browser and agent tools; a separate profile without your saved logins", check: "google-chrome --version" },
   { id: "docker", name: "Docker", version: "Engine + Compose", description: "Containers and builds on a dedicated EC2 worker only; never the control-plane socket", check: "docker info --format '{{.ServerVersion}}' && docker compose version && docker buildx version", backends: ["ec2"] },
   { id: "node", name: "Node.js", version: "22", description: "JavaScript runtime and npm", check: "node --version" },
   { id: "python", name: "Python", version: "3", description: "Private virtualenv using the base Python 3 runtime", check: "python3 --version" },

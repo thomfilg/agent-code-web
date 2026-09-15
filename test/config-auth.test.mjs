@@ -17,4 +17,6 @@ test("browser authentication uses a signed HttpOnly cookie", () => {
   const request = { headers: { cookie: cookie.split(";")[0] } };
   assert.equal(auth.authenticated(request), true);
   assert.equal(auth.authenticated({ headers: { cookie: "agent_web_session=forged" } }), false);
+  assert.equal(auth.authenticated({ headers: { cookie: "agent_web_session=%invalid" } }), false);
+  assert.equal(auth.authenticated({ headers: { cookie: request.headers.cookie + "; unrelated=%invalid" } }), true);
 });

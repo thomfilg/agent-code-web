@@ -15,7 +15,9 @@ function equal(left, right) {
 function cookies(header = "") {
   return Object.fromEntries(header.split(";").map((part) => {
     const index = part.indexOf("=");
-    return index < 0 ? [part.trim(), ""] : [part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1))];
+    if (index < 0) return [part.trim(), ""];
+    let value; try { value = decodeURIComponent(part.slice(index + 1)); } catch { value = ""; }
+    return [part.slice(0, index).trim(), value];
   }).filter(([name]) => name));
 }
 

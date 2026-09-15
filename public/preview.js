@@ -1,4 +1,7 @@
 // Runs in an opaque-origin sandbox. Generated code never executes.
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") { event.preventDefault(); parent.postMessage({ type: "relay-preview-close" }, "*"); }
+});
 const source = decodeURIComponent(location.hash.slice(1));
 document.body.innerHTML = DOMPurify.sanitize(source, {
   WHOLE_DOCUMENT: false, FORCE_BODY: true, ADD_TAGS: ["style"],

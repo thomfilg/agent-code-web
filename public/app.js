@@ -1,4 +1,5 @@
 import { ChatSidebar } from "./chat-sidebar.js";
+import { closeSidePanel } from "./side-panels.js";
 import { WorkspaceSettings } from "./workspace-settings.js";
 import { ModelPicker } from "./model-picker.js";
 import { ChatControls } from "./chat-controls.js";
@@ -7,6 +8,11 @@ import { ToolActivity, groupTools } from "./tool-activity.js";
 import { UsagePanel } from "./usage-panel.js";
 import { SlashComposer } from "./slash-composer.js";
 import { McpSettings } from "./mcp-settings.js";
+import { MessageHistory } from "./message-history.js";
+import { MessageNavigator } from "./message-navigator.js";
+import { DocumentPreview } from "./document-preview.js";
+import { SharedBrowserPanel } from "./shared-browser.js";
+import { BrowserConnectionSettings } from "./browser-connections.js";
 
 const state = {
   config: null,
@@ -113,7 +119,7 @@ function renderMessage(message, streaming = false) {
   const body = node("div", "message-body");
   body.append(node("div", "message-label", role === "assistant" ? agentLabel(message.agent || state.active?.agent) : role));
   const text = node("div", "message-text");
-  renderContent(text, message.text || "");
+  renderContent(text, message.text || "", { onPreview: preview => documentPreview.open({ ...preview, messageId: message.id }) });
   if (streaming) text.append(node("span", "stream-caret"));
   body.append(text);
   if (message.attachments?.length) body.append(node("p", "muted", message.attachments.map(file => `📎 ${file.name}`).join(" · ")));
@@ -134,7 +140,8 @@ function renderMessages({ pinBottom = false } = {}) {
     for (const message of rows) elements.messages.append(message.kind === "tool_group" ? toolActivity.button(message.key) : renderMessage(message));
     if (state.stream) elements.messages.append(renderMessage({ id: state.stream.id, role: "assistant", text: state.stream.text }, true));
   }
-  if (pinBottom || wasNearBottom) elements.messages.scrollTop = elements.messages.scrollHeight;
+  messageNavigator.update();
+  if (!messageNavigator.readingHistory && (pinBottom || wasNearBottom)) elements.messages.scrollTop = elements.messages.scrollHeight;
 }
 
 function renderApproval() {
@@ -174,10 +181,15 @@ function renderApproval() {
 
 function renderActive() {
   const chat = state.active;
+  documentPreview.setChat(chat?.id);
+  sharedBrowser.setChat(chat?.id);
+  browserConnectionSettings.setChat(chat?.id);
   elements.welcome.hidden = Boolean(chat);
   elements.conversation.hidden = !chat;
   elements.actions.hidden = !chat;
   if (!chat) {
+    closeSidePanel("diff"); toolActivity.update(null, new Map());
+    elements.messages.replaceChildren();
     elements.title.textContent = "Agent Relay";
     elements.meta.textContent = "Independent workspaces. Disposable runtimes.";
     return;
@@ -248,6 +260,8 @@ async function selectChat(id) {
     const { chat } = await api(`/api/chats/${id}`);
     if (state.selection !== selection) return;
     state.active = chat;
+    messageHistory.select(chat.id);
+    slashComposer.close();
     history.replaceState(null, "", `#chat=${id}`);
     renderChats();
     renderActive();
@@ -306,6 +320,8 @@ function connectEvents(chatId) {
       renderApproval();
     } else if (event.type === "runtime_error") {
       toast(event.text);
+    } else if (event.type === "chat_deleted") {
+      forgetChat(chatId).catch(error => toast(error.message));
     }
   };
   source.onerror = () => {
@@ -382,6 +398,7 @@ async function sendMessage(event) {
   if (!files.length && await runWebCommand(text)) { elements.input.value = ""; resizeInput(); return; }
   const queued = ["starting", "running"].includes(state.active.status) || state.active.queuedMessages?.length;
   elements.input.value = "";
+  messageHistory.reset();
   resizeInput();
   try {
     await activeModelPicker.saving;
@@ -467,7 +484,7 @@ $("#composer").addEventListener("submit", sendMessage);
 elements.send.addEventListener("click", () => { if (elements.send.type === "button") $("#stop-button").click(); });
 elements.input.addEventListener("input", resizeInput);
 elements.input.addEventListener("keydown", (event) => {
-  if (event.isComposing || slashComposer.keydown(event)) return;
+  if (event.isComposing || slashComposer.keydown(event) || messageHistory.keydown(event)) return;
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     $("#composer").requestSubmit();
@@ -478,18 +495,31 @@ $("#stop-button").addEventListener("click", async () => {
   try { await api(`/api/chats/${state.active.id}/stop`, { method: "POST", body: "{}" }); }
   catch (error) { toast(error.message); }
 });
-$("#delete-button").addEventListener("click", async () => {
-  if (!state.active || !confirm(`Delete “${state.active.title}” and its workspace?`)) return;
-  try {
-    const id = state.active.id;
-    await api(`/api/chats/${id}`, { method: "DELETE" });
+async function deleteChat(chat) {
+  if (!chat || !confirm(`Permanently delete “${chat.title}”, its messages, and its workspace files? Any running agent will be stopped. This cannot be undone.`)) return false;
+  const id = chat.id;
+  await api(`/api/chats/${id}`, { method: "DELETE" });
+  await forgetChat(id);
+  toast("Chat and workspace permanently deleted.");
+  return true;
+}
+async function forgetChat(id) {
+  state.chats = state.chats.filter(item => item.id !== id);
+  chatControls.drafts.delete(id);
+  if (state.active?.id === id) {
     state.eventSource?.close();
-    state.chats = state.chats.filter((chat) => chat.id !== id);
+    state.selection = (state.selection || 0) + 1;
+    state.stream = null; state.liveTools.clear();
     state.active = null;
-    renderChats();
-    if (state.chats.length) await selectChat(state.chats[0].id);
-    else renderActive();
-  } catch (error) { toast(error.message); }
+    messageHistory.select(null);
+    history.replaceState(null, "", location.pathname);
+    renderActive();
+    if (state.chats.length) await selectChat(state.chats[0].id).catch(error => toast(error.message));
+  }
+  renderChats();
+}
+$("#delete-button").addEventListener("click", () => {
+  deleteChat(state.active).catch(error => toast(error.message));
 });
 $("#open-sidebar").addEventListener("click", () => elements.sidebar.classList.add("open"));
 $("#close-sidebar").addEventListener("click", () => elements.sidebar.classList.remove("open"));
@@ -499,22 +529,36 @@ document.addEventListener("keydown", (event) => {
     openNewChat();
   }
 });
-const sidebar = new ChatSidebar({ state, api, select: selectChat, toast, age: escapeTime, agentLabel,
+const sidebar = new ChatSidebar({ state, api, select: selectChat, remove: deleteChat, toast, agentLabel,
   updated: chat => {
     updateChatSummary(chat);
     if (state.active?.id === chat.id) { state.active = { ...state.active, ...chat }; renderActive(); }
   },
 });
 const workspaceSettings = new WorkspaceSettings({ state, api, toast });
-const mcpSettings = new McpSettings({ api, toast });
+const mcpSettings = new McpSettings({ api, toast, state });
 const toolActivity = new ToolActivity();
 const usagePanel = new UsagePanel({ state, api, toast });
+const documentPreview = new DocumentPreview();
+const sharedBrowser = new SharedBrowserPanel({ api });
+const browserConnectionSettings = new BrowserConnectionSettings({ api, state, toast, browser: sharedBrowser,
+  accountChanged: async () => {
+    await sidebar.refresh();
+    if (state.active && !state.chats.some(chat => chat.id === state.active.id)) { state.eventSource?.close(); state.active = null; state.stream = null; }
+    if (state.active) await selectChat(state.active.id); else if (state.chats.length) await selectChat(state.chats[0].id); else renderActive();
+    renderChats();
+  },
+  chatUpdated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = chat; renderActive(); } },
+});
 const chatControls = new ChatControls({ state, api, toast,
+  preview: documentPreview,
   updated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = { ...state.active, ...chat }; renderActive(); } },
   openEnvironment: () => workspaceSettings.openEnvironments(state.active?.environmentId),
   openRepositories: () => openNewChat(),
 });
 const slashComposer = new SlashComposer({ state, api });
+const messageHistory = new MessageHistory({ input: elements.input, state, onChange: resizeInput });
+const messageNavigator = new MessageNavigator({ state, scroller: elements.messages, root: $("#message-navigator") });
 const activeModelPicker = new ModelPicker({ root: $("#composer-model-controls"), api, onChange: async settings => {
   if (!state.active) return;
   const id = state.active.id;

@@ -60,6 +60,7 @@ export function loadConfig(env = process.env) {
     port: integer(env, "AGENT_WEB_PORT", 8787, { max: 65_535 }),
     authToken,
     cookieSecure: boolean(env, "AGENT_COOKIE_SECURE", false),
+    publicOrigin: env.AGENT_WEB_PUBLIC_URL || "",
     database: {
       mode: choice(env, "AGENT_DATABASE_MODE", env.DATABASE_URL ? "postgres" : "embedded", ["postgres", "embedded", "memory"]),
       url: env.DATABASE_URL || "",
@@ -78,6 +79,7 @@ export function loadConfig(env = process.env) {
     workspaceSource: env.AGENT_WORKSPACE_SOURCE || "",
     workerBackend,
     enableMock: boolean(env, "AGENT_ENABLE_MOCK", false),
+    chromeBin: env.AGENT_CHROME_BIN || "google-chrome",
     processIsolation: choice(env, "AGENT_PROCESS_ISOLATION", isolationDefault, ["namespace", "none"]),
     sessionCapabilityTtlMs: integer(env, "AGENT_CAPABILITY_TTL_MS", 3_600_000, {
       min: 10_000,
