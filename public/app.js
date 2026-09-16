@@ -36,6 +36,7 @@ import { StatusLineControls } from "./statusline-controls.js";
 import { TabTitleControls } from "./tab-title-controls.js";
 import { SyntaxThemeControls } from "./syntax-theme-controls.js";
 import { PetControls } from "./pet-controls.js";
+import { DesktopHandoff } from "./desktop-handoff.js";
 
 const state = {
   config: null,
@@ -206,6 +207,7 @@ function renderActive() {
   statusline.render();
   tabTitle.render();
   pets.render();
+  desktopHandoff.render();
   vimComposer.select();
   sideChat.setChat(chat);
   agentThreads.setChat(chat);
@@ -482,6 +484,11 @@ async function sendMessage(event) {
   let text = elements.input.value.trim() || (files.length ? "Please inspect the attached files." : "");
   if (!text || !state.active) return;
   const chatId = state.active.id;
+  if (/^\/app(?:\s|$)/.test(text) && state.active.agent === "codex") {
+    if (text !== "/app") { toast("Use /app without arguments to open the saved session's desktop handoff."); return; }
+    try { if (await desktopHandoff.open() && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); slashComposer.close(); workspaceContext.closeMenu(); } }
+    catch (error) { toast(error.message); } return;
+  }
   if (/^\/pets?(?:\s|$)/.test(text)) {
     try {
       if (await pets.command(text.replace(/^\/pets?\s*/, "")) && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); slashComposer.close(); workspaceContext.closeMenu(); }
@@ -786,6 +793,7 @@ const browserConnectionSettings = new BrowserConnectionSettings({ api, state, to
     tabTitle.resetIdentity();
     syntaxTheme.resetIdentity();
     pets.resetIdentity();
+    desktopHandoff.resetIdentity();
     keymap.resetIdentity(); await keymap.load().catch(error => toast(error.message));
     await sidebar.refresh();
     if (state.active && !state.chats.some(chat => chat.id === state.active.id)) { state.eventSource?.close(); state.active = null; state.stream = null; }
@@ -823,6 +831,8 @@ const syntaxTheme = new SyntaxThemeControls({ api, controls: chatControls, notif
 $("#syntax-theme-button").addEventListener("click", () => void syntaxTheme.open().catch(error => toast(error.message)));
 const pets = new PetControls({ api, controls: chatControls, getChat: () => state.active, root: $("#chat-pet"), notify: message => toast(message, { outsideDialog: true }) });
 $("#pets-button").addEventListener("click", () => void pets.open().catch(error => toast(error.message)));
+const desktopHandoff = new DesktopHandoff({ state, api, controls: chatControls });
+$("#desktop-app-button").addEventListener("click", () => void desktopHandoff.open().catch(error => toast(error.message)));
 const vimComposer = new VimComposer({ input: elements.input, getChatId: () => state.active?.id, notify: toast, keydown: composerKeydown,
   changed: () => { resizeInput(); renderKeyboardHints(); },
   help: () => chatControls.dialog("Vim composer keys",

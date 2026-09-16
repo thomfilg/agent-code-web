@@ -34,8 +34,9 @@ export const WEB_COMMANDS = {
   title: "Select, reorder and save browser-tab title fields; does not rename the chat",
   theme: "Preview and save syntax-highlighting colors for Relay code and diffs",
   pets: "Choose a built-in or custom pet for this chat; /pets name selects, /pets off hides",
+  app: "Open the same saved Codex session in the desktop app; review computer and profile first",
 };
 export const webCommands = (agent, capabilities = {}) => Object.entries(WEB_COMMANDS)
-  .filter(([name]) => !["goal", "init", "review", "fast", "personality", "ps", "clean", "debug-config", "side", "btw", "fork", "agent", "ide", "apps", "plugins", "hooks", "experimental", "memories", "import", "approve", "feedback", "logout"].includes(name) || agent === "codex")
+  .filter(([name]) => !["goal", "init", "review", "fast", "personality", "ps", "clean", "debug-config", "side", "btw", "fork", "agent", "ide", "app", "apps", "plugins", "hooks", "experimental", "memories", "import", "approve", "feedback", "logout"].includes(name) || agent === "codex")
   .filter(([name]) => !["fast", "personality"].includes(name) || capabilities[name])
   .map(([name, description]) => ({ name, description, aliases: Object.entries(WEB_COMMAND_ALIASES).filter(([, target]) => target === name).map(([alias]) => alias), kind: "Web control", web: true }));

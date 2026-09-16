@@ -461,6 +461,18 @@ fresh session. The target provider's default model/effort are selected.
 - **Slash commands:** type `/` to discover installed skills, plugin aliases and
   native commands; arrows navigate and Enter inserts. See Conversation controls
   below for command behavior and the remaining native-command coverage checklist.
+- **Desktop handoff (Codex):** `/app` or **Chat actions → Open in desktop app**
+  inspects the same saved native session. For a verified local host profile,
+  confirm that your desktop app uses the worker's computer and exact Codex
+  profile, then open its `codex://threads/<native-id>` link. The browser may ask
+  before launching the app; Relay cannot confirm installation or launch success.
+  This never copies history/credentials, starts a model turn, pauses the queue or
+  wakes a worker. Checked locations survive stop/restart and are labelled as
+  saved, not reverified. Old sessions without a checked location require a
+  refresh while their worker is awake. Remote workers show SSH connection
+  guidance, not a false local-session link; private gateway profiles cannot yet
+  be handed to the desktop app. Actual OS launch and remote/private handoff
+  remain acceptance/implementation gates in `docs/command-support.md`.
 - **Side chat (Codex):** `/side [question]`, `/btw [question]`, or **Side chat**
   opens a native temporary fork in the resizable third column (overlay on phones).
   It inherits the main context and shares its workspace and selected permissions,

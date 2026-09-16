@@ -415,6 +415,14 @@ export async function createAgentWebServer(options = {}) {
           request.guardChat(); return json(response, 200, result);
         }
         if (tail === "commands/inspect" && request.method === "GET") return json(response, 200, await manager.inspectCommand(chatId, url.searchParams.get("command")));
+        if (tail === "desktop-handoff" && request.method === "GET") {
+          const check = async () => {
+            request.guardChat();
+            if ((await browserUsers.session(request))?.id !== user?.id || !auth.authenticated(request)) throw Object.assign(new Error("The account changed. Reopen /app."), { statusCode: 409 });
+          };
+          await check(); const result = await manager.desktopHandoff(chatId, request.guardChat); await check();
+          return json(response, 200, { ...result, accountScope: user?.id || "shared" }, { "cache-control": "private, no-store" });
+        }
         if (tail === "logout" && request.method === "GET") {
           const result = await manager.nativeLogout(chatId, "status", {}, request.guardChat); request.guardChat(); return json(response, 200, result);
         }

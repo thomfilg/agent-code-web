@@ -62,6 +62,32 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: `/app` now opens a scoped same-session desktop handoff panel. An awake
+  worker supplies native metadata through read-only `thread/read`; a bound
+  controller locator survives stop/restart without waking it. Local host-profile
+  links require explicit same-computer/profile confirmation. No transcript,
+  credential, account or SSH-key transfer; no prompt, native setting change,
+  automatic stop or queue mutation. Refresh/account/navigation races clear old
+  paths and links. Private gateway profiles and remote workers have explicit
+  limitations, not fabricated local links or pretend handoff success.
+  OpenAI Docs supplied the actual local deep-link and remote-connection contract.
+  Nine unit/controller cases and seven handoff browser cases pass; the final
+  related browser regression run passes 20/20. The actual installed Codex
+  0.154.0 smoke passes on a disposable private profile: same native identity
+  before/after resume, unchanged history, one loopback seed response and no
+  external model calls. The normal, default-concurrency `npm test` passes
+  **362/362**, including the real Chrome extension case. All JavaScript syntax
+  and whitespace checks pass; the 320px panel was visually inspected.
+  Initial checks caught a cache-header override (fixed) and test selectors that
+  hit Stop instead of Queue and assumed a hash router (corrected to the real
+  controls). No assertions/timeouts/launch flags were relaxed. This is a focused
+  browser checkpoint, not a rerun or closure of the earlier full-suite
+  history/network failures. Nothing was deployed or changed in live chats.
+  OS desktop launch remains unverified; private-profile handoff and one-click
+  remote selection remain unimplemented. Keep item 20 open. Next safe work is
+  the remaining `/fast`/`/personality` browser/native parameter acceptance,
+  followed by `/init` and installed Claude-command acceptance. Preserve these
+  open gates while saving this increment to PR #2 without merge/deployment.
 - 20: `/pets` and `/pet` now open a saved web companion picker; direct names/IDs
   and Off work while busy without sending/queueing a prompt. Eight actual
   OpenAI v4 built-ins are downloaded lazily, hash-checked and cached. Private

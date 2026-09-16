@@ -20,6 +20,7 @@ export function messageCommand(agent, text) {
     return { type: "settings", settings: { [key]: argument === "default" ? null : argument } };
   }
   if (agent !== "codex") return null; // Preserve Claude's installed commands and plugin aliases.
+  if (match[1] === "app") throw new Error("Open /app without arguments in the web composer to hand off the saved session. This is not agent input.");
   if (match[1] === "approve") throw new Error("Open /approve without arguments and confirm a specific denied action. Plain messages cannot grant approval.");
   if (match[1] === "feedback") throw new Error("Open /feedback without arguments to review and explicitly send a report. Plain messages cannot submit diagnostics.");
   if (match[1] === "logout") throw new Error("Open /logout without arguments, inspect the native account and confirm sign-out. Plain messages cannot clear credentials.");

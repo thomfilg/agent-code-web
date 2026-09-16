@@ -27,6 +27,7 @@ import { copyImportedImages, importedHistoryWarnings } from "./codex-import-chat
 import { CodexApprovals } from "./codex-approvals.mjs";
 import { CodexFeedback } from "./codex-feedback.mjs";
 import { CodexLogout } from "./codex-logout.mjs";
+import { desktopBinding, desktopInfo } from "./desktop-handoff.mjs";
 
 const ADAPTERS = {
   codex: CodexAdapter,
@@ -292,6 +293,35 @@ export class RuntimeManager extends EventEmitter {
   nativeHooks(chatId, input = {}, guard = () => {}) { return this.#nativeSettings(chatId, "hook", input, guard); }
   nativeFeatures(chatId, input = {}, guard = () => {}) { return this.#nativeSettings(chatId, "feature", input, guard); }
   nativeMemories(chatId, input = {}, guard = () => {}) { return this.#nativeSettings(chatId, "memory", input, guard); }
+
+  async desktopHandoff(chatId, guard = () => {}) {
+    guard(); const chat = this.store.get(chatId);
+    if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    if (chat.agent !== "codex") throw new Error("Desktop handoff requires a Codex chat");
+    const binding = desktopBinding(chat, this.config), version = this.#lifecycleVersions.get(chatId) || 0;
+    const check = () => {
+      guard(); const current = this.store.get(chatId);
+      if (!current || desktopBinding(current, this.config) !== binding || version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(new Error("The chat changed or stopped. Refresh the desktop handoff."), { statusCode: 409 });
+    };
+    const runtime = this.#runtimes.get(chatId);
+    let snapshot = null, checkedNow = false;
+    if (runtime?.adapter.desktopSession && !["starting", "stopping"].includes(chat.status)) {
+      snapshot = await runtime.adapter.desktopSession(check); check();
+      checkedNow = true;
+      if (this.store.records) {
+        await this.store.records.put("desktop-handoff", chatId, { binding, snapshot });
+        try { check(); } catch (error) {
+          if (!this.store.get(chatId)) await this.store.records.delete("desktop-handoff", chatId);
+          throw error;
+        }
+      }
+    } else if (this.store.records) {
+      const saved = await this.store.records.get("desktop-handoff", chatId); check();
+      if (saved?.binding === binding) snapshot = saved.snapshot;
+    }
+    check();
+    return desktopInfo(chat, snapshot, { awake: checkedNow, busy: this.isBusy(chatId) || this.sideChats.busy(chatId) || Boolean(runtime?.adapter.nativeSettingsBusy?.()) });
+  }
 
   async nativeLogout(chatId, action = "status", input = {}, guard = () => {}) {
     guard(); const chat = this.store.get(chatId);

@@ -37,6 +37,7 @@ and remain at the beginning of native stream-json input.
 | `/title` | Relay web equivalent: configure the actual browser-tab title with eight ordered fields, live preview, explicit save, neutral app-only title and per-account persistence. Runtime/goal/plan updates use saved chat data; animation respects reduced motion and visibility. Does not rename a chat or change native configuration. Activation pending. |
 | `/theme` | Relay web equivalent: preview/save four syntax palettes with per-account persistence; real self-hosted code tokenization in an isolated browser worker, plus themed diff colors. Keeps literal source, drafts/files and active work unchanged. Unknown/large/complex blocks stay readable; worker failures can be retried. Activation pending. |
 | `/pets`, `/pet`, `/pets <name>`, `/pets off` | Relay web equivalent: eight real built-ins, saved selection/Off, private uploaded custom pets and current-chat activity. Preview/save, named selection, reduced motion, hidden-tab pausing, bounded image decoding and explicit custom deletion. No agent input or native profile changes. Activation pending. |
+| `/app` (Codex) | Explicit same-session desktop link for verified local host profiles, with native locator inspection, stopped-session cache, computer/profile confirmation and no prompt/credential/history transfer. Remote/private profiles show their actual connection limits. Controller/browser and installed-CLI inspection checks; OS launch acceptance and private/remote handoff remain open. |
 | `/init [instructions]` | Repository-instruction creation task, preserving existing AGENTS.md and unrelated edits. Parser/dispatch tests; resulting repository document still needs acceptance verification. |
 | Installed Codex skills | `skills/list` plus structured skill input. No fake terminal entries substituted for skills. |
 | Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI `/reload-skills`, `/autocompact 200k` and `/config` return visible native results without any model call; full installed-command acceptance still pending. |
@@ -72,10 +73,75 @@ Do not treat removing entries from autocomplete as implementing them.
 - `/logout` private native credentials are implemented below. Shared host,
   keyring/automatic storage and gateway-hidden ephemeral accounts remain gated
   until their company/profile isolation and native visibility can be verified.
-- Remaining surface-specific handling: `/app`.
+- `/app` local-session link and native inspection are implemented below. Actual
+  OS desktop launch is unverified in this headless Linux test environment.
+  Private gateway-profile handoff and one-click remote-host selection are not
+  implemented; guidance is not counted as completing those paths. No documented
+  chat-link parameter selects `CODEX_HOME` or a remote host, so Relay must not
+  invent one or copy credentials to make a misleading local link appear to work.
 - Windows-only sandbox setup and read-directory commands do not apply to the
   current Linux worker. Native APIs still need capability/version checks if a
   Windows worker is introduced.
+
+### Desktop handoff
+
+OpenAI Docs' [CLI command reference](https://learn.chatgpt.com/docs/developer-commands#continue-in-the-desktop-app-with-app)
+defines `/app` as opening the same saved session (the native CLI documents this
+for macOS/Windows). The [desktop deep-link reference](https://learn.chatgpt.com/docs/reference/commands#deep-links)
+provides `codex://threads/<thread-id>` for a local chat. This differs from moving
+a chat and its Git state between already connected desktop hosts. The
+[remote guide](https://learn.chatgpt.com/docs/remote-connections#connect-to-an-ssh-host)
+requires a user-configured authenticated SSH connection. These sources do not
+establish a `CODEX_HOME`/remote-host selector for local chat links.
+
+Relay's `/app` and Chat actions menu open a review panel, never an ordinary model
+message or a process on the server. An awake Codex adapter reads its own native
+`thread/read` metadata with `includeTurns: false`; it validates thread identity,
+non-ephemeral history, workspace and profile-contained session path. Native
+errors are not dumped into the browser. Authentication mode comes from the
+actual worker startup, not a subsequently changed configuration. Relay returns
+and caches only the validated locator; it does not request turns, read history
+files, access account APIs/native settings or copy credentials or SSH keys.
+
+A small locator is cached in controller records, bound to chat, owner, company,
+environment, workspace, session, backend and configured host profile. Stopped
+workers use a clearly labelled saved location, without waking. Owner/scope
+changes invalidate it; explicit chat deletion removes it, including a late
+write racing deletion. Unverified old/empty sessions get no fabricated chat or
+forced seed message. Refresh while the existing worker is awake verifies them.
+
+Local host-profile links require explicit confirmation of the same computer and
+profile. The URL contains only the validated native UUID, never a Relay ID,
+prompt, token or guessed path parameter. Relay keeps the chat/draft/attachments
+and queue intact, warns about concurrent work, and says only that opening was
+requested: a web page cannot prove that the installed desktop app received it.
+Remote host profiles offer the documented SSH-settings link and guide; private
+gateway profiles stay visibly unavailable for desktop handoff. Neither case is
+silently exported or routed into an unrelated local profile. These limitations
+remain open above, not disguised as full command completion.
+
+The HTTP endpoint is authenticated, owner-checked, read-only and `private,
+no-store`; it rechecks login after asynchronous inspection. The UI clears old
+paths/links on refresh, failure, account/session changes or chat navigation, and
+ignores late responses. Clipboard denial falls back to selecting literal text;
+unsupported command arguments retain the draft. New tests cover these behaviors
+without launching a personal desktop app. The actual installed Codex 0.154.0
+smoke uses a disposable profile and one loopback fixture response to create a
+saved thread, then proves identical session/profile before/after resume and an
+unchanged native transcript. Inspection makes no extra inference requests.
+OS launch, remote/private handoff and live backend activation are not claimed.
+
+Verification: all nine handoff unit/controller cases pass; the normal
+default-concurrency `npm test` passes **362/362**, including real Chrome.
+All seven handoff browser scenarios pass in the final **20/20** related-command
+browser run. The installed-CLI smoke passes on the final source, and JavaScript
+syntax/whitespace checks pass. The 320px layout was visually inspected. Initial
+failures found an overridden cache header (fixed) and two test-fixture mistakes
+(busy Stop versus Queue, and assuming a hash router); the tests now exercise the
+real controls without weakened assertions or longer timeouts. This targeted
+browser result does not erase the earlier full-suite history/network failures.
+Next safe item-20 work is `/fast` and `/personality` browser/native parameter
+acceptance, then `/init` and the remaining installed Claude-command checks.
 
 ### Pets
 

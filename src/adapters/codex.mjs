@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { JsonRpcProcess } from "../json-rpc-process.mjs";
 import { buildWorkerEnvironment } from "../worker-process.mjs";
+import { inspectDesktopSession } from "../desktop-handoff.mjs";
 import { errorMessage, redact } from "../utils.mjs";
 import { codexUsage, safeRateLimits, cliVersionFromUserAgent, safeSessionDetails } from "../session-info.mjs";
 import { codexMcpArgs } from "../mcp-connections.mjs";
@@ -128,6 +129,7 @@ export class CodexAdapter {
     });
     await ensureDirectory(env.CODEX_HOME);
     this.nativeHome = env.CODEX_HOME;
+    this.nativeAuthMode = authMode;
     this.pluginCli = new CodexPluginCli({ command: this.config.codex.bin, workspace: this.workspace, env,
       ...(this.executor ? { spawn: this.executor.spawn.bind(this.executor) } : { isolation: this.config.processIsolation }) });
     this.plugins = new CodexPlugins({ run: args => this.pluginCli.run(args),
@@ -222,6 +224,8 @@ export class CodexAdapter {
   }
 
   nativeSettingsBusy() { return Boolean(this.current || this.goal?.status === "active" || this.agents?.busy() || [...this.children].some(child => child.current)); }
+
+  desktopSession(check) { return inspectDesktopSession(this, check); }
 
   async #loadThread() {
     const common = {
