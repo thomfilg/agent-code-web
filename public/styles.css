@@ -449,6 +449,19 @@ dialog { max-height: calc(100dvh - 28px); }
 #controls-content button { border: 1px solid var(--line); padding: 8px; border-radius: 5px; color: var(--text); background: var(--panel); }
 #controls-content .native-memory-confirm .danger { color: var(--red); border-color: rgba(245,139,131,.35); }
 .attachment-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.composer .relay-vim-editor { height: auto; min-width: 0; max-width: 100%; background: transparent; color: var(--text); font: 14px/1.6 ui-monospace, monospace; }
+.composer .relay-vim-editor .CodeMirror-scroll { max-height: 220px; min-height: 58px; }
+.composer .relay-vim-editor .CodeMirror-lines { padding: 4px 0; }
+.composer .relay-vim-editor .CodeMirror-cursor { border-left-color: var(--lime); }
+.composer .relay-vim-editor .CodeMirror-selected { background: #637546; }
+.composer .relay-vim-editor .CodeMirror-activeline-background { background: transparent; }
+.composer .relay-vim-editor.cm-fat-cursor .CodeMirror-cursor { background: var(--lime); color: var(--bg); }
+.composer .relay-vim-editor .CodeMirror-dialog { background: var(--panel); color: var(--text); border-color: var(--line); padding: 6px; }
+.composer .relay-vim-editor .CodeMirror-dialog input { color: var(--text); font: inherit; max-width: 80%; }
+.vim-status { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 10px; padding: 2px 0 8px; }
+.vim-status[hidden] { display: none; }
+#vim-mode { color: var(--lime); font-weight: 600; }
+.vim-status button { border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; background: transparent; color: var(--text); font: inherit; }
 .attachment-chip { display: flex; align-items: center; gap: 4px; max-width: 200px; padding: 3px 6px; font-size: 10px; background: var(--panel); border-radius: 6px; }
 .attachment-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-open { min-width: 0; padding: 7px 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: transparent; color: var(--text); font: inherit; cursor: pointer; }

@@ -62,6 +62,31 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: `/vim`, explicit on/off and Chat actions now control real web-composer Vim
+  editing. The OpenAI Docs skill informed the per-session behavior; the mode is
+  per chat in this page, not a native configuration change. A pinned, self-hosted
+  editor loads only on opt-in. Normal/Insert/Visual editing, motions, operators,
+  text objects, registers, undo, search and substitutions work on the unsent
+  draft. Insert-mode Relay shortcuts, command/file pickers and attachments keep
+  their existing paths. Normal Enter cannot send; mode, help and off controls
+  are visible. Chat/account changes reset registers, macros, search and undo;
+  late asset loads and load failures cannot erase newer drafts or switch chats.
+  Two new unit/controller checks and nine actual-editor browser checks pass,
+  including mobile, account changes, workspace references, clipboard files,
+  busy queueing, IME and read-only/size limits. The full unit/controller suite
+  passes 329/329 with `node --test --test-concurrency=2 test/*.test.mjs`.
+  Default-concurrency `npm run check` is not green: after correcting the obsolete
+  assertion that Vim must be unavailable, its latest run had 319 passes, nine
+  failures and one cancellation, involving fixture timeouts and shutdown races.
+  No timeout was relaxed and no test was skipped; the default-run failures are
+  retained, not declared fixed by the bounded-concurrency result. The final full
+  browser suite passes 102/102, including all nine Vim cases; repository-wide
+  JavaScript syntax and `git diff --check` pass. Desktop and 320px editor layouts
+  were visually inspected. Item 26's known intermittent paging failure did not
+  reproduce in this browser run but remains open. No worker,
+  native config, live chat/account, personal Chrome or live service changed.
+  Backend activation remains pending. Save this incremental checkpoint to PR #2
+  without merge/deployment. Next: `/statusline`; item 20 remains in progress.
 - 20: `/keymap` now opens a working web keyboard editor, also reachable through
   Chat actions. The OpenAI Docs skill informed context/action selection,
   alternatives, unbinding and persistence; Relay explicitly distinguishes its

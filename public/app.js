@@ -31,6 +31,7 @@ import { NativeApprovalControls } from "./native-approvals.js";
 import { NativeFeedbackControls } from "./native-feedback.js";
 import { NativeLogoutControls } from "./native-logout.js";
 import { KeymapControls } from "./keymap-controls.js";
+import { VimComposer } from "./vim-composer.js";
 
 const state = {
   config: null,
@@ -198,6 +199,7 @@ function renderApproval() {
 
 function renderActive() {
   const chat = state.active;
+  vimComposer.select();
   sideChat.setChat(chat);
   agentThreads.setChat(chat);
   workspaceContext.setChat(chat);
@@ -300,6 +302,7 @@ async function selectChat(id) {
   try {
     const { chat } = await api(`/api/chats/${id}`);
     if (state.selection !== selection) return;
+    vimComposer.beforeSelect();
     state.active = chat;
     messageHistory.select(chat.id);
     slashComposer.close();
@@ -472,6 +475,14 @@ async function sendMessage(event) {
   let text = elements.input.value.trim() || (files.length ? "Please inspect the attached files." : "");
   if (!text || !state.active) return;
   const chatId = state.active.id;
+  if (/^\/vim(?:\s|$)/.test(text)) {
+    try {
+      const argument = text.slice(4).trim();
+      if (argument && !["on", "off"].includes(argument)) throw new Error("Use /vim, /vim on or /vim off to control this web composer's editing mode.");
+      if (await vimComposer.toggle(argument ? argument === "on" : undefined, { command: text }) && state.active?.id === chatId) { slashComposer.close(); workspaceContext.closeMenu(); }
+    } catch (error) { toast(error.message); }
+    return;
+  }
   if (text === "/keymap") {
     try { if (await keymap.open() && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } }
     catch (error) { toast(error.message); } return;
@@ -597,6 +608,7 @@ async function runWebCommand(text) {
 }
 
 function resizeInput() {
+  if (elements.input.relayVimEditor) { vimComposer.sync(); return; }
   elements.input.style.height = "auto";
   elements.input.style.height = `${Math.min(elements.input.scrollHeight, 170)}px`;
 }
@@ -664,18 +676,21 @@ function keyboardAction(event, action) {
   }
   return false;
 }
-elements.input.addEventListener("keydown", (event) => {
-  if (event.isComposing || event.keyCode === 229 || document.querySelector("dialog[open]") || workspaceContext.keydown(event) || slashComposer.keydown(event)) return;
+function composerKeydown(event, { vim = false, inserting = true } = {}) {
+  if (event.isComposing || event.keyCode === 229 || document.querySelector("dialog[open]")) return;
+  if (!inserting && !event.ctrlKey && !event.metaKey && !event.altKey) return;
+  if (workspaceContext.keydown(event) || slashComposer.keydown(event)) return;
   const action = keymap.action(event, "composer");
   if (action?.startsWith("history_")) { messageHistory.keydown(event, action); return; }
   if (action === "send") {
     event.preventDefault();
     if (!event.repeat) $("#composer").requestSubmit();
   } else if (action === "newline") {
-    if (event.key === "Enter" && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) return; // Retain the browser's native undo for the default newline.
+    if (!vim && event.key === "Enter" && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) return; // Retain the browser's native undo for the default newline.
     event.preventDefault(); elements.input.setRangeText("\n", elements.input.selectionStart, elements.input.selectionEnd, "end"); elements.input.dispatchEvent(new Event("input", { bubbles: true }));
   } else keyboardAction(event, action);
-});
+}
+elements.input.addEventListener("keydown", composerKeydown);
 document.addEventListener("keydown", event => {
   if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || document.querySelector("dialog[open]") || event.target === elements.input) return;
   if (event.target.closest?.("input, textarea, select, [contenteditable], canvas, [role=application]")) return;
@@ -698,6 +713,7 @@ async function deleteChat(chat) {
   return true;
 }
 async function forgetChat(id) {
+  vimComposer.forget(id);
   state.chats = state.chats.filter(item => item.id !== id);
   chatControls.drafts.delete(id);
   if (state.active?.id === id) {
@@ -734,6 +750,7 @@ const agentThreads = new AgentThreadsPanel({ api, getChat: () => state.active, t
 const sharedBrowser = new SharedBrowserPanel({ api, getBackend: () => state.active?.runtimeMetadata?.backend || state.config?.workerBackend });
 const browserConnectionSettings = new BrowserConnectionSettings({ api, state, toast, browser: sharedBrowser,
   accountChanged: async () => {
+    vimComposer.resetIdentity();
     keymap.resetIdentity(); await keymap.load().catch(error => toast(error.message));
     await sidebar.refresh();
     if (state.active && !state.chats.some(chat => chat.id === state.active.id)) { state.eventSource?.close(); state.active = null; state.stream = null; }
@@ -754,10 +771,19 @@ function renderKeyboardHints() {
   const send = binding("composer", "send", ["enter"]), newline = binding("composer", "newline", ["shift-enter"]);
   const busy = ["running", "starting"].includes(state.active?.status);
   $(".composer-hint").textContent = `${send ? `${send} to ${busy ? "queue" : "send"}` : "Use the send/queue button"}${busy ? " · Stop pauses the queue" : ""}${newline ? ` · ${newline} for a new line` : ""}`;
+  if (elements.input.relayVimEditor && !elements.input.relayVimEditor.state.vim?.insertMode) $(".composer-hint").textContent = `Vim Normal/Visual: i to edit · Use the ${busy ? "Queue" : "Send"} button to ${busy ? "queue" : "send"}`;
   const keys = keymap.snapshot.bindings.global?.new_chat ?? ["ctrl-k", "meta-k"], preferred = keys.find(key => key.startsWith(navigator.platform?.includes("Mac") ? "meta-" : "ctrl-")) || keys[0];
   const badge = $("#new-chat-button kbd"); badge.textContent = preferred ? label(preferred) : ""; badge.hidden = !preferred;
 }
 const keymap = new KeymapControls({ api, controls: chatControls, notify: message => toast(message, { outsideDialog: true }), changed: renderKeyboardHints });
+const vimComposer = new VimComposer({ input: elements.input, getChatId: () => state.active?.id, notify: toast, keydown: composerKeydown,
+  changed: () => { resizeInput(); renderKeyboardHints(); },
+  help: () => chatControls.dialog("Vim composer keys",
+    node("p", "", "Vim editing applies only to this chat's web composer for this page session. It starts in Normal mode. New chats and page reloads start with the ordinary composer. It never changes the worker's terminal configuration or sends a prompt."),
+    node("p", "", "i/a/I/A insert or append · Esc returns to Normal · h/j/k/l, w/b/e, 0/^/$, gg/G move · counts such as 3w · d/c/y with motions or text objects such as dw, ciw, da\" · x/r replace/delete · p/P paste the local Vim register · u and Ctrl+R undo/redo · v/V/Ctrl+V visual selections · / and ? search · n/N repeat search · :s substitutions."),
+    node("p", "", "In Insert mode, Relay's configured send/queue, newline, message-history and command/file-picker shortcuts stay active. In Normal/Visual mode, unmodified keys belong to Vim; use the Send/Queue button, or a configured modified send shortcut. Tab moves focus outside the editor when no picker is open."),
+    node("p", "muted", "Vim commands edit the unsent draft, not workspace files; :w does not send it. Attachments remain attached. Registers, macros, search and undo state are cleared when you turn Vim off or leave this chat, so they cannot leak into another chat or account. No external script/CDN, filesystem or model access is used.")),
+});
 $("#keymap-button").addEventListener("click", () => void keymap.open().catch(error => toast(error.message)));
 const slashComposer = new SlashComposer({ state, api });
 const workspaceContext = new WorkspaceContext({ state, api, controls: chatControls, toast });

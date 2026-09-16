@@ -32,6 +32,7 @@ and remain at the beginning of native stream-json input.
 | `/feedback` (Codex) | Explicit policy check, literal report review and final external-upload confirmation. Logs off by default; private-profile diagnostics are a separate opt-in, shared host logs stay blocked. Encrypted owner/company/session/worker-bound intents prevent automatic repeats after lost replies or restart. Real CLI checks use a network-isolated local TLS receiver, not OpenAI. Unit/controller and responsive browser checks pass; live activation pending. |
 | `/logout` (Codex) | Read-only status, explicit private-account inspection and separately confirmed native credential removal; queue pauses and history/draft/files remain. Native account and file removal are verified, with credential/policy/worker-bound consent and no automatic replay after uncertainty. Shared host, OS keyring/auto and gateway-hidden ephemeral accounts remain locked. Unit/controller, responsive browser and network-isolated real-CLI checks pass; live activation pending. |
 | `/keymap` | Relay web equivalent: edit/save/unbind/restore actual global and main-composer shortcuts, with duplicate/reserved-key validation, context precedence, per-account persistence and conflict checks. Main history boundaries, draft/files, IME/pickers and busy queue behavior are retained. Terminal config and worker permissions are never changed. Five unit/controller checks and five responsive browser checks pass; live activation pending. |
+| `/vim`, `/vim on`, `/vim off` | Per-chat web composer toggle using a lazily loaded, self-hosted Vim editor. Real Normal/Insert/Visual editing, operators/text objects, search/substitution and undo; Insert-mode Relay shortcuts and attachments are retained. Chat/account changes clear registers, macros, search and undo state. No worker/config/model action. |
 | `/init [instructions]` | Repository-instruction creation task, preserving existing AGENTS.md and unrelated edits. Parser/dispatch tests; resulting repository document still needs acceptance verification. |
 | Installed Codex skills | `skills/list` plus structured skill input. No fake terminal entries substituted for skills. |
 | Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI `/reload-skills`, `/autocompact 200k` and `/config` return visible native results without any model call; full installed-command acceptance still pending. |
@@ -67,11 +68,64 @@ Do not treat removing entries from autocomplete as implementing them.
 - `/logout` private native credentials are implemented below. Shared host,
   keyring/automatic storage and gateway-hidden ephemeral accounts remain gated
   until their company/profile isolation and native visibility can be verified.
-- Terminal UI equivalents or surface-specific handling: `/vim`,
-  `/statusline`, `/title`, `/theme`, `/pets`, `/pet`, `/app`.
+- Terminal UI equivalents or surface-specific handling: `/statusline`, `/title`,
+  `/theme`, `/pets`, `/pet`, `/app`.
 - Windows-only sandbox setup and read-directory commands do not apply to the
   current Linux worker. Native APIs still need capability/version checks if a
   Windows worker is introduced.
+
+### Vim composer
+
+The OpenAI Docs skill's [Vim command reference](https://learn.chatgpt.com/docs/developer-commands#toggle-vim-mode-with-vim)
+establishes a per-session Normal/Insert composer toggle, distinct from changing
+the native default in configuration. Relay therefore applies `/vim` to the web
+composer, with explicit on/off arguments and a recoverable Chat actions toggle.
+It is never sent as ordinary model text or queued as a worker action. Enabling it
+while an agent works does not stop that agent, change permissions or send input.
+
+The pinned, self-hosted CodeMirror 5.65.21 Vim editor loads only on explicit
+enable, including its local search/dialog/bracket dependencies and styles. No
+CDN, bundler or external script is involved. This provides actual Vim motions,
+counts, operators and text objects, Normal/Insert/Visual/Replace modes, registers,
+undo/redo, searches and substitutions. The existing textarea is bridged to the
+editor's value, selection, focus and range operations, including its native
+backing value, so drafts, forms, file paste, attachments and command/file pickers
+retain the existing Relay paths. Programmatic replacement clears old undo state;
+the existing 100,000-character limit also applies to Vim edits and substitutions.
+
+Unmodified Normal/Visual keys belong to Vim. In Insert mode, configured Relay
+send/queue, newline and message-history actions take precedence, as do open
+command/file pickers. Modified configured send shortcuts and global controls also
+remain usable in Normal mode. Tab leaves the editor when no picker is open. The
+visible mode badge, contextual keyboard hint, Keys help and Vim off button make
+the mode explicit; turning it off retains draft text and attached files. Ex
+commands edit this draft only; `:w` does not save workspace files or send input.
+
+The mode flag lives per chat in the current page. Reload and new chats default to
+the ordinary composer; native `config.toml` is not mutated. Leaving a chat,
+changing the Relay account or disabling Vim destroys its editor and resets the
+pinned upstream Vim register/macro/search state, preventing cross-chat leakage.
+No draft text is copied into preference storage. Failed asset loads retain the
+typed command and can retry. Loading is generation-bound, so a late response
+cannot enable another chat, erase a newer draft or restore a revoked account's
+editor. New keyboard styles are scoped to the optional main-composer editor;
+side chat, child-agent inputs and Shared Chrome are unchanged.
+
+Verification uses the real shipped editor in isolated Chromium fixtures, not
+mock Vim actions. Two new unit/controller tests and nine browser tests pass,
+covering actual editing, busy queueing, remapped shortcuts, clipboard files,
+workspace references, command/history navigation, chat/account changes, late
+loads and errors, mobile controls and message limits. The full unit/controller
+suite passes 329/329 with `node --test --test-concurrency=2 test/*.test.mjs`.
+The default-concurrency check did not pass: its latest run had 319 passes, nine
+failures and one cancellation involving fixture timeouts and shutdown races.
+Those failures remain recorded; no tests were skipped or timeouts relaxed.
+The final full browser suite passes 102/102, including all nine Vim cases;
+repository-wide JavaScript syntax and whitespace checks pass. Desktop and 320px
+editor layouts were visually inspected. Item 26's previously reproduced paging
+intermittency remains open despite passing this run.
+Next remaining command is `/statusline`; item 20 stays open and activation is
+still pending.
 
 ### Keyboard remapping
 
@@ -109,8 +163,8 @@ Five unit/controller and five responsive browser checks cover validation, scope,
 persistence through service/browser reloads, real dispatch of all seven actions,
 busy queueing, draft/file retention, stale writes, IME and late acknowledgements.
 Desktop and 320px mobile dialogs were inspected. This is a web-surface equivalent,
-not a claim that terminal-only pager/editor keymaps were modified. Next: `/vim`;
-item 20 and the full feature queue remain in progress.
+not a claim that terminal-only pager/editor keymaps were modified. Vim editing
+was the subsequent checkpoint above; item 20 and the queue remain in progress.
 
 ### Native sign-out
 

@@ -1,4 +1,5 @@
 import { openSidePanel, closeSidePanel } from "./side-panels.js";
+import { composerHasFocus, composerIsInserting } from "./vim-composer.js";
 
 const $ = selector => document.querySelector(selector);
 const button = (label, action) => { const element = document.createElement("button"); element.type = "button"; element.className = "secondary-button"; element.textContent = label; element.onclick = action; return element; };
@@ -25,7 +26,7 @@ export class WorkspaceContext {
     setInterval(() => this.presence(), 15000);
     this.input.addEventListener("input", () => { clearTimeout(this.menuTimer); this.closeMenu(); this.menuTimer = setTimeout(() => void this.suggest(), 160); });
     this.input.addEventListener("click", () => void this.suggest());
-    this.input.addEventListener("blur", () => { clearTimeout(this.blurTimer); this.blurTimer = setTimeout(() => { if (document.activeElement !== this.input) this.closeMenu(); }, 150); });
+    this.input.addEventListener("blur", () => { clearTimeout(this.blurTimer); this.blurTimer = setTimeout(() => { if (!composerHasFocus(this.input)) this.closeMenu(); }, 150); });
   }
   setChat(chat) {
     if (this.chatId === chat?.id) return;
@@ -134,7 +135,7 @@ export class WorkspaceContext {
     } finally { this.staging = false; }
   }
   query() {
-    if (!this.chatId || document.activeElement !== this.input || this.input.selectionStart !== this.input.selectionEnd) return null;
+    if (!this.chatId || !composerHasFocus(this.input) || !composerIsInserting(this.input) || this.input.selectionStart !== this.input.selectionEnd) return null;
     const end = this.input.selectionStart, prefix = this.input.value.slice(0, end);
     const command = /^\/mention ([^\n]*)$/.exec(prefix);
     if (command && end === this.input.value.length) return { query: command[1], start: 0, end, command: true };

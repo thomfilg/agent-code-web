@@ -620,6 +620,19 @@ fresh session. The target provider's default model/effort are selected.
   it does not edit a remote terminal's `tui.keymap` or native `config.toml`, wake
   a worker, submit a prompt, answer an approval or change permissions. Side-chat,
   child-agent and Shared Chrome keyboard input are not remapped by these controls.
+- **Vim composer:** `/vim` toggles Vim editing for the current web chat; explicit
+  `/vim on` and `/vim off` and **Chat actions → Enable/Disable Vim editing** also
+  work. The editor loads locally only after opt-in and starts in Normal mode.
+  Use `i` to insert, Escape for Normal, motions/operators/text objects, visual
+  selections, registers, undo/redo, search and substitutions. The **Keys** control
+  explains the bindings. In Insert mode, Relay's configured send/queue, newline,
+  history and command/file pickers keep working. In Normal/Visual mode unmodified
+  keys belong to Vim; use Send/Queue or a configured modified send shortcut.
+  Files remain attached and `:w` never submits a message. Turning Vim off restores
+  the ordinary textarea with the draft intact. Mode is per chat in this page,
+  not a change to native `tui.vim_mode_default`; reloads and new chats default to
+  ordinary editing. Registers, undo, macros and search history are cleared on
+  chat/account changes or disable. No native config or worker is touched.
 - **Native sign-out (Codex):** `/logout` opens saved status without waking the
   worker. **Inspect native account** explicitly connects this chat, without an
   agent message or token refresh. A separate confirmation clears only reviewed

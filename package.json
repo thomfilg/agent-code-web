@@ -19,6 +19,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@playwright/mcp": "0.0.81",
+    "codemirror": "5.65.21",
     "dompurify": "^3.4.15",
     "embedded-postgres": "^17.10.0-beta.17",
     "fflate": "^0.8.3",

@@ -49,7 +49,7 @@ test("Codex menu contains executable skills and real web controls, not stale ter
   assert.ok(!webCommands("claude").some(command => command.name === "experimental"));
   assert.equal(commands.find(c => c.name === "memories").web, true);
   assert.ok(!webCommands("claude").some(command => command.name === "memories"));
-  assert.ok(commands.some(c => c.name === "work" && c.path)); assert.ok(!commands.some(c => c.name === "vim")); assert.equal(commands.find(c => c.name === "goal").web, true);
+  assert.ok(commands.some(c => c.name === "work" && c.path)); assert.equal(commands.find(c => c.name === "vim").web, true); assert.equal(commands.find(c => c.name === "goal").web, true);
 });
 
 test("command discovery gates model-specific commands and refreshes them when the model changes", async () => {

@@ -145,9 +145,13 @@ export async function createAgentWebServer(options = {}) {
         response.removeHeader("x-frame-options");
         response.setHeader("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts");
       }
-      const vendor = { "/vendor/marked.js": "marked/lib/marked.esm.js", "/vendor/purify.js": "dompurify/dist/purify.es.mjs", "/vendor/purify-classic.js": "dompurify/dist/purify.min.js" }[url.pathname];
+      const vendor = { "/vendor/marked.js": "marked/lib/marked.esm.js", "/vendor/purify.js": "dompurify/dist/purify.es.mjs", "/vendor/purify-classic.js": "dompurify/dist/purify.min.js",
+        "/vendor/codemirror.js": "codemirror/lib/codemirror.js", "/vendor/codemirror.css": "codemirror/lib/codemirror.css",
+        "/vendor/codemirror-dialog.css": "codemirror/addon/dialog/dialog.css", "/vendor/codemirror-dialog.js": "codemirror/addon/dialog/dialog.js",
+        "/vendor/codemirror-searchcursor.js": "codemirror/addon/search/searchcursor.js", "/vendor/codemirror-matchbrackets.js": "codemirror/addon/edit/matchbrackets.js",
+        "/vendor/codemirror-vim.js": "codemirror/keymap/vim.js" }[url.pathname];
       if (vendor && request.method === "GET") {
-        response.setHeader("content-type", "text/javascript; charset=utf-8");
+        response.setHeader("content-type", vendor.endsWith(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8");
         return response.end(await readFile(new URL(`../node_modules/${vendor}`, import.meta.url)));
       }
       if (!validateOrigin(request)) return json(response, 403, { error: "cross-origin request rejected" });

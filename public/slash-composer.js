@@ -1,3 +1,4 @@
+import { composerHasFocus, composerIsInserting } from "./vim-composer.js";
 export class SlashComposer {
   constructor({ api, state }) {
     Object.assign(this, { api, state }); this.input = document.querySelector("#message-input"); this.menu = document.querySelector("#slash-menu"); this.cache = new Map(); this.pending = new Map(); this.index = 0; this.version = 0;
@@ -6,7 +7,7 @@ export class SlashComposer {
     this.input.addEventListener("input", () => { this.index = 0; void this.update(); });
     this.input.addEventListener("click", () => this.update());
     this.input.addEventListener("focus", () => this.update());
-    this.input.addEventListener("blur", () => { clearTimeout(this.blurTimer); this.blurTimer = setTimeout(() => { if (document.activeElement !== this.input) this.close(); }, 150); });
+    this.input.addEventListener("blur", () => { clearTimeout(this.blurTimer); this.blurTimer = setTimeout(() => { if (!composerHasFocus(this.input)) this.close(); }, 150); });
     document.querySelector("#slash-commands").onclick = () => { document.querySelectorAll(".control-menu[open]").forEach(n => n.open = false); this.input.value = "/"; this.input.focus(); this.update(); };
   }
   key() { return `${this.state.active?.id}:${this.state.active?.agent}:${this.state.active?.model || "default"}`; }
@@ -14,7 +15,7 @@ export class SlashComposer {
     for (const map of [this.cache, this.pending]) for (const key of map.keys()) if (key.startsWith(`${chatId}:`)) map.delete(key);
     if (this.state.active?.id === chatId) this.close();
   }
-  query() { return this.input.selectionStart === this.input.value.length && /^\/[\w:.-]*$/.test(this.input.value) ? this.input.value.slice(1).toLowerCase() : null; }
+  query() { return composerIsInserting(this.input) && this.input.selectionStart === this.input.value.length && /^\/[\w:.-]*$/.test(this.input.value) ? this.input.value.slice(1).toLowerCase() : null; }
   message(text) { this.matches = []; this.options.replaceChildren(); this.status.textContent = text; this.status.hidden = false; this.input.removeAttribute("aria-activedescendant"); document.querySelector("#slash-count").textContent = ""; }
   async update() {
     const q = this.query(), key = this.key(), id = this.state.active?.id, version = ++this.version;

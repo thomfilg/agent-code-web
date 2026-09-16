@@ -29,6 +29,7 @@ export const WEB_COMMANDS = {
   feedback: "Review and explicitly send feedback to OpenAI, with optional native diagnostics",
   logout: "Inspect and confirm native Codex sign-out for this private profile",
   keymap: "Inspect, remap and save Relay web keyboard shortcuts",
+  vim: "Toggle Vim editing for this chat's web composer",
 };
 export const webCommands = (agent, capabilities = {}) => Object.entries(WEB_COMMANDS)
   .filter(([name]) => !["goal", "init", "review", "fast", "personality", "ps", "clean", "debug-config", "side", "btw", "fork", "agent", "ide", "apps", "plugins", "hooks", "experimental", "memories", "import", "approve", "feedback", "logout"].includes(name) || agent === "codex")

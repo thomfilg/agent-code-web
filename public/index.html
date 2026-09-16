@@ -62,6 +62,7 @@
             <details class="control-menu"><summary aria-label="Chat actions" title="Chat actions">⋮</summary><div class="control-popover">
               <button type="button" id="background-tasks">Background tasks</button>
               <button type="button" id="keymap-button">Keyboard shortcuts</button>
+              <button type="button" id="vim-button" aria-pressed="false">Enable Vim editing</button>
               <button type="button" id="open-workspace">Open in…</button>
               <button type="button" id="organize-chat-button" aria-label="Organize current chat">Rename / organize</button>
               <button type="button" id="transcript-view">Transcript view</button>
@@ -118,6 +119,7 @@
               </div>
               <div id="attachment-chips" class="attachment-chips"></div>
               <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message" aria-describedby="composer-keyboard-hint"></textarea>
+              <div id="vim-status" class="vim-status" hidden><span id="vim-mode" role="status"></span><span class="muted">i to edit · Esc for Normal</span><button type="button" id="vim-help">Keys</button><button type="button" id="vim-disable">Vim off</button></div>
               <div class="composer-footer">
                 <div class="composer-pickers">
                   <details class="control-menu upward composer-add"><summary aria-label="Add to message" title="Add files, commands or connectors">+</summary><div class="control-popover">
