@@ -18,6 +18,7 @@ import { importedTranscript } from "../codex-import-chat.mjs";
 import { codexFeedbackPolicy } from "../codex-feedback.mjs";
 import { codexLogoutPolicy, logoutHash } from "../codex-logout.mjs";
 import { inspectCodexAuthFile } from "../codex-auth-files.mjs";
+import { planProgress } from "../tab-title.mjs";
 
 const toml = (value) => JSON.stringify(value);
 
@@ -671,7 +672,11 @@ export class CodexAdapter {
         this.hooks.onEvent?.({ type: "goal_turn_started" });
       }
       current.turnId = params.turn?.id || current.turnId;
+      this.hooks.onEvent?.({ type: "task_progress", agent: "codex", sessionId: this.threadId, progress: null });
       current.resolveStarted?.({ turn: params.turn });
+    }
+    if (method === "turn/plan/updated" && params.threadId === this.threadId && this.current && params.turnId === this.current.turnId) {
+      this.hooks.onEvent?.({ type: "task_progress", agent: "codex", sessionId: this.threadId, progress: planProgress(params.plan, this.threadId, params.turnId) });
     }
     if (method === "thread/tokenUsage/updated") this.hooks.onEvent?.({ type: "usage", usage: codexUsage(params.tokenUsage) });
     if (method === "account/rateLimits/updated") this.hooks.onEvent?.({ type: "rate_limits", rateLimits: safeRateLimits(params) });

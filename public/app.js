@@ -33,6 +33,7 @@ import { NativeLogoutControls } from "./native-logout.js";
 import { KeymapControls } from "./keymap-controls.js";
 import { VimComposer } from "./vim-composer.js";
 import { StatusLineControls } from "./statusline-controls.js";
+import { TabTitleControls } from "./tab-title-controls.js";
 
 const state = {
   config: null,
@@ -201,6 +202,7 @@ function renderApproval() {
 function renderActive() {
   const chat = state.active;
   statusline.render();
+  tabTitle.render();
   vimComposer.select();
   sideChat.setChat(chat);
   agentThreads.setChat(chat);
@@ -477,9 +479,10 @@ async function sendMessage(event) {
   let text = elements.input.value.trim() || (files.length ? "Please inspect the attached files." : "");
   if (!text || !state.active) return;
   const chatId = state.active.id;
-  if (/^\/statusline(?:\s|$)/.test(text)) {
-    if (text !== "/statusline") { toast("Use /statusline without arguments to select and order footer fields."); return; }
-    try { if (await statusline.open() && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); slashComposer.close(); workspaceContext.closeMenu(); } }
+  if (/^\/(statusline|title)(?:\s|$)/.test(text)) {
+    const command = text.split(/\s/, 1)[0], control = command === "/title" ? tabTitle : statusline;
+    if (text !== command) { toast(`Use ${command} without arguments to select and order ${command === "/title" ? "browser-tab title" : "footer"} fields.${command === "/title" ? " Use /rename to rename the chat." : ""}`); return; }
+    try { if (await control.open() && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); slashComposer.close(); workspaceContext.closeMenu(); } }
     catch (error) { toast(error.message); } return;
   }
   if (/^\/vim(?:\s|$)/.test(text)) {
@@ -641,6 +644,9 @@ async function boot() {
     return;
   }
   state.config = await api("/api/config");
+  // Cosmetic preferences must not hold the conversation/composer behind a
+  // slow settings response. The tab stays neutral until its settings arrive.
+  void tabTitle.load().catch(error => toast(`Tab title stays neutral: ${error.message}`));
   await keymap.load().catch(error => toast(`Keyboard shortcuts use defaults: ${error.message}`));
   await statusline.load().catch(error => toast(`Status line uses defaults: ${error.message}`));
   await sidebar.refresh();
@@ -709,6 +715,7 @@ document.addEventListener("keydown", event => {
 window.addEventListener("focus", () => {
   if (state.config) void keymap.load().catch(() => {});
   if (state.config) void statusline.load().catch(() => {});
+  if (state.config) void tabTitle.load().catch(() => {});
 });
 $("#stop-button").addEventListener("click", async () => {
   if (!state.active) return;
@@ -763,11 +770,13 @@ const browserConnectionSettings = new BrowserConnectionSettings({ api, state, to
   accountChanged: async () => {
     vimComposer.resetIdentity();
     statusline.resetIdentity();
+    tabTitle.resetIdentity();
     keymap.resetIdentity(); await keymap.load().catch(error => toast(error.message));
     await sidebar.refresh();
     if (state.active && !state.chats.some(chat => chat.id === state.active.id)) { state.eventSource?.close(); state.active = null; state.stream = null; }
     if (state.active) await selectChat(state.active.id); else if (state.chats.length) await selectChat(state.chats[0].id); else renderActive();
     await statusline.load().catch(error => toast(error.message));
+    await tabTitle.load().catch(error => toast(error.message));
     renderChats();
   },
   chatUpdated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = chat; renderActive(); } },
@@ -791,6 +800,8 @@ function renderKeyboardHints() {
 const keymap = new KeymapControls({ api, controls: chatControls, notify: message => toast(message, { outsideDialog: true }), changed: renderKeyboardHints });
 const statusline = new StatusLineControls({ api, controls: chatControls, getChat: () => state.active, notify: message => toast(message, { outsideDialog: true }) });
 $("#statusline-button").addEventListener("click", () => void statusline.open().catch(error => toast(error.message)));
+const tabTitle = new TabTitleControls({ api, controls: chatControls, getChat: () => state.active, notify: message => toast(message, { outsideDialog: true }) });
+$("#tab-title-button").addEventListener("click", () => void tabTitle.open().catch(error => toast(error.message)));
 const vimComposer = new VimComposer({ input: elements.input, getChatId: () => state.active?.id, notify: toast, keydown: composerKeydown,
   changed: () => { resizeInput(); renderKeyboardHints(); },
   help: () => chatControls.dialog("Vim composer keys",

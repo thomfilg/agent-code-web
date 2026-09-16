@@ -612,7 +612,7 @@ export class RuntimeManager extends EventEmitter {
       const updated = await this.store.update(chatId, current => ({ agent, ...settings, modelSelectionSet: true,
         agentSessionId: null, needsAgentHandoff: true, pendingRequest: null, awaitingUser: false,
         nativeForkSessionId: null, forkGoalPending: false, forkContextPending: false, goal: null,
-        usage: null, usageAccount: null, rateLimits: null, sessionDetails: null, connectors: null, slashCommands: [], commandCatalog: [],
+        usage: null, usageAccount: null, rateLimits: null, sessionDetails: null, taskProgress: null, connectors: null, slashCommands: [], commandCatalog: [],
         messages: current.messages.map(message => ["assistant", "tool"].includes(message.role) ? { ...message, agent: message.agent || current.agent } : message),
         statusDetail: `Switched to ${agent === "claude" ? "Claude Code" : agent === "codex" ? "Codex" : "Mock"}. Conversation and workspace retained.`,
         ...workflowPatch({ ...current, awaitingUser: false, pendingRequest: null }),
@@ -968,6 +968,7 @@ export class RuntimeManager extends EventEmitter {
     runtime.idleTimer = null;
     const assistantMessageId = newId("msg");
     runtime.assistantMessageId = assistantMessageId;
+    await this.store.update(chatId, { taskProgress: null });
     await this.#setStatus(chatId, "running", "Agent is working", null);
     this.#emit(chatId, { type: "turn_started", messageId: assistantMessageId });
 
@@ -1332,6 +1333,11 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async #agentEvent(chatId, event) {
+    if (event.type === "task_progress") {
+      const chat = this.store.get(chatId);
+      if (event.agent === chat?.agent && event.sessionId === chat?.agentSessionId) this.publishChat(await this.store.update(chatId, { taskProgress: event.progress }));
+      return;
+    }
     if (event.type === "session_details") {
       if (event.details?.agent === this.store.get(chatId)?.agent) this.publishChat(await this.store.update(chatId, { sessionDetails: event.details }));
       return;

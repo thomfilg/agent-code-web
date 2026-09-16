@@ -62,6 +62,45 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: `/title` now configures Relay's browser-tab title through an eight-field
+  picker with preview, selection, drag/arrow order, explicit save, defaults and
+  a neutral app-only title. OpenAI Docs guided behavior and spinner/project
+  defaults; chat names and native terminal configuration are not changed.
+  Account-scoped preferences (or explicitly shared installation preferences)
+  reuse the tested footer picker/storage mechanics but separate record kinds.
+  Stale/revoked writes and late acknowledgements cannot overwrite newer settings,
+  panels or drafts. Account changes immediately neutralize the title. Saved
+  runtime/branch/model/goal metadata drives the title; spinner animation pauses
+  for approvals/questions, hidden tabs and reduced motion. Values are bounded
+  plain text, not HTML/templates or copied prompts. Native Codex 0.154.0 lacks
+  `update_plan`, even with goals disabled: initial step-count smoke attempts
+  failed and exposed the capability difference. All six actual goal states and
+  clearing now pass real-CLI smoke verification without inference/credentials.
+  Optional native plan notifications retain only current-thread/turn aggregate
+  counts, with schema/protocol-fixture, stop/reload and reset coverage; no claim
+  that this installed CLI emits the legacy plan tool. Seven new unit/controller
+  checks and eleven title browser checks pass; the ten existing footer and two
+  attachment checks remain green (23/23 focused browser tests). Two deterministic
+  title regressions failed before correction: slow preferences delayed startup,
+  and another account discovered on focus could reuse a cached private chat's
+  name. Title loading is now non-blocking and its title/preview verify ownership.
+  Real HTTP/private-account browser persistence also passes without waking an
+  agent. Full unit/controller suite: 343/343 with concurrency two. The first
+  full browser run was deliberately interrupted to make corrections: 31 passed,
+  two failed, one interrupted and 86 not run. The attachment test targeted a
+  hidden input before startup selected a chat; it now asserts the actual chat
+  and visible composer before file selection, without removing assertions or
+  increasing timeouts. Item 26's Jump to latest detachment reproduced again and
+  remains open. Prior default-concurrency failures remain open. The final full
+  browser run completed 122/123, including all eleven title cases. The shared
+  Chrome case reached its overall 30-second deadline late in its desktop-
+  screenshot/expand flow, after typing and viewport checks passed. This is not
+  a green full suite; no timeout/assertion was relaxed. Both shared-browser cases
+  then passed isolated (the original case in 10.0 seconds), with no code changes;
+  the full-suite timeout is retained, not declared fixed. Desktop and 320px title
+  layouts were visually inspected. No live
+  service/chat/account/Chrome changes. Next: `/theme`; item 20
+  and backend activation remain open.
 - 20: `/statusline` now configures the actual web footer: fifteen fields,
   live preview, checkbox selection, drag/arrow reordering, explicit save, hide
   and defaults. OpenAI Docs informed selection/order/persistence and disabling;

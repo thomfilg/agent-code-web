@@ -34,6 +34,7 @@ and remain at the beginning of native stream-json input.
 | `/keymap` | Relay web equivalent: edit/save/unbind/restore actual global and main-composer shortcuts, with duplicate/reserved-key validation, context precedence, per-account persistence and conflict checks. Main history boundaries, draft/files, IME/pickers and busy queue behavior are retained. Terminal config and worker permissions are never changed. Five unit/controller checks and five responsive browser checks pass; live activation pending. |
 | `/vim`, `/vim on`, `/vim off` | Per-chat web composer toggle using a lazily loaded, self-hosted Vim editor. Real Normal/Insert/Visual editing, operators/text objects, search/substitution and undo; Insert-mode Relay shortcuts and attachments are retained. Chat/account changes clear registers, macros, search and undo state. No worker/config/model action. |
 | `/statusline` | Relay web equivalent: choose/reorder 15 footer fields with preview, explicit save, hide/defaults and per-account persistence. Saved worker data updates the footer without extra polling or wake-up. Missing/stale snapshots are labelled; default branches and detached HEADs work independently of PR discovery. Native terminal config is unchanged; activation pending. |
+| `/title` | Relay web equivalent: configure the actual browser-tab title with eight ordered fields, live preview, explicit save, neutral app-only title and per-account persistence. Runtime/goal/plan updates use saved chat data; animation respects reduced motion and visibility. Does not rename a chat or change native configuration. Activation pending. |
 | `/init [instructions]` | Repository-instruction creation task, preserving existing AGENTS.md and unrelated edits. Parser/dispatch tests; resulting repository document still needs acceptance verification. |
 | Installed Codex skills | `skills/list` plus structured skill input. No fake terminal entries substituted for skills. |
 | Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI `/reload-skills`, `/autocompact 200k` and `/config` return visible native results without any model call; full installed-command acceptance still pending. |
@@ -69,11 +70,77 @@ Do not treat removing entries from autocomplete as implementing them.
 - `/logout` private native credentials are implemented below. Shared host,
   keyring/automatic storage and gateway-hidden ephemeral accounts remain gated
   until their company/profile isolation and native visibility can be verified.
-- Terminal UI equivalents or surface-specific handling: `/title`,
-  `/theme`, `/pets`, `/pet`, `/app`.
+- Terminal UI equivalents or surface-specific handling: `/theme`, `/pets`,
+  `/pet`, `/app`.
 - Windows-only sandbox setup and read-directory commands do not apply to the
   current Linux worker. Native APIs still need capability/version checks if a
   Windows worker is introduced.
+
+### Browser-tab title configuration
+
+The OpenAI Docs skill's [title command reference](https://learn.chatgpt.com/docs/developer-commands#configure-terminal-title-items-with-title)
+establishes interactive selection, ordering, confirmation and persistence. Its
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference#configtoml)
+specifies spinner/project defaults and disabling title updates. Relay applies
+these to its own browser tab; it never modifies native `tui.terminal_title`,
+renames the chat or sends `/title` as ordinary model text. Empty selection uses
+the neutral Agent Relay title instead of leaving private chat metadata behind.
+
+Eight fields cover app name, project, activity indicator, status, saved chat name,
+Git branch, model and task progress. Reordering supports drag handles and arrows;
+the preview is staged until Save. Defaults and the neutral-title button are also
+staged. Main draft/files, active work and queue remain untouched. Values render
+as bounded plain text, without control/bidi characters, HTML evaluation, arbitrary
+templates or prompt/goal/plan contents. The activity timer runs only for selected,
+visible, working chats; reduced motion uses a static indicator and pending
+answers/approvals stop animation. No additional worker polling is introduced.
+
+Preferences share the tested ordered-field picker/storage mechanics with
+`/statusline`, but use a separate record kind and strict field allowlist. They
+persist per private Relay account, or explicitly in installation-shared scope.
+Authentication, same-origin, account and revision checks reject stale writes.
+Account changes neutralize the tab immediately; late acknowledgements cannot
+restore another account's settings or overwrite a newer panel or draft.
+
+The installed Codex 0.154.0 does not advertise `update_plan`, including with its
+goals feature disabled. Initial native plan smoke attempts correctly failed
+instead of claiming fabricated counts. Progress therefore uses the native goal
+state when available: active, paused, blocked, usage-limited, budget-limited or
+complete. `node scripts/smoke-real-title.mjs` verifies all six and clearing with
+the actual CLI in disposable profiles, without model calls or real credentials.
+Optional [`turn/plan/updated` notifications](https://learn.chatgpt.com/docs/app-server)
+are implemented against the generated schema and a protocol fixture: only
+aggregate counts from the current native thread/turn are kept, reset on new turns
+or agent changes, and retained across stop/controller reload. Plan text and
+explanations never become title metadata or synthetic chat messages. Other
+agents and unreported progress remain explicitly unknown.
+
+Seven new unit/controller tests, eleven title browser tests, the ten existing
+status-line browser tests and both attachment browser tests pass (23/23 focused
+browser checks). Two added regressions failed before correction: delayed title
+preferences held up chat startup, and a new account discovered on focus could
+project an old cached private chat into the title. Startup title loading is now
+non-blocking and the title/preview recheck the cached chat's owner. A real HTTP
+browser test verifies private preference persistence without intercepting the
+settings endpoint or starting a worker. The full unit/controller suite passed 343/343 at
+concurrency two; previous default-concurrency failures remain documented, not
+claimed fixed. Native goal-state smoke and repository-wide JavaScript syntax
+checks pass. The first full browser run was deliberately interrupted after
+31 passes, two failures and one interrupted case to make corrections (86 cases
+not run). Its attachment case filled a hidden input before a chat was ready;
+explicit ready/visible assertions now precede that artificial file-selection
+step, with no assertion removed or timeout relaxed. The known item-26 Jump to
+latest detachment also reproduced and remains open. The final full browser run
+completed with 122/123 passing, including all eleven title cases: the shared
+Chrome case hit its 30-second overall deadline late in its desktop-screenshot/
+expand flow after typing and viewport assertions passed. This is recorded as an
+unresolved broader browser check, not a green full suite. No assertions/timeouts
+were relaxed; both shared-browser cases passed a separate isolated rerun (the
+original case in 10.0 seconds) without changing their code. That does not erase
+the full-suite timeout or prove its cause fixed. Desktop and 320px title-picker
+screenshots were inspected. No live service, user chat, personal Chrome, real
+native profile or real account has been changed.
+Next: `/theme`; item 20 and backend activation remain open.
 
 ### Status-line configuration
 
@@ -116,7 +183,8 @@ account, or the clearly disclosed shared installation scope when signed out.
 Authentication, origin, account and stale-write checks protect updates. Delayed
 loads/saves cannot switch a chat, replace a newer panel, erase a newer draft or
 restore another account's preferences. No provider, GitHub, MCP or Chrome
-credential/configuration change occurs. Next: `/title`; item 20 stays open.
+credential/configuration change occurs. `/title` follows in the checkpoint above;
+item 20 stays open.
 
 Seven new unit/controller checks and ten desktop/mobile browser checks pass.
 The full unit/controller suite passes 336/336 with

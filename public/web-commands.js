@@ -31,6 +31,7 @@ export const WEB_COMMANDS = {
   keymap: "Inspect, remap and save Relay web keyboard shortcuts",
   vim: "Toggle Vim editing for this chat's web composer",
   statusline: "Select, reorder and save Relay web-footer status fields",
+  title: "Select, reorder and save browser-tab title fields; does not rename the chat",
 };
 export const webCommands = (agent, capabilities = {}) => Object.entries(WEB_COMMANDS)
   .filter(([name]) => !["goal", "init", "review", "fast", "personality", "ps", "clean", "debug-config", "side", "btw", "fork", "agent", "ide", "apps", "plugins", "hooks", "experimental", "memories", "import", "approve", "feedback", "logout"].includes(name) || agent === "codex")

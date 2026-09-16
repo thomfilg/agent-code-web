@@ -646,6 +646,18 @@ fresh session. The target provider's default model/effort are selected.
   installation scope. Stale saves require reload. This does not modify native
   `tui.status_line`/`config.toml`, wake a worker or send/queue a prompt. It uses
   existing session updates and read-only Git snapshots after ordinary turns.
+- **Browser tab title:** `/title` or **Chat actions → Browser tab title** opens
+  a preview and field picker. Choose/reorder app name, project, activity indicator,
+  status, chat name, Git branch, model and task progress, then **Save tab title**.
+  **Use app title only** restores a neutral Agent Relay title; it and **Restore
+  defaults** are staged until saved. Preferences persist per Relay account, or in
+  the disclosed shared installation scope without a private account. This changes
+  the browser tab, not the chat name (`/rename`) or native `tui.terminal_title`.
+  The spinner pauses for questions/approvals, hidden tabs and reduced motion.
+  Progress shows a reported Codex goal state, or native plan counts when reported;
+  it never guesses a completion percentage or exposes the goal/plan text. Unknown
+  values remain explicit. Opening settings never wakes, interrupts or messages
+  the agent, including while it is busy. No native configuration is changed.
 - **Native sign-out (Codex):** `/logout` opens saved status without waking the
   worker. **Inspect native account** explicitly connects this chat, without an
   agent message or token refresh. A separate confirmation clears only reviewed

@@ -32,6 +32,10 @@ test("pasted images can be previewed before and after sending, without losing th
 test("image removal is separate from previewing, and normal pasted text is left alone", async ({ page, request }) => {
   const { chat } = await (await request.post("/api/chats", { data: { agent: "mock", title: "Attachment removal fixture" } })).json(); chatId = chat.id;
   await page.goto(`/#chat=${chat.id}`);
+  // Unlike clicking the visible attachment picker, setInputFiles can target a
+  // hidden input before startup has selected a chat. Assert the real UI is ready.
+  await expect(page.locator("#chat-title")).toHaveText(chat.title);
+  await expect(page.getByLabel("Message", { exact: true })).toBeVisible();
   await page.locator("#attachment-input").setInputFiles({ name: "picture.png", mimeType: "image/png", buffer: png });
   await page.getByRole("button", { name: "Remove picture.png", exact: true }).click();
   await expect(page.locator("#attachment-chips")).toBeEmpty(); await expect(page.locator("#preview-panel")).not.toBeVisible();

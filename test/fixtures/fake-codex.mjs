@@ -83,6 +83,12 @@ rl.on("line", (line) => {
     pendingTurn = { threadId: message.params.threadId, turnId: `turn_fixture_${++turnCount}` };
     send({ id: message.id, result: { turn: { id: pendingTurn.turnId, status: "inProgress", items: [] } } });
     send({ method: "turn/started", params: { threadId: pendingTurn.threadId, turn: { id: pendingTurn.turnId, status: "inProgress" } } });
+    if (message.params.input?.some(item => item.text === "title-progress-fixture")) {
+      for (const patch of [{ threadId: "other-thread" }, { turnId: "old-turn" }, {}]) send({ method: "turn/plan/updated", params: {
+        ...pendingTurn, ...patch, explanation: "private explanation never retained",
+        plan: [{ step: "private completed step", status: "completed" }, { step: "private active step", status: "inProgress" }, { step: "private pending step", status: "pending" }],
+      } });
+    }
     send({ method: "item/started", params: { ...pendingTurn, startedAtMs: Date.now(), item: { id: "cmd_fixture", type: "commandExecution", command: "printf fixture", commandActions: [], cwd: process.cwd(), status: "inProgress" } } });
     send({ method: "item/commandExecution/requestApproval", id: 900, params: { ...pendingTurn, itemId: "cmd_fixture", command: "printf fixture", cwd: process.cwd(), reason: "Fixture approval" } });
   } else if (message.method === "turn/interrupt") {
