@@ -62,6 +62,24 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: `/keymap` now opens a working web keyboard editor, also reachable through
+  Chat actions. The OpenAI Docs skill informed context/action selection,
+  alternatives, unbinding and persistence; Relay explicitly distinguishes its
+  web shortcuts from native terminal configuration. Seven actual actions cover
+  new chat, composer/question focus, send/queue, newline and boundary-aware
+  history. Composer overrides global; pickers, IME and browser editing retain
+  their controls. Reserved/conflicting bindings are rejected. Preferences persist
+  per signed-in Relay account, or in the disclosed installation-shared scope
+  without an account. Scope/revision guards reject stale writes and late replies
+  cannot roll back newer settings, replace a panel or clear a newer draft/files.
+  Five unit/controller checks and five desktop/mobile browser checks pass;
+  `npm run check`: 327/327, full browser suite: 93/93. Desktop and 320px dialogs
+  were visually inspected. Item 26 passed in this full run but its previously
+  reproduced intermittent paging failure remains unresolved, not declared fixed.
+  No worker was woken for keymap settings; no native config, live chat/account,
+  personal Chrome or live service changed. Backend activation remains pending.
+  Save this verified incremental checkpoint to existing PR #2, without merge or
+  deployment. Next: `/vim`; item 20 and the overall queue remain in progress.
 - 20: `/logout` now opens saved status without waking a worker, explicitly
   inspects a private native account, and requires a separate idle confirmation
   before Codex clears its credentials. The OpenAI Docs skill informed native

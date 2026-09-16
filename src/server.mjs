@@ -3,6 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BrowserAuth } from "./auth.mjs";
+import { KeymapPreferences } from "./keymap.mjs";
 import { CapabilityBroker } from "./capabilities.mjs";
 import { loadConfig } from "./config.mjs";
 import { ProviderGateway } from "./provider-gateway.mjs";
@@ -96,6 +97,7 @@ export async function createAgentWebServer(options = {}) {
   const broker = options.broker || new CapabilityBroker({ ttlMs: config.sessionCapabilityTtlMs });
   const auth = new BrowserAuth({ token: config.authToken, secure: config.cookieSecure });
   const browserUsers = new BrowserUsers(records, { secure: config.cookieSecure });
+  const keymaps = new KeymapPreferences(records);
   const gateway = new ProviderGateway({ config, broker });
   const sseClients = new Set();
   const sidebarClients = new Set();
@@ -170,6 +172,13 @@ export async function createAgentWebServer(options = {}) {
       if (!manager && url.pathname.startsWith("/api/")) return json(response, 503, { error: "control plane is starting" });
       const user = url.pathname.startsWith("/api/") ? await browserUsers.session(request) : null;
       const visibleChats = () => store.list().filter(chat => browserUsers.canRead(chat, user));
+      if (url.pathname === "/api/keymap" && ["GET", "PATCH"].includes(request.method)) {
+        const scope = user?.id || "shared", guard = async () => {
+          if ((await browserUsers.session(request))?.id !== user?.id || !auth.authenticated(request)) throw Object.assign(new Error("The shortcut account changed. Reload /keymap."), { statusCode: 409 });
+        };
+        const result = request.method === "PATCH" ? await keymaps.save(scope, await bodyJson(request, 8000), guard) : await keymaps.get(scope, guard);
+        return json(response, 200, { ...result, account: browserUsers.public(user) });
+      }
       if (url.pathname === "/api/browser-account" && request.method === "GET") return json(response, 200, { user: browserUsers.public(user) });
       if (["/api/browser-account/register", "/api/browser-account/login"].includes(url.pathname) && request.method === "POST") {
         const input = await bodyJson(request, 10000);

@@ -3,6 +3,7 @@ export function messageCommand(agent, text) {
   const match = /^\/([\w:.-]+)(?:\s+([\s\S]*))?$/.exec(text.trim());
   if (!match) return null;
   const argument = (match[2] || "").trim();
+  if (match[1] === "keymap") throw new Error("Open /keymap without arguments to remap Relay keyboard shortcuts. This is a web control, not agent input.");
   if (match[1] === "plan") return { type: "plan", prompt: argument };
   if (["permissions", "mode"].includes(match[1]) && argument) {
     const mode = { auto: "auto", edits: "accept_edits", "accept-edits": "accept_edits", plan: "plan", "read-only": "plan" }[argument.toLowerCase()];

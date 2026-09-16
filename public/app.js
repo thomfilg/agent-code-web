@@ -30,6 +30,7 @@ import { NativeImportsControls } from "./native-imports.js";
 import { NativeApprovalControls } from "./native-approvals.js";
 import { NativeFeedbackControls } from "./native-feedback.js";
 import { NativeLogoutControls } from "./native-logout.js";
+import { KeymapControls } from "./keymap-controls.js";
 
 const state = {
   config: null,
@@ -231,7 +232,7 @@ function renderActive() {
   elements.send.setAttribute("aria-label", busy ? "Stop agent" : "Send message");
   elements.send.querySelector("path").setAttribute("d", busy ? "M7 7h10v10H7z" : "m5 12 7-7 7 7M12 5v14");
   $("#queue-message").hidden = !busy; $("#queue-message").disabled = unavailable;
-  $(".composer-hint").textContent = busy ? "Enter to queue · Stop pauses the queue · Shift + Enter for a new line" : "Enter to send · Shift + Enter for a new line";
+  renderKeyboardHints();
   elements.input.placeholder = chat.workflowState === "archived" ? "Archived · unarchive this chat to continue" : "Ask your agent to build, inspect, or fix something…";
   if (!elements.agentPicker.options.length) for (const agent of state.config.agents.filter(item => item.enabled)) {
     const option = node("option", "", agent.id === "claude" ? "Claude" : agent.label); option.value = agent.id; elements.agentPicker.append(option);
@@ -471,6 +472,10 @@ async function sendMessage(event) {
   let text = elements.input.value.trim() || (files.length ? "Please inspect the attached files." : "");
   if (!text || !state.active) return;
   const chatId = state.active.id;
+  if (text === "/keymap") {
+    try { if (await keymap.open() && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } }
+    catch (error) { toast(error.message); } return;
+  }
   if (text === "/logout" && state.active.agent === "codex") {
     try { if (await nativeLogout.open() && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } }
     catch (error) { toast(error.message); } return;
@@ -617,6 +622,7 @@ async function boot() {
     return;
   }
   state.config = await api("/api/config");
+  await keymap.load().catch(error => toast(`Keyboard shortcuts use defaults: ${error.message}`));
   await sidebar.refresh();
   sidebar.connect();
   elements.agentSelect.replaceChildren();
@@ -649,18 +655,34 @@ elements.agentSelect.addEventListener("change", renderSecurityHint);
 $("#composer").addEventListener("submit", sendMessage);
 elements.send.addEventListener("click", () => { if (elements.send.type === "button") $("#stop-button").click(); });
 elements.input.addEventListener("input", resizeInput);
-document.addEventListener("keydown", event => {
-  if (event.key === "ArrowUp" && event.altKey && !event.ctrlKey && !event.metaKey && !elements.approval.hidden && !document.querySelector("dialog[open]")) {
+function keyboardAction(event, action) {
+  if (action === "new_chat") { event.preventDefault(); if (!event.repeat) openNewChat(); return true; }
+  if (action === "focus_composer" && !elements.input.disabled && state.active) { event.preventDefault(); elements.input.focus(); return true; }
+  if (action === "answer_request" && !elements.approval.hidden) {
     const control = elements.approval.querySelector("input:not(:disabled), textarea:not(:disabled), button:not(:disabled)");
-    if (control) { event.preventDefault(); control.focus(); }
+    if (control) { event.preventDefault(); control.focus(); return true; }
   }
-});
+  return false;
+}
 elements.input.addEventListener("keydown", (event) => {
-  if (event.isComposing || workspaceContext.keydown(event) || slashComposer.keydown(event) || messageHistory.keydown(event)) return;
-  if (event.key === "Enter" && !event.shiftKey) {
+  if (event.isComposing || event.keyCode === 229 || document.querySelector("dialog[open]") || workspaceContext.keydown(event) || slashComposer.keydown(event)) return;
+  const action = keymap.action(event, "composer");
+  if (action?.startsWith("history_")) { messageHistory.keydown(event, action); return; }
+  if (action === "send") {
     event.preventDefault();
-    $("#composer").requestSubmit();
-  }
+    if (!event.repeat) $("#composer").requestSubmit();
+  } else if (action === "newline") {
+    if (event.key === "Enter" && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) return; // Retain the browser's native undo for the default newline.
+    event.preventDefault(); elements.input.setRangeText("\n", elements.input.selectionStart, elements.input.selectionEnd, "end"); elements.input.dispatchEvent(new Event("input", { bubbles: true }));
+  } else keyboardAction(event, action);
+});
+document.addEventListener("keydown", event => {
+  if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || document.querySelector("dialog[open]") || event.target === elements.input) return;
+  if (event.target.closest?.("input, textarea, select, [contenteditable], canvas, [role=application]")) return;
+  keyboardAction(event, keymap.action(event, "global"));
+});
+window.addEventListener("focus", () => {
+  if (state.config) void keymap.load().catch(() => {});
 });
 $("#stop-button").addEventListener("click", async () => {
   if (!state.active) return;
@@ -695,12 +717,6 @@ $("#delete-button").addEventListener("click", () => {
 });
 $("#open-sidebar").addEventListener("click", () => elements.sidebar.classList.add("open"));
 $("#close-sidebar").addEventListener("click", () => elements.sidebar.classList.remove("open"));
-document.addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-    event.preventDefault();
-    openNewChat();
-  }
-});
 const sidebar = new ChatSidebar({ state, api, select: selectChat, remove: deleteChat, toast, agentLabel,
   updated: chat => {
     updateChatSummary(chat);
@@ -718,6 +734,7 @@ const agentThreads = new AgentThreadsPanel({ api, getChat: () => state.active, t
 const sharedBrowser = new SharedBrowserPanel({ api, getBackend: () => state.active?.runtimeMetadata?.backend || state.config?.workerBackend });
 const browserConnectionSettings = new BrowserConnectionSettings({ api, state, toast, browser: sharedBrowser,
   accountChanged: async () => {
+    keymap.resetIdentity(); await keymap.load().catch(error => toast(error.message));
     await sidebar.refresh();
     if (state.active && !state.chats.some(chat => chat.id === state.active.id)) { state.eventSource?.close(); state.active = null; state.stream = null; }
     if (state.active) await selectChat(state.active.id); else if (state.chats.length) await selectChat(state.chats[0].id); else renderActive();
@@ -731,6 +748,17 @@ const chatControls = new ChatControls({ state, api, toast,
   openEnvironment: () => workspaceSettings.openEnvironments(state.active?.environmentId),
   openRepositories: () => openNewChat(),
 });
+function renderKeyboardHints() {
+  const label = binding => binding.split("-").map(key => ({ ctrl: "Ctrl", meta: "Meta", alt: "Alt", shift: "Shift", enter: "Enter" }[key] || key)).join(" + ");
+  const binding = (context, action, defaults) => (keymap.snapshot.bindings[context]?.[action] ?? defaults).map(label).join(" / ");
+  const send = binding("composer", "send", ["enter"]), newline = binding("composer", "newline", ["shift-enter"]);
+  const busy = ["running", "starting"].includes(state.active?.status);
+  $(".composer-hint").textContent = `${send ? `${send} to ${busy ? "queue" : "send"}` : "Use the send/queue button"}${busy ? " · Stop pauses the queue" : ""}${newline ? ` · ${newline} for a new line` : ""}`;
+  const keys = keymap.snapshot.bindings.global?.new_chat ?? ["ctrl-k", "meta-k"], preferred = keys.find(key => key.startsWith(navigator.platform?.includes("Mac") ? "meta-" : "ctrl-")) || keys[0];
+  const badge = $("#new-chat-button kbd"); badge.textContent = preferred ? label(preferred) : ""; badge.hidden = !preferred;
+}
+const keymap = new KeymapControls({ api, controls: chatControls, notify: message => toast(message, { outsideDialog: true }), changed: renderKeyboardHints });
+$("#keymap-button").addEventListener("click", () => void keymap.open().catch(error => toast(error.message)));
 const slashComposer = new SlashComposer({ state, api });
 const workspaceContext = new WorkspaceContext({ state, api, controls: chatControls, toast });
 const nativeApps = new NativeAppsPicker({ state, api, controls: chatControls, toast });

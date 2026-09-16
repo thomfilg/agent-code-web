@@ -607,6 +607,19 @@ fresh session. The target provider's default model/effort are selected.
   `node scripts/smoke-real-feedback.mjs` tests actual Codex with private profiles
   and a local TLS receiver in a network-isolated Linux namespace; no report or
   diagnostic data reaches OpenAI during the check.
+- **Keyboard shortcuts:** `/keymap` or **Chat actions → Keyboard shortcuts**
+  opens Relay's web keymap. Edit global or main-composer bindings, use several
+  alternatives, leave a field empty to unbind a Relay action, or restore defaults;
+  only **Save shortcuts** applies changes. Composer bindings override global
+  bindings, while slash/file pickers retain their own navigation keys. The
+  editor detects duplicate bindings and protects standard browser/text-editing
+  shortcuts. Normal textarea editing remains available when an action is unbound.
+  Signed-in Relay accounts have separate saved preferences; without a private
+  account, the editor explicitly identifies the shared installation preferences.
+  Reload conflicts retain the unsaved shortcut draft. This is a web equivalent:
+  it does not edit a remote terminal's `tui.keymap` or native `config.toml`, wake
+  a worker, submit a prompt, answer an approval or change permissions. Side-chat,
+  child-agent and Shared Chrome keyboard input are not remapped by these controls.
 - **Native sign-out (Codex):** `/logout` opens saved status without waking the
   worker. **Inspect native account** explicitly connects this chat, without an
   agent message or token refresh. A separate confirmation clears only reviewed

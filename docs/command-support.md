@@ -31,6 +31,7 @@ and remain at the beginning of native stream-json input.
 | `/approve` (Codex) | Review captured automatic-review denials and explicitly queue one exact-action retry. Encrypted owner/project/session binding, idempotent confirmations, FIFO/paused queues and fail-closed interruption handling. Real CLI tests cover approval context, same-thread resume, a harmless command execution, continued automatic review, an actual filesystem-permission denial and all seven action formats. Unit/controller and desktop/mobile browser checks pass; live activation pending. |
 | `/feedback` (Codex) | Explicit policy check, literal report review and final external-upload confirmation. Logs off by default; private-profile diagnostics are a separate opt-in, shared host logs stay blocked. Encrypted owner/company/session/worker-bound intents prevent automatic repeats after lost replies or restart. Real CLI checks use a network-isolated local TLS receiver, not OpenAI. Unit/controller and responsive browser checks pass; live activation pending. |
 | `/logout` (Codex) | Read-only status, explicit private-account inspection and separately confirmed native credential removal; queue pauses and history/draft/files remain. Native account and file removal are verified, with credential/policy/worker-bound consent and no automatic replay after uncertainty. Shared host, OS keyring/auto and gateway-hidden ephemeral accounts remain locked. Unit/controller, responsive browser and network-isolated real-CLI checks pass; live activation pending. |
+| `/keymap` | Relay web equivalent: edit/save/unbind/restore actual global and main-composer shortcuts, with duplicate/reserved-key validation, context precedence, per-account persistence and conflict checks. Main history boundaries, draft/files, IME/pickers and busy queue behavior are retained. Terminal config and worker permissions are never changed. Five unit/controller checks and five responsive browser checks pass; live activation pending. |
 | `/init [instructions]` | Repository-instruction creation task, preserving existing AGENTS.md and unrelated edits. Parser/dispatch tests; resulting repository document still needs acceptance verification. |
 | Installed Codex skills | `skills/list` plus structured skill input. No fake terminal entries substituted for skills. |
 | Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI `/reload-skills`, `/autocompact 200k` and `/config` return visible native results without any model call; full installed-command acceptance still pending. |
@@ -66,11 +67,50 @@ Do not treat removing entries from autocomplete as implementing them.
 - `/logout` private native credentials are implemented below. Shared host,
   keyring/automatic storage and gateway-hidden ephemeral accounts remain gated
   until their company/profile isolation and native visibility can be verified.
-- Terminal UI equivalents or surface-specific handling: `/keymap`, `/vim`,
+- Terminal UI equivalents or surface-specific handling: `/vim`,
   `/statusline`, `/title`, `/theme`, `/pets`, `/pet`, `/app`.
 - Windows-only sandbox setup and read-directory commands do not apply to the
   current Linux worker. Native APIs still need capability/version checks if a
   Windows worker is introduced.
+
+### Keyboard remapping
+
+The OpenAI Docs skill's [keymap command reference](https://learn.chatgpt.com/docs/developer-commands#remap-tui-shortcuts-with-keymap)
+establishes native inspect/remap/persist/unbind behavior and context precedence.
+Relay's worker uses the headless app server, not the terminal composer, so
+changing the remote terminal keymap would not affect this web input surface.
+`/keymap` therefore explicitly controls Relay's web keymap, not `tui.keymap` or
+`config.toml`. The same dialog is reachable through Chat actions when a shortcut
+has been unbound. It is available for all providers and never becomes ordinary
+model input. It opens and saves without waking or stopping an agent.
+
+Seven real actions are configurable: new chat, focus composer, focus the pending
+question/approval, send/queue, newline, and previous/next sent-message recall at
+the draft boundaries. Global and main-composer contexts are separate; composer
+bindings win. Up to four alternatives may be assigned per action. Empty lists
+unbind Relay actions while browser-native editing still works. Restore buttons
+stage defaults; only saving applies them. Same-context conflicts, repeated keys,
+unknown actions and standard browser/editing reservations are rejected by shared
+client/server validation. Slash/file pickers retain their existing keys. IME and
+AltGraph input is not interpreted as an app shortcut; repeated Enter cannot
+resubmit a message. Side, child-agent and Shared Chrome inputs keep their own
+controls. Account-specific keyboard settings do not change company credentials.
+
+Preferences are stored in the controller records for the authenticated Relay
+account. Legacy sessions without a private account explicitly use installation-
+shared preferences; the dialog warns about this rather than implying privacy.
+Authentication, same-origin checks, account-bound revisions and serialized writes
+prevent cross-account or stale-tab overwrites. Account changes reset active
+bindings before reloading. Refocusing the browser reloads saved preferences.
+Late responses cannot overwrite a newer dialog, chat draft or newer keymap.
+Save errors retain edits, and reloading dirty fields asks before discarding them.
+
+Five unit/controller and five responsive browser checks cover validation, scope,
+persistence through service/browser reloads, real dispatch of all seven actions,
+busy queueing, draft/file retention, stale writes, IME and late acknowledgements.
+Desktop and 320px mobile dialogs were inspected. This is a web-surface equivalent,
+not a claim that terminal-only pager/editor keymaps were modified. Next: `/vim`;
+item 20 and the full feature queue remain in progress.
 
 ### Native sign-out
 

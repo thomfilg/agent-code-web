@@ -435,6 +435,11 @@ dialog { max-height: calc(100dvh - 28px); }
 .native-feedback-confirm pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; padding: 10px; background: var(--bg); border-radius: 6px; }
 .native-feedback-confirm button { margin: 8px 8px 0 0; }
 .native-feedback-history { overflow-wrap: anywhere; }
+.keymap-rows { display: grid; gap: 10px; }
+.keymap-row { min-width: 0; }
+.keymap-row input { min-width: 0; width: 100%; }
+.keymap-row small { display: block; overflow-wrap: anywhere; }
+.keymap-row button { margin-top: 8px; }
 .native-logout-details, .native-logout-confirm, .native-logout-history { overflow-wrap: anywhere; }
 .native-logout-confirm p { margin: 10px 0; line-height: 1.5; }
 .native-logout-confirm button { margin: 8px 8px 0 0; white-space: normal; }

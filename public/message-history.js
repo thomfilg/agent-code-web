@@ -13,9 +13,11 @@ export class MessageHistory {
   }
   reset() { if (this.chatId) this.chats.set(this.chatId, { draft: "", index: null, messages: [], edits: new Map() }); }
   set(value, atStart = false) { this.input.value = value || ""; const caret = atStart ? 0 : this.input.value.length; this.input.setSelectionRange(caret, caret); this.onChange(); }
-  keydown(event) {
-    if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || !["ArrowUp", "ArrowDown"].includes(event.key) || this.input.selectionStart !== this.input.selectionEnd) return false;
-    const previous = event.key === "ArrowUp";
+  keydown(event, action = null) {
+    if (event.isComposing || this.input.selectionStart !== this.input.selectionEnd) return false;
+    if (action === null && (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || !["ArrowUp", "ArrowDown"].includes(event.key))) return false;
+    if (action !== null && !["history_previous", "history_next"].includes(action)) return false;
+    const previous = action ? action === "history_previous" : event.key === "ArrowUp";
     if ((previous && this.input.selectionStart !== 0) || (!previous && this.input.selectionEnd !== this.input.value.length)) return false;
     const entry = this.chats.get(this.chatId); if (!entry) return false;
     if (entry.index === null) {
