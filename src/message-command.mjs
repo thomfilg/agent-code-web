@@ -8,6 +8,7 @@ export function messageCommand(agent, text) {
   if (match[1] === "statusline") throw new Error("Open /statusline in the web composer to configure its footer, not as agent input.");
   if (match[1] === "title") throw new Error("Open /title in the web composer to configure the browser tab, not as agent input. Use /rename to rename the chat.");
   if (match[1] === "theme") throw new Error("Open /theme without arguments in the web composer to choose syntax colors, not as agent input.");
+  if (["pets", "pet"].includes(match[1])) throw new Error("Use /pets in the web composer to choose a pet, or /pets off to hide it. This is not agent input.");
   if (match[1] === "plan") return { type: "plan", prompt: argument };
   if (["permissions", "mode"].includes(match[1]) && argument) {
     const mode = { auto: "auto", edits: "accept_edits", "accept-edits": "accept_edits", plan: "plan", "read-only": "plan" }[argument.toLowerCase()];

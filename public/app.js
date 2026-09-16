@@ -35,6 +35,7 @@ import { VimComposer } from "./vim-composer.js";
 import { StatusLineControls } from "./statusline-controls.js";
 import { TabTitleControls } from "./tab-title-controls.js";
 import { SyntaxThemeControls } from "./syntax-theme-controls.js";
+import { PetControls } from "./pet-controls.js";
 
 const state = {
   config: null,
@@ -204,6 +205,7 @@ function renderActive() {
   const chat = state.active;
   statusline.render();
   tabTitle.render();
+  pets.render();
   vimComposer.select();
   sideChat.setChat(chat);
   agentThreads.setChat(chat);
@@ -480,6 +482,12 @@ async function sendMessage(event) {
   let text = elements.input.value.trim() || (files.length ? "Please inspect the attached files." : "");
   if (!text || !state.active) return;
   const chatId = state.active.id;
+  if (/^\/pets?(?:\s|$)/.test(text)) {
+    try {
+      if (await pets.command(text.replace(/^\/pets?\s*/, "")) && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); slashComposer.close(); workspaceContext.closeMenu(); }
+    } catch (error) { toast(error.message); }
+    return;
+  }
   if (/^\/(statusline|title|theme)(?:\s|$)/.test(text)) {
     const command = text.split(/\s/, 1)[0], control = { "/title": tabTitle, "/statusline": statusline, "/theme": syntaxTheme }[command];
     if (text !== command) { toast(command === "/theme" ? "Use /theme without arguments to preview and save syntax colors." : `Use ${command} without arguments to select and order ${command === "/title" ? "browser-tab title" : "footer"} fields.${command === "/title" ? " Use /rename to rename the chat." : ""}`); return; }
@@ -649,6 +657,7 @@ async function boot() {
   // slow settings response. The tab stays neutral until its settings arrive.
   void tabTitle.load().catch(error => toast(`Tab title stays neutral: ${error.message}`));
   void syntaxTheme.load().catch(error => toast(`Syntax theme uses defaults: ${error.message}`));
+  void pets.load().catch(error => toast(`Pet stays hidden: ${error.message}`));
   await keymap.load().catch(error => toast(`Keyboard shortcuts use defaults: ${error.message}`));
   await statusline.load().catch(error => toast(`Status line uses defaults: ${error.message}`));
   await sidebar.refresh();
@@ -719,6 +728,7 @@ window.addEventListener("focus", () => {
   if (state.config) void statusline.load().catch(() => {});
   if (state.config) void tabTitle.load().catch(() => {});
   if (state.config) void syntaxTheme.load().catch(() => {});
+  if (state.config) void pets.load().catch(() => {});
 });
 $("#stop-button").addEventListener("click", async () => {
   if (!state.active) return;
@@ -775,6 +785,7 @@ const browserConnectionSettings = new BrowserConnectionSettings({ api, state, to
     statusline.resetIdentity();
     tabTitle.resetIdentity();
     syntaxTheme.resetIdentity();
+    pets.resetIdentity();
     keymap.resetIdentity(); await keymap.load().catch(error => toast(error.message));
     await sidebar.refresh();
     if (state.active && !state.chats.some(chat => chat.id === state.active.id)) { state.eventSource?.close(); state.active = null; state.stream = null; }
@@ -782,6 +793,7 @@ const browserConnectionSettings = new BrowserConnectionSettings({ api, state, to
     await statusline.load().catch(error => toast(error.message));
     await tabTitle.load().catch(error => toast(error.message));
     await syntaxTheme.load().catch(error => toast(error.message));
+    await pets.load().catch(error => toast(error.message));
     renderChats();
   },
   chatUpdated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = chat; renderActive(); } },
@@ -809,6 +821,8 @@ const tabTitle = new TabTitleControls({ api, controls: chatControls, getChat: ()
 $("#tab-title-button").addEventListener("click", () => void tabTitle.open().catch(error => toast(error.message)));
 const syntaxTheme = new SyntaxThemeControls({ api, controls: chatControls, notify: message => toast(message, { outsideDialog: true }) });
 $("#syntax-theme-button").addEventListener("click", () => void syntaxTheme.open().catch(error => toast(error.message)));
+const pets = new PetControls({ api, controls: chatControls, getChat: () => state.active, root: $("#chat-pet"), notify: message => toast(message, { outsideDialog: true }) });
+$("#pets-button").addEventListener("click", () => void pets.open().catch(error => toast(error.message)));
 const vimComposer = new VimComposer({ input: elements.input, getChatId: () => state.active?.id, notify: toast, keydown: composerKeydown,
   changed: () => { resizeInput(); renderKeyboardHints(); },
   help: () => chatControls.dialog("Vim composer keys",

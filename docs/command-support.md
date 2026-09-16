@@ -36,6 +36,7 @@ and remain at the beginning of native stream-json input.
 | `/statusline` | Relay web equivalent: choose/reorder 15 footer fields with preview, explicit save, hide/defaults and per-account persistence. Saved worker data updates the footer without extra polling or wake-up. Missing/stale snapshots are labelled; default branches and detached HEADs work independently of PR discovery. Native terminal config is unchanged; activation pending. |
 | `/title` | Relay web equivalent: configure the actual browser-tab title with eight ordered fields, live preview, explicit save, neutral app-only title and per-account persistence. Runtime/goal/plan updates use saved chat data; animation respects reduced motion and visibility. Does not rename a chat or change native configuration. Activation pending. |
 | `/theme` | Relay web equivalent: preview/save four syntax palettes with per-account persistence; real self-hosted code tokenization in an isolated browser worker, plus themed diff colors. Keeps literal source, drafts/files and active work unchanged. Unknown/large/complex blocks stay readable; worker failures can be retried. Activation pending. |
+| `/pets`, `/pet`, `/pets <name>`, `/pets off` | Relay web equivalent: eight real built-ins, saved selection/Off, private uploaded custom pets and current-chat activity. Preview/save, named selection, reduced motion, hidden-tab pausing, bounded image decoding and explicit custom deletion. No agent input or native profile changes. Activation pending. |
 | `/init [instructions]` | Repository-instruction creation task, preserving existing AGENTS.md and unrelated edits. Parser/dispatch tests; resulting repository document still needs acceptance verification. |
 | Installed Codex skills | `skills/list` plus structured skill input. No fake terminal entries substituted for skills. |
 | Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI `/reload-skills`, `/autocompact 200k` and `/config` return visible native results without any model call; full installed-command acceptance still pending. |
@@ -71,10 +72,104 @@ Do not treat removing entries from autocomplete as implementing them.
 - `/logout` private native credentials are implemented below. Shared host,
   keyring/automatic storage and gateway-hidden ephemeral accounts remain gated
   until their company/profile isolation and native visibility can be verified.
-- Terminal UI equivalents or surface-specific handling: `/pets`, `/pet`, `/app`.
+- Remaining surface-specific handling: `/app`.
 - Windows-only sandbox setup and read-directory commands do not apply to the
   current Linux worker. Native APIs still need capability/version checks if a
   Windows worker is introduced.
+
+### Pets
+
+OpenAI Docs' [pet guide](https://learn.chatgpt.com/docs/pets) establishes the
+CLI picker aliases, direct named selection, Off, custom companions and four
+current-session states. Its web guidance supplies the standard transparent
+1536 × 1872 PNG/WebP sheet and 20 MiB upload limit. The installed Codex 0.154.0
+app-server protocol has no pets RPC. Relay therefore implements a web companion
+using the actual built-in v4 sprite sheets, without writing native `tui.pet`,
+scanning a host profile or substituting an agent prompt for the command.
+
+Codex, Dewey, Fireball, Rocky, Seedy, Stacky, BSOD and Null Signal are selected
+from a staged picker or by name/ID. Off is persisted too. Only the currently
+selected, account-permitted chat supplies activity; missing/stopped states are
+not presented as completed work. Pending input takes precedence over work.
+One companion and one picker preview retain at most one decoded sheet each;
+decodes are serialized per view, superseded work is discarded, replaced/late
+bitmaps are closed, and closed pickers release their listeners and animation.
+Reduced motion uses a still frame; hidden tabs and page suspension stop timers.
+Canvas scaling preserves frame proportions, including custom non-square grids.
+
+Custom pets require a private Relay account. The image is explicitly selected
+from the user's computer; an optional JSON metadata file can describe a different
+grid. Relay reads only those uploaded bytes, never a manifest's file/URL path.
+Metadata uses `displayName` (or `name`), optional `description`, a `frame` object
+with positive integer `width`, `height`, `columns`, `rows`, and `animations` keyed
+by animation name. Each animation has zero-based sheet indexes in `frames` and
+`fps`, or a `fallback` to another animation. `idle` is required. Display states
+select `typing`, `waiting`, `bounce` or `sad`, falling back to idle when absent.
+For example, this describes a 128 × 128 sheet with four 64 × 64 frames:
+
+```json
+{"displayName":"Local friend","frame":{"width":64,"height":64,"columns":2,"rows":2},"animations":{"idle":{"frames":[0,1],"fps":3},"typing":{"frames":[2,3],"fps":6},"waiting":{"fallback":"idle"},"bounce":{"fallback":"idle"},"sad":{"fallback":"idle"}}}
+```
+
+Without metadata, the standard eight-column/nine-row grid is used (idle,
+right/left running, wave, jump, sad, waiting, typing, bounce). The parser bounds
+dimensions to 4096 per edge, 256 frames, 32 animations and 60 fps, and rejects
+invalid indexes or fallback cycles. Uploads have 20 MiB file and 12-pet/60 MiB
+library bounds. The browser decodes the selected image before upload. The
+server validates signatures/container headers/dimensions and PNG checksums,
+and rejects SVG and animated containers; it is not a full server-side image
+decoder. Custom assets are separate from chat attachments
+and require the owning account on every read. This documents Relay's supported
+metadata fields, not a promise to implement every undocumented native pet-pack
+extension. The standard native v4 artwork is independently verified below.
+
+Selection and libraries use per-account records, revision locks, auth/origin
+checks, and revalidation after asynchronous operations. The signed-out fallback
+is explicitly installation-shared and supports built-ins only. A changed
+account clears private names, descriptions, selected files, labels and bitmaps
+from an old open picker. Late saves cannot replace a newer preference or dialog.
+Explicit deletion removes only that account's selected custom asset and turns
+it off if active; built-ins cannot be deleted. Startup/typing/attachments do not
+wait for cosmetic settings. No model request, worker lifecycle change, native
+profile change, browser observation or new status polling is introduced.
+
+Six pet unit/controller cases, twelve pet browser cases (across the focused
+runs below) and all eight real built-ins have passed. The
+public-artwork smoke uses a fresh browser, checks fixed SHA-256 hashes, decodes
+every declared animation frame, verifies transparency and all four states, and
+checks that cached repeats cause no additional external downloads. Its only
+external requests are the eight fixed public artwork URLs; no model/account
+credentials are used. The mobile layout was visually reviewed and corrected
+for readable full-width rows; actual built-in artwork was visually inspected.
+The private-picker regression verifies that changing accounts removes old
+custom names/descriptions, preview labels, selected files and image pixels;
+a cached foreign chat cannot supply activity under the new account.
+
+Verification history is retained, not collapsed into a green aggregate:
+
+- The initial five pet cases and full unit/controller run passed 352/352 at
+  concurrency two. After adding quota/failure cleanup coverage, all six pet
+  cases pass; the next full run passed 352/353, with one **cancelled** 60-second
+  Chrome-extension test. That unchanged test then passed alone in 46.7 seconds.
+  The timeout's cause is not established; default-concurrency gates remain open.
+- Eleven focused pet browser cases passed together. The full browser run then
+  passed 140/147, including all eleven pet and both shared-Chrome cases. One
+  failure is item 26's Jump to latest DOM detachment. The other six have trace
+  evidence of `ERR_NETWORK_CHANGED` during startup/reload: MCP connection,
+  organization pin/drag, syntax-theme persistence, two title cases and Vim
+  draft switching. The startup/network condition is not declared fixed.
+- After the private-picker cleanup and final scoped CSS adjustments, a combined
+  follow-up passed 17/18: the new privacy case and all six unchanged
+  network-affected cases passed, but the pet-state case failed before chat
+  startup with `ERR_NETWORK_CHANGED` on module requests. That unchanged case
+  subsequently passed alone. These follow-ups do not erase full-run failures.
+- Repository-wide JavaScript syntax and whitespace checks pass. No assertions,
+  timeouts or browser launch flags were relaxed. Failure traces remain under
+  `test-results/pets-full` and `test-results/pets-final-followup`; standalone
+  follow-up evidence is under `test-results/pets-state-followup`.
+
+No live service/chat/account/Chrome or native profile was changed. Item 20 and
+live activation remain open; `/app` is the next UI command.
 
 ### Syntax theme configuration
 

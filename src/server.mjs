@@ -7,6 +7,8 @@ import { KeymapPreferences } from "./keymap.mjs";
 import { StatusLinePreferences } from "./status-line.mjs";
 import { TabTitlePreferences } from "./tab-title.mjs";
 import { SyntaxThemePreferences } from "./syntax-theme.mjs";
+import { PetPreferences } from "./pets.mjs";
+import { PET_IMAGE_LIMIT } from "../public/pets.js";
 import { SYNTAX_MODES } from "../public/syntax-theme.js";
 import { CapabilityBroker } from "./capabilities.mjs";
 import { loadConfig } from "./config.mjs";
@@ -105,6 +107,7 @@ export async function createAgentWebServer(options = {}) {
   const statuslines = new StatusLinePreferences(records);
   const tabTitles = new TabTitlePreferences(records);
   const syntaxThemes = new SyntaxThemePreferences(records);
+  const pets = new PetPreferences(records, { fetchImpl: options.petFetch });
   const gateway = new ProviderGateway({ config, broker });
   const sseClients = new Set();
   const sidebarClients = new Set();
@@ -186,6 +189,27 @@ export async function createAgentWebServer(options = {}) {
       if (!manager && url.pathname.startsWith("/api/")) return json(response, 503, { error: "control plane is starting" });
       const user = url.pathname.startsWith("/api/") ? await browserUsers.session(request) : null;
       const visibleChats = () => store.list().filter(chat => browserUsers.canRead(chat, user));
+      if (url.pathname === "/api/pets" || url.pathname.startsWith("/api/pets/")) {
+        const scope = user?.id || "shared", guard = async () => {
+          if ((await browserUsers.session(request))?.id !== user?.id || !auth.authenticated(request)) throw Object.assign(new Error("The pet account changed. Reload /pets."), { statusCode: 409 });
+        };
+        const asset = /^\/api\/pets\/assets\/([a-z0-9-]+)$/.exec(url.pathname), custom = /^\/api\/pets\/custom\/(custom-[a-f0-9-]+)$/.exec(url.pathname);
+        if (request.method === "GET" && asset) {
+          if (url.searchParams.get("scope") !== scope) return json(response, 409, { error: "The pet account changed. Reload /pets." });
+          const result = await pets.asset(scope, asset[1], guard);
+          response.writeHead(200, { "content-type": result.mime, "content-length": result.data.length, "cache-control": "private, no-store", "cross-origin-resource-policy": "same-origin" });
+          return response.end(result.data);
+        }
+        let result;
+        if (url.pathname === "/api/pets" && request.method === "GET") result = await pets.get(scope, guard);
+        else if (url.pathname === "/api/pets" && request.method === "PATCH") result = await pets.save(scope, await bodyJson(request, 4000), guard);
+        else if (url.pathname === "/api/pets/custom" && request.method === "POST") {
+          if (!user) return json(response, 403, { error: "Sign in to a private Relay account to upload custom pets." });
+          result = await pets.upload(scope, await bodyJson(request, Math.ceil(PET_IMAGE_LIMIT / 3) * 4 + 100000), guard);
+        } else if (custom && request.method === "DELETE") result = await pets.remove(scope, custom[1], await bodyJson(request, 4000), guard);
+        else return json(response, 404, { error: "Pet route not found" });
+        return json(response, 200, { ...result, account: browserUsers.public(user) });
+      }
       if (["/api/statusline", "/api/tab-title", "/api/syntax-theme"].includes(url.pathname) && ["GET", "PATCH"].includes(request.method)) {
         const preferences = { "/api/statusline": statuslines, "/api/tab-title": tabTitles, "/api/syntax-theme": syntaxThemes }[url.pathname];
         const scope = user?.id || "shared", guard = async () => {

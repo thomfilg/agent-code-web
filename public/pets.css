@@ -1,0 +1,36 @@
+.chat-pet { display: flex; align-items: center; gap: 4px; margin-inline-start: auto; min-width: 0; }
+.chat-pet[hidden] { display: none; }
+.pet-open { display: flex; align-items: center; border: 0; background: transparent; padding: 0; gap: 4px; text-align: start; }
+.pet-open > span:last-child { display: grid; gap: 3px; font-size: 11px; max-width: 100px; overflow-wrap: anywhere; }
+.pet-open small { color: var(--muted); }
+.pet-art { display: block; }
+.pet-art canvas { display: block; width: auto; height: auto; max-width: 64px; max-height: 70px; }
+.pet-art-error { display: block; color: var(--muted); font-size: 11px; max-width: 160px; overflow-wrap: anywhere; }
+.pet-art-error[hidden] { display: none; }
+.chat-pet .pet-art-error { max-width: 100px; }
+.pet-settings { display: flex; flex-direction: column; gap: 10px; max-height: min(720px, 75dvh); }
+.pet-scroll { overflow: auto; min-height: 0; overscroll-behavior: contain; padding: 0 3px; }
+.pet-picker-grid { display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 16px; }
+.pet-choices { display: grid; gap: 3px; min-width: 0; margin: 0; padding: 8px; border: 1px solid var(--line); border-radius: 10px; }
+.pet-choices label { display: flex; align-items: center; gap: 9px; padding: 8px; cursor: pointer; border-radius: 7px; }
+.pet-choices label:has(:checked) { background: var(--panel-soft); }
+.pet-choices input { width: auto; accent-color: var(--lime); flex-shrink: 0; }
+.pet-choices small { display: block; font-size: 11px; margin-top: 3px; }
+.pet-choices span { min-width: 0; overflow-wrap: anywhere; }
+.pet-preview-column { display: flex; flex-direction: column; align-items: center; gap: 12px; align-self: start; position: sticky; top: 0; min-width: 0; }
+.pet-preview { min-height: 170px; display: grid; place-content: center; }
+.pet-preview canvas { max-width: 144px; max-height: 156px; }
+.pet-preview-column select, .pet-preview-column button { width: 100%; font-size: 12px; }
+.pet-upload { display: grid; gap: 9px; border: 1px solid var(--line); border-radius: 10px; margin: 14px 0; padding: 12px; min-width: 0; }
+.pet-upload input { width: 100%; min-width: 0; }
+.pet-upload label { font-size: 12px; color: var(--muted); }
+.pet-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 480px) {
+  .pet-picker-grid { display: flex; flex-direction: column; gap: 12px; }
+  .pet-preview-column { order: -1; display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 8px; position: static; width: 100%; }
+  .pet-preview { grid-row: span 2; }
+  .pet-preview canvas { max-width: 100px; max-height: 110px; }
+  .pet-preview { min-height: 116px; }
+  .chat-pet .pet-open > span:last-child { display: none; }
+  .chat-pet .pet-art canvas { max-width: 48px; max-height: 52px; }
+}

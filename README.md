@@ -673,6 +673,26 @@ fresh session. The target provider's default model/effort are selected.
   stay plain without losing source or Copy contents. Failed asset loads can be
   retried. No code is executed or sent outside the browser by highlighting;
   isolated HTML/Markdown/SVG previews retain their own document styling.
+- **Pets:** `/pets`, `/pet` or **Chat actions → Pets** opens a picker with
+  preview, explicit **Save pet**, and Off. `/pets <name>` selects directly;
+  `/pets off` hides the companion. The eight built-ins use verified OpenAI v4
+  artwork, downloaded lazily and cached by Relay; no credentials are sent with
+  those downloads. The current chat supplies Running, Needs input, Ready and
+  Blocked states; stopped/archived/unknown states stay explicit. No chat text or
+  browser activity is used, and no worker is woken, interrupted or messaged.
+  Animation pauses when the tab is hidden and becomes still with reduced motion.
+  The picker keeps only one preview, releases replaced images, and retains the
+  composer draft/files. Selection persists per Relay account, with a labelled
+  installation-shared built-in selection when signed out of private accounts.
+  Private accounts can upload PNG/WebP sprite sheets (standard: 1536 × 1872,
+  maximum 20 MiB) and explicitly delete their own custom pets. An optional
+  `pet.json`/`avatar.json` describes another grid and frame-index animations;
+  see [the format and verification notes](docs/command-support.md#pets).
+  Custom libraries are limited to 12 pets / 60 MiB. Files are selected explicitly,
+  never discovered by scanning personal folders or following manifest paths.
+  Account/revision conflicts retain unsaved selections; account changes clear
+  private picker content and cannot apply an old save or artwork response.
+  This is Relay's web equivalent, not an OS overlay or a native profile change.
 - **Native sign-out (Codex):** `/logout` opens saved status without waking the
   worker. **Inspect native account** explicitly connects this chat, without an
   agent message or token refresh. A separate confirmation clears only reviewed

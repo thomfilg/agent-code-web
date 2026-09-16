@@ -62,6 +62,34 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: `/pets` and `/pet` now open a saved web companion picker; direct names/IDs
+  and Off work while busy without sending/queueing a prompt. Eight actual
+  OpenAI v4 built-ins are downloaded lazily, hash-checked and cached. Private
+  accounts can explicitly upload bounded PNG/WebP sheets plus optional frame
+  metadata and delete only their own custom pets. Current-chat states, still
+  frames for reduced motion, hidden-tab pausing, released bitmaps, drafts/files,
+  account/revision guards and visibly disclosed shared built-in preferences are
+  implemented. OpenAI Docs informed CLI aliases/status and standard web sheet
+  behavior. No native profiles or live services/chats/accounts/Chrome changed.
+  Six pet unit/controller and eleven focused browser cases pass; all eight
+  real built-ins pass checksum/decode/transparency/frame/state checks in a fresh
+  browser without model calls. Mobile review caught cramped columns, corrected
+  to full-width choices. A final account-change review also clears private
+  picker text/files/labels, not just its image; its added browser case passes.
+  The initial full unit/controller run passed 352/352 at concurrency two. With
+  the added quota case, the next run passed 352/353 with one cancelled 60-second
+  Chrome-extension test; that unchanged case passed alone in 46.7 seconds.
+  The full browser run passed 140/147, including all eleven pet cases. Item 26's
+  Jump to latest detachment remains; six other failures show startup/reload
+  `ERR_NETWORK_CHANGED` in traces (MCP, organization, syntax theme, two title
+  cases and Vim). The final combined follow-up passed 17/18, including the new
+  privacy case and all six unchanged network-affected cases; a pet-state case
+  failed before startup with the same network error, then passed unchanged in
+  isolation. All twelve pet scenarios have passing evidence across those runs,
+  but the broader timeout/network/history gates remain open. JavaScript syntax
+  and whitespace checks pass; no assertions, timeouts or launch flags relaxed.
+  Next UI command: `/app`; item 20 and activation remain open. Save this
+  checkpoint to PR #2 without merge/deployment.
 - 20: `/theme` now previews and saves four syntax palettes for conversation code
   and diff colors. OpenAI Docs guided preview/confirmation/persistence; this is
   a web equivalent, not a native configuration write or agent prompt. Per-account

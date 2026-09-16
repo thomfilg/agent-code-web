@@ -1,5 +1,5 @@
 // Shared by discovery and the composer: every advertised control has a handler.
-export const WEB_COMMAND_ALIASES = { reset: "clear", name: "rename", cost: "usage", stats: "usage", subagents: "agent" };
+export const WEB_COMMAND_ALIASES = { reset: "clear", name: "rename", cost: "usage", stats: "usage", subagents: "agent", pet: "pets" };
 export const WEB_COMMANDS = {
   usage: "Show detailed session usage", status: "Show session status and usage", context: "Show context usage",
   model: "Choose the agent model", effort: "Choose reasoning effort", plan: "Switch to Plan mode; optionally include a task",
@@ -33,6 +33,7 @@ export const WEB_COMMANDS = {
   statusline: "Select, reorder and save Relay web-footer status fields",
   title: "Select, reorder and save browser-tab title fields; does not rename the chat",
   theme: "Preview and save syntax-highlighting colors for Relay code and diffs",
+  pets: "Choose a built-in or custom pet for this chat; /pets name selects, /pets off hides",
 };
 export const webCommands = (agent, capabilities = {}) => Object.entries(WEB_COMMANDS)
   .filter(([name]) => !["goal", "init", "review", "fast", "personality", "ps", "clean", "debug-config", "side", "btw", "fork", "agent", "ide", "apps", "plugins", "hooks", "experimental", "memories", "import", "approve", "feedback", "logout"].includes(name) || agent === "codex")
