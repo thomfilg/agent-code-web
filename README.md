@@ -658,6 +658,21 @@ fresh session. The target provider's default model/effort are selected.
   it never guesses a completion percentage or exposes the goal/plan text. Unknown
   values remain explicit. Opening settings never wakes, interrupts or messages
   the agent, including while it is busy. No native configuration is changed.
+- **Syntax theme:** `/theme` or **Chat actions → Syntax theme** previews Relay
+  dark, Paper light, High contrast or Plain code colors. **Save syntax theme**
+  applies the choice to conversation code blocks (including side/child replies)
+  and diff colors; closing cancels the selection. Restore default is staged too.
+  Preferences persist per Relay account, or in the clearly labelled installation
+  scope when no private account is signed in. Revision conflicts keep the draft;
+  account changes invalidate old controls and cannot apply an old save response.
+  This is a web equivalent, not a write to native `tui.theme`/`config.toml` or an
+  agent input. It never queues, interrupts or wakes a worker, and retains the
+  composer draft/files. The pinned, self-hosted tokenizer runs in a separate
+  browser worker, without loading the Vim editor into the page. Common explicit
+  fence languages are supported; unknown, oversized or overly complex blocks
+  stay plain without losing source or Copy contents. Failed asset loads can be
+  retried. No code is executed or sent outside the browser by highlighting;
+  isolated HTML/Markdown/SVG previews retain their own document styling.
 - **Native sign-out (Codex):** `/logout` opens saved status without waking the
   worker. **Inspect native account** explicitly connects this chat, without an
   agent message or token refresh. A separate confirmation clears only reviewed

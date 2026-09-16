@@ -62,6 +62,38 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: `/theme` now previews and saves four syntax palettes for conversation code
+  and diff colors. OpenAI Docs guided preview/confirmation/persistence; this is
+  a web equivalent, not a native configuration write or agent prompt. Per-account
+  settings (or explicitly shared installation scope) have auth/origin, revision,
+  account-change and late-response guards. Draft/files and busy work remain.
+  A self-hosted, pinned tokenizer runs in a separate browser worker, never the
+  page's opt-in Vim runtime. Source is literal and never executed; bounded jobs,
+  source/line/token limits, deferred batches and stale-element checks protect
+  rendering. Unknown/large/complex blocks remain intact as plain text. Retrying
+  replaces failed worker/module state. Four new unit/controller cases and the
+  full 347/347 suite pass at concurrency two; all JavaScript syntax checks pass.
+  Thirteen new browser scenarios cover real colors/copy/preview isolation,
+  save/cancel/defaults, private HTTP persistence, mobile, busy/draft/file safety,
+  errors/late responses, accounts, worker retry and 70-block batching. A focus
+  account-change test failed before the stale-panel notice/disable fix. The next
+  combined run passed 21/22, including all nine Vim cases; the failure occurred
+  during startup before that scenario, with `ERR_NETWORK_CHANGED` on preferences
+  and MCP requests in the trace. It passed unchanged in isolation; the startup
+  network condition is not declared fixed. Desktop/320px layouts were inspected.
+  The full browser suite finished 134/136, including all thirteen theme cases
+  and both shared-Chrome cases. Item 26's Jump to latest detachment reproduced;
+  a sign-out case failed before its scenario when startup script requests
+  reported `ERR_NETWORK_CHANGED`. No assertions/timeouts were relaxed. A final
+  light-theme contrast correction applies the palette to diff line numbers,
+  with an actual computed-color assertion. All thirteen theme, nine Vim and four
+  unchanged sign-out cases then passed together (26/26). That follow-up does not
+  erase the full-run failure or establish the network condition's root cause.
+  Code-palette foreground contrast was checked (above 4.5:1); desktop/320px
+  layouts were inspected. Prior default-concurrency failures remain recorded.
+  No live service/chat/account/Chrome or native config changes. Next: `/pets`
+  and `/pet`; item 20 and activation remain open. Save this checkpoint to
+  existing PR #2 without merge/deployment.
 - 20: `/title` now configures Relay's browser-tab title through an eight-field
   picker with preview, selection, drag/arrow order, explicit save, defaults and
   a neutral app-only title. OpenAI Docs guided behavior and spinner/project

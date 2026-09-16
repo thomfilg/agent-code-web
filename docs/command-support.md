@@ -35,6 +35,7 @@ and remain at the beginning of native stream-json input.
 | `/vim`, `/vim on`, `/vim off` | Per-chat web composer toggle using a lazily loaded, self-hosted Vim editor. Real Normal/Insert/Visual editing, operators/text objects, search/substitution and undo; Insert-mode Relay shortcuts and attachments are retained. Chat/account changes clear registers, macros, search and undo state. No worker/config/model action. |
 | `/statusline` | Relay web equivalent: choose/reorder 15 footer fields with preview, explicit save, hide/defaults and per-account persistence. Saved worker data updates the footer without extra polling or wake-up. Missing/stale snapshots are labelled; default branches and detached HEADs work independently of PR discovery. Native terminal config is unchanged; activation pending. |
 | `/title` | Relay web equivalent: configure the actual browser-tab title with eight ordered fields, live preview, explicit save, neutral app-only title and per-account persistence. Runtime/goal/plan updates use saved chat data; animation respects reduced motion and visibility. Does not rename a chat or change native configuration. Activation pending. |
+| `/theme` | Relay web equivalent: preview/save four syntax palettes with per-account persistence; real self-hosted code tokenization in an isolated browser worker, plus themed diff colors. Keeps literal source, drafts/files and active work unchanged. Unknown/large/complex blocks stay readable; worker failures can be retried. Activation pending. |
 | `/init [instructions]` | Repository-instruction creation task, preserving existing AGENTS.md and unrelated edits. Parser/dispatch tests; resulting repository document still needs acceptance verification. |
 | Installed Codex skills | `skills/list` plus structured skill input. No fake terminal entries substituted for skills. |
 | Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI `/reload-skills`, `/autocompact 200k` and `/config` return visible native results without any model call; full installed-command acceptance still pending. |
@@ -70,11 +71,65 @@ Do not treat removing entries from autocomplete as implementing them.
 - `/logout` private native credentials are implemented below. Shared host,
   keyring/automatic storage and gateway-hidden ephemeral accounts remain gated
   until their company/profile isolation and native visibility can be verified.
-- Terminal UI equivalents or surface-specific handling: `/theme`, `/pets`,
-  `/pet`, `/app`.
+- Terminal UI equivalents or surface-specific handling: `/pets`, `/pet`, `/app`.
 - Windows-only sandbox setup and read-directory commands do not apply to the
   current Linux worker. Native APIs still need capability/version checks if a
   Windows worker is introduced.
+
+### Syntax theme configuration
+
+The OpenAI Docs skill's [theme command reference](https://learn.chatgpt.com/docs/developer-commands#choose-a-syntax-theme-with-theme)
+establishes a preview picker, confirmation and a saved syntax-highlighting
+choice. Relay applies that behavior to the actual conversation code blocks
+(including side/child replies) and diff colors, not an unrelated worker terminal
+or the agent's prompt. Native `tui.theme`/`config.toml` remains unchanged.
+
+Relay dark, Paper light, High contrast and Plain have a staged preview and
+explicit Save. Closing cancels; Restore default is also staged. Busy slash
+dispatch does not queue input or stop/wake the agent. Draft text and files stay
+intact. Preferences are stored separately per Relay account, with disclosed
+installation-shared fallback, authentication/origin checks, scope/revision
+guards and account-reset/late-response protection. A newly discovered account
+visibly invalidates old open controls. Preference loading cannot gate startup.
+
+A separate module worker lazily loads an allowlisted, self-hosted minimal
+CodeMirror tokenizer and grammars from the already-pinned dependency. The page's
+opt-in Vim runtime is untouched. Tokens become text nodes/spans, never evaluated
+HTML or code; tabs, line endings and Copy source remain intact. Limits cover
+80,000 characters, 4,000 per line, 5,000 styled ranges, 40 queued source copies
+and a worker deadline. Deferred mounted blocks drain in bounded batches;
+discarded/replaced content cannot receive old results. Unknown/oversized/complex
+blocks stay plain rather than truncating source. Retry recreates a failed worker
+so failed module imports do not remain cached. Isolated document previews keep
+their existing CSP, sanitizer and document styling.
+
+Four new unit/controller tests exercise actual pinned grammars, exact source,
+limits, persistence, revisions, account/origin/auth rejection and fixed asset
+paths. The full unit/controller suite passes 347/347 at concurrency two;
+repository-wide JavaScript syntax checks pass. Thirteen browser cases cover
+actual token/diff colors, cancellation/defaults, private HTTP persistence, busy
+dispatch, draft/files, mobile errors, slow/late settings, account changes, asset
+failure/retry, replacement and 70-block batch draining. Initial eight cases
+passed. An added account-focus regression failed before the explicit stale-panel
+notice/disable fix. The following combined run passed 21/22 (including all nine
+Vim cases); its one failure occurred before the theme scenario at chat startup,
+with trace evidence of `ERR_NETWORK_CHANGED` on preferences/MCP requests. That
+case then passed unchanged in isolation. This does not declare the broader
+startup/network condition fixed. Desktop and 320px screenshots were inspected.
+The full browser run completed 134/136, including all thirteen theme cases and
+both shared-Chrome cases. The failures are item 26's known Jump to latest
+detachment and a sign-out case that never reached its scenario because startup
+script requests reported `ERR_NETWORK_CHANGED`. No assertion or timeout was
+relaxed. A final contrast adjustment makes diff line numbers use the selected
+palette's comment color; its computed light-theme color is asserted. After that
+change, all thirteen theme, nine Vim and four sign-out cases passed together
+(26/26). The sign-out test itself was not changed; passing its follow-up does not
+erase the full-run network failure. Code palette foreground colors were checked
+against their backgrounds (all exceed 4.5:1); desktop and 320px layouts were
+inspected. The broader history/startup failures and prior default-concurrency
+failures remain open. No live chat, account, Chrome, native configuration or
+service has been changed. Next: `/pets` and `/pet`; item 20 and activation remain
+open.
 
 ### Browser-tab title configuration
 

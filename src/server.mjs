@@ -6,6 +6,8 @@ import { BrowserAuth } from "./auth.mjs";
 import { KeymapPreferences } from "./keymap.mjs";
 import { StatusLinePreferences } from "./status-line.mjs";
 import { TabTitlePreferences } from "./tab-title.mjs";
+import { SyntaxThemePreferences } from "./syntax-theme.mjs";
+import { SYNTAX_MODES } from "../public/syntax-theme.js";
 import { CapabilityBroker } from "./capabilities.mjs";
 import { loadConfig } from "./config.mjs";
 import { ProviderGateway } from "./provider-gateway.mjs";
@@ -102,6 +104,7 @@ export async function createAgentWebServer(options = {}) {
   const keymaps = new KeymapPreferences(records);
   const statuslines = new StatusLinePreferences(records);
   const tabTitles = new TabTitlePreferences(records);
+  const syntaxThemes = new SyntaxThemePreferences(records);
   const gateway = new ProviderGateway({ config, broker });
   const sseClients = new Set();
   const sidebarClients = new Set();
@@ -150,6 +153,9 @@ export async function createAgentWebServer(options = {}) {
         response.setHeader("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts");
       }
       const vendor = { "/vendor/marked.js": "marked/lib/marked.esm.js", "/vendor/purify.js": "dompurify/dist/purify.es.mjs", "/vendor/purify-classic.js": "dompurify/dist/purify.min.js",
+        "/vendor/syntax-runmode.js": "codemirror/addon/runmode/runmode-standalone.js",
+        "/vendor/syntax-simple.js": "codemirror/addon/mode/simple.js",
+        ...Object.fromEntries(SYNTAX_MODES.map(mode => [`/vendor/syntax-${mode}.js`, `codemirror/mode/${mode}/${mode}.js`])),
         "/vendor/codemirror.js": "codemirror/lib/codemirror.js", "/vendor/codemirror.css": "codemirror/lib/codemirror.css",
         "/vendor/codemirror-dialog.css": "codemirror/addon/dialog/dialog.css", "/vendor/codemirror-dialog.js": "codemirror/addon/dialog/dialog.js",
         "/vendor/codemirror-searchcursor.js": "codemirror/addon/search/searchcursor.js", "/vendor/codemirror-matchbrackets.js": "codemirror/addon/edit/matchbrackets.js",
@@ -180,8 +186,8 @@ export async function createAgentWebServer(options = {}) {
       if (!manager && url.pathname.startsWith("/api/")) return json(response, 503, { error: "control plane is starting" });
       const user = url.pathname.startsWith("/api/") ? await browserUsers.session(request) : null;
       const visibleChats = () => store.list().filter(chat => browserUsers.canRead(chat, user));
-      if (["/api/statusline", "/api/tab-title"].includes(url.pathname) && ["GET", "PATCH"].includes(request.method)) {
-        const preferences = url.pathname === "/api/statusline" ? statuslines : tabTitles;
+      if (["/api/statusline", "/api/tab-title", "/api/syntax-theme"].includes(url.pathname) && ["GET", "PATCH"].includes(request.method)) {
+        const preferences = { "/api/statusline": statuslines, "/api/tab-title": tabTitles, "/api/syntax-theme": syntaxThemes }[url.pathname];
         const scope = user?.id || "shared", guard = async () => {
           if ((await browserUsers.session(request))?.id !== user?.id || !auth.authenticated(request)) throw Object.assign(new Error(`The ${preferences.label.toLowerCase()} account changed. Reload its settings.`), { statusCode: 409 });
         };

@@ -1,5 +1,6 @@
 import { marked } from "/vendor/marked.js";
 import DOMPurify from "/vendor/purify.js";
+import { highlightCode } from "./syntax-highlight.js";
 const escape = value => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
 const renderer = new marked.Renderer();
 renderer.html = ({ text }) => `<pre class="html-source"><code>${escape(text)}</code></pre>`;
@@ -20,12 +21,12 @@ export function renderContent(root, text, { onPreview } = {}) {
   for (const [index, pre] of [...root.querySelectorAll("pre")].entries()) {
     const code = pre.querySelector("code"); if (!code) continue;
     const source = code.textContent;
+    const language = pre.classList.contains("html-source") ? "html" : [...code.classList].find(name => name.startsWith("language-"))?.slice(9).toLowerCase();
     const toolbar = document.createElement("div"); toolbar.className = "code-toolbar";
     const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy";
     copy.onclick = async () => { try { await navigator.clipboard.writeText(source); copy.textContent = "Copied"; } catch { copy.textContent = "Copy unavailable"; } };
     toolbar.append(copy); pre.before(toolbar);
     if (onPreview) {
-      const language = [...code.classList].find(name => name.startsWith("language-"))?.slice(9).toLowerCase();
       const format = pre.classList.contains("html-source") || ["html", "htm"].includes(language) ? "html" : ["md", "markdown"].includes(language) ? "markdown" : language === "svg" ? "svg" : "text";
       const title = { html: "HTML preview", markdown: "Markdown preview", svg: "SVG preview", text: "Text preview" }[format];
       const preview = document.createElement("button"); preview.type = "button"; preview.className = "document-preview-button";
@@ -33,5 +34,6 @@ export function renderContent(root, text, { onPreview } = {}) {
       preview.onclick = () => onPreview({ source, format, title, trigger: preview, index });
       pre.after(preview);
     }
+    highlightCode(code, language);
   }
 }
