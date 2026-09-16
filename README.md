@@ -633,6 +633,19 @@ fresh session. The target provider's default model/effort are selected.
   not a change to native `tui.vim_mode_default`; reloads and new chats default to
   ordinary editing. Registers, undo, macros and search history are cleared on
   chat/account changes or disable. No native config or worker is touched.
+- **Status line:** `/statusline` or **Chat actions → Status line** opens a live
+  preview and field picker for Relay's web footer. Toggle fields and reorder them
+  with arrows or drag handles, then **Save status line**; **Hide status line**
+  and **Restore defaults** are staged until saved. Model/reasoning, context,
+  5-hour/weekly limits, Git branch, session token totals, native session ID,
+  worker directory, project root and agent CLI version are available. Missing
+  values stay **Not reported**, stopped workers show saved snapshots, and
+  expired limit windows are marked awaiting refresh. Git snapshots include
+  default branches and detached HEADs without changing PR discovery. Preferences
+  persist per signed-in Relay account, or in the explicitly disclosed shared
+  installation scope. Stale saves require reload. This does not modify native
+  `tui.status_line`/`config.toml`, wake a worker or send/queue a prompt. It uses
+  existing session updates and read-only Git snapshots after ordinary turns.
 - **Native sign-out (Codex):** `/logout` opens saved status without waking the
   worker. **Inspect native account** explicitly connects this chat, without an
   agent message or token refresh. A separate confirmation clears only reviewed

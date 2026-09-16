@@ -440,6 +440,35 @@ dialog { max-height: calc(100dvh - 28px); }
 .keymap-row input { min-width: 0; width: 100%; }
 .keymap-row small { display: block; overflow-wrap: anywhere; }
 .keymap-row button { margin-top: 8px; }
+.chat-statusline, .statusline-preview { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font: 11px/1.5 ui-monospace, monospace; min-width: 0; }
+.chat-statusline { margin: 5px 4px 0; max-height: 5.5em; overflow: auto; }
+.chat-statusline[hidden] { display: none; }
+.statusline-item { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.chat-statusline .statusline-item { max-width: min(100%, 32em); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.statusline-label, .statusline-snapshot { color: var(--text); }
+.statusline-item.unavailable { opacity: .7; }
+.statusline-preview { border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin: 10px 0; max-height: 130px; overflow: auto; }
+.statusline-rows { max-height: 330px; overflow-y: auto; border-block: 1px solid var(--line); margin-bottom: 10px; }
+.statusline-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; border-bottom: 1px solid var(--line); padding: 9px 4px; }
+.statusline-row label { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.statusline-row input { width: auto; margin: 0; }
+.statusline-row small { grid-column: 1; font-size: 11px; overflow-wrap: anywhere; }
+.statusline-row-actions { display: flex; align-items: center; gap: 3px; grid-column: 2; grid-row: 1 / span 2; }
+.statusline-drag { cursor: grab; padding: 5px; }
+#controls-dialog:has(.statusline-settings) .dialog-card { height: min(760px, calc(100dvh - 32px)); padding: 18px; gap: 12px; }
+#controls-content:has(.statusline-settings) { display: flex; flex: 1; min-height: 0; }
+.statusline-settings { display: flex; flex-direction: column; min-height: 0; width: 100%; gap: 8px; font-size: 12px; }
+.statusline-settings > p, .statusline-about { flex: none; }
+.statusline-about { max-height: 120px; overflow: auto; }
+.statusline-about p { padding-top: 8px; }
+.statusline-settings .statusline-preview { flex: none; margin: 0; max-height: 70px; }
+.statusline-settings .statusline-rows { flex: 1; min-height: 55px; max-height: none; margin: 0; }
+.dialog-card .statusline-row input { width: 16px; height: 16px; flex: none; accent-color: var(--lime); }
+.dialog-card .statusline-row label > span { margin: 0; font-size: 12px; }
+.statusline-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; flex: none; }
+#controls-content .statusline-actions button { font-size: 12px; white-space: normal; }
+#controls-content .statusline-actions .primary-button { background: var(--lime); color: var(--bg); }
+.statusline-settings button:disabled { opacity: .4; cursor: default; }
 .native-logout-details, .native-logout-confirm, .native-logout-history { overflow-wrap: anywhere; }
 .native-logout-confirm p { margin: 10px 0; line-height: 1.5; }
 .native-logout-confirm button { margin: 8px 8px 0 0; white-space: normal; }

@@ -5,7 +5,7 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { prompt += chunk; });
 process.stdin.on("end", () => {
   const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
-  send({ type: "system", subtype: "init", session_id: "fixture" });
+  send({ type: "system", subtype: "init", session_id: "fixture", model: "fixture-claude", claude_code_version: "2.1.0-fixture" });
   if (prompt === "wait for interruption") { setInterval(() => {}, 1000); return; }
   if (prompt === "inspect-settings") {
     const flag = name => { const i = process.argv.indexOf(name); return i < 0 ? null : process.argv[i + 1]; };

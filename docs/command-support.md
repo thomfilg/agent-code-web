@@ -33,6 +33,7 @@ and remain at the beginning of native stream-json input.
 | `/logout` (Codex) | Read-only status, explicit private-account inspection and separately confirmed native credential removal; queue pauses and history/draft/files remain. Native account and file removal are verified, with credential/policy/worker-bound consent and no automatic replay after uncertainty. Shared host, OS keyring/auto and gateway-hidden ephemeral accounts remain locked. Unit/controller, responsive browser and network-isolated real-CLI checks pass; live activation pending. |
 | `/keymap` | Relay web equivalent: edit/save/unbind/restore actual global and main-composer shortcuts, with duplicate/reserved-key validation, context precedence, per-account persistence and conflict checks. Main history boundaries, draft/files, IME/pickers and busy queue behavior are retained. Terminal config and worker permissions are never changed. Five unit/controller checks and five responsive browser checks pass; live activation pending. |
 | `/vim`, `/vim on`, `/vim off` | Per-chat web composer toggle using a lazily loaded, self-hosted Vim editor. Real Normal/Insert/Visual editing, operators/text objects, search/substitution and undo; Insert-mode Relay shortcuts and attachments are retained. Chat/account changes clear registers, macros, search and undo state. No worker/config/model action. |
+| `/statusline` | Relay web equivalent: choose/reorder 15 footer fields with preview, explicit save, hide/defaults and per-account persistence. Saved worker data updates the footer without extra polling or wake-up. Missing/stale snapshots are labelled; default branches and detached HEADs work independently of PR discovery. Native terminal config is unchanged; activation pending. |
 | `/init [instructions]` | Repository-instruction creation task, preserving existing AGENTS.md and unrelated edits. Parser/dispatch tests; resulting repository document still needs acceptance verification. |
 | Installed Codex skills | `skills/list` plus structured skill input. No fake terminal entries substituted for skills. |
 | Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI `/reload-skills`, `/autocompact 200k` and `/config` return visible native results without any model call; full installed-command acceptance still pending. |
@@ -68,11 +69,69 @@ Do not treat removing entries from autocomplete as implementing them.
 - `/logout` private native credentials are implemented below. Shared host,
   keyring/automatic storage and gateway-hidden ephemeral accounts remain gated
   until their company/profile isolation and native visibility can be verified.
-- Terminal UI equivalents or surface-specific handling: `/statusline`, `/title`,
+- Terminal UI equivalents or surface-specific handling: `/title`,
   `/theme`, `/pets`, `/pet`, `/app`.
 - Windows-only sandbox setup and read-directory commands do not apply to the
   current Linux worker. Native APIs still need capability/version checks if a
   Windows worker is introduced.
+
+### Status-line configuration
+
+The OpenAI Docs skill's [status-line command reference](https://learn.chatgpt.com/docs/developer-commands#configure-footer-items-with-statusline)
+establishes interactive item selection/reordering, confirmation and persistence.
+Its [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference#configtoml)
+also establishes ordered fields and disabling the status line. Relay applies
+that behavior to its actual web footer, explicitly not to an unrelated worker
+terminal's `tui.status_line` or native `config.toml`.
+
+The picker provides a live preview, checkboxes, drag handles and accessible
+up/down controls. Save applies the order immediately; Hide and Restore defaults
+remain drafts until saved, and closing cancels unsaved changes. Main draft text
+and files are untouched; a successfully opened bare command clears only that
+same command, never newer text. It works while the agent is busy without queueing
+a model input or stopping work. Footer fields wrap/truncate within the chat;
+the responsive picker keeps its header, save/error state and close control
+visible while the field list scrolls.
+
+Fifteen selectable fields cover model, model plus reasoning, remaining/used/
+maximum context, 5-hour/weekly limits, Git branch, total/input/output session
+tokens, native session ID, worker working directory, primary Git root and agent
+CLI version. Current context is not cumulative usage; cached input and reasoning
+output are not counted twice. Zero is distinct from missing data. Expired limit
+windows are marked awaiting refresh, missing fields say Not reported, and stopped
+workers show saved snapshots. Metadata is rendered literally, not as HTML.
+
+Native initialization supplies a bounded allowlist of model, worker directory
+and CLI version; raw user-agent/host/config data is not stored in these details.
+The installed Codex 0.154.0 handshake verifies actual metadata in an isolated
+test profile without inference or real credentials. Claude's init path is
+verified with a local protocol fixture. Read-only Git probes run on an already
+awake worker after ordinary turns and use its primary repository, not a remote
+worker's controller mirror. Their default/detached branch snapshot is separate
+from PR discovery. Snapshots persist in controller-owned chat records, never as
+conversation messages; selecting fields adds no worker/network polling loop.
+
+Only allowlisted field IDs persist in revisioned preferences: per private Relay
+account, or the clearly disclosed shared installation scope when signed out.
+Authentication, origin, account and stale-write checks protect updates. Delayed
+loads/saves cannot switch a chat, replace a newer panel, erase a newer draft or
+restore another account's preferences. No provider, GitHub, MCP or Chrome
+credential/configuration change occurs. Next: `/title`; item 20 stays open.
+
+Seven new unit/controller checks and ten desktop/mobile browser checks pass.
+The full unit/controller suite passes 336/336 with
+`node --test --test-concurrency=2 test/*.test.mjs`; previous default-concurrency
+failures remain recorded in the queue ledger, not declared fixed. Native Codex
+metadata verification, repository-wide JavaScript syntax and whitespace checks
+also pass. No real account or live worker/service was changed; activation remains
+pending.
+
+The first full browser run passed 110/111 and exposed a startup race: automatic
+initial chat selection could close a mobile drawer the user had just opened
+while settings were loading. A deterministic test reproduced it before the fix.
+Initial selection now preserves the drawer; explicit chat choices still close
+it. All sixteen organization/status-line checks pass afterward, including the
+unchanged original failing test. The final full browser suite passes 112/112.
 
 ### Vim composer
 

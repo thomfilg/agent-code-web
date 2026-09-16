@@ -62,6 +62,36 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: `/statusline` now configures the actual web footer: fifteen fields,
+  live preview, checkbox selection, drag/arrow reordering, explicit save, hide
+  and defaults. OpenAI Docs informed selection/order/persistence and disabling;
+  the UI explicitly distinguishes this from worker terminal configuration.
+  Preferences are account-scoped (or explicitly installation-shared without a
+  private account), revision-guarded and never contain arbitrary scripts/data.
+  Late loads/saves preserve newer panels, drafts, chat selection and account
+  preferences. Missing metrics are not zero; context and cumulative counters
+  remain distinct, cache/reasoning are not double-counted, expired limit windows
+  are marked and stopped workers show saved snapshots. Native initialization
+  captures bounded model/directory/version fields, not raw user-agent/host data.
+  The actual Codex 0.154.0 handshake passes in an isolated profile without
+  inference; Claude's init path has local protocol-fixture coverage. Separate
+  read-only Git snapshots include main/default branches and detached HEADs on
+  the worker; PR discovery behavior is unchanged. No settings action wakes a
+  worker, sends a prompt or changes native config/credentials. Seven new
+  unit/controller checks and ten responsive browser checks pass. The full
+  unit/controller suite passes 336/336 with concurrency limited to two, without
+  skipping tests or relaxing assertions. The prior default-concurrency failures
+  remain documented, not declared fixed by this result. Desktop and 320px picker
+  layouts were inspected; close/save/error state stay visible as the field list
+  scrolls. The first full browser run passed 110/111, finding a mobile startup
+  race: automatic initial chat selection closed a drawer already opened by the
+  user. A deterministic regression test failed before the fix; initial selection
+  now preserves that drawer, while explicit chat selection still closes it.
+  All sixteen organization/status-line browser cases then passed, including the
+  original failure, without altering its assertions/timeouts. The final full
+  browser suite passes 112/112. No live service, chat, personal Chrome or account
+  changed. Backend
+  activation remains pending. Next: `/title`; item 20 remains in progress.
 - 20: `/vim`, explicit on/off and Chat actions now control real web-composer Vim
   editing. The OpenAI Docs skill informed the per-session behavior; the mode is
   per chat in this page, not a native configuration change. A pinned, self-hosted

@@ -32,6 +32,7 @@ import { NativeFeedbackControls } from "./native-feedback.js";
 import { NativeLogoutControls } from "./native-logout.js";
 import { KeymapControls } from "./keymap-controls.js";
 import { VimComposer } from "./vim-composer.js";
+import { StatusLineControls } from "./statusline-controls.js";
 
 const state = {
   config: null,
@@ -199,6 +200,7 @@ function renderApproval() {
 
 function renderActive() {
   const chat = state.active;
+  statusline.render();
   vimComposer.select();
   sideChat.setChat(chat);
   agentThreads.setChat(chat);
@@ -292,7 +294,7 @@ function tickCountdown() {
   elements.countdown.textContent = `SLEEPS IN ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-async function selectChat(id) {
+async function selectChat(id, { closeSidebar = true } = {}) {
   const selection = state.selection = (state.selection || 0) + 1;
   await activeModelPicker.saving?.catch(() => {});
   if (state.selection !== selection) return;
@@ -309,7 +311,7 @@ async function selectChat(id) {
     history.replaceState(null, "", `#chat=${id}`);
     renderChats();
     renderActive();
-    elements.sidebar.classList.remove("open");
+    if (closeSidebar) elements.sidebar.classList.remove("open");
     connectEvents(id);
     requestAnimationFrame(() => { elements.messages.scrollTop = elements.messages.scrollHeight; });
   } catch (error) { if (state.selection === selection) toast(error.message); }
@@ -475,6 +477,11 @@ async function sendMessage(event) {
   let text = elements.input.value.trim() || (files.length ? "Please inspect the attached files." : "");
   if (!text || !state.active) return;
   const chatId = state.active.id;
+  if (/^\/statusline(?:\s|$)/.test(text)) {
+    if (text !== "/statusline") { toast("Use /statusline without arguments to select and order footer fields."); return; }
+    try { if (await statusline.open() && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); slashComposer.close(); workspaceContext.closeMenu(); } }
+    catch (error) { toast(error.message); } return;
+  }
   if (/^\/vim(?:\s|$)/.test(text)) {
     try {
       const argument = text.slice(4).trim();
@@ -635,6 +642,7 @@ async function boot() {
   }
   state.config = await api("/api/config");
   await keymap.load().catch(error => toast(`Keyboard shortcuts use defaults: ${error.message}`));
+  await statusline.load().catch(error => toast(`Status line uses defaults: ${error.message}`));
   await sidebar.refresh();
   sidebar.connect();
   elements.agentSelect.replaceChildren();
@@ -648,7 +656,9 @@ async function boot() {
     ? "One EC2 worker per chat"
     : state.config.processIsolation === "namespace" ? "Private PID namespaces" : "Process isolation disabled";
   renderChats();
-  if (state.chats.length) await selectChat(state.chats.find(chat => location.hash === `#chat=${chat.id}`)?.id || state.chats[0].id);
+  // A user can open the mobile drawer while startup settings are loading.
+  // Automatic initial selection must not undo that explicit interaction.
+  if (state.chats.length) await selectChat(state.chats.find(chat => location.hash === `#chat=${chat.id}`)?.id || state.chats[0].id, { closeSidebar: false });
   else renderActive();
 }
 
@@ -698,6 +708,7 @@ document.addEventListener("keydown", event => {
 });
 window.addEventListener("focus", () => {
   if (state.config) void keymap.load().catch(() => {});
+  if (state.config) void statusline.load().catch(() => {});
 });
 $("#stop-button").addEventListener("click", async () => {
   if (!state.active) return;
@@ -751,10 +762,12 @@ const sharedBrowser = new SharedBrowserPanel({ api, getBackend: () => state.acti
 const browserConnectionSettings = new BrowserConnectionSettings({ api, state, toast, browser: sharedBrowser,
   accountChanged: async () => {
     vimComposer.resetIdentity();
+    statusline.resetIdentity();
     keymap.resetIdentity(); await keymap.load().catch(error => toast(error.message));
     await sidebar.refresh();
     if (state.active && !state.chats.some(chat => chat.id === state.active.id)) { state.eventSource?.close(); state.active = null; state.stream = null; }
     if (state.active) await selectChat(state.active.id); else if (state.chats.length) await selectChat(state.chats[0].id); else renderActive();
+    await statusline.load().catch(error => toast(error.message));
     renderChats();
   },
   chatUpdated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = chat; renderActive(); } },
@@ -776,6 +789,8 @@ function renderKeyboardHints() {
   const badge = $("#new-chat-button kbd"); badge.textContent = preferred ? label(preferred) : ""; badge.hidden = !preferred;
 }
 const keymap = new KeymapControls({ api, controls: chatControls, notify: message => toast(message, { outsideDialog: true }), changed: renderKeyboardHints });
+const statusline = new StatusLineControls({ api, controls: chatControls, getChat: () => state.active, notify: message => toast(message, { outsideDialog: true }) });
+$("#statusline-button").addEventListener("click", () => void statusline.open().catch(error => toast(error.message)));
 const vimComposer = new VimComposer({ input: elements.input, getChatId: () => state.active?.id, notify: toast, keydown: composerKeydown,
   changed: () => { resizeInput(); renderKeyboardHints(); },
   help: () => chatControls.dialog("Vim composer keys",

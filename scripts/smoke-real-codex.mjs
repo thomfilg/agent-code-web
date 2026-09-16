@@ -23,7 +23,7 @@ try {
   await store.initialize();
   const chat = await store.create({ title: "Protocol smoke test", agent: "codex", source: "" });
   await prepareWorkspace({ destination: chat.workspace, source: "" });
-  let threadId;
+  let threadId, sessionDetails;
   adapter = new CodexAdapter({
     chat,
     store,
@@ -31,13 +31,16 @@ try {
     broker: new CapabilityBroker({ ttlMs: 10_000 }),
     gatewayOrigin: "http://127.0.0.1:9",
     hooks: {
+      onEvent: event => { if (event.type === "session_details") sessionDetails = event.details; },
       onSessionId: (id) => { threadId = id; },
       onFatal: (error) => { throw error; },
     },
   });
   await adapter.start();
   if (!threadId) throw new Error("real app-server did not return a thread id");
+  if (!sessionDetails?.cliVersion || !sessionDetails.model || sessionDetails.cwd !== chat.workspace) throw new Error("real app-server did not report the status-line session metadata");
   console.log(`Real Codex app-server handshake passed (${threadId})`);
+  console.log(`Status-line metadata verified: Codex ${sessionDetails.cliVersion}, provider-reported model and isolated worker directory`);
 } finally {
   await adapter?.stop().catch(() => {});
   await rm(root, { recursive: true, force: true });

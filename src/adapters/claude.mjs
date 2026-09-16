@@ -4,7 +4,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { buildWorkerEnvironment, spawnWorker, terminateWorker } from "../worker-process.mjs";
 import { errorMessage, redact } from "../utils.mjs";
-import { claudeUsage, claudeContext, claudeRateLimits } from "../session-info.mjs";
+import { claudeUsage, claudeContext, claudeRateLimits, safeSessionDetails } from "../session-info.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks }) {
@@ -127,7 +127,10 @@ export class ClaudeAdapter {
         const usage = claudeContext(lastRequest);
         if (usage) this.hooks.onEvent?.({ type: "context_usage", usage });
       }
-      if (event.type === "system" && event.subtype === "init") this.hooks.onEvent?.({ type: "session_capabilities", connectors: (event.mcp_servers || []).map(server => ({ name: server.name, status: server.status })), slashCommands: event.slash_commands || [] });
+      if (event.type === "system" && event.subtype === "init") {
+        this.hooks.onEvent?.({ type: "session_capabilities", connectors: (event.mcp_servers || []).map(server => ({ name: server.name, status: server.status })), slashCommands: event.slash_commands || [] });
+        this.hooks.onEvent?.({ type: "session_details", details: safeSessionDetails("claude", { cwd: this.workspace, model: event.model, cliVersion: event.claude_code_version }) });
+      }
       if (event.type === "stream_event" && event.event?.type === "content_block_delta") {
         const delta = event.event.delta?.text || "";
         if (delta) {

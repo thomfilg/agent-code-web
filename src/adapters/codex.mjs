@@ -4,7 +4,7 @@ import path from "node:path";
 import { JsonRpcProcess } from "../json-rpc-process.mjs";
 import { buildWorkerEnvironment } from "../worker-process.mjs";
 import { errorMessage, redact } from "../utils.mjs";
-import { codexUsage, safeRateLimits } from "../session-info.mjs";
+import { codexUsage, safeRateLimits, cliVersionFromUserAgent, safeSessionDetails } from "../session-info.mjs";
 import { codexMcpArgs } from "../mcp-connections.mjs";
 import { captureSessionBundle, workerSessionIO } from "../codex-session-bundle.mjs";
 import { CodexAgentThreads } from "../codex-agent-threads.mjs";
@@ -192,10 +192,11 @@ export class CodexAdapter {
       this.#rejectCurrent(new Error("Codex worker stopped before the turn completed"));
     });
     rpc.start();
-    await rpc.request("initialize", {
+    const initialized = await rpc.request("initialize", {
       clientInfo: { name: "agent_web_poc", title: "Agent Web POC", version: "0.1.0" },
       capabilities: { experimentalApi: true },
     });
+    this.cliVersion = cliVersionFromUserAgent(initialized?.userAgent);
     rpc.notify("initialized", {});
     await this.#loadThread();
     // Native feedback retains its invocation configuration after reloads.
@@ -251,6 +252,7 @@ export class CodexAdapter {
       await this.hooks.onSessionId?.(this.threadId);
     }
     this.settings = { model: result.model, serviceTier: result.serviceTier ?? null };
+    await this.hooks.onEvent?.({ type: "session_details", details: safeSessionDetails("codex", { cwd: this.workspace, model: result.model, cliVersion: this.cliVersion }) });
   }
 
   async forkSide(hooks) {

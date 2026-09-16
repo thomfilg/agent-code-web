@@ -7,7 +7,7 @@ import { ClaudeAdapter } from "./adapters/claude.mjs";
 import { MockAdapter } from "./adapters/mock.mjs";
 import { runtimeWorkflowPatch, workflowPatch } from "../public/chat-organization.js";
 import { responsePrompt, extractResponse, ResponseStream } from "./response-protocol.mjs";
-import { PullRequestMonitor, inspectBranches } from "./pull-requests.mjs";
+import { PullRequestMonitor, inspectBranches, inspectWorkspaceStatus } from "./pull-requests.mjs";
 import { handoffPrompt } from "./agent-handoff.mjs";
 import { snapshotChanges } from "./workspace-changes.mjs";
 import { mergeUsage } from "./session-info.mjs";
@@ -612,7 +612,7 @@ export class RuntimeManager extends EventEmitter {
       const updated = await this.store.update(chatId, current => ({ agent, ...settings, modelSelectionSet: true,
         agentSessionId: null, needsAgentHandoff: true, pendingRequest: null, awaitingUser: false,
         nativeForkSessionId: null, forkGoalPending: false, forkContextPending: false, goal: null,
-        usage: null, usageAccount: null, rateLimits: null, connectors: null, slashCommands: [], commandCatalog: [],
+        usage: null, usageAccount: null, rateLimits: null, sessionDetails: null, connectors: null, slashCommands: [], commandCatalog: [],
         messages: current.messages.map(message => ["assistant", "tool"].includes(message.role) ? { ...message, agent: message.agent || current.agent } : message),
         statusDetail: `Switched to ${agent === "claude" ? "Claude Code" : agent === "codex" ? "Codex" : "Mock"}. Conversation and workspace retained.`,
         ...workflowPatch({ ...current, awaitingUser: false, pendingRequest: null }),
@@ -1048,9 +1048,11 @@ export class RuntimeManager extends EventEmitter {
       }
       // Inspect only a worker that is already awake. Later GitHub polling uses
       // these saved branch names and never boots an idle EC2 instance.
-      const gitBranches = await inspectBranches(this.store.get(chatId), runtime.executor);
+      const [gitBranches, workspaceStatus] = await Promise.all([
+        inspectBranches(this.store.get(chatId), runtime.executor), inspectWorkspaceStatus(this.store.get(chatId), runtime.executor),
+      ]);
       const workspaceChanges = runtime.generation === generation ? await snapshotChanges(this.store.get(chatId), runtime.executor) : null;
-      if (runtime.generation === generation) await this.store.update(chatId, { gitBranches, workspaceChanges });
+      if (runtime.generation === generation) await this.store.update(chatId, { gitBranches, workspaceStatus, workspaceChanges });
     } catch (error) {
       if (turn.cancelled || runtime.generation !== generation) return;
       this.publishChat(await this.store.update(chatId, { queuePaused: true, queueError: errorMessage(error) }));
@@ -1330,6 +1332,10 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async #agentEvent(chatId, event) {
+    if (event.type === "session_details") {
+      if (event.details?.agent === this.store.get(chatId)?.agent) this.publishChat(await this.store.update(chatId, { sessionDetails: event.details }));
+      return;
+    }
     if (event.type === "goal") { this.publishChat(await this.store.update(chatId, { goal: event.goal })); return; }
     if (event.type === "goal_turn_started") {
       const runtime = this.#runtimes.get(chatId); if (!runtime) return;

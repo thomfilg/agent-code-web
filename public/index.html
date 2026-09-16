@@ -62,6 +62,7 @@
             <details class="control-menu"><summary aria-label="Chat actions" title="Chat actions">⋮</summary><div class="control-popover">
               <button type="button" id="background-tasks">Background tasks</button>
               <button type="button" id="keymap-button">Keyboard shortcuts</button>
+              <button type="button" id="statusline-button">Status line</button>
               <button type="button" id="vim-button" aria-pressed="false">Enable Vim editing</button>
               <button type="button" id="open-workspace">Open in…</button>
               <button type="button" id="organize-chat-button" aria-label="Organize current chat">Rename / organize</button>
@@ -159,6 +160,7 @@
             </form>
             <input type="file" id="attachment-input" multiple hidden>
             <div class="composer-help"><span>Type <kbd>/</kbd> for commands</span><p class="composer-hint" id="composer-keyboard-hint">Enter to send · Shift + Enter for a new line</p></div>
+            <div id="chat-statusline" class="chat-statusline" role="group" aria-label="Chat status line" hidden></div>
           </div>
         </section>
         <aside class="side-panel" id="workspace-panel" aria-labelledby="workspace-title" hidden>

@@ -21,9 +21,9 @@ function continueGoal() {
 rl.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
-    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOs: "linux" } });
+    send({ id: message.id, result: { userAgent: `${message.params.clientInfo.name}/0.154.0-fixture (private-host-never-expose)`, platformFamily: "unix", platformOs: "linux" } });
   } else if (message.method === "thread/start") {
-    send({ id: message.id, result: { thread: { id: "thr_fixture" } } });
+    send({ id: message.id, result: { model: "fixture-gpt", thread: { id: "thr_fixture" } } });
   } else if (message.method === "thread/list") {
     send({ id: message.id, result: { data: [], nextCursor: null } });
   } else if (message.method === "thread/read") {

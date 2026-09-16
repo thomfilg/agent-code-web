@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BrowserAuth } from "./auth.mjs";
 import { KeymapPreferences } from "./keymap.mjs";
+import { StatusLinePreferences } from "./status-line.mjs";
 import { CapabilityBroker } from "./capabilities.mjs";
 import { loadConfig } from "./config.mjs";
 import { ProviderGateway } from "./provider-gateway.mjs";
@@ -98,6 +99,7 @@ export async function createAgentWebServer(options = {}) {
   const auth = new BrowserAuth({ token: config.authToken, secure: config.cookieSecure });
   const browserUsers = new BrowserUsers(records, { secure: config.cookieSecure });
   const keymaps = new KeymapPreferences(records);
+  const statuslines = new StatusLinePreferences(records);
   const gateway = new ProviderGateway({ config, broker });
   const sseClients = new Set();
   const sidebarClients = new Set();
@@ -176,6 +178,13 @@ export async function createAgentWebServer(options = {}) {
       if (!manager && url.pathname.startsWith("/api/")) return json(response, 503, { error: "control plane is starting" });
       const user = url.pathname.startsWith("/api/") ? await browserUsers.session(request) : null;
       const visibleChats = () => store.list().filter(chat => browserUsers.canRead(chat, user));
+      if (url.pathname === "/api/statusline" && ["GET", "PATCH"].includes(request.method)) {
+        const scope = user?.id || "shared", guard = async () => {
+          if ((await browserUsers.session(request))?.id !== user?.id || !auth.authenticated(request)) throw Object.assign(new Error("The status-line account changed. Reload /statusline."), { statusCode: 409 });
+        };
+        const result = request.method === "PATCH" ? await statuslines.save(scope, await bodyJson(request, 4000), guard) : await statuslines.get(scope, guard);
+        return json(response, 200, { ...result, account: browserUsers.public(user) });
+      }
       if (url.pathname === "/api/keymap" && ["GET", "PATCH"].includes(request.method)) {
         const scope = user?.id || "shared", guard = async () => {
           if ((await browserUsers.session(request))?.id !== user?.id || !auth.authenticated(request)) throw Object.assign(new Error("The shortcut account changed. Reload /keymap."), { statusCode: 409 });

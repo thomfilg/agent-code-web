@@ -51,6 +51,25 @@ export async function inspectBranches(chat, executor) {
   return branches;
 }
 
+// Separate from PR discovery: the footer must include main/default branches,
+// scratch Git workspaces and detached HEADs without creating PR candidates.
+export async function inspectWorkspaceStatus(chat, executor) {
+  const directory = chat.repositories?.[0]?.directory || "";
+  const snapshot = { branch: null, projectRoot: null, recordedAt: new Date().toISOString() };
+  if (directory && (path.basename(directory) !== directory || [".", ".."].includes(directory))) return snapshot;
+  const cwd = path.join(executor?.workspace || chat.workspace, directory);
+  const [root, branch] = await Promise.allSettled([
+    git(executor, cwd, ["rev-parse", "--show-toplevel"]),
+    git(executor, cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]),
+  ]);
+  if (root.status === "fulfilled") snapshot.projectRoot = root.value;
+  if (branch.status === "fulfilled") snapshot.branch = branch.value;
+  else if (snapshot.projectRoot) {
+    try { snapshot.branch = `detached · ${await git(executor, cwd, ["rev-parse", "--short", "HEAD"])}`; } catch { /* No commit or inaccessible Git state. */ }
+  }
+  return snapshot;
+}
+
 const failureConclusions = new Set(["failure", "timed_out", "cancelled", "action_required", "stale", "startup_failure"]);
 export function checkState(runs, combined) {
   if (runs.some(run => failureConclusions.has(run.conclusion)) || combined.statuses?.some(status => ["error", "failure"].includes(status.state)) || ["failure", "error"].includes(combined.state)) return "failing";
