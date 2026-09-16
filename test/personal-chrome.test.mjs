@@ -83,6 +83,12 @@ test("real Chrome extension keeps logins private until the per-chat toggle, and 
   await waitFor(async () => (await app.manager.browsers.command(chat.id, "evaluate", { expression: "document.querySelector('#session')?.textContent" })) === "Signed in as Alice");
   assert.equal(app.manager.browsers.info(chat.id).mode, "personal");
   await expect(relay.locator("#browser-canvas")).toBeVisible();
+  await expect(relay.locator("#browser-canvas")).toHaveAttribute("width", "2560");
+  await relay.locator("#browser-viewport").selectOption("390x844");
+  await expect(relay.locator("#browser-canvas")).toHaveAttribute("width", "780");
+  await expect(relay.locator("#browser-canvas")).toHaveAttribute("height", "1688");
+  await relay.locator("#browser-viewport").selectOption("1280x800");
+  await expect(relay.locator("#browser-canvas")).toHaveAttribute("width", "2560");
   await expect(relay.locator("#browser-tabs")).toBeDisabled();
   const tokenConfig = app.manager.browsers.runtime(chat.id, url).relay_browser, client = new Client({ name: "personal-browser-test", version: "1" });
   await client.connect(new StreamableHTTPClientTransport(new URL(tokenConfig.url), { requestInit: { headers: tokenConfig.headers } }));

@@ -27,5 +27,13 @@ export async function startBrowserSite({ port = 0 } = {}) {
   });
   const sockets = new WebSocketServer({ server });
   await new Promise(resolve => server.listen(port, "127.0.0.1", resolve));
-  return { url: `http://127.0.0.1:${server.address().port}`, async close() { for (const socket of sockets.clients) socket.terminate(); await new Promise(resolve => sockets.close(resolve)); await new Promise(resolve => server.close(resolve)); } };
+  return { url: `http://127.0.0.1:${server.address().port}`, async close() {
+    // Stop accepting HTTP/upgrades before draining clients, including Chrome's
+    // unfinished/preconnected requests which closeIdleConnections leaves open.
+    const httpClosed = new Promise(resolve => server.close(resolve));
+    const wsClosed = new Promise(resolve => sockets.close(resolve));
+    for (const socket of sockets.clients) socket.terminate();
+    server.closeAllConnections();
+    await Promise.all([httpClosed, wsClosed]);
+  } };
 }

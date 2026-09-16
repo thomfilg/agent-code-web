@@ -8,7 +8,7 @@ const count = value => Number.isFinite(value) ? new Intl.NumberFormat(undefined,
 
 export class ChatControls {
   constructor(options) {
-    Object.assign(this, options); this.drafts = new Map(); this.hiddenPRs = new Set();
+    Object.assign(this, options); this.drafts = new Map(); this.hiddenPRs = new Set(); this.uploads = new Map();
     $("#copy-chat-link").addEventListener("click", () => this.copy(`${location.origin}/#chat=${this.state.active.id}`, "Private chat link copied"));
     $("#view-changes").addEventListener("click", () => this.showChanges());
     $("#close-diff").addEventListener("click", () => closeSidePanel("diff"));
@@ -27,11 +27,18 @@ export class ChatControls {
     }));
     $("#add-attachments").addEventListener("click", () => $("#attachment-input").click());
     $("#attachment-input").addEventListener("change", event => this.attach(event.target.files));
+    $("#message-input").addEventListener("paste", event => {
+      const files = [...(event.clipboardData?.files || [])];
+      if (!files.length) for (const item of event.clipboardData?.items || []) if (item.kind === "file") { const file = item.getAsFile(); if (file) files.push(file); }
+      if (!files.length) return; // Leave text and unsupported OS file paths alone.
+      event.preventDefault(); void this.attach(files);
+    });
     document.addEventListener("click", event => document.querySelectorAll(".control-menu[open]").forEach(menu => { if (!menu.contains(event.target)) menu.open = false; }));
     document.addEventListener("keydown", event => { if (event.key === "Escape") document.querySelectorAll(".control-menu[open]").forEach(menu => menu.open = false); });
   }
   async copy(text, message = "Copied") { try { await navigator.clipboard.writeText(text); this.toast(message); } catch { this.dialog("Copy", el("pre", text)); } }
   dialog(title, ...content) {
+    this.dialogVersion = (this.dialogVersion || 0) + 1;
     document.querySelectorAll(".control-menu[open]").forEach(menu => menu.open = false);
     $("#controls-title").textContent = title; $("#controls-content").replaceChildren(...content);
     $("#controls-dialog").showModal();
@@ -47,7 +54,7 @@ export class ChatControls {
       document.querySelectorAll(".control-menu[open]").forEach(menu => menu.open = false);
     }
     $("#mode-label").textContent = { auto: "Auto", accept_edits: "Edits", plan: "Plan" }[chat.mode || "accept_edits"];
-    $("#mode-provider-note").textContent = chat.agent === "codex" ? "Codex keeps on-request approvals in Auto and Accept edits. Plan uses a read-only sandbox." : "Claude uses its native permission modes. Your CLI/account may restrict availability.";
+    $("#mode-provider-note").textContent = chat.agent === "codex" ? "Auto routes eligible approvals through Codex's automatic safety reviewer (uses model tokens). Edits asks you. Plan uses a read-only sandbox." : "Claude uses its native permission modes. Your CLI/account may restrict availability.";
     const percentage = Number.isFinite(chat.usage?.contextTokens) && chat.usage?.contextWindow ? Math.min(100, chat.usage.contextTokens / chat.usage.contextWindow * 100) : 0;
     $("#usage-ring").style.setProperty("--usage", `${percentage}%`);
     $("#archive-current-chat").textContent = chat.archived ? "Unarchive" : "Archive";
@@ -55,6 +62,81 @@ export class ChatControls {
     const signature = JSON.stringify([chat.id, chat.repositories, chat.gitBranches, chat.pullRequests, chat.githubSyncWarning]);
     if (signature !== this.signature) { this.signature = signature; this.repositories(chat); this.pullRequests(chat); }
     this.renderAttachments();
+    const goalStatus = $("#goal-status"); goalStatus.replaceChildren();
+    if (chat.agent === "codex" && chat.goal) {
+      goalStatus.append(button(`Goal · ${chat.goal.status} · ${chat.goal.objective}`, () => this.goal(), "goal-summary"));
+      if (chat.mode === "plan" && chat.goal.status === "active") goalStatus.append(el("small", "Plan mode: planning only; automatic goal continuation is disabled.", "muted"));
+    }
+  }
+  async goal(action = null, { throwErrors = false } = {}) {
+    const chatId = this.state.active.id;
+    if (action === "edit") {
+      const input = el("textarea"); input.value = this.state.active.goal?.objective || ""; input.maxLength = 4000; input.rows = 5; input.setAttribute("aria-label", "Goal objective");
+      const error = el("p", "", "form-error"); error.setAttribute("role", "alert");
+      const save = button("Save goal", async () => {
+        if (!input.value.trim()) { error.textContent = "Enter a goal objective."; return; }
+        save.disabled = true;
+        try { await this.submitCommand(chatId, `/goal edit ${input.value.trim()}`); $("#controls-dialog").close(); }
+        catch (failure) { error.textContent = failure.message; }
+        finally { save.disabled = false; }
+      }, "primary-button");
+      this.dialog("Edit Codex goal", input, error, save); input.focus(); return;
+    }
+    if (action === "clear" && !confirm("Clear this goal? The conversation and workspace will be kept.")) return;
+    try {
+      if (action) {
+        const { chat } = await this.api(`/api/chats/${chatId}/goal`, { method: "PATCH", body: JSON.stringify({ action }) });
+        if (this.state.active?.id !== chatId) return;
+        this.updated(chat);
+      }
+      const goal = this.state.active.goal;
+      this.dialog("Codex goal", ...(goal ? [
+        el("p", goal.objective), el("p", `Status: ${goal.status}`, "muted"),
+        el("p", `${count(goal.tokensUsed)} tokens used${goal.tokenBudget ? ` / ${count(goal.tokenBudget)} budget` : " · no token budget set"} · ${Math.round(goal.timeUsedSeconds || 0)} seconds`),
+        button(goal.status === "active" ? "Pause goal" : "Resume goal", () => this.goal(goal.status === "active" ? "pause" : "resume"), "secondary-button"),
+        button("Clear goal", () => this.goal("clear"), "secondary-button"),
+        button("Edit goal", () => this.goal("edit"), "secondary-button"),
+      ] : [el("p", "No goal is set. Type /goal followed by the objective to start one.")]),
+      el("p", "Goals use Codex's persisted thread state and respect the selected Plan / Edits mode. No budget is imposed unless you set one in Codex.", "muted"));
+    } catch (error) { if (throwErrors) throw error; this.toast(error.message); }
+  }
+  async submitCommand(chatId, text) {
+    if (this.state.active?.id !== chatId) throw new Error("The active chat changed. Reopen this control in its chat.");
+    const chat = this.state.active, queued = ["starting", "running", "stopping"].includes(chat.status) || chat.queuedMessages?.length;
+    return this.api(`/api/chats/${chatId}/${queued ? "queue" : "messages"}`, { method: "POST", body: JSON.stringify({ text, attachments: [] }) });
+  }
+  savedChats(chats, select) {
+    const search = el("input"); search.type = "search"; search.placeholder = "Find a conversation"; search.setAttribute("aria-label", "Find a conversation");
+    const list = el("div", undefined, "saved-chat-choices");
+    const render = () => { const matches = chats.filter(chat => !chat.archived && chat.title.toLowerCase().includes(search.value.toLowerCase())); list.replaceChildren(...matches.map(chat => button(chat.title, () => { $("#controls-dialog").close(); select(chat); }, "secondary-button"))); if (!matches.length) list.append(el("p", "No matching conversations.")); };
+    search.addEventListener("input", render); render(); this.dialog("Resume conversation", search, list); search.focus();
+  }
+  personality() {
+    const chatId = this.state.active.id;
+    const choices = ["friendly", "pragmatic", "none"].map(value => button(value[0].toUpperCase() + value.slice(1), async event => {
+      event.currentTarget.disabled = true;
+      try { await this.submitCommand(chatId, `/personality ${value}`); $("#controls-dialog").close(); }
+      catch (error) { this.toast(error.message); }
+      finally { event.target.disabled = false; }
+    }, "secondary-button"));
+    this.dialog("Codex personality", el("p", "Applied to later turns in this chat, when supported by its model. Queues behind running work."), ...choices);
+  }
+  async inspectCommand(command, terminate = null) {
+    const chatId = this.state.active.id;
+    if (terminate && !confirm(terminate === "all" ? "Stop all background terminals tracked by this Codex thread? Other chats and the agent itself are kept." : "Stop this background terminal? The agent and other tasks will keep running.")) return;
+    const version = this.inspectionVersion = (this.inspectionVersion || 0) + 1;
+    this.dialog(command === "ps" ? "Background terminals" : "Codex configuration", el("p", "Loading…"));
+    const dialogVersion = this.dialogVersion;
+    const result = await this.api(`/api/chats/${chatId}/commands/inspect${terminate ? "" : `?command=${command}`}`, terminate ? { method: "POST", body: JSON.stringify({ terminate, confirm: true }) } : {});
+    if (this.inspectionVersion !== version || this.dialogVersion !== dialogVersion || this.state.active?.id !== chatId || !$("#controls-dialog").open) return;
+    const refresh = button("Refresh", () => this.inspectCommand(command).catch(error => this.toast(error.message)), "secondary-button");
+    const items = result.items.map(item => {
+      const row = el("div", undefined, "native-command-item"); row.append(el("pre", item.title), el("p", item.detail, "muted"));
+      if (command === "ps" && result.awake) row.append(button(`Stop task ${item.id}`, () => this.inspectCommand("ps", item.id).catch(error => this.toast(error.message)), "secondary-button"));
+      return row;
+    });
+    if (!items.length) items.push(el("p", command === "ps" ? "No tracked background terminals." : "No configuration reported."));
+    $("#controls-content").replaceChildren(el("p", result.note, "muted"), ...items, refresh);
   }
   repositories(chat) {
     const root = $("#chat-repositories"); root.replaceChildren();
@@ -73,11 +155,11 @@ export class ChatControls {
     try {
       const { repositories } = await this.api("/api/github/repositories");
       const select = el("select"); select.setAttribute("aria-label", "Repository to add");
-      for (const repo of repositories.filter(repo => !this.state.active.repositories?.some(existing => existing.fullName === repo.fullName))) { const option = el("option", repo.fullName); option.value = repo.fullName; select.append(option); }
+      for (const repo of repositories.filter(repo => !this.state.active.repositories?.some(existing => existing.fullName === repo.fullName))) { const option = el("option", `${repo.fullName}${repo.connectionName ? ` · ${repo.connectionName}` : ""}`); option.value = repo.fullName; option.dataset.connectionId = repo.githubConnectionId || ""; select.append(option); }
       const branch = el("input"); branch.placeholder = "Default branch"; branch.setAttribute("aria-label", "Branch to add");
       const save = button("Add repository", async () => {
         save.disabled = true;
-        try { const { chat } = await this.api(`/api/chats/${chatId}/repositories`, { method: "POST", body: JSON.stringify({ fullName: select.value, branch: branch.value || undefined }) }); this.updated(chat); $("#controls-dialog").close(); }
+        try { const { chat } = await this.api(`/api/chats/${chatId}/repositories`, { method: "POST", body: JSON.stringify({ fullName: select.value, branch: branch.value || undefined, githubConnectionId: select.selectedOptions[0]?.dataset.connectionId || undefined }) }); this.updated(chat); $("#controls-dialog").close(); }
         catch (error) { this.toast(error.message); }
         finally { save.disabled = false; }
       }); save.disabled = !select.options.length;
@@ -172,14 +254,58 @@ export class ChatControls {
     catch (error) { $("#controls-content").replaceChildren(el("p", error.message, "form-error")); }
   }
   attachments() { return this.drafts.get(this.state.active?.id) || []; }
+  addDraftAttachment(chatId, file) {
+    const draft = this.drafts.get(chatId) || [];
+    if (draft.some(item => item.id === file.id)) return;
+    if (draft.length >= 10 || draft.reduce((sum, item) => sum + item.size, 0) + file.size > 20 * 1024 * 1024) throw new Error("Attach up to 10 files and 20 MB per message");
+    this.drafts.set(chatId, [...draft, file]); this.renderAttachments();
+  }
+  attachmentButton(file, { chatId = this.state.active?.id, messageId } = {}) {
+    const label = file.workspaceContext ? `${file.workspaceContext.path || "Workspace"}${file.workspaceContext.range ? `:${file.workspaceContext.range.start.line}–${file.workspaceContext.range.end.line}` : ""}` : file.name;
+    const open = button(label, () => this.openAttachment(file, { chatId, messageId, trigger: open }), "attachment-open");
+    open.setAttribute("aria-label", `Preview ${file.name}`); open.title = `Preview ${file.name}`; return open;
+  }
+  async openAttachment(file, context) {
+    if (file.appReference) {
+      const app = file.appReference;
+      this.dialog(app.name, el("p", `Native app reference · ${app.token}`), el("p", `Company: ${app.company || "Unassigned"}`, "muted"), el("p", app.inactive ? "Historical reference. Select the app again to use it in this chat." : "Saved reference only, not a copy of account credentials. Access is rechecked when this input runs.", "muted"));
+      return;
+    }
+    const version = this.attachmentPreviewVersion = (this.attachmentPreviewVersion || 0) + 1;
+    try {
+      const attachment = file.previewSource ? file : (await this.api(`/api/chats/${context.chatId}/attachments/${file.id}`)).attachment;
+      if (this.state.active?.id !== context.chatId || this.attachmentPreviewVersion !== version) return;
+      const image = /^image\/(png|jpeg|webp|gif|avif)$/.test(attachment.mime || "");
+      let source;
+      if (image) source = attachment.previewSource || `data:${attachment.mime};base64,${attachment.data}`;
+      else if (/^(?:text\/|application\/(?:json|xml))/.test(attachment.mime || "") || /\.(?:txt|md|json|csv|log|html|svg|js|ts|css)$/i.test(attachment.name)) {
+        source = new TextDecoder().decode(Uint8Array.from(atob(attachment.data), char => char.charCodeAt(0)));
+      } else { this.toast("Preview is available for images and text files."); return; }
+      this.preview.open({ ...context, source, format: image ? "image" : "text", title: attachment.name });
+    } catch (error) { this.toast(error.message); }
+  }
   renderAttachments() {
     const root = $("#attachment-chips"); root.replaceChildren(...this.attachments().map(file => {
-      const chip = el("span", undefined, "attachment-chip"); chip.append(el("span", file.name), button("×", () => { this.drafts.set(this.state.active.id, this.attachments().filter(item => item.id !== file.id)); this.renderAttachments(); }, "small-icon")); return chip;
+      const chip = el("span", undefined, "attachment-chip"), remove = button("×", () => { this.drafts.set(this.state.active.id, this.attachments().filter(item => item.id !== file.id)); this.renderAttachments(); }, "small-icon");
+      remove.setAttribute("aria-label", `Remove ${file.name}`); chip.append(this.attachmentButton(file), remove); return chip;
     }));
+    if (this.uploads.has(this.state.active?.id)) root.append(el("span", "Uploading…", "muted"));
   }
-  clearAttachments(chatId) { this.drafts.delete(chatId); this.renderAttachments(); }
-  async attach(files) {
+  clearAttachments(chatId, sentIds) { if (sentIds) this.drafts.set(chatId, (this.drafts.get(chatId) || []).filter(file => !sentIds.includes(file.id))); else this.drafts.delete(chatId); this.renderAttachments(); }
+  async waitForUploads(chatId) { while (this.uploads.has(chatId)) await this.uploads.get(chatId); }
+  attach(files) {
     const chatId = this.state.active?.id; if (!chatId) return;
+    const list = [...files];
+    return this.queueUpload(chatId, () => this.uploadFiles(chatId, list));
+  }
+  queueUpload(chatId, action) {
+    const pending = (this.uploads.get(chatId) || Promise.resolve()).catch(() => {}).then(action);
+    this.uploads.set(chatId, pending); this.renderAttachments();
+    const clear = () => { if (this.uploads.get(chatId) === pending) this.uploads.delete(chatId); this.renderAttachments(); };
+    void pending.then(clear, clear);
+    return pending;
+  }
+  async uploadFiles(chatId, files) {
     for (const file of files) {
       const draft = this.drafts.get(chatId) || [];
       if (draft.length >= 10 || draft.reduce((sum, item) => sum + item.size, 0) + file.size > 20 * 1024 * 1024) { this.toast("Attach up to 10 files and 20 MB per message"); break; }
@@ -187,7 +313,8 @@ export class ChatControls {
       try {
         const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1]); reader.onerror = reject; reader.readAsDataURL(file); });
         const result = await this.api(`/api/chats/${chatId}/attachments`, { method: "POST", body: JSON.stringify({ name: file.name, mime: file.type, data }) });
-        this.drafts.set(chatId, [...(this.drafts.get(chatId) || []), result.attachment]); this.renderAttachments();
+        const previewSource = /^image\/(png|jpeg|webp|gif|avif)$/.test(file.type) ? `data:${file.type};base64,${data}` : undefined;
+        this.drafts.set(chatId, [...(this.drafts.get(chatId) || []), { ...result.attachment, ...(previewSource ? { previewSource } : {}) }]); this.renderAttachments();
       } catch (error) { this.toast(error.message); }
     }
     $("#attachment-input").value = "";

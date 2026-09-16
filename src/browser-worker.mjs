@@ -11,6 +11,7 @@ export class ChromeBrowser extends EventEmitter {
   constructor({ executable = "google-chrome", profile = null } = {}) {
     super(); this.executable = executable; this.profile = profile;
     this.pending = new Map(); this.sequence = 0; this.viewport = { width: 1280, height: 800 }; this.watching = false;
+    this.layoutQueue = Promise.resolve(); this.captureVersion = 0; this.lastCaptureAt = 0;
   }
   async start() {
     this.directory = this.profile || await mkdtemp(path.join(os.tmpdir(), "relay-chrome-"));
@@ -27,7 +28,7 @@ export class ChromeBrowser extends EventEmitter {
     this.child.stdio[4].setEncoding("utf8");
     this.child.stdio[4].on("data", chunk => {
       buffer += chunk;
-      if (buffer.length > 32 * 1024 * 1024) { this.fail(new Error("Chrome response exceeded limit")); return; }
+      if (buffer.length > 48 * 1024 * 1024) { this.fail(new Error("Chrome response exceeded limit")); return; }
       let end;
       while ((end = buffer.indexOf("\0")) >= 0) {
         const frame = buffer.slice(0, end); buffer = buffer.slice(end + 1);
@@ -55,9 +56,13 @@ export class ChromeBrowser extends EventEmitter {
     }
     if (message.method === "Page.screencastFrame") {
       void this.call("Page.screencastFrameAck", { sessionId: message.params.sessionId }, message.sessionId).catch(() => {});
-      if (this.watching && message.sessionId === this.sessionId) this.emit("frame", { data: message.params.data, ...this.viewport });
+      if (this.watching && message.sessionId === this.sessionId) this.requestFrame();
     }
-    if (message.method === "Page.javascriptDialogOpening" && message.sessionId === this.sessionId) this.emit("dialog", message.params);
+    if (message.sessionId === this.sessionId) {
+      if (message.method === "Page.javascriptDialogOpening") { this.dialogOpen = true; this.emit("dialog", message.params); }
+      if (message.method === "Page.javascriptDialogClosed") { this.dialogOpen = false; this.requestFrame(); }
+      if (["Page.loadEventFired", "Page.domContentEventFired", "Page.frameNavigated", "Page.navigatedWithinDocument"].includes(message.method)) this.requestFrame();
+    }
     if (["Target.targetCreated", "Target.targetDestroyed", "Target.targetInfoChanged"].includes(message.method)) {
       clearTimeout(this.tabsTimer);
       this.tabsTimer = setTimeout(() => { void this.status().then(value => this.emit("status", value)).catch(() => {}); }, 50);
@@ -80,11 +85,17 @@ export class ChromeBrowser extends EventEmitter {
     const { targetInfos } = await this.call("Target.getTargets");
     return targetInfos.filter(tab => tab.type === "page").map(tab => ({ id: tab.targetId, title: tab.title.slice(0, 300), url: tab.url.slice(0, 4000) }));
   }
-  async status() { return { running: !this.failed, tabId: this.tabId, tabs: await this.tabs(), viewport: this.viewport, mode: "guest" }; }
-  async select(targetId) {
+  async status() { return { running: !this.failed, tabId: this.tabId, tabs: await this.tabs(), viewport: this.viewport, mode: "guest", captureVersion: 2 }; }
+  updateLayout(action) {
+    const pending = this.layoutQueue.then(action);
+    this.layoutQueue = pending.catch(() => {}); return pending;
+  }
+  select(targetId) { return this.updateLayout(() => this.selectPage(targetId)); }
+  async selectPage(targetId) {
     if (!(await this.tabs()).some(tab => tab.id === targetId)) throw new Error("Browser tab no longer exists");
+    const wasWatching = this.watching;
     if (this.sessionId) {
-      await this.page("Page.stopScreencast").catch(() => {});
+      await this.setWatching(false);
       await this.call("Target.detachFromTarget", { sessionId: this.sessionId }).catch(() => {});
     }
     this.sessionId = (await this.call("Target.attachToTarget", { targetId, flatten: true })).sessionId;
@@ -92,25 +103,55 @@ export class ChromeBrowser extends EventEmitter {
     await this.page("Page.enable");
     await this.page("Runtime.enable");
     await this.page("Page.bringToFront");
-    await this.resize(this.viewport);
-    if (this.watching) await this.watch(true);
+    await this.setViewport(this.viewport);
+    if (wasWatching) await this.setWatching(true);
     const status = await this.status(); this.emit("status", status); return status;
   }
-  async resize({ width, height }) {
+  resize(params) { return this.updateLayout(() => this.setViewport(params)); }
+  async setViewport({ width, height }) {
     if (!Number.isInteger(width) || width < 320 || width > 2560 || !Number.isInteger(height) || height < 240 || height > 1600) throw new Error("Viewport must be 320–2560 by 240–1600 pixels");
+    const wasWatching = this.watching;
+    await this.setWatching(false);
+    // Retina-quality presets, with a bounded bitmap size for large custom views.
+    const deviceScaleFactor = width * height <= 2097152 ? 2 : 1;
+    await this.page("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor, mobile: false });
     this.viewport = { width, height };
-    await this.page("Emulation.setDeviceMetricsOverride", { ...this.viewport, deviceScaleFactor: 1, mobile: false });
+    if (wasWatching) await this.setWatching(true);
+    this.emit("status", await this.status());
     return this.viewport;
   }
-  async watch(enabled) {
+  watch(enabled) { return this.updateLayout(() => this.setWatching(enabled)); }
+  async setWatching(enabled) {
     this.watching = Boolean(enabled);
+    this.captureVersion++; clearTimeout(this.captureTimer); this.captureTimer = null; this.frameRequested = false;
     await this.page("Page.stopScreencast").catch(() => {});
     if (this.watching) {
-      await this.page("Page.startScreencast", { format: "jpeg", quality: 75, maxWidth: this.viewport.width, maxHeight: this.viewport.height, everyNthFrame: 1 });
-      const { data } = await this.page("Page.captureScreenshot", { format: "jpeg", quality: 75 });
-      this.emit("frame", { data, ...this.viewport });
+      // CDP screencasts downsample to 1x even with a high-DPI viewport. Use them
+      // only as repaint notifications; transmit native-resolution PNG captures.
+      await this.page("Page.startScreencast", { format: "png", maxWidth: this.viewport.width, maxHeight: this.viewport.height, everyNthFrame: 1 });
+      this.requestFrame();
     }
     return { watching: this.watching };
+  }
+  requestFrame() {
+    if (!this.watching || this.closing || this.dialogOpen) return;
+    this.frameRequested = true;
+    if (this.captureTimer || this.capturing) return;
+    this.captureTimer = setTimeout(() => {
+      this.captureTimer = null; this.frameRequested = false; this.capturing = true;
+      this.lastCaptureAt = Date.now();
+      // Chrome temporarily adjusts its surface during capture. Serialize with
+      // viewport changes and input so its cleanup cannot undo a later resize.
+      void this.updateLayout(async () => {
+        if (!this.watching || this.closing || this.dialogOpen) return;
+        const version = this.captureVersion, viewport = { ...this.viewport };
+        const { data } = await this.page("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+        if (this.watching && !this.closing && version === this.captureVersion) { this.captureError = null; this.emit("frame", { data, mimeType: "image/png", ...viewport }); }
+      }).catch(error => { this.captureError = error.message; }).finally(() => {
+        this.capturing = false;
+        if (this.frameRequested) this.requestFrame();
+      });
+    }, Math.max(0, 100 - (Date.now() - this.lastCaptureAt)));
   }
   async evaluate(expression) {
     if (typeof expression !== "string" || expression.length > 30000) throw new Error("Invalid browser expression");
@@ -127,45 +168,45 @@ export class ChromeBrowser extends EventEmitter {
         const url = new URL(params.url);
         if (!["http:", "https:"].includes(url.protocol) && url.href !== "about:blank") throw new Error("Use an HTTP or HTTPS website address");
         if (url.username || url.password) throw new Error("Do not put credentials in browser addresses");
-        const result = await this.page("Page.navigate", { url: url.href });
+        const result = await this.updateLayout(() => this.page("Page.navigate", { url: url.href }));
         if (result.errorText) throw new Error(result.errorText);
         return { url: url.href };
       }
-      case "reload": await this.page("Page.reload"); return {};
+      case "reload": await this.updateLayout(() => this.page("Page.reload")); return {};
       case "back": case "forward": {
         const history = await this.page("Page.getNavigationHistory");
         const entry = history.entries[history.currentIndex + (action === "back" ? -1 : 1)];
-        if (entry) await this.page("Page.navigateToHistoryEntry", { entryId: entry.id });
+        if (entry) await this.updateLayout(() => this.page("Page.navigateToHistoryEntry", { entryId: entry.id }));
         return {};
       }
-      case "newTab": return this.select((await this.call("Target.createTarget", { url: "about:blank" })).targetId);
+      case "newTab": return this.updateLayout(async () => this.selectPage((await this.call("Target.createTarget", { url: "about:blank" })).targetId));
       case "selectTab": return this.select(params.id);
-      case "closeTab": {
+      case "closeTab": return this.updateLayout(async () => {
         if (!(await this.tabs()).some(tab => tab.id === params.id)) throw new Error("Unknown browser tab");
         const current = params.id === this.tabId;
         await this.call("Target.closeTarget", { targetId: params.id });
-        if (current) { const tabs = await this.tabs(); return tabs.length ? this.select(tabs[0].id) : this.command("newTab"); }
+        if (current) { const tabs = await this.tabs(); return this.selectPage(tabs[0]?.id || (await this.call("Target.createTarget", { url: "about:blank" })).targetId); }
         return this.status();
-      }
+      });
       case "mouse": {
         if (!["mousePressed", "mouseReleased", "mouseMoved", "mouseWheel"].includes(params.type)) throw new Error("Invalid pointer event");
         const { x, y } = params;
         if (![x, y].every(Number.isFinite) || x < 0 || y < 0 || x > this.viewport.width || y > this.viewport.height) throw new Error("Pointer outside browser viewport");
         const button = ["left", "right", "middle"].includes(params.button) ? params.button : "none";
-        await this.page("Input.dispatchMouseEvent", { type: params.type, x, y, button, buttons: Number(params.buttons) & 7, modifiers: Number(params.modifiers) & 15,
-          ...(params.type === "mouseWheel" ? { deltaX: Math.max(-3000, Math.min(3000, Number(params.deltaX) || 0)), deltaY: Math.max(-3000, Math.min(3000, Number(params.deltaY) || 0)) } : { clickCount: Math.min(3, Math.max(0, Number(params.clickCount) || 0)) }) });
+        await this.updateLayout(() => this.page("Input.dispatchMouseEvent", { type: params.type, x, y, button, buttons: Number(params.buttons) & 7, modifiers: Number(params.modifiers) & 15,
+          ...(params.type === "mouseWheel" ? { deltaX: Math.max(-3000, Math.min(3000, Number(params.deltaX) || 0)), deltaY: Math.max(-3000, Math.min(3000, Number(params.deltaY) || 0)) } : { clickCount: Math.min(3, Math.max(0, Number(params.clickCount) || 0)) }) }));
         return {};
       }
       case "key": {
         if (!["keyDown", "keyUp", "rawKeyDown"].includes(params.type) || typeof params.key !== "string" || params.key.length > 40) throw new Error("Invalid key event");
-        await this.page("Input.dispatchKeyEvent", { type: params.type, key: params.key, code: String(params.code || "").slice(0, 40), windowsVirtualKeyCode: Number(params.keyCode) & 255,
-          modifiers: Number(params.modifiers) & 15, ...(typeof params.text === "string" && params.text.length <= 4 ? { text: params.text } : {}) }); return {};
+        await this.updateLayout(() => this.page("Input.dispatchKeyEvent", { type: params.type, key: params.key, code: String(params.code || "").slice(0, 40), windowsVirtualKeyCode: Number(params.keyCode) & 255,
+          modifiers: Number(params.modifiers) & 15, ...(typeof params.text === "string" && params.text.length <= 4 ? { text: params.text } : {}) })); return {};
       }
       case "text":
         if (typeof params.text !== "string" || params.text.length > 30000) throw new Error("Text exceeds 30,000 characters");
-        await this.page("Input.insertText", { text: params.text }); return {};
+        await this.updateLayout(() => this.page("Input.insertText", { text: params.text })); return {};
       case "dialog": await this.page("Page.handleJavaScriptDialog", { accept: params.accept === true, promptText: String(params.text || "").slice(0, 4000) }); return {};
-      case "screenshot": return { ...(await this.page("Page.captureScreenshot", { format: "png" })), ...this.viewport };
+      case "screenshot": return this.updateLayout(async () => ({ ...(await this.page("Page.captureScreenshot", { format: "png" })), ...this.viewport }));
       case "evaluate": return this.evaluate(params.expression);
       case "snapshot": {
         const { nodes } = await this.page("Accessibility.getFullAXTree");
@@ -190,6 +231,7 @@ export class ChromeBrowser extends EventEmitter {
   async stop() {
     if (this.closing) return this.stopping;
     this.closing = true;
+    this.watching = false; this.captureVersion++; clearTimeout(this.captureTimer);
     this.stopping = (async () => {
       clearTimeout(this.tabsTimer);
       if (this.child?.pid && this.child.exitCode === null && !this.child.signalCode) {

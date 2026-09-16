@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
+import { connect } from "node:net";
 import WebSocket from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -13,6 +14,26 @@ import { prepareChrome } from "../src/chrome-software.mjs";
 
 const executable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || process.env.AGENT_CHROME_BIN || "google-chrome";
 let available = false; try { execFileSync(executable, ["--version"], { stdio: "ignore" }); available = true; } catch {}
+const pngSize = frame => {
+  assert.equal(frame.mimeType, "image/png");
+  const data = Buffer.from(frame.data, "base64");
+  assert.equal(data.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+  return [data.readUInt32BE(16), data.readUInt32BE(20)];
+};
+
+test("browser fixture teardown closes unfinished HTTP preconnections without waiting for Chrome", async () => {
+  const site = await startBrowserSite(), address = new URL(site.url);
+  const socket = connect({ host: address.hostname, port: Number(address.port) }); socket.on("error", () => {});
+  let closing, timer;
+  try {
+    await once(socket, "connect");
+    socket.write("GET / HTTP/1.1\r\nHost: localhost\r\n");
+    await new Promise(resolve => setTimeout(resolve, 20));
+    closing = site.close();
+    const closed = await Promise.race([closing.then(() => true), new Promise(resolve => { timer = setTimeout(() => resolve(false), 500); })]);
+    assert.equal(closed, true, "Fixture close must not wait for an incomplete browser request");
+  } finally { clearTimeout(timer); socket.destroy(); await (closing || site.close()); }
+});
 
 test("Chrome installation prefers worker system binaries, or pins its private installer without sudo", async () => {
   const calls = [], executor = { workspace: "/workspace", runtimeHome: "/runtime", mkdir: async dir => calls.push({ dir }) };
@@ -118,4 +139,25 @@ test("shared-browser gateway: authenticated WebSocket, real MCP, same live page,
   assert.equal((await fetch(tokenConfig.url, { method: "POST", headers: { ...tokenConfig.headers, "content-type": "application/json" }, body: "{}" })).status, 401);
   assert.equal(app.manager.browsers.info(chat.id).running, false);
   assert.equal(app.store.get(chat.id).messages.length, 0, "opening Chrome never starts an LLM or logs browser input into the transcript");
+});
+
+test("live frames are lossless, high-DPI and retain the exact CSS viewport through rapid resizing", { skip: !available }, async t => {
+  const browser = new ChromeBrowser({ executable }); t.after(() => browser.stop()); await browser.start();
+  const frames = []; browser.on("frame", frame => { frames.push(frame); if (frames.length > 12) frames.shift(); });
+  await browser.watch(true);
+  await waitFor(() => frames.some(frame => frame.width === 1280));
+  assert.deepEqual(pngSize(frames.at(-1)), [2560, 1600]);
+  await Promise.all([browser.resize({ width: 1920, height: 1080 }), browser.resize({ width: 834, height: 1112 }), browser.resize({ width: 390, height: 844 })]);
+  assert.deepEqual(browser.viewport, { width: 390, height: 844 });
+  await waitFor(() => frames.some(frame => frame.width === 390));
+  assert.deepEqual(pngSize(frames.at(-1)), [780, 1688]);
+  assert.deepEqual(await browser.evaluate("[innerWidth,innerHeight,devicePixelRatio]"), [390, 844, 2]);
+  for (const frame of frames) assert.deepEqual(pngSize(frame), [frame.width * 2, frame.height * 2], "no stale bitmap may be labeled with the next viewport");
+  await browser.resize({ width: 2560, height: 1600 });
+  await waitFor(() => frames.some(frame => frame.width === 2560));
+  assert.deepEqual(pngSize(frames.at(-1)), [2560, 1600], "very large custom views have a bounded bitmap size");
+  await browser.watch(false); const count = frames.length;
+  await browser.evaluate("document.body.style.background='red'");
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(frames.length, count, "closing the viewer stops captures, including in-flight frames");
 });

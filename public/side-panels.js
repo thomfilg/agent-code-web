@@ -1,4 +1,4 @@
-const panels = ["diff", "tools", "preview", "browser"];
+const panels = ["diff", "tools", "preview", "browser", "side", "agents", "workspace"];
 
 // One secondary workspace at a time: desktop column, narrow-screen overlay.
 export function openSidePanel(name) {

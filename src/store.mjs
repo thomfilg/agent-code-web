@@ -84,7 +84,7 @@ export class ChatStore {
     return chat ? clone(chat) : null;
   }
 
-  async create({ title, agent, source = "", repositories = [], environmentId = null, environmentName = null, autoTitle = true, model = null, effort = null, modelSelectionSet = false, ownerId = null }) {
+  async create({ title, agent, source = "", repositories = [], environmentId = null, environmentName = null, autoTitle = true, model = null, effort = null, modelSelectionSet = false, ownerId = null }, prepare = null) {
     const id = newId("chat");
     const timestamp = nowIso();
     const chat = {
@@ -125,9 +125,19 @@ export class ChatStore {
       messages: [],
     };
     await mkdir(this.runtimeHome(id), { recursive: true, mode: 0o700 });
-    this.#chats.set(id, chat);
-    await this.#persist(id);
-    return clone(chat);
+    try {
+      // A persistent fork is not visible or addressable until its independent
+      // files and private native history are ready. No half-built sidebar row.
+      if (prepare) Object.assign(chat, await prepare(clone(chat)));
+      this.#chats.set(id, chat);
+      await this.#persist(id);
+      return clone(chat);
+    } catch (error) {
+      this.#chats.delete(id);
+      await this.records?.delete("chat", id).catch(() => {});
+      await rm(this.chatDir(id), { recursive: true, force: true });
+      throw error;
+    }
   }
 
   async update(id, patch) {
@@ -167,6 +177,12 @@ export class ChatStore {
     this.#chats.delete(id);
     await this.#writes.get(id);
     if (this.records) await this.records.delete("chat", id);
+    if (this.records) await this.records.delete("native-fork", id);
+    if (this.records) await this.records.delete("native-agents", id);
+    if (this.records) await this.records.delete("native-import", id);
+    if (this.records) await this.records.delete("native-approvals", id);
+    if (this.records) await this.records.delete("native-feedback", id);
+    if (this.records) await this.records.delete("native-logout", id);
     await rm(this.chatDir(id), { recursive: true, force: true });
     return true;
   }

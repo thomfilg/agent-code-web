@@ -57,8 +57,9 @@ export class BrowserProcess extends EventEmitter {
 }
 
 export class SharedBrowsers {
-  constructor({ store, config, acquire, onIdle = async () => {}, processFactory = child => new BrowserProcess(child) }) {
+  constructor({ store, config, acquire, onIdle = async () => {}, isActive = () => false, onViewers = async () => {}, processFactory = child => new BrowserProcess(child) }) {
     this.store = store; this.config = config; this.acquire = acquire; this.processFactory = processFactory;
+    this.isActive = isActive; this.onViewers = onViewers;
     this.entries = new Map(); this.versions = new Map(); this.grants = new CapabilityBroker({ ttlMs: config.sessionCapabilityTtlMs }); this.onIdle = onIdle;
   }
   requireChat(chatId) {
@@ -100,6 +101,7 @@ export class SharedBrowsers {
         clearTimeout(entry.idleTimer);
         if (this.entries.get(chatId) === entry) { this.entries.delete(chatId); void this.onIdle(chatId).catch(() => {}); }
         for (const viewer of entry.viewers) { this.send(viewer, { event: "closed", value }); viewer.close(1000, "Browser stopped"); }
+        void this.onViewers(chatId).catch(() => {});
       });
       await browser.ready;
       if ((this.versions.get(chatId) || 0) !== version) { await browser.stop(); throw new Error("Browser start cancelled"); }
@@ -115,7 +117,7 @@ export class SharedBrowsers {
   touch(chatId) {
     const entry = this.entries.get(chatId); if (!entry) return;
     clearTimeout(entry.idleTimer);
-    if (!entry.viewers.size && !this.personal?.grants.has(chatId)) {
+    if (!entry.viewers.size && !this.personal?.grants.has(chatId) && !this.isActive(chatId)) {
       entry.idleTimer = setTimeout(() => { void this.stop(chatId, false).then(() => this.onIdle(chatId)).catch(() => {}); }, Math.max(1000, this.config.idleTimeoutMs));
       entry.idleTimer.unref?.();
     }
@@ -127,6 +129,7 @@ export class SharedBrowsers {
     if (socket.readyState !== 1) return;
     if (this.personal?.grants.has(chatId)) return this.personal.attachViewer(chatId, socket);
     entry.viewers.add(socket); this.touch(chatId);
+    void this.onViewers(chatId).catch(() => {});
     this.send(socket, { event: "status", value: entry.browser.state });
     if (entry.frame) this.send(socket, { event: "frame", value: entry.frame });
     let pending = 0;
@@ -139,6 +142,7 @@ export class SharedBrowsers {
     });
     socket.once("close", () => {
       entry.viewers.delete(socket);
+      void this.onViewers(chatId).catch(() => {});
       if (!entry.viewers.size) { void entry.browser.command("watch", { enabled: false }).catch(() => {}); this.touch(chatId); }
     });
     await entry.browser.command("watch", { enabled: true });

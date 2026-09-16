@@ -66,9 +66,13 @@ export class UsagePanel {
     $("#usage-ring").style.setProperty("--usage", `${Math.min(100, p)}%`);
     if ($("#usage-menu").open) {
       const compact = button("Compact session", async () => {
-        if (!confirm("Compact this session now? This can use model tokens.")) return;
-        try { await this.api(`/api/chats/${this.state.active.id}/compact`, { method: "POST", body: "{}" }); await this.refresh(); } catch (error) { this.toast(error.message); }
-      }); compact.disabled = !info.canCompact; compact.title = info.canCompact ? "Compact context" : "Manual compaction requires an awake, idle Codex session; Claude compacts automatically";
+        const chat = this.state.active; if (!chat) return;
+        const queued = ["starting", "running", "stopping"].includes(chat.status) || chat.queuedMessages?.length;
+        compact.disabled = true;
+        try { await this.api(`/api/chats/${chat.id}/${queued ? "queue" : "messages"}`, { method: "POST", body: JSON.stringify({ text: "/compact" }) }); this.toast(queued ? "/compact queued" : "/compact sent"); }
+        catch (error) { this.toast(error.message); }
+        finally { compact.disabled = false; }
+      }); compact.title = "Send /compact · queues behind the current work when the agent is busy";
       $("#session-usage").replaceChildren(this.context(info), compact, this.limits(info), button("See detailed breakdown ›", () => this.detailed()));
     }
     if (!$("#usage-dialog").open) return;

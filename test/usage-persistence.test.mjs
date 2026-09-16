@@ -20,5 +20,5 @@ test("context and inspection snapshots survive worker stop and controller restar
   let starts = 0; const restarted = new RuntimeManager({ store: storeAfterRestart, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => { starts++; throw new Error("Must not wake"); } });
   t.after(() => restarted.shutdown()); const info = await restarted.sessionInfo(chat.id);
   assert.equal(info.usage.contextTokens, 155100); assert.equal(info.usage.contextWindow, 1000000); assert.equal(info.recordedAt, "2026-09-14T20:00:00.000Z");
-  assert.equal(info.account.planType, "Test plan"); assert.equal(info.rateLimits[0].windows[0].usedPercent, 11); assert.equal(info.snapshot, true); assert.equal(info.canCompact, false); assert.equal(starts, 0);
+  assert.equal(info.account.planType, "Test plan"); assert.equal(info.rateLimits[0].windows[0].usedPercent, 11); assert.equal(info.snapshot, true); assert.equal(info.canCompact, true); assert.equal(starts, 0);
 });

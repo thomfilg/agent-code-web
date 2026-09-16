@@ -1,10 +1,12 @@
-import { repositoryGroup } from "./chat-organization.js";
+import { scopeLabel } from "./company-scope.js";
+import { CompanyPicker, knownCompanies } from "./company-picker.js";
 const $ = s => document.querySelector(s);
 const el = (tag, text, cls) => { const node = document.createElement(tag); node.textContent = text; if (cls) node.className = cls; return node; };
 const statuses = { unverified: "Not tested", needs_auth: "Sign-in required", connected: "Connected", error: "Connection failed", worker_pending: "Verified when the worker starts" };
 export class McpSettings {
   constructor({ api, toast, state }) {
     Object.assign(this, { api, toast, state });
+    this.companyPicker = new CompanyPicker($("#mcp-companies"), () => { this.dirty = true; this.actions(); });
     $("#mcps-button").onclick = () => this.open(); $("#mcp-close").onclick = () => $("#mcp-dialog").close();
     $("#mcp-new").onclick = () => { this.edit(); $("#mcp-name").focus(); };
     $("#mcp-type").onchange = () => this.transport(); $("#mcp-auth").onchange = () => this.transport();
@@ -18,11 +20,9 @@ export class McpSettings {
   async load() {
     const [saved, catalog] = await Promise.all([this.api("/api/mcps"), this.api("/api/mcps/presets")]); this.connections = saved.connections;
     $("#mcp-list").replaceChildren(...this.connections.map(connection => {
-      const b = el("button", `${connection.organization || "Shared"} · ${connection.name} · ${statuses[connection.health?.status] || "Not tested"}`, "secondary-button"); b.type = "button"; b.onclick = () => this.edit(connection); return b;
+      const b = el("button", `${scopeLabel(connection)} · ${connection.name} · ${statuses[connection.health?.status] || "Not tested"}`, "secondary-button"); b.type = "button"; b.onclick = () => this.edit(connection); return b;
     }));
     if (!this.connections.length) $("#mcp-list").append(el("p", "No connections yet. Choose a preset or add a custom MCP.", "muted"));
-    const organizations = [...this.connections.map(c => c.organization), ...(this.state?.chats || []).map(chat => { const group = repositoryGroup(chat); return group.fullName ? group.company.toLowerCase() : null; })];
-    $("#mcp-organizations").replaceChildren(...[...new Set(organizations.filter(Boolean))].sort().map(org => { const option = el("option", org); option.value = org; return option; }));
     $("#mcp-presets").replaceChildren(...catalog.presets.map(preset => {
       const button = el("button", "", "mcp-preset"); button.type = "button"; button.append(el("strong", preset.name), el("span", preset.description, "muted"));
       button.onclick = () => { this.edit({ name: preset.id, type: "http", url: preset.url, authMode: preset.authMode }); $("#mcp-catalog").open = false; $("#mcp-name").focus(); }; return button;
@@ -33,7 +33,7 @@ export class McpSettings {
     this.current = connection?.id ? connection : null; this.dirty = false;
     $("#mcp-error").textContent = ""; $("#mcp-save-status").textContent = "";
     $("#mcp-name").value = connection?.name || ""; $("#mcp-type").value = connection?.type || "http";
-    $("#mcp-organization").value = connection?.organization || "";
+    this.companyPicker.set(connection || {}, knownCompanies(this.state, this.connections));
     $("#mcp-url").value = connection?.url || ""; $("#mcp-headers").value = ""; $("#mcp-auth").value = connection?.authMode || "oauth";
     $("#mcp-headers").placeholder = connection?.hasCredentials ? `Saved: ${connection.headerNames.join(", ")} · leave blank to keep` : '{"Authorization":"Bearer …"}';
     $("#mcp-client-id").value = connection?.oauthClientId || ""; $("#mcp-scopes").value = connection?.oauthScopes || "";
@@ -66,8 +66,9 @@ export class McpSettings {
   async save(event) {
     event.preventDefault(); event.submitter.disabled = true; $("#mcp-error").textContent = "";
     try {
+      if (!this.state?.config?.features?.companyScopes) throw new Error("Restart Relay to activate company-scoped settings before saving. This server still uses the old global settings.");
       const type = $("#mcp-type").value, headers = $("#mcp-headers").value.trim(), secret = $("#mcp-client-secret").value;
-      const data = { name: $("#mcp-name").value, organization: $("#mcp-organization").value, type, revision: this.current?.revision,
+      const data = { name: $("#mcp-name").value, ...this.companyPicker.value(), type, revision: this.current?.revision,
         ...(type === "http" ? { url: $("#mcp-url").value, authMode: $("#mcp-auth").value, oauthClientId: $("#mcp-client-id").value, oauthScopes: $("#mcp-scopes").value, ...(secret ? { oauthClientSecret: secret } : {}), ...(headers ? { headers: JSON.parse(headers) } : {}) } : { command: $("#mcp-command").value, args: JSON.parse($("#mcp-args").value || "[]") }) };
       const { connection } = await this.api(this.current ? `/api/mcps/${this.current.id}` : "/api/mcps", { method: this.current ? "PATCH" : "POST", body: JSON.stringify(data) });
       await this.load(); this.edit(connection); $("#mcp-save-status").textContent = "Saved. Connect or test, then select this MCP in an environment. It applies on the next worker start.";

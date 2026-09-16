@@ -21,6 +21,7 @@ export class ClaudeAdapter {
     this.child = null;
     this.capability = "";
     this.stopped = false;
+    this.sendVersion = 0;
   }
 
   async start() {
@@ -35,6 +36,7 @@ export class ClaudeAdapter {
   }
 
   async send(text, { model, effort, resetEffort, mode = "accept_edits", systemPrompt } = {}) {
+    const version = this.sendVersion;
     if (this.child) throw new Error("A Claude turn is already running for this chat");
     if (this.stopped || (this.config.claude.authMode === "gateway" && !this.capability)) await this.start();
 
@@ -80,6 +82,8 @@ export class ClaudeAdapter {
       ...(effort ? ["--effort", effort] : []),
     ];
 
+    if (version !== this.sendVersion) throw new Error("Claude turn interrupted");
+
     const child = this.executor
       ? this.executor.spawn(this.config.claude.bin, args, {
           cwd: this.workspace,
@@ -98,6 +102,7 @@ export class ClaudeAdapter {
     let streamed = "";
     let fallback = "";
     let resultMessage = null;
+    let compacted = false;
     let lastRequest = null;
     const sampleId = randomUUID();
     let stderr = "";
@@ -112,6 +117,10 @@ export class ClaudeAdapter {
     lines.on("line", (line) => {
       let event;
       try { event = JSON.parse(line); } catch { return; }
+      if (event.type === "system" && event.subtype === "compact_boundary") {
+        compacted = true;
+        this.hooks.onEvent?.({ type: "notice", text: event.compact_metadata?.trigger === "manual" ? "Context compacted." : "Context compacted automatically." });
+      }
       if (event.type === "rate_limit_event") this.hooks.onEvent?.({ type: "rate_limits", rateLimits: claudeRateLimits(event.rate_limit_info), merge: true });
       if (event.type === "assistant" && !event.parent_tool_use_id && event.message?.usage) {
         lastRequest = event.message;
@@ -171,7 +180,7 @@ export class ClaudeAdapter {
           (resultMessage.subtype && resultMessage.subtype !== "success")
         );
         if (code === 0 && !resultFailed) {
-          resolve({ text: streamed || fallback, status: "completed" });
+          resolve({ text: streamed || fallback, status: "completed", compacted });
         } else {
           reject(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`));
         }
@@ -183,7 +192,16 @@ export class ClaudeAdapter {
     throw new Error("Interactive approval responses are currently implemented for Codex only");
   }
 
+  async interrupt() {
+    this.sendVersion += 1;
+    // Claude print mode is one child per turn. Keep its resume ID, capability,
+    // worker lease and browser; only terminate this turn's CLI process.
+    const child = this.child;
+    if (child) await terminateWorker(child);
+  }
+
   async stop() {
+    this.sendVersion += 1;
     this.stopped = true;
     const child = this.child;
     this.child = null;

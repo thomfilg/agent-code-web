@@ -101,7 +101,7 @@ the long-lived provider secret.
 | `AGENT_WEB_PORT` | `8787` | HTTP port (`0` is useful in tests) |
 | `AGENT_WEB_AUTH_TOKEN` | empty | UI/API bearer secret; mandatory on non-loopback binds |
 | `AGENT_COOKIE_SECURE` | `0` | mark the browser session cookie Secure when served over HTTPS |
-| `AGENT_IDLE_TIMEOUT_MS` | `300000` | completed-turn-to-worker-stop delay |
+| `AGENT_IDLE_TIMEOUT_MS` | `300000` | inactivity-to-worker-stop delay, paused while a chat tab or browser viewer is active |
 | `AGENT_DATA_DIR` | `./data` | persisted chats, workspaces, and CLI state |
 | `AGENT_WORKSPACE_SOURCE` | empty | optional local repo/path cloned into every new chat |
 | `AGENT_ENABLE_MOCK` | `0` | expose the deterministic Mock agent |
@@ -120,6 +120,23 @@ server port: localhost belongs to the chat’s worker, including EC2 workers.
 The site’s WebSockets/HMR run in Chrome normally. This is an interactive live
 view, not a reverse proxy that puts untrusted website HTML on Relay’s origin.
 
+**Open directly** and **Copy URL** open the app in your own browser. With Relay
+and local workers on your computer, `http://localhost:3000/path` becomes
+`http://chat_<id>.localhost:3000/path`. The port, path, query and fragment are
+preserved, and the new tab has no opener. These are local aliases with distinct
+browser origins, **not network isolation or authentication**. Local workers
+still share host ports. Remote-worker localhost links are not advertised as
+working direct links: they require port forwarding, so use Shared Chrome there.
+
+The viewport picker offers xxs (320×640), xs (390×844), sm (640×960),
+md (834×1112), lg (1280×800), xlg (1920×1080), and custom dimensions.
+Resizing restarts capture on the same page without navigation. Live PNG frames
+retain 2× pixel density for the presets; very large custom views use 1× to bound
+bitmap memory. The canvas does not upscale a phone viewport to fill a desktop
+panel. Capture, navigation, input and resize operations are serialized, and
+only one frame is decoded at a time. Desktop column dividers can be dragged
+or resized with arrow keys; widths are saved in this browser.
+
 Both agents receive the built-in `relay_browser` MCP server when their worker
 starts. It provides navigation, accessibility snapshots, screenshots, clicks,
 typing, tabs, viewport sizing and page JavaScript evaluation. The browser starts
@@ -134,6 +151,20 @@ and an otherwise-idle agent worker awake. **Stop Chrome** discards the separate
 profile; **Stop worker** also revokes the browser tool capability. Inspecting
 browser status does not wake a worker. Tab content and typed input are not
 automatically added to the transcript; explicit agent tool results can be.
+
+A visible chat tab pauses its worker's sleep countdown, even without an open
+Chrome panel. Leaving the tab starts a fresh idle period. Presence leases
+expire after a disconnect and never wake a stopped worker, invoke an agent, or
+send browsing activity into the conversation. Hidden browser panels stop their
+live stream until the tab becomes visible again.
+
+Paste clipboard images/files in the composer to attach them. Click an image
+attachment to preview it in the document column (an overlay on narrow screens),
+with fit/actual-size controls and a separate remove action. Saved attachments
+remain previewable after the worker stops and are authorized against their chat.
+Long conversations mount at most 60 conversation rows at a time; the message
+navigator and earlier/newer controls can bring older rows back into view without
+deleting saved history. The complete transcript is still loaded in client state.
 
 Chrome uses its native sandbox and private debugging pipe descriptors. No CDP,
 VNC or worker web port is exposed publicly. WebSocket upgrades require the UI
@@ -322,6 +353,36 @@ Additional settings: `AGENT_CONTROL_DIR`, `AGENT_DATABASE_PORT`,
 GitHub expiry is saved when reported or supplied; unknown expiry is displayed
 as such. A revoked token is invalidated on the next GitHub API request.
 
+### Company availability and credential separation
+
+GitHub connections, environments and MCP connections each have an **Available
+companies** selector. Check several owners (for example `12-apps` and `thomfilg`)
+without granting access to `g2i` or `umg`. Add missing owner names in the form.
+The chat's first repository determines its company; moving its sidebar group or
+adding secondary repositories never changes that authorization scope.
+
+Save separate GitHub and MCP connections for different accounts. Repository
+selections retain their GitHub connection ID. A credential must allow both the
+repository's owner and the chat's primary company before Relay can clone it or
+read/update its PRs. Ambiguous GitHub matches require an explicit connection;
+Relay never silently tries another company's token. Clone authentication is
+transient and restricted to the exact repository URL.
+
+An empty company list grants no company access. **Unassigned chats** explicitly
+allows scratch workspaces, not every company. Legacy global credentials remain
+saved and encrypted but require an explicit company selection before reuse;
+old singular MCP organization scopes migrate to the same single company.
+Removing a company or MCP selection revokes existing HTTP MCP grants and streams
+immediately; adding connections and changing worker software/setup/public
+variables takes effect on the next worker start. Already copied files and public
+variables cannot be retroactively removed from a running process.
+
+These checks separate configuration and credential use within Relay; they are
+not a filesystem sandbox between repositories in one workspace or separate
+control-plane administrator accounts. The existing explicit host-auth/local
+worker limitations still apply. If new forms are loaded from an older running
+backend, saves fail closed until the backend supports company scopes.
+
 ## Execution environments
 
 Environments → Add environment creates a named profile for this server's
@@ -399,11 +460,175 @@ fresh session. The target provider's default model/effort are selected.
   input; Claude can inspect uploaded files through its file-reading tools.
 - **Slash commands:** type `/` to discover installed skills, plugin aliases and
   native commands; arrows navigate and Enter inserts. See Conversation controls
-  below for the distinction between web actions and terminal-only commands.
+  below for command behavior and the remaining native-command coverage checklist.
+- **Side chat (Codex):** `/side [question]`, `/btw [question]`, or **Side chat**
+  opens a native temporary fork in the resizable third column (overlay on phones).
+  It inherits the main context and shares its workspace and selected permissions,
+  but has independent replies, questions, and stop controls. Main work continues.
+  Attachments included with an inline side question go only to that side thread.
+  Hiding/reopening the panel retains it; **End side chat** or stopping the worker
+  discards its temporary conversation, not any shared workspace edits. Reading or
+  refreshing its state never wakes a worker. Nested side chats and opening a side
+  chat during native review are not supported by Codex.
+- **Fork (Codex):** `/fork [optional title]` creates an independent conversation
+  and workspace while the original can keep running. Sent attachments, native
+  context and company/environment/model settings are retained; unsent queues,
+  approvals and signed-in Chrome grants are not copied. An inherited goal waits
+  for the first non-Plan message; Stop or pause cancels that deferred activation.
+  Retrying a failed request preserves the draft and cannot create duplicate forks.
+  Native history stays in private controller storage. Workspace copying is
+  bounded and requires self-contained files/Git repositories; external links,
+  linked worktrees, concurrent writes and oversized copies fail explicitly rather
+  than silently dropping content. No fake message is sent to fork an empty chat.
+- **Agent threads (Codex):** `/agent` or `/subagents` opens a picker of this
+  chat's native child agents. View paginated messages, answer child questions,
+  send follow-ups or stop a selected child without replacing the main chat.
+  Active replies receive native steering; idle agents receive a new native turn.
+  Parent ancestry is verified, so a shared native profile or session ID cannot
+  expose another chat's threads. Viewed messages have bounded, encrypted
+  controller snapshots that remain readable while the worker sleeps. **Connect
+  to agents** refreshes native state; reading a saved snapshot does not wake it.
+  Running children and pending child requests keep the worker awake.
+- **Workspace context:** use **+ → Workspace files & selections**, `/mention
+  [path]` or `@path` to choose real files/folders in this chat's worker. The
+  read-only viewer supports text selections; **Use open files as context** or
+  Codex `/ide [optional task]` attaches the open files and active selection.
+  Nothing reaches the agent until you send or queue a message. Captured context
+  survives in queued/sent attachments, outside the disposable worker; changed
+  files must be reopened before capture. Files over 512 KiB are path-only
+  references. This is Relay's viewer, not a connection to an external editor.
+  Connecting may wake the worker but never starts an agent turn.
+- **Native apps (Codex):** `/apps` searches the current native thread's apps.
+  Selecting an available app inserts its `$app-name` token and a saved reference
+  into the draft; it does not send input, install anything or change credentials.
+  Sending/queueing uses native structured app mentions. Access and callable policy
+  are checked again at dispatch, and references cannot cross chat, native-session,
+  owner or company boundaries. Historical references copied into a fork are not
+  permission grants: select the app again there. The picker uses the existing
+  Codex account and does **not** solve inherited host-profile credential isolation;
+  that audit remains queue item 21. It does not load remote app icons or installation
+  links. `node scripts/smoke-real-apps.mjs` checks installed protocol compatibility
+  with a private unauthenticated profile and zero model calls; authenticated app
+  invocation still requires account-specific acceptance.
+- **Native plugins (Codex):** `/plugins` opens searchable marketplace tabs and
+  plugin details. Private chat profiles can install, enable, disable and remove
+  plugins after confirmation while the chat and its agents are idle. Shared
+  host profiles are inspection-only: native company/account isolation remains
+  item 21, not permission to edit global host settings. Native managed-policy and
+  consent restrictions are preserved. Actions use the supported CLI, reload
+  native configuration and refresh installed skills without restarting Chrome or
+  sending an agent message. Interrupted changes must be reconciled by Refresh
+  before the agent continues. `node scripts/smoke-real-plugins.mjs` exercises the
+  real CLI against a private local marketplace with no host account or inference;
+  remote authenticated marketplace acceptance remains unverified.
+- **Native hooks (Codex):** `/hooks` filters lifecycle hooks by event or text and
+  shows their source, command or MCP handler, trust and enabled state. In private
+  chat profiles, review the source before explicitly trusting its exact native
+  definition hash; enable/disable are separate confirmed actions while idle.
+  Managed hooks cannot be changed. Shared host profiles hide executable details
+  and remain read-only pending company/profile isolation (item 21). Native MCP
+  metadata omits argument templates, so inspect the source file before trusting
+  those hooks. Refresh reloads an idle private worker's cached definitions;
+  changed definitions need trust again. Opening the browser may wake the worker,
+  but does not send agent input or grant trust. Existing trusted lifecycle hooks
+  still follow native policy. `node scripts/smoke-real-hooks.mjs` verifies real
+  command and MCP hook execution, trust changes, disabling, persistence and
+  command/argument source reload with a private profile and loopback fixtures,
+  not a host account.
+- **Experimental features (Codex):** `/experimental` lists the current native
+  session's beta flags, including their descriptions, configured state and
+  defaults. Private chat profiles can enable or disable a flag after confirmation
+  while the chat and its agents are idle. Managed requirements and higher-priority
+  project/session/profile settings stay locked; shared host profiles are read-only
+  pending item 21. Changes are persisted and verified through the native config
+  API. Some need an agent restart to take full effect; the picker explains this
+  but does not restart a worker or Chrome, or send an agent message. Network proxy
+  does not grant sandbox network access, and native sleep prevention is separate
+  from Relay's idle-container timer. `node scripts/smoke-real-features.mjs` checks
+  the real CLI, restart persistence and trusted project overrides in a private
+  temporary profile without inference or host-account changes.
+- **Native memories (Codex):** `/memories` controls local memory enablement,
+  use and generation in this chat's private native profile. Use changes affect
+  later native sessions; generation choices also update the current chat's
+  contribution preference. Existing conversation context is not erased. Native
+  startup consolidation can use quota even when new chat contributions are off;
+  Local memories is the separate feature switch. Reset requires confirmation
+  and deletes only that private profile's memory files and summaries, keeping
+  conversations and settings. Memories can be recreated while the feature or a
+  background pass remains active. Shared host profiles are read-only pending
+  company isolation (21), and managed overrides cannot be changed. No control
+  sends a user message or automatically restarts the worker or Chrome.
+  `node scripts/smoke-real-memories.mjs` verifies actual native summary injection,
+  current-thread contribution state, persistence, startup consolidation and
+  reset isolation using private profiles and loopback-only model responses.
+- **Native import (Codex):** `/import` reviews supported Claude Code or Cursor
+  setup and recent conversations from this worker's workspace/private profile.
+  Select whole setup groups or individual conversations, then confirm. Results
+  distinguish imported, failed and unreported items; interrupted operations are
+  reconciled without automatically repeating them. Shared host profiles remain
+  read-only pending company isolation (21). **Open chat** separately confirms an
+  independent, stopped Relay chat with a copy of the current workspace and its
+  native history. It sends no message, preserves source files and unsent drafts,
+  and does not copy personal accounts or profile-level settings. Continue the new
+  chat explicitly when ready. Unsupported source content may become native text
+  markers (the installed Claude importer does this for images); warnings retain
+  that limitation. External image URLs and outside-workspace files are not fetched.
+  `node scripts/smoke-real-import.mjs` and
+  `node scripts/smoke-real-import-chat.mjs` verify the real CLI, recovery,
+  independent history, source deletion and native resume in private fixtures.
+- **Retry a denied action (Codex):** `/approve` shows this native session's
+  retained automatic-review denials without waking its worker. Review the
+  action and confirm to queue one retry; busy chats retain FIFO order and a
+  paused queue stays paused. Codex records the native approval, then receives
+  an explicit request to retry that exact action under the current policy.
+  Permissions are not broadened, pending approval prompts are not accepted,
+  and automatic review may still deny the retry. The draft and its attachments
+  stay untouched. Encrypted review records are bound to the owner, project and
+  native session. Interrupted/uncertain approvals or possibly-started retries
+  are not repeated automatically. Denials predating capture cannot be recovered
+  from ordinary chat history. `node scripts/smoke-real-approve.mjs` verifies the
+  actual CLI using isolated profiles, deterministic loopback main/reviewer
+  responses and a harmless print command; it uses no real account or model.
+- **Native feedback (Codex):** `/feedback` opens a report dialog without sending
+  anything. Explicitly check the worker's policy, write and review the report,
+  then confirm **Send feedback to OpenAI**. Logs are off by default; native
+  session/version and diagnostic/authentication metadata are still included.
+  Opted-in diagnostics may contain conversation/code, native logs and file paths;
+  they are collected at send time, not previewed or redacted by Relay. Shared
+  host logs are blocked pending company isolation (21); private diagnostic
+  storage must stay within the profile's configured roots. Current, managed and
+  startup policy are checked. Changing startup configuration requires an
+  explicit worker restart; the control never restarts it automatically.
+  Draft text and files are not sent to the agent or attached to the report.
+  Reviewed reports expire after five minutes and are bound to this owner,
+  project, native session and worker. Uncertain uploads are never automatically
+  repeated; refresh saved status before creating another report. The native
+  session reference is not an independent external receipt.
+  `node scripts/smoke-real-feedback.mjs` tests actual Codex with private profiles
+  and a local TLS receiver in a network-isolated Linux namespace; no report or
+  diagnostic data reaches OpenAI during the check.
+- **Native sign-out (Codex):** `/logout` opens saved status without waking the
+  worker. **Inspect native account** explicitly connects this chat, without an
+  agent message or token refresh. A separate confirmation clears only reviewed
+  private native credentials using Codex's own logout operation and pauses queued
+  messages. It does not revoke API keys, sign out of Relay/Chrome, disconnect
+  GitHub/MCPs, delete history/workspace/drafts, or remove Relay gateway access.
+  Sign-out requires idle main/side/native agents. Reviews expire after five
+  minutes; credential, profile, policy and worker changes invalidate consent.
+  Lost replies and interrupted operations stay uncertain, never automatically
+  retried. Shared host profiles and OS keyring/automatic storage remain locked
+  pending company/profile isolation. Gateway providers may hide in-memory native
+  accounts; those are locked when removal cannot be verified. Config changes do
+  not silently restart workers. `node scripts/smoke-real-logout.mjs` exercises the
+  real CLI with disposable dummy accounts and loopback-only network isolation;
+  no live account, OS keyring or external authentication service is touched.
 - **Context/usage:** shows only CLI-reported token, cost, and account-limit data.
   Missing values are explicitly unavailable; Claude's cumulative token counters
-  are not presented as current context usage. Manual compaction is available
-  for an awake, idle Codex session; Claude manages compaction internally.
+  are not presented as current context usage. **Compact session** sends
+  `/compact` without changing the composer draft. It remains available while
+  working, queues behind the current turn, and wakes a stopped session when
+  dispatched. Codex uses native `thread/compact/start`; Claude receives its
+  native `/compact` command. A paused queue stays paused until resumed.
 - **Connectors:** shows MCP servers reported by the CLI. The sidebar's MCP
   connections editor supports presets, custom servers, browser OAuth and tool
   discovery. Select saved connections separately for each environment.
@@ -484,9 +709,18 @@ state.
   and Enter or Tab to insert without sending. Claude reports installed commands,
   plugin aliases and native commands through its initialize response. Codex
   skills come from `skills/list`, and invoke the native structured skill input.
-  Codex terminal-only commands are labelled as such; listing one does not imply
-  the web client implements it. Web controls include `/usage`, `/model`,
-  `/effort`, `/plan`, `/diff`, `/mcp`, `/skills`, `/stop`, `/rename` and `/archive`.
+  `/goal` uses persisted native goals; `edit`, `pause`, `resume` and `clear` work
+  without substituting ordinary prompts for goal controls. `/review` starts the
+  native reviewer, optionally with `--base <branch>`, `--commit <SHA>`, or custom
+  instructions. `/init` asks the agent to create or improve repository instructions.
+  `/model <id>`, `/effort <level>` and `/permissions <auto|edits|read-only>` queue
+  validated settings behind running work. `/fast` and `/personality` are offered
+  only when the selected model advertises support. Web actions also cover usage,
+  diff, MCPs, attachments, copying, transcript display and chat organization.
+  `/stop`, `/quit` and `/exit` stop Relay's agent and pause the queue; they are not
+  limited to native background terminals. Destructive chat deletion asks for
+  confirmation. [The command coverage checklist](docs/command-support.md) records
+  the still-unimplemented commands; listing or hiding a command is not a fix.
   Cloud discovery uses the last worker-reported catalog without waking a worker.
 - Usage has a compact context/limits popover and a detailed session breakdown.
   Current context is distinct from cumulative tokens. Claude context includes
@@ -506,6 +740,17 @@ state.
 - Hover or focus the right-side message rail to see your messages; tap on touch
   screens. Select a preview to jump to that message. Escape closes the list.
 
+## Live updates and transport
+
+Chat and sidebar updates use Server-Sent Events (`EventSource`) with automatic
+reconnection. Shared Chrome frames and input use an authenticated WebSocket.
+Message submissions and configuration changes use ordinary HTTP requests.
+Provider PR/check status is polled separately by the controller.
+
+Agent questions appear as clickable choices above the composer, with a free-text
+answer and a Skip action. Alt+Up focuses the question card. Live status updates
+preserve unfinished answers; choosing an option does not submit until Send answers.
+
 ## MCP connections
 
 Use **MCP connections** in the sidebar. Choose Linear, Atlassian (Jira/Confluence/
@@ -516,17 +761,14 @@ connection under **Environments → MCP connections**. Changes
 apply on the next worker start. Both Codex and Claude receive per-worker MCP
 configuration without modifying shared CLI config files.
 
-For separate accounts per project, set **Organization** to the GitHub owner of
-the chat's primary repository (for example, `12-apps` or `g2i`). You can save
-`linear` in both organizations and complete OAuth separately for each; tokens,
-connection health, and disconnect actions are independent. Select both in an
-environment if it serves both organizations. On worker startup, the controller
-only grants selected connections matching the **first** repository's owner,
-plus selected **Shared** connections (blank Organization). Secondary repositories
-and sidebar groups do not expand access. Scratch chats receive only Shared
-connections. Existing unscoped connections remain Shared. This is routing within
-the private control plane, not separate user-account tenancy or a sandbox between
-repositories in the same workspace.
+Use **Available companies** for one or several primary-repository owners. You
+can save `linear` for `12-apps` and `thomfilg`, and another `linear` for `g2i`,
+then complete OAuth separately; tokens, connection health and disconnect actions
+are independent. Equal names require non-overlapping company lists. Select both
+in an environment if it serves those companies. Worker startup grants only the
+selected MCPs allowed for that chat's **first** repository owner. Scratch chats
+receive only explicitly selected **Unassigned chats** connections. Neither a
+blank company list nor a legacy global connection grants all-company access.
 
 ### Browser OAuth (including custom servers)
 

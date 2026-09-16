@@ -9,7 +9,11 @@ export class SlashComposer {
     this.input.addEventListener("blur", () => { clearTimeout(this.blurTimer); this.blurTimer = setTimeout(() => { if (document.activeElement !== this.input) this.close(); }, 150); });
     document.querySelector("#slash-commands").onclick = () => { document.querySelectorAll(".control-menu[open]").forEach(n => n.open = false); this.input.value = "/"; this.input.focus(); this.update(); };
   }
-  key() { return `${this.state.active?.id}:${this.state.active?.agent}`; }
+  key() { return `${this.state.active?.id}:${this.state.active?.agent}:${this.state.active?.model || "default"}`; }
+  invalidate(chatId) {
+    for (const map of [this.cache, this.pending]) for (const key of map.keys()) if (key.startsWith(`${chatId}:`)) map.delete(key);
+    if (this.state.active?.id === chatId) this.close();
+  }
   query() { return this.input.selectionStart === this.input.value.length && /^\/[\w:.-]*$/.test(this.input.value) ? this.input.value.slice(1).toLowerCase() : null; }
   message(text) { this.matches = []; this.options.replaceChildren(); this.status.textContent = text; this.status.hidden = false; this.input.removeAttribute("aria-activedescendant"); document.querySelector("#slash-count").textContent = ""; }
   async update() {
@@ -20,7 +24,10 @@ export class SlashComposer {
     if (!this.cache.has(key) || this.cache.get(key).expires < Date.now()) {
       this.message("Loading commands and installed skills…"); this.options.setAttribute("aria-busy", "true");
       try {
-        if (!this.pending.has(key)) this.pending.set(key, this.api(`/api/chats/${id}/commands`).then(result => { this.cache.set(key, { ...result, expires: Date.now() + 60000 }); }).finally(() => this.pending.delete(key)));
+        if (!this.pending.has(key)) {
+          const promise = this.api(`/api/chats/${id}/commands`).then(result => { if (this.pending.get(key) === promise) this.cache.set(key, { ...result, expires: Date.now() + 60000 }); }).finally(() => { if (this.pending.get(key) === promise) this.pending.delete(key); });
+          this.pending.set(key, promise);
+        }
         await this.pending.get(key);
       } catch (error) { if (version === this.version) { this.message(`Could not load commands. ${error.message}`); this.options.setAttribute("aria-busy", "false"); } return; }
       // Slow discovery must not undo Escape, blur, a newer query, or a chat switch.

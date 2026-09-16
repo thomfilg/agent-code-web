@@ -111,6 +111,7 @@ export class BrowserConnections extends EventEmitter {
     const grant = this.grants.get(chatId);
     if (!grant?.active) throw failure("Signed-in Chrome sharing is not enabled");
     grant.viewers.add(socket);
+    this.emit("viewers", chatId);
     const send = value => { if (socket.readyState === 1) socket.send(JSON.stringify(value)); };
     send({ event: "status", value: grant.state });
     let pending = 0;
@@ -119,7 +120,7 @@ export class BrowserConnections extends EventEmitter {
       if (!input || !Number.isInteger(input.id) || !allowedActions.has(input.action) || ["evaluate", "screenshot", "snapshot", "watch"].includes(input.action) || ++pending > 64) { socket.close(1008, "Invalid action"); return; }
       void this.command(chatId, input.action, input.params).then(value => send({ id: input.id, value }), error => send({ id: input.id, error: error.message })).finally(() => { pending--; });
     });
-    socket.once("close", () => { grant.viewers.delete(socket); if (grant.active && !grant.viewers.size) void this.command(chatId, "watch", { enabled: false }).catch(() => {}); });
+    socket.once("close", () => { grant.viewers.delete(socket); this.emit("viewers", chatId); if (grant.active && !grant.viewers.size) void this.command(chatId, "watch", { enabled: false }).catch(() => {}); });
     await this.command(chatId, "watch", { enabled: true });
   }
   accept(socket, extensionId) {

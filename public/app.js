@@ -13,6 +13,23 @@ import { MessageNavigator } from "./message-navigator.js";
 import { DocumentPreview } from "./document-preview.js";
 import { SharedBrowserPanel } from "./shared-browser.js";
 import { BrowserConnectionSettings } from "./browser-connections.js";
+import { setupPanelResizers } from "./panel-resizers.js";
+import { MessageWindow } from "./message-window.js";
+import { ChatPresence } from "./chat-presence.js";
+import { WEB_COMMAND_ALIASES } from "./web-commands.js";
+import { renderAgentRequest } from "./agent-request.js";
+import { SideChatPanel } from "./side-chat.js";
+import { AgentThreadsPanel } from "./agent-threads.js";
+import { WorkspaceContext } from "./workspace-context.js";
+import { NativeAppsPicker } from "./native-apps.js";
+import { NativePluginsPicker } from "./native-plugins.js";
+import { NativeHooksBrowser } from "./native-hooks.js";
+import { NativeFeaturesPicker } from "./native-features.js";
+import { NativeMemoriesControls } from "./native-memories.js";
+import { NativeImportsControls } from "./native-imports.js";
+import { NativeApprovalControls } from "./native-approvals.js";
+import { NativeFeedbackControls } from "./native-feedback.js";
+import { NativeLogoutControls } from "./native-logout.js";
 
 const state = {
   config: null,
@@ -20,6 +37,7 @@ const state = {
   active: null,
   stream: null,
   liveTools: new Map(),
+  queueActions: new Map(),
   eventSource: null,
 };
 
@@ -122,65 +140,67 @@ function renderMessage(message, streaming = false) {
   renderContent(text, message.text || "", { onPreview: preview => documentPreview.open({ ...preview, messageId: message.id }) });
   if (streaming) text.append(node("span", "stream-caret"));
   body.append(text);
-  if (message.attachments?.length) body.append(node("p", "muted", message.attachments.map(file => `📎 ${file.name}`).join(" · ")));
+  if (message.attachments?.length) {
+    const files = node("div", "message-attachments");
+    for (const file of message.attachments) files.append(file.id ? chatControls.attachmentButton(file, { messageId: message.id }) : node("span", "muted", file.name));
+    body.append(files);
+  }
   wrapper.append(body);
   return wrapper;
 }
 
+const messageWindow = new MessageWindow();
+let adjustingMessageWindow = false;
+let messageRenderVersion = 0;
 function renderMessages({ pinBottom = false } = {}) {
   if (!state.active) return;
+  const version = ++messageRenderVersion;
+  const changedChat = messageWindow.chatId !== state.active.id;
   const wasNearBottom = elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight < 110;
+  const oldTop = elements.messages.getBoundingClientRect().top;
+  const anchor = [...elements.messages.querySelectorAll(".message")].find(n => n.getBoundingClientRect().bottom > oldTop + 10);
+  const anchorId = anchor?.dataset.messageId, anchorOffset = anchor ? anchor.getBoundingClientRect().top - oldTop : 0;
+  adjustingMessageWindow = true;
   elements.messages.replaceChildren();
-  const persisted = state.active.messages || [];
+  const persisted = (state.active.messages || []).filter(message => !message.meta?.renderingSample);
   if (!persisted.length && !state.stream && !state.liveTools.size) {
+    messageWindow.update(state.active.id, []);
+    toolActivity.update(state.active.id, new Map());
     elements.messages.append(node("div", "messages-empty", "This workspace is ready.\nSend a message to wake the agent."));
   } else {
     const { rows, groups } = groupTools(persisted, [...state.liveTools.values()]);
     toolActivity.update(state.active.id, groups);
-    for (const message of rows) elements.messages.append(message.kind === "tool_group" ? toolActivity.button(message.key) : renderMessage(message));
-    if (state.stream) elements.messages.append(renderMessage({ id: state.stream.id, role: "assistant", text: state.stream.text }, true));
+    const visible = messageWindow.update(state.active.id, rows);
+    const pager = (label, action) => { const button = node("button", "message-page-button", label); button.type = "button"; button.onclick = action; return button; };
+    if (messageWindow.start) elements.messages.append(pager(`Load earlier messages · ${messageWindow.start} above`, () => { messageNavigator.readingHistory = true; messageWindow.move(-1); renderMessages(); }));
+    for (const message of visible) elements.messages.append(message.kind === "tool_group" ? toolActivity.button(message.key) : renderMessage(message));
+    if (messageWindow.end < rows.length) {
+      elements.messages.append(pager(`Load newer messages · ${rows.length - messageWindow.end} below`, () => { messageWindow.move(1); renderMessages(); }));
+      elements.messages.append(pager("Jump to latest", () => { messageWindow.latest(); messageNavigator.readingHistory = false; renderMessages({ pinBottom: true }); }));
+    } else if (state.stream) elements.messages.append(renderMessage({ id: state.stream.id, role: "assistant", text: state.stream.text }, true));
   }
   messageNavigator.update();
-  if (!messageNavigator.readingHistory && (pinBottom || wasNearBottom)) elements.messages.scrollTop = elements.messages.scrollHeight;
+  if (messageWindow.tail && !messageNavigator.readingHistory && (changedChat || pinBottom || wasNearBottom)) elements.messages.scrollTop = elements.messages.scrollHeight;
+  else if (anchorId) {
+    const retained = [...elements.messages.querySelectorAll(".message")].find(n => n.dataset.messageId === anchorId);
+    if (retained) elements.messages.scrollTop += retained.getBoundingClientRect().top - elements.messages.getBoundingClientRect().top - anchorOffset;
+  }
+  requestAnimationFrame(() => requestAnimationFrame(() => { if (version === messageRenderVersion) adjustingMessageWindow = false; }));
 }
 
 function renderApproval() {
   const request = state.active?.pendingRequest;
-  elements.approval.replaceChildren();
-  elements.approval.hidden = !request;
-  if (!request) return;
-  elements.approval.append(node("h3", "", request.method.includes("requestUserInput") ? "The agent has a question" : "Approval required"));
-  elements.approval.append(node("p", "", request.prompt));
-  if (request.command) elements.approval.append(node("code", "", request.command));
-  const actions = node("div", "approval-actions");
-  if (request.questions?.length) {
-    const answers = {};
-    for (const question of request.questions) {
-      const label = node("label", "");
-      label.append(node("p", "", question.question));
-      const input = node("input", "question-input");
-      input.placeholder = question.header || "Answer";
-      input.addEventListener("input", () => { answers[question.id] = input.value; });
-      label.append(input);
-      elements.approval.append(label);
-    }
-    const answer = node("button", "approve", "Answer");
-    answer.addEventListener("click", () => resolveRequest({ answers }));
-    actions.append(answer);
-  } else {
-    const once = node("button", "approve", "Approve once");
-    once.addEventListener("click", () => resolveRequest({ decision: "accept" }));
-    const session = node("button", "secondary-button", "For this session");
-    session.addEventListener("click", () => resolveRequest({ decision: "acceptForSession" }));
-    const deny = node("button", "deny", "Deny");
-    deny.addEventListener("click", () => resolveRequest({ decision: "decline" }));
-    actions.append(once, session, deny);
-  }
-  elements.approval.append(actions);
+  const key = request ? `${state.active.id}:${request.requestId}` : null;
+  const target = { chatId: state.active?.id, requestId: request?.requestId };
+  renderAgentRequest(elements.approval, request, key, payload => resolveRequest(payload, target));
 }
 
 function renderActive() {
   const chat = state.active;
+  sideChat.setChat(chat);
+  agentThreads.setChat(chat);
+  workspaceContext.setChat(chat);
+  chatPresence.select(chat?.id);
   documentPreview.setChat(chat?.id);
   sharedBrowser.setChat(chat?.id);
   browserConnectionSettings.setChat(chat?.id);
@@ -198,7 +218,7 @@ function renderActive() {
   $("#organize-chat-button").textContent = "Rename / organize";
   const runtimeLabel = chat.runtimeMetadata?.instanceId ? ` · ${chat.runtimeMetadata.instanceId}` : "";
   elements.meta.textContent = `${agentLabel(chat.agent)}${runtimeLabel} · ${chat.workspace}`;
-  elements.status.textContent = chat.status;
+  elements.status.textContent = chat.status === "idle" && chat.idleKeepAwakeReason ? "Ready" : chat.status;
   elements.detail.textContent = chat.statusDetail || "";
   elements.statusDot.className = `status-dot ${chat.status}`;
   $("#stop-button").disabled = chat.status === "stopped";
@@ -233,13 +253,33 @@ function renderQueue() {
   const root = $("#message-queue"), chat = state.active; root.replaceChildren();
   if (!chat?.queuedMessages?.length) return;
   root.append(node("strong", "", `${chat.queuePaused ? "Paused queue" : "Queued messages"} · ${chat.queuedMessages.length}`));
-  const edit = async body => { try { const result = await api(`/api/chats/${chat.id}/queue`, { method: "PATCH", body: JSON.stringify(body) }); if (state.active?.id === chat.id) { state.active = { ...state.active, ...result.chat }; renderActive(); } } catch (error) { toast(error.message); } };
-  if (chat.queuePaused) { const resume = node("button", "secondary-button", "Resume queue"); resume.type = "button"; resume.onclick = () => edit({ resume: true }); root.append(resume); }
-  for (const item of chat.queuedMessages) { const row = node("div", "queue-row"), remove = node("button", "small-icon", "×"); remove.type = "button"; remove.setAttribute("aria-label", "Remove queued message"); remove.onclick = () => edit({ removeId: item.id }); row.append(node("span", "", item.text), remove); root.append(row); }
+  const pending = state.queueActions.get(chat.id);
+  const edit = async body => {
+    if (state.queueActions.has(chat.id)) return;
+    state.queueActions.set(chat.id, body); renderQueue();
+    try {
+      const result = await api(`/api/chats/${chat.id}/queue`, { method: "PATCH", body: JSON.stringify(body) });
+      if (state.active?.id === chat.id && (result.chat.revision || 0) >= (state.active.revision || 0)) { state.active = { ...state.active, ...result.chat }; renderActive(); }
+    } catch (error) { toast(error.message); }
+    finally { state.queueActions.delete(chat.id); if (state.active?.id === chat.id) renderQueue(); }
+  };
+  if (chat.queuePaused) { const resume = node("button", "secondary-button", "Resume queue"); resume.type = "button"; resume.disabled = Boolean(pending); resume.onclick = () => edit({ resume: true }); root.append(resume); }
+  for (const item of chat.queuedMessages) {
+    const row = node("div", "queue-row"), remove = node("button", "small-icon", "×"), sendNow = node("button", "queue-send-now", pending?.sendNowId === item.id ? "Sending…" : "Send now");
+    row.dataset.queueId = item.id;
+    const preview = node("span", "queue-text", item.text); preview.title = item.text;
+    sendNow.type = remove.type = "button";
+    sendNow.disabled = remove.disabled = Boolean(pending);
+    sendNow.title = "Interrupt the current turn and send this message next";
+    sendNow.onclick = () => edit({ sendNowId: item.id });
+    remove.setAttribute("aria-label", "Remove queued message"); remove.onclick = () => edit({ removeId: item.id });
+    row.append(preview, sendNow, remove); root.append(row);
+  }
   if (chat.queueError) root.append(node("p", "form-error", chat.queueError));
 }
 
 function tickCountdown() {
+  if (state.active?.status === "idle" && state.active.idleKeepAwakeReason) { elements.countdown.textContent = "KEPT AWAKE"; return; }
   const deadline = state.active?.idleDeadlineAt ? new Date(state.active.idleDeadlineAt).getTime() : 0;
   if (!deadline || state.active?.status !== "idle") {
     elements.countdown.textContent = "";
@@ -274,10 +314,13 @@ async function selectChat(id) {
 function connectEvents(chatId) {
   const source = new EventSource(`/api/chats/${chatId}/events`, { withCredentials: true });
   state.eventSource = source;
+  source.onopen = () => { if (state.active?.id === chatId) { void sideChat.refresh(); void agentThreads.refresh(); } };
   source.onmessage = ({ data }) => {
     if (state.active?.id !== chatId) return;
     const event = JSON.parse(data);
-    if (event.type === "chat_updated") {
+    if (event.type === "side_chat_updated") { sideChat.update(event, chatId); }
+    else if (event.type === "agent_threads_updated") { agentThreads.update(event, chatId); }
+    else if (event.type === "chat_updated") {
       // EventSource replays turn history on reconnect; old snapshots must not
       // undo newer pins, moves, names or states already fetched from the API.
       if ((event.chat.revision || 0) < (state.active.revision || 0) || event.chat.updatedAt < state.active.updatedAt) return;
@@ -307,6 +350,9 @@ function connectEvents(chatId) {
       state.stream = null;
       if (!state.active.messages.some((message) => message.id === event.message.id)) state.active.messages.push(event.message);
       renderMessages({ pinBottom: true });
+    } else if (event.type === "turn_interrupted" || event.type === "runtime_stopped") {
+      state.liveTools.clear(); state.stream = null;
+      renderMessages();
     } else if (event.type === "turn_failed") {
       state.liveTools.clear();
       state.stream = null;
@@ -316,8 +362,7 @@ function connectEvents(chatId) {
       state.active.pendingRequest = event.request;
       renderApproval();
     } else if (event.type === "request_resolved") {
-      state.active.pendingRequest = null;
-      renderApproval();
+      if (state.active.pendingRequest?.requestId === event.requestId) { state.active.pendingRequest = null; renderApproval(); }
     } else if (event.type === "runtime_error") {
       toast(event.text);
     } else if (event.type === "chat_deleted") {
@@ -329,14 +374,17 @@ function connectEvents(chatId) {
   };
 }
 
-async function resolveRequest(payload) {
+async function resolveRequest(payload, target) {
   const request = state.active?.pendingRequest;
-  if (!request) return;
+  if (!request || state.active.id !== target.chatId || request.requestId !== target.requestId) return;
+  const controls = [...elements.approval.querySelectorAll("button, input, textarea")];
+  if (controls.some(control => control.disabled)) return;
+  controls.forEach(control => { control.disabled = true; });
   try {
-    await api(`/api/chats/${state.active.id}/requests/${request.requestId}/respond`, { method: "POST", body: JSON.stringify(payload) });
-    state.active.pendingRequest = null;
-    renderApproval();
+    await api(`/api/chats/${target.chatId}/requests/${encodeURIComponent(target.requestId)}/respond`, { method: "POST", body: JSON.stringify(payload) });
+    if (state.active?.id === target.chatId && state.active.pendingRequest?.requestId === target.requestId) { state.active.pendingRequest = null; renderApproval(); }
   } catch (error) { toast(error.message); }
+  finally { controls.forEach(control => { control.disabled = false; }); }
 }
 
 async function openNewChat() {
@@ -388,22 +436,120 @@ async function createChat(event) {
   finally { submitter.disabled = false; submitter.textContent = originalLabel; }
 }
 
+const forkRequests = new Map();
+
+async function forkFromComposer(chatId, text) {
+  let action = forkRequests.get(chatId);
+  if (action?.pending) return;
+  if (action?.text !== text) { action = { text, requestId: crypto.randomUUID() }; forkRequests.set(chatId, action); }
+  action.pending = true;
+  toast("Creating an independent fork… The source conversation stays open.");
+  const selection = state.selection;
+  try {
+    await activeModelPicker.saving;
+    const { chat } = await api(`/api/chats/${chatId}/fork`, { method: "POST", body: JSON.stringify({ requestId: action.requestId, title: text.replace(/^\/fork\s*/, "") }) });
+    updateChatSummary(chat); renderChats();
+    forkRequests.delete(chatId);
+    if (state.active?.id === chatId && state.selection === selection && elements.input.value.trim() === text) {
+      elements.input.value = ""; messageHistory.reset(); resizeInput();
+      await selectChat(chat.id);
+    } else toast(`Fork ready: ${chat.title}`);
+  } catch (error) { toast(error.message); }
+  finally { action.pending = false; }
+}
+
 async function sendMessage(event) {
   event.preventDefault();
-  const files = chatControls.attachments();
-  const text = elements.input.value.trim() || (files.length ? "Please inspect the attached files." : "");
+  if (!state.active || state.waitingForUploads) return;
+  const waitingChat = state.active.id;
+  if (chatControls.uploads.has(waitingChat)) {
+    state.waitingForUploads = true;
+    try { await chatControls.waitForUploads(waitingChat); } catch (error) { toast(error.message); return; } finally { state.waitingForUploads = false; }
+    if (state.active?.id !== waitingChat) return;
+  }
+  let files = chatControls.attachments();
+  let text = elements.input.value.trim() || (files.length ? "Please inspect the attached files." : "");
   if (!text || !state.active) return;
   const chatId = state.active.id;
-  if (text === "/skills" && !files.length) { elements.input.value = "/"; elements.input.focus(); void slashComposer.update(); return; }
-  if (!files.length && await runWebCommand(text)) { elements.input.value = ""; resizeInput(); return; }
-  const queued = ["starting", "running"].includes(state.active.status) || state.active.queuedMessages?.length;
+  if (text === "/logout" && state.active.agent === "codex") {
+    try { if (await nativeLogout.open() && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } }
+    catch (error) { toast(error.message); } return;
+  }
+  if (text === "/feedback" && state.active.agent === "codex") {
+    try { if (await nativeFeedback.open() && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } }
+    catch (error) { toast(error.message); } return;
+  }
+  if (text === "/approve" && state.active.agent === "codex") {
+    try { if (await nativeApprovals.open() && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } }
+    catch (error) { toast(error.message); } return;
+  }
+  if (text === "/import" && state.active.agent === "codex") {
+    try { if (await nativeImports.open() && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } }
+    catch (error) { toast(error.message); } return;
+  }
+  if (text === "/memories" && state.active.agent === "codex") {
+    try { if (await nativeMemories.open() && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } }
+    catch (error) { toast(error.message); } return;
+  }
+  if (text === "/experimental" && state.active.agent === "codex") {
+    try { await nativeFeatures.open(); if (state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } }
+    catch (error) { toast(error.message); } return;
+  }
+  if (text === "/hooks" && state.active.agent === "codex") {
+    try { await nativeHooks.open(); if (state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } }
+    catch (error) { toast(error.message); } return;
+  }
+  if (text === "/plugins" && state.active.agent === "codex") {
+    try { await nativePlugins.open(); if (state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } }
+    catch (error) { toast(error.message); } return;
+  }
+  if (text === "/apps" && state.active.agent === "codex") {
+    try { await nativeApps.open(); if (state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } }
+    catch (error) { toast(error.message); } return;
+  }
+  if (state.active.agent === "codex" && /^\/ide(?:\s|$)/.test(text)) {
+    const original = text;
+    try {
+      if (original.replace(/^\/ide\s*/, "").startsWith("/")) throw new Error("Use /ide with a task, not another slash command");
+      if (!await workspaceContext.prepareIde() || state.active?.id !== chatId || elements.input.value.trim() !== original) return;
+      text = original.replace(/^\/ide\s*/, ""); files = chatControls.attachments();
+      elements.input.value = text; resizeInput();
+      if (!text) return; // /ide stages context for the next message.
+    } catch (error) { toast(error.message); return; }
+  }
+  if (/^\/mention(?:\s|$)/.test(text)) {
+    try { await workspaceContext.open(text.replace(/^\/mention\s*/, "")); if (state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } }
+    catch (error) { toast(error.message); } return;
+  }
+  if (state.active.agent === "codex" && /^\/fork(?:\s|$)/.test(text)) {
+    if (files.length) toast("Send or remove unsent attachments before forking. Previously sent attachments are copied automatically.");
+    else await forkFromComposer(chatId, text);
+    return;
+  }
+  if (state.active.agent === "codex" && /^\/(side|btw)(?:\s|$)/.test(text)) {
+    try {
+      await activeModelPicker.saving;
+      const question = text.replace(/^\/(side|btw)\s*/, "");
+      if (files.length && !question) throw new Error("Add a side question with these attachments");
+      await sideChat.open(question, files.map(file => file.id));
+      chatControls.clearAttachments(chatId, files.map(file => file.id));
+      if (state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); }
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  if (["/skills", "/help"].includes(text) && !files.length) { elements.input.value = "/"; elements.input.focus(); void slashComposer.update(); return; }
+  if (!files.length) {
+    try { if (await runWebCommand(text)) { if (state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } return; } }
+    catch (error) { toast(error.message); return; } // Failed controls keep the typed command.
+  }
+  const queued = ["starting", "running", "stopping"].includes(state.active.status) || state.active.queuedMessages?.length;
   elements.input.value = "";
   messageHistory.reset();
   resizeInput();
   try {
     await activeModelPicker.saving;
     await api(`/api/chats/${chatId}/${queued ? "queue" : "messages"}`, { method: "POST", body: JSON.stringify({ text, attachments: files.map(file => file.id) }) });
-    chatControls.clearAttachments(chatId);
+    chatControls.clearAttachments(chatId, files.map(file => file.id));
   } catch (error) {
     elements.input.value = text;
     resizeInput();
@@ -412,17 +558,36 @@ async function sendMessage(event) {
 }
 
 async function runWebCommand(text) {
+  text = text.replace(/^\/([\w:.-]+)(?=\s|$)/, (match, name) => WEB_COMMAND_ALIASES[name] ? `/${WEB_COMMAND_ALIASES[name]}` : match);
+  const chatId = state.active.id;
+  if (text === "/agent" && state.active.agent === "codex") { await agentThreads.open(); return true; }
+  const apply = chat => { updateChatSummary(chat); if (state.active?.id === chatId) { state.active = { ...state.active, ...chat }; renderActive(); } };
+  const goal = /^\/goal(?:\s+(pause|resume|clear|edit))?$/.exec(text);
+  if (goal && state.active?.agent === "codex") { await chatControls.goal(goal[1] || null, { throwErrors: true }); return true; }
   if (["/usage", "/status", "/context"].includes(text)) { usagePanel.detailed(); return true; }
   if (text === "/model") { $("#composer-model-controls .model-select").focus(); return true; }
-  if (text === "/effort") { $("#composer-model-controls .effort-menu").open = true; return true; }
+  if (["/effort", "/reasoning"].includes(text)) { $("#composer-model-controls .effort-menu").open = true; return true; }
+  if (["/permissions", "/mode"].includes(text)) { $("#mode-menu").open = true; $("#mode-menu [data-agent-mode]").focus(); return true; }
+  if (text === "/personality" && state.active.agent === "codex") { chatControls.personality(); return true; }
+  if (["/ps", "/debug-config", "/clean"].includes(text) && state.active.agent === "codex") { await chatControls.inspectCommand(text === "/debug-config" ? "debug-config" : "ps", text === "/clean" ? "all" : null); return true; }
   if (text === "/diff") { void chatControls.showChanges(); return true; }
   if (text === "/mcp") { void mcpSettings.open(); return true; }
-  if (text === "/stop") { $("#stop-button").click(); return true; }
-  if (text === "/new") { openNewChat(); return true; }
+  if (text === "/mcp verbose") { await chatControls.connectors(); return true; }
+  if (["/stop", "/quit", "/exit"].includes(text)) { await api(`/api/chats/${state.active.id}/stop`, { method: "POST" }); return true; }
+  if (["/new", "/clear"].includes(text)) { openNewChat(); return true; }
   if (text === "/rename") { $("#organize-chat-button").click(); return true; }
-  if (text === "/archive") { void chatControls.patch({ archived: true }); return true; }
-  if (text === "/compact") { if (confirm("Compact this session? This can use model tokens.")) try { await api(`/api/chats/${state.active.id}/compact`, { method: "POST", body: "{}" }); } catch (error) { toast(error.message); } return true; }
-  if (text === "/plan") { try { const { chat } = await api(`/api/chats/${state.active.id}/mode`, { method: "PATCH", body: JSON.stringify({ mode: "plan" }) }); state.active = { ...state.active, ...chat }; renderActive(); } catch (error) { toast(error.message); } return true; }
+  if (text.startsWith("/rename ")) { const { chat } = await api(`/api/chats/${chatId}`, { method: "PATCH", body: JSON.stringify({ title: text.slice(8).trim() }) }); apply(chat); return true; }
+  if (text === "/archive") { const { chat } = await api(`/api/chats/${chatId}`, { method: "PATCH", body: JSON.stringify({ archived: true }) }); apply(chat); return true; }
+  if (text === "/delete") { await sidebar.remove(state.active); return true; }
+  if (["/raw", "/transcript"].includes(text)) { chatControls.transcript(); return true; }
+  if (text === "/copy") { const last = [...state.active.messages].reverse().find(message => message.role === "assistant" && message.text && !message.meta?.renderingSample); if (!last) throw new Error("No completed assistant response to copy yet"); await chatControls.copy(last.text, "Latest response copied"); return true; }
+  if (text === "/resume") { chatControls.savedChats(state.chats, chat => selectChat(chat.id)); return true; }
+  if (text === "/compact") return false; // Send through the ordinary message/queue path.
+  if (text === "/plan") {
+    if (["starting", "running", "stopping"].includes(state.active.status) || state.active.queuedMessages?.length) return false;
+    const { chat } = await api(`/api/chats/${state.active.id}/mode`, { method: "PATCH", body: JSON.stringify({ mode: "plan" }) });
+    apply(chat); return true;
+  }
   return false;
 }
 
@@ -431,8 +596,8 @@ function resizeInput() {
   elements.input.style.height = `${Math.min(elements.input.scrollHeight, 170)}px`;
 }
 
-function toast(message) {
-  const dialog = [...document.querySelectorAll("dialog[open]")].at(-1);
+function toast(message, { outsideDialog = false } = {}) {
+  const dialog = !outsideDialog && [...document.querySelectorAll("dialog[open]")].at(-1);
   if (dialog) {
     let error = dialog.querySelector("[role=alert]");
     if (!error) { error = node("p", "form-error"); error.setAttribute("role", "alert"); dialog.querySelector("form, .dialog-card")?.append(error); }
@@ -445,6 +610,7 @@ function toast(message) {
 }
 
 async function boot() {
+  setupPanelResizers();
   const auth = await api("/api/auth");
   if (auth.required && !auth.authenticated) {
     elements.loginDialog.showModal();
@@ -483,8 +649,14 @@ elements.agentSelect.addEventListener("change", renderSecurityHint);
 $("#composer").addEventListener("submit", sendMessage);
 elements.send.addEventListener("click", () => { if (elements.send.type === "button") $("#stop-button").click(); });
 elements.input.addEventListener("input", resizeInput);
+document.addEventListener("keydown", event => {
+  if (event.key === "ArrowUp" && event.altKey && !event.ctrlKey && !event.metaKey && !elements.approval.hidden && !document.querySelector("dialog[open]")) {
+    const control = elements.approval.querySelector("input:not(:disabled), textarea:not(:disabled), button:not(:disabled)");
+    if (control) { event.preventDefault(); control.focus(); }
+  }
+});
 elements.input.addEventListener("keydown", (event) => {
-  if (event.isComposing || slashComposer.keydown(event) || messageHistory.keydown(event)) return;
+  if (event.isComposing || workspaceContext.keydown(event) || slashComposer.keydown(event) || messageHistory.keydown(event)) return;
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     $("#composer").requestSubmit();
@@ -539,8 +711,11 @@ const workspaceSettings = new WorkspaceSettings({ state, api, toast });
 const mcpSettings = new McpSettings({ api, toast, state });
 const toolActivity = new ToolActivity();
 const usagePanel = new UsagePanel({ state, api, toast });
+const chatPresence = new ChatPresence({ api });
 const documentPreview = new DocumentPreview();
-const sharedBrowser = new SharedBrowserPanel({ api });
+const sideChat = new SideChatPanel({ api, getChat: () => state.active, toast, onPreview: preview => documentPreview.open(preview) });
+const agentThreads = new AgentThreadsPanel({ api, getChat: () => state.active, toast, onPreview: preview => documentPreview.open(preview) });
+const sharedBrowser = new SharedBrowserPanel({ api, getBackend: () => state.active?.runtimeMetadata?.backend || state.config?.workerBackend });
 const browserConnectionSettings = new BrowserConnectionSettings({ api, state, toast, browser: sharedBrowser,
   accountChanged: async () => {
     await sidebar.refresh();
@@ -557,8 +732,30 @@ const chatControls = new ChatControls({ state, api, toast,
   openRepositories: () => openNewChat(),
 });
 const slashComposer = new SlashComposer({ state, api });
+const workspaceContext = new WorkspaceContext({ state, api, controls: chatControls, toast });
+const nativeApps = new NativeAppsPicker({ state, api, controls: chatControls, toast });
+const nativePlugins = new NativePluginsPicker({ state, api, controls: chatControls, changed: chatId => slashComposer.invalidate(chatId) });
+const nativeHooks = new NativeHooksBrowser({ state, api, controls: chatControls, changed: chatId => slashComposer.invalidate(chatId) });
+const nativeFeatures = new NativeFeaturesPicker({ state, api, controls: chatControls, changed: chatId => slashComposer.invalidate(chatId) });
+const nativeMemories = new NativeMemoriesControls({ state, api, controls: chatControls, changed: chatId => slashComposer.invalidate(chatId) });
+const nativeApprovals = new NativeApprovalControls({ state, api, controls: chatControls, notify: message => toast(message, { outsideDialog: true }) });
+const nativeFeedback = new NativeFeedbackControls({ state, api, controls: chatControls, notify: message => toast(message, { outsideDialog: true }) });
+const nativeLogout = new NativeLogoutControls({ state, api, controls: chatControls, notify: message => toast(message, { outsideDialog: true }), changed: chatId => slashComposer.invalidate(chatId) });
+const nativeImports = new NativeImportsControls({ state, api, controls: chatControls, changed: chatId => slashComposer.invalidate(chatId), opened: (chat, active) => {
+  updateChatSummary(chat); renderChats();
+  if (chat.importWarnings?.length) toast(chat.importWarnings.join(" "), { outsideDialog: true });
+  if (active && !elements.input.value.trim() && !chatControls.attachments().length) void selectChat(chat.id);
+  else toast(`Imported chat ready: ${chat.title}`, { outsideDialog: true });
+} });
 const messageHistory = new MessageHistory({ input: elements.input, state, onChange: resizeInput });
-const messageNavigator = new MessageNavigator({ state, scroller: elements.messages, root: $("#message-navigator") });
+const messageNavigator = new MessageNavigator({ state, scroller: elements.messages, root: $("#message-navigator"), ensureVisible: id => { if (messageWindow.show(id)) renderMessages(); }, atLatest: () => messageWindow.tail });
+elements.messages.addEventListener("scroll", () => {
+  if (adjustingMessageWindow || !messageWindow.rows?.length) return;
+  const nearBottom = elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight < 100;
+  messageNavigator.readingHistory = !nearBottom || !messageWindow.tail;
+  if (elements.messages.scrollTop < 80 && messageWindow.start > 0) { messageWindow.move(-1); renderMessages(); }
+  else if (nearBottom && messageWindow.end < messageWindow.rows.length) { messageWindow.move(1); renderMessages(); }
+}, { passive: true });
 const activeModelPicker = new ModelPicker({ root: $("#composer-model-controls"), api, onChange: async settings => {
   if (!state.active) return;
   const id = state.active.id;

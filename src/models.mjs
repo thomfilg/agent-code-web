@@ -43,7 +43,7 @@ export class ModelCatalog {
       const models = []; let cursor;
       do {
         const result = await rpc.request("model/list", { limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}) });
-        models.push(...result.data.map(model => ({ id: model.model, label: model.displayName || model.model, description: model.description || "", isDefault: model.isDefault, defaultEffort: model.defaultReasoningEffort, efforts: model.supportedReasoningEfforts.map(e => e.reasoningEffort) })));
+        models.push(...result.data.map(model => ({ id: model.model, label: model.displayName || model.model, description: model.description || "", isDefault: model.isDefault, defaultEffort: model.defaultReasoningEffort, efforts: model.supportedReasoningEfforts.map(e => e.reasoningEffort), supportsPersonality: model.supportsPersonality === true, serviceTiers: (model.serviceTiers || []).map(tier => ({ id: tier.id, name: tier.name, description: tier.description })) })));
         cursor = result.nextCursor;
       } while (cursor);
       return { models, source: "codex-app-server", note: "Models and effort levels reported by the installed Codex CLI.", configuredDefault: this.config.codex.model || null };
@@ -62,13 +62,33 @@ export class ModelCatalog {
     const model = input.model || null; const effort = input.effort || null;
     if (model !== null && (typeof model !== "string" || model.length > 150 || !/^[a-zA-Z0-9_.\[\]-]+$/.test(model))) throw fail("Invalid model name");
     if (effort !== null && typeof effort !== "string") throw fail("Invalid effort level");
-    if (!model && !effort) return { model: null, effort: null };
+    if (!model && !effort && !Object.hasOwn(input, "serviceTier") && !Object.hasOwn(input, "personality")) return { model: null, effort: null };
     const catalog = await this.list(agent);
     const selected = catalog.models.find(item => item.id === (model || catalog.configuredDefault)) || (!model ? catalog.models.find(item => item.isDefault) : null);
     if (agent === "mock" || (model && !selected)) throw fail("Choose a model from the available models list");
     const allowed = selected?.efforts || (agent === "claude" ? catalog.models.find(item => item.id === "opus")?.efforts : []);
     if (effort && !allowed?.includes(effort)) throw fail("This effort level is not supported by the selected model");
-    return { model, effort };
+    const extra = {};
+    if (Object.hasOwn(input, "serviceTier")) {
+      if (agent !== "codex" || (input.serviceTier !== null && !selected?.serviceTiers?.some(tier => tier.id === input.serviceTier))) throw fail("This service tier is not available for the selected model");
+      extra.serviceTier = input.serviceTier;
+    }
+    if (Object.hasOwn(input, "personality")) {
+      if (agent !== "codex" || !selected?.supportsPersonality || !["friendly", "pragmatic", "none"].includes(input.personality)) throw fail("Choose a supported personality: friendly, pragmatic, or none");
+      extra.personality = input.personality;
+    }
+    return { model, effort, ...extra };
+  }
+  async selected(chat) {
+    const catalog = await this.list(chat.agent);
+    const model = chat.model || catalog.configuredDefault;
+    return catalog.models.find(item => item.id === model) || (!model ? catalog.models.find(item => item.isDefault) : null);
+  }
+  async fastSettings(chat, action = "toggle") {
+    const selected = await this.selected(chat);
+    const tier = selected?.serviceTiers?.find(item => /^fast$/i.test(item.name || "") || item.id === "fast" || item.id === "priority");
+    if (!tier) throw fail("The selected model does not advertise a Fast service tier");
+    return { serviceTier: action === "off" || (action === "toggle" && chat.serviceTier === tier.id) ? null : tier.id };
   }
   async turnSettings(chat) {
     if (chat.agent === "mock") return {};
@@ -77,6 +97,8 @@ export class ModelCatalog {
     const selected = catalog.models.find(item => item.id === target) || (!target ? catalog.models.find(item => item.isDefault) : null);
     if (target && !selected) throw fail(`Model ${target} is not available. Choose another model before sending a message.`);
     const effort = chat.effort || (selected?.efforts.includes(catalog.configuredDefaultEffort) ? catalog.configuredDefaultEffort : selected?.defaultEffort) || null;
-    return { model: chat.model || catalog.configuredDefault || selected?.id || (chat.agent === "claude" ? "default" : null), effort, resetEffort: !effort };
+    return { model: chat.model || catalog.configuredDefault || selected?.id || (chat.agent === "claude" ? "default" : null), effort, resetEffort: !effort,
+      ...(chat.agent === "codex" && Object.hasOwn(chat, "serviceTier") ? { serviceTier: selected?.serviceTiers?.some(tier => tier.id === chat.serviceTier) ? chat.serviceTier : null } : {}),
+      ...(chat.agent === "codex" && chat.personality ? { personality: selected?.supportsPersonality ? chat.personality : "none" } : {}) };
   }
 }

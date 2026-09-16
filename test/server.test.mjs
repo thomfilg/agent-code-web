@@ -36,6 +36,29 @@ test("transcript copies persist rich content without sharing workspaces or start
   assert.equal((await jsonRequest(`${url}/api/chats/${copy.id}`, { headers })).body.chat.messages.length, 61);
 });
 
+test("a rendering sample extends the requested chat in place and is explicit, idempotent and excluded from handoff", async t => {
+  const { handoffPrompt } = await import("../src/agent-handoff.mjs");
+  const root = await temporaryDirectory(t), app = await createAgentWebServer({ config: testConfig(root, { AGENT_WEB_AUTH_TOKEN: "sample-secret" }) });
+  const { url } = await app.start(); t.after(() => app.stop());
+  const chat = await app.manager.createChat({ agent: "mock", title: "Keep this chat" });
+  await app.store.appendMessage(chat.id, { role: "user", text: "Original request" });
+  const before = app.store.get(chat.id), endpoint = `${url}/api/chats/${chat.id}/rendering-sample`, headers = { Authorization: "Bearer sample-secret" };
+  assert.equal((await jsonRequest(endpoint, { method: "POST", body: '{"confirm":true}' })).response.status, 401);
+  assert.equal((await jsonRequest(endpoint, { method: "POST", headers, body: "{}" })).response.status, 403);
+  const result = await jsonRequest(endpoint, { method: "POST", headers, body: '{"confirm":true}' });
+  assert.equal(result.response.status, 200); const after = result.body.chat;
+  assert.equal(after.id, before.id); assert.equal(after.workspace, before.workspace); assert.equal(after.customGroupId, before.customGroupId); assert.equal(after.ownerId, before.ownerId);
+  assert.equal(after.messages.length, before.messages.length + 241); assert.deepEqual(after.messages[0], before.messages[0]);
+  assert.ok(after.messages.reduce((n, m) => n + m.text.length, 0) > 200000); assert.equal(app.store.list().length, 1);
+  assert.equal(after.status, "stopped"); assert.equal(after.agentSessionId, null);
+  const repeat = await jsonRequest(endpoint, { method: "POST", headers, body: '{"confirm":true}' }); assert.equal(repeat.body.chat.messages.length, after.messages.length);
+  assert.doesNotMatch(handoffPrompt({ ...after, needsAgentHandoff: true, messages: [...after.messages, { role: "user", text: "Continue" }] }, "Continue"), /Rendering sample/);
+  const real = await app.store.appendMessage(chat.id, { role: "user", text: "A real request after the samples" });
+  const removed = await jsonRequest(endpoint, { method: "DELETE", headers });
+  assert.equal(removed.response.status, 200); assert.deepEqual(removed.body.chat.messages.map(message => message.id), [before.messages[0].id, real.id]);
+  assert.equal(removed.body.chat.workspace, before.workspace);
+});
+
 test("HTTP UI creates a chat, streams an event, and exposes persisted result", async (t) => {
   const root = await temporaryDirectory(t);
   const app = await createAgentWebServer({ config: testConfig(path.join(root, "data")) });

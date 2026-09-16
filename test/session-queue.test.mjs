@@ -7,6 +7,37 @@ import { CapabilityBroker } from "../src/capabilities.mjs";
 import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
 import { groupTools } from "../public/tool-activity.js";
 
+test("Codex compaction queues behind active work, preserves FIFO, and can wake a stopped session", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const calls = []; let release;
+  const manager = new RuntimeManager({ store, config: testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "10000" }), broker: new CapabilityBroker({ ttlMs: 10000 }),
+    commands: { list: async () => ({ commands: [{ name: "compact", web: true }] }) },
+    adapterFactory: () => ({ start: async () => {}, stop: async () => {}, compact: async () => { calls.push("compact"); }, send: async text => {
+      if (text.includes("hold this turn")) { calls.push("first"); await new Promise(resolve => { release = resolve; }); }
+      else calls.push("after");
+      return { text: "Done" };
+    } }) });
+  t.after(() => manager.shutdown()); const chat = await manager.createChat({ agent: "codex", title: "Compaction fixture" });
+  const first = await manager.submit(chat.id, "hold this turn"); await waitFor(() => release);
+  const queued = await manager.compact(chat.id); assert.equal(queued.queuedMessages[0].text, "/compact");
+  await manager.enqueue(chat.id, "after compaction"); assert.deepEqual(calls, ["first"]);
+  release(); await first.completion; await waitFor(() => calls.length === 3 && !manager.isBusy(chat.id));
+  assert.deepEqual(calls, ["first", "compact", "after"]);
+  assert.deepEqual(store.get(chat.id).messages.filter(message => message.role === "user").map(message => message.text), ["hold this turn", "/compact", "after compaction"]);
+  await manager.stop(chat.id); assert.equal((await manager.sessionInfo(chat.id)).canCompact, true);
+  await manager.compact(chat.id); assert.equal(calls.at(-1), "compact"); assert.equal(calls.length, 4);
+});
+test("Claude queued compaction is sent as the exact native /compact input, without Codex-only restrictions", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const calls = []; let release;
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }),
+    adapterFactory: () => ({ start: async () => {}, stop: async () => {}, send: async text => { calls.push(text); if (text === "hold") await new Promise(resolve => { release = resolve; }); return { text: "Done" }; } }) });
+  t.after(() => manager.shutdown()); const chat = await manager.createChat({ agent: "claude", title: "Claude compact fixture" });
+  const first = await manager.submit(chat.id, "hold"); await waitFor(() => release);
+  await manager.compact(chat.id); release(); await first.completion; await waitFor(() => calls.length === 2 && !manager.isBusy(chat.id));
+  assert.deepEqual(calls, ["hold", "/compact"]);
+});
+
 test("Claude context includes cache writes and reads once, while result totals accumulate across calls", () => {
   const request = { model: "opus", usage: { input_tokens: 2, output_tokens: 4, cache_read_input_tokens: 15477, cache_creation_input_tokens: 31155 } };
   assert.equal(claudeContext(request).contextTokens, 46634);
@@ -63,4 +94,71 @@ test("session info rereads counters that arrive while live inspection is pending
   const info = manager.sessionInfo(chat.id); await waitFor(() => finishInspect);
   await hooks.onEvent({ type: "usage", usage: codexUsage({ last: { totalTokens: 200 }, total: { totalTokens: 200 }, modelContextWindow: 1000 }) });
   finishInspect({}); assert.equal((await info).usage.contextTokens, 200);
+});
+
+async function queueFixture(t, options = {}) {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const calls = []; let release, interruptions = 0, stops = 0;
+  const manager = new RuntimeManager({ store, config: testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "10000" }), broker: new CapabilityBroker({ ttlMs: 10000 }),
+    adapterFactory: () => ({ start: async () => {},
+      stop: async () => { stops++; release?.({ text: "stopped" }); },
+      interrupt: async () => { interruptions++; await options.interrupt?.(); release?.({ text: "interrupted" }); },
+      send: text => { calls.push(text); return new Promise(resolve => { release = resolve; }); } }), ...options.manager });
+  t.after(() => manager.shutdown()); const chat = await manager.createChat({ agent: "mock" });
+  return { store, manager, chat, calls, complete: () => release?.({ text: "done" }), interruptions: () => interruptions, stops: () => stops };
+}
+
+test("Send now interrupts only the turn, sends the selected item once, and retains FIFO for the rest", async t => {
+  const f = await queueFixture(t), { manager, store, chat, calls } = f;
+  const first = await manager.submit(chat.id, "first"); await waitFor(() => calls.length === 1);
+  await manager.enqueue(chat.id, "second"); await manager.enqueue(chat.id, "third"); await manager.enqueue(chat.id, "fourth");
+  const selected = store.get(chat.id).queuedMessages[1];
+  await Promise.all([manager.editQueue(chat.id, { sendNowId: selected.id }), manager.editQueue(chat.id, { sendNowId: selected.id })]);
+  await first.completion; await waitFor(() => calls.length === 2);
+  assert.deepEqual(calls, ["first", "third"]); assert.equal(f.interruptions(), 1); assert.equal(f.stops(), 0);
+  assert.deepEqual(store.get(chat.id).queuedMessages.map(m => m.text), ["second", "fourth"]);
+  await assert.rejects(manager.editQueue(chat.id, { sendNowId: selected.id }), /not found/); assert.equal(f.interruptions(), 1);
+  f.complete(); await waitFor(() => calls.length === 3); assert.equal(calls[2], "second");
+  f.complete(); await waitFor(() => calls.length === 4); assert.equal(calls[3], "fourth");
+  f.complete(); await waitFor(() => !manager.isBusy(chat.id)); assert.equal(store.get(chat.id).queuedMessages.length, 0);
+});
+
+test("Send now works on a paused queue without resuming the other messages; invalid IDs do not interrupt", async t => {
+  const f = await queueFixture(t), { manager, store, chat, calls } = f;
+  await store.update(chat.id, { queuePaused: true }); await manager.enqueue(chat.id, "later"); await manager.enqueue(chat.id, "now");
+  await assert.rejects(manager.editQueue(chat.id, { sendNowId: "wrong-chat-message" }), /not found/);
+  const id = store.get(chat.id).queuedMessages[1].id; await manager.editQueue(chat.id, { sendNowId: id });
+  await waitFor(() => calls.length === 1); f.complete(); await waitFor(() => !manager.isBusy(chat.id));
+  assert.deepEqual(calls, ["now"]); assert.equal(f.interruptions(), 0);
+  assert.equal(store.get(chat.id).queuePaused, true); assert.equal(store.get(chat.id).queuedMessages[0].text, "later");
+});
+
+test("manual Stop wins over an in-flight Send now and retains the queued input", async t => {
+  let finishInterrupt;
+  const f = await queueFixture(t, { interrupt: () => new Promise(resolve => { finishInterrupt = resolve; }) }), { manager, store, chat, calls } = f;
+  await manager.submit(chat.id, "first"); await waitFor(() => calls.length === 1);
+  await manager.enqueue(chat.id, "never send after stop"); const id = store.get(chat.id).queuedMessages[0].id;
+  const sending = manager.editQueue(chat.id, { sendNowId: id }); const rejected = assert.rejects(sending, /cancelled/);
+  await waitFor(() => finishInterrupt); await manager.stop(chat.id); finishInterrupt(); await rejected;
+  assert.deepEqual(calls, ["first"]); assert.equal(store.get(chat.id).queuePaused, true);
+  assert.equal(store.get(chat.id).queuedMessages[0].id, id); assert.equal(store.get(chat.id).status, "stopped");
+});
+
+test("Send now cancels asynchronous turn preparation before the old prompt reaches an agent", async t => {
+  let finishSettings, preparations = 0;
+  const f = await queueFixture(t, { manager: { models: { creationSettings: async () => ({}), turnSettings: () => ++preparations === 1 ? new Promise(resolve => { finishSettings = resolve; }) : {} } } });
+  const { manager, store, chat, calls } = f;
+  await manager.submit(chat.id, "old prompt"); await waitFor(() => finishSettings);
+  await manager.enqueue(chat.id, "priority"); const id = store.get(chat.id).queuedMessages[0].id;
+  const sending = manager.editQueue(chat.id, { sendNowId: id }); finishSettings({}); await sending;
+  await waitFor(() => calls.length === 1); assert.deepEqual(calls, ["priority"]); f.complete(); await waitFor(() => !manager.isBusy(chat.id));
+});
+
+test("failed Send now keeps its attachments and the selected message for retry", async t => {
+  let rejectAttachment = false;
+  const f = await queueFixture(t, { manager: { attachments: { resolve: async (_id, ids) => { if (rejectAttachment) throw new Error("Attachment unavailable"); assert.deepEqual(ids, ["upload-1"]); return []; } } } });
+  const { manager, store, chat } = f; await store.update(chat.id, { queuePaused: true });
+  await manager.enqueue(chat.id, "with file", ["upload-1"]); const selected = store.get(chat.id).queuedMessages[0]; rejectAttachment = true;
+  await assert.rejects(manager.editQueue(chat.id, { sendNowId: selected.id }), /Attachment unavailable/);
+  assert.deepEqual(store.get(chat.id).queuedMessages, [selected]); assert.equal(manager.isBusy(chat.id), false);
 });

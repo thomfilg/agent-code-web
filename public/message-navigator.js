@@ -1,7 +1,7 @@
 const make = (tag, cls, text) => { const n = document.createElement(tag); n.className = cls; if (text !== undefined) n.textContent = text; return n; };
 export class MessageNavigator {
-  constructor({ state, scroller, root }) {
-    Object.assign(this, { state, scroller, root }); this.key = ""; this.readingHistory = false;
+  constructor({ state, scroller, root, ensureVisible, atLatest = () => true }) {
+    Object.assign(this, { state, scroller, root, ensureVisible }); this.key = ""; this.readingHistory = false;
     this.toggle = root.querySelector("button"); this.list = root.querySelector(".message-nav-list"); this.ticks = root.querySelector(".message-nav-ticks");
     this.toggle.onclick = () => { this.open = !this.open; this.root.dataset.open = String(this.open); this.toggle.setAttribute("aria-expanded", String(this.open)); };
     root.onkeydown = event => { if (event.key === "Escape") { this.close(); this.toggle.focus(); event.preventDefault(); this.root.dataset.dismissed = "true"; } };
@@ -10,11 +10,11 @@ export class MessageNavigator {
     root.onfocusin = () => { delete this.root.dataset.dismissed; this.toggle.setAttribute("aria-expanded", "true"); };
     root.onfocusout = event => { if (!root.contains(event.relatedTarget)) this.close(); };
     document.addEventListener("pointerdown", event => { if (!root.contains(event.target)) this.close(); });
-    scroller.addEventListener("scroll", () => { if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40) this.readingHistory = false; this.mark(); }, { passive: true });
+    scroller.addEventListener("scroll", () => { if (atLatest() && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40) this.readingHistory = false; this.mark(); }, { passive: true });
   }
   close() { this.open = false; this.root.dataset.open = "false"; this.toggle.setAttribute("aria-expanded", "false"); }
   update() {
-    const chat = this.state.active, messages = (chat?.messages || []).filter(m => m.role === "user");
+    const chat = this.state.active, messages = (chat?.messages || []).filter(m => m.role === "user" && !m.meta?.renderingSample);
     this.root.hidden = !messages.length;
     const key = `${chat?.id}:${messages.map(m => m.id).join(",")}`;
     if (key !== this.key) {
@@ -30,6 +30,8 @@ export class MessageNavigator {
     this.mark();
   }
   jump(id) {
+    this.readingHistory = true;
+    this.ensureVisible?.(id);
     const target = [...this.scroller.querySelectorAll(".message.user")].find(n => n.dataset.messageId === id); if (!target) return;
     this.readingHistory = true; this.close(); this.root.dataset.dismissed = "true";
     target.tabIndex = -1; target.focus({ preventScroll: true });

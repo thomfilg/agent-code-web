@@ -4,9 +4,9 @@ import { CapabilityBroker } from "./capabilities.mjs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpOAuth } from "./mcp-oauth.mjs";
-import { repositoryGroup } from "../public/chat-organization.js";
+import { companyForChat, companyScope, normalizeCompanyScope, scopeAllows, scopesOverlap } from "../public/company-scope.js";
 const fail = message => Object.assign(new Error(message), { statusCode: 400 });
-const publicConnection = ({ headers, oauth, oauthClientSecret, authGeneration, ...connection }) => ({ ...connection, authMode: connection.authMode || (Object.keys(headers || {}).length ? "headers" : "none"), headerNames: Object.keys(headers || {}), hasCredentials: Boolean(Object.keys(headers || {}).length), oauthConnected: Boolean(oauth?.tokens), hasClientSecret: Boolean(oauthClientSecret), health: connection.health || { status: "unverified" } });
+const publicConnection = ({ headers, oauth, oauthClientSecret, authGeneration, ...connection }) => ({ ...connection, ...companyScope(connection), scopeNeedsReview: !Array.isArray(connection.companies) && !connection.organization, authMode: connection.authMode || (Object.keys(headers || {}).length ? "headers" : "none"), headerNames: Object.keys(headers || {}), hasCredentials: Boolean(Object.keys(headers || {}).length), oauthConnected: Boolean(oauth?.tokens), hasClientSecret: Boolean(oauthClientSecret), health: connection.health || { status: "unverified" } });
 
 export class McpConnections {
   constructor(records, { ttlMs = 86400000, fetchImpl = fetch } = {}) {
@@ -31,9 +31,8 @@ export class McpConnections {
     if (old && input.revision !== old.revision) throw Object.assign(new Error("Connection changed; reload before saving"), { statusCode: 409 });
     const name = String(input.name || "").trim();
     if (!/^[a-zA-Z][\w-]{0,63}$/.test(name)) throw fail("MCP name must start with a letter and use up to 64 letters, numbers, underscores or hyphens");
-    const organization = String(input.organization === undefined ? old?.organization || "" : input.organization || "").trim().toLowerCase();
-    if (organization && !/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(organization)) throw fail("Organization must be a GitHub owner, such as 12-apps or g2i (leave blank for shared)");
-    if ((await this.list()).some(c => c.id !== id && c.name.toLowerCase() === name.toLowerCase() && (c.organization || "").toLowerCase() === organization)) throw fail("An MCP connection with this name already exists in this organization or shared scope");
+    const scope = normalizeCompanyScope(input, old || {});
+    if ((await this.list()).some(c => c.id !== id && c.name.toLowerCase() === name.toLowerCase() && scopesOverlap(c, scope))) throw fail("An MCP connection with this name already exists for one of the selected companies. Use a distinct name or non-overlapping companies.");
     if (!["http", "stdio"].includes(input.type)) throw fail("Choose HTTP or stdio transport");
     let data;
     if (input.type === "http") {
@@ -59,7 +58,7 @@ export class McpConnections {
       if (input.headers && Object.keys(input.headers).length || input.env && Object.keys(input.env).length) throw fail("Protected credentials are supported with HTTP MCP connections. Do not put secrets in stdio commands or arguments.");
       data = { command: input.command.trim(), args: input.args };
     }
-    const value = { id: id || `mcp_${randomUUID()}`, name, organization: organization || null, type: input.type, ...data, authGeneration: randomUUID(), health: { status: input.type === "stdio" ? "worker_pending" : data.authMode === "oauth" && !data.oauth ? "needs_auth" : "unverified" }, revision: (old?.revision || 0) + 1, updatedAt: new Date().toISOString() };
+    const value = { id: id || `mcp_${randomUUID()}`, name, ...scope, organization: scope.companies.length === 1 ? scope.companies[0] : null, type: input.type, ...data, authGeneration: randomUUID(), health: { status: input.type === "stdio" ? "worker_pending" : data.authMode === "oauth" && !data.oauth ? "needs_auth" : "unverified" }, revision: (old?.revision || 0) + 1, updatedAt: new Date().toISOString() };
     await this.records.put("mcp", value.id, value); if (old) this.revokeConnection(value.id); return publicConnection(value);
   }
   async validateSelection(ids) {
@@ -106,16 +105,16 @@ export class McpConnections {
   }
   async runtime(chatId, ids, origin, chat = {}) {
     await this.validateSelection(ids); this.revokeChat(chatId);
-    const primary = repositoryGroup(chat), organization = primary.fullName ? primary.company.toLowerCase() : null;
+    const company = companyForChat(chat);
     // Match the primary repository, never secondary repositories or display groups.
     // Filter before granting credentials, including for stdio servers.
-    const connections = (await Promise.all(ids.map(id => this.get(id)))).filter(c => !c.organization || c.organization.toLowerCase() === organization);
+    const connections = (await Promise.all(ids.map(id => this.get(id)))).filter(c => scopeAllows(c, company));
     const token = connections.length ? this.broker.issue({ chatId, provider: "mcp" }) : null;
     this.grants.set(chatId, new Map(connections.map(connection => [connection.id, { connection, sessions: new Set(), streams: new Set() }])));
-    const names = new Set(connections.filter(c => !c.organization).map(c => `relay_${c.name}`));
+    const names = new Set(connections.filter(c => !companyScope(c).companies.length).map(c => `relay_${c.name}`));
     return Object.fromEntries(connections.map(c => {
       let name = `relay_${c.name}`;
-      if (c.organization) {
+      if (companyScope(c).companies.length) {
         name = `relay_${c.name.slice(0, 20)}_${c.id.slice(4).replaceAll("-", "")}`;
         while (names.has(name)) name += "_";
         names.add(name);
@@ -126,6 +125,10 @@ export class McpConnections {
     }));
   }
   revokeChat(chatId) { for (const selected of this.grants.get(chatId)?.values() || []) for (const controller of selected.streams) controller.abort(); this.broker.revokeChat(chatId); this.grants.delete(chatId); }
+  restrictChat(chatId, allowedIds) {
+    const connections = this.grants.get(chatId); if (!connections) return;
+    for (const [id, selected] of connections) if (!allowedIds.includes(id)) { for (const controller of selected.streams) controller.abort(); connections.delete(id); }
+  }
   revokeConnection(id) { for (const connections of this.grants.values()) { for (const controller of connections.get(id)?.streams || []) controller.abort(); connections.delete(id); } }
   async handle(request, response, url) {
     const match = /^\/gateway\/mcp\/(mcp_[a-f0-9-]{36})$/.exec(url.pathname); if (!match) return false;
@@ -139,6 +142,8 @@ export class McpConnections {
     const current = await this.records.get("mcp", connection.id);
     if (!current || current.authGeneration !== connection.authGeneration) return finish(401, "MCP connection changed or disconnected. Restart the worker.");
     let headers; try { headers = await this.oauth.headers(connection); } catch { return finish(401, "MCP sign-in expired. Reconnect in MCP connections, then restart the worker."); }
+    const authenticated = await this.records.get("mcp", connection.id);
+    if (this.grants.get(grant.chatId)?.get(connection.id) !== selected || authenticated?.authGeneration !== connection.authGeneration) return finish(401, "MCP access was revoked while authenticating");
     for (const key of ["accept", "content-type", "mcp-session-id", "mcp-protocol-version", "last-event-id"]) if (request.headers[key]) headers.set(key, request.headers[key]);
     const controller = new AbortController(); selected.streams.add(controller); const timer = setTimeout(() => controller.abort(), 3600000);
     response.once("close", () => { clearTimeout(timer); selected.streams.delete(controller); controller.abort(); });

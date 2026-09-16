@@ -94,11 +94,13 @@ test("GitHub picker preserves repository order, branches, selection and inline e
   await page.goto("/"); await page.getByRole("button", { name: /New chat/ }).click();
   await expect(page.locator("#new-chat-title")).toHaveCount(0);
   await page.locator("#connect-github-button").click();
+  await page.locator("#github-companies").getByLabel("Add companies", { exact: true }).fill("acme, other");
+  await page.locator("#github-companies").getByRole("button", { name: "Add companies", exact: true }).click();
   await page.getByRole("button", { name: "Use this server’s gh login" }).click();
   await expect(page.locator("#github-dialog")).not.toBeVisible();
   await page.locator(".repository-picker-dropdown > summary").click();
-  await page.getByLabel("Acme/api", { exact: false }).check();
-  await page.getByLabel("Other/library", { exact: false }).check();
+  await page.getByRole("checkbox", { name: /^Acme\/api / }).check();
+  await page.getByRole("checkbox", { name: /^Other\/library / }).check();
   await page.getByLabel("Branch for Acme/api").focus();
   await expect(page.getByLabel("Branch for Acme/api").locator("option")).toHaveCount(2);
   await page.getByLabel("Branch for Acme/api").selectOption("develop");

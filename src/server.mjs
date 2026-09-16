@@ -107,11 +107,11 @@ export async function createAgentWebServer(options = {}) {
   const environments = new Environments(records, config.workerBackend, mcps);
   const models = options.models || new ModelCatalog(config);
   const attachments = new Attachments(records, store);
-  const commands = options.commands || new CommandCatalog(config);
+  const commands = options.commands || new CommandCatalog(config, models);
   await environments.initialize();
   let manager = null;
   const browserSockets = new WebSocketServer({ noServer: true, maxPayload: 100000, perMessageDeflate: false });
-  const personalSockets = new WebSocketServer({ noServer: true, maxPayload: 4 * 1024 * 1024, perMessageDeflate: false });
+  const personalSockets = new WebSocketServer({ noServer: true, maxPayload: 48 * 1024 * 1024, perMessageDeflate: false });
   const releaseIdentity = async user => {
     if (!user) return;
     await manager?.browsers.personal?.revokeOwner(user.id);
@@ -208,6 +208,7 @@ export async function createAgentWebServer(options = {}) {
           agents: manager.availableAgents(),
           workspaceSource: config.workspaceSource,
           database: records.kind,
+          features: { companyScopes: true },
         });
       }
       if (url.pathname === "/api/github" && request.method === "GET") return json(response, 200, await github.status());
@@ -234,10 +235,13 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/models" && request.method === "GET") return json(response, 200, await models.list(url.searchParams.get("agent")));
       if (url.pathname === "/api/github" && request.method === "POST") return json(response, 200, await github.connect(await bodyJson(request, config.maxBodyBytes)));
       if (url.pathname === "/api/github" && request.method === "DELETE") return json(response, 200, await github.disconnect());
-      if (url.pathname === "/api/github/device" && request.method === "POST") return json(response, 200, await github.beginDevice());
+      const githubRoute = /^\/api\/github\/connections\/(github(?:_[a-f0-9-]{36})?)$/.exec(url.pathname);
+      if (githubRoute && request.method === "PATCH") return json(response, 200, await github.connect({ ...await bodyJson(request, config.maxBodyBytes), id: githubRoute[1] }));
+      if (githubRoute && request.method === "DELETE") return json(response, 200, await github.disconnect(githubRoute[1]));
+      if (url.pathname === "/api/github/device" && request.method === "POST") return json(response, 200, await github.beginDevice(await bodyJson(request, config.maxBodyBytes)));
       if (url.pathname === "/api/github/device/poll" && request.method === "POST") return json(response, 200, await github.pollDevice((await bodyJson(request, config.maxBodyBytes)).id));
       if (url.pathname === "/api/github/repositories" && request.method === "GET") return json(response, 200, { repositories: await github.repositories(url.searchParams.get("q") || "", url.searchParams.get("refresh") === "1") });
-      if (url.pathname === "/api/github/branches" && request.method === "GET") return json(response, 200, { branches: await github.branches(url.searchParams.get("repository")) });
+      if (url.pathname === "/api/github/branches" && request.method === "GET") return json(response, 200, { branches: await github.branches(url.searchParams.get("repository"), url.searchParams.get("connection") || undefined) });
       if (url.pathname === "/api/environments" && request.method === "GET") return json(response, 200, { environments: await environments.list(), software: SOFTWARE_CATALOG });
       if (url.pathname === "/api/environments" && request.method === "POST") return json(response, 201, { environment: await environments.save(await bodyJson(request, config.maxBodyBytes)) });
       const environmentRoute = /^\/api\/environments\/(env_[a-f0-9-]{36})(?:\/(reveal))?$/.exec(url.pathname);
@@ -257,7 +261,8 @@ export async function createAgentWebServer(options = {}) {
         await environments.get(body.environmentId);
         if (!Array.isArray(body.repositories) || body.repositories.length > 100 || body.repositories.some(repo => typeof repo.fullName !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(repo.fullName) || typeof repo.branch !== "string" || repo.branch.length > 250)) throw new Error("Invalid repository preferences");
         const modelSettings = await models.validate(body.agent, body);
-        const preferences = { environmentId: body.environmentId, agent: ["codex", "claude", "mock"].includes(body.agent) ? body.agent : null, ...modelSettings, repositories: body.repositories.map(({ fullName, branch }) => ({ fullName, branch })) };
+        if (body.repositories.some(repo => repo.githubConnectionId && !/^github(?:_[a-f0-9-]{36})?$/.test(repo.githubConnectionId))) throw new Error("Invalid GitHub connection preference");
+        const preferences = { environmentId: body.environmentId, agent: ["codex", "claude", "mock"].includes(body.agent) ? body.agent : null, ...modelSettings, repositories: body.repositories.map(({ fullName, branch, githubConnectionId }) => ({ fullName, branch, ...(githubConnectionId ? { githubConnectionId } : {}) })) };
         await records.put("preferences", "new-chat", preferences);
         return json(response, 200, { preferences });
       }
@@ -298,6 +303,7 @@ export async function createAgentWebServer(options = {}) {
         const { chatId, tail } = routed;
         request.guardChat = () => { if (!browserUsers.canRead(store.get(chatId), user)) throw Object.assign(new Error("Chat not found"), { statusCode: 404 }); };
         request.guardChat();
+        if (tail === "presence" && request.method === "POST") return json(response, 200, await manager.setPresence(chatId, await bodyJson(request, 1000)));
         if (tail === "browser/access" && request.method === "GET") return json(response, 200, manager.browsers.personal.info(chatId, user));
         if (tail === "browser/access" && request.method === "PATCH") {
           browserUsers.require(user); const input = await bodyJson(request, 2000);
@@ -319,9 +325,88 @@ export async function createAgentWebServer(options = {}) {
         if (tail === "browser" && request.method === "POST") { await manager.browsers.ensure(chatId); return json(response, 200, manager.browsers.info(chatId)); }
         if (tail === "browser" && request.method === "DELETE") { await manager.browsers.stop(chatId, false); await manager.browserIdle(chatId); return json(response, 200, { stopped: true }); }
         if (tail === "copy" && request.method === "POST") return json(response, 201, { chat: await manager.copyTranscript(chatId, await bodyJson(request, config.maxBodyBytes), user?.id) });
+        if (tail === "fork" && request.method === "POST") return json(response, 201, { chat: await manager.forkChat(chatId, await bodyJson(request, 2000), user?.id || null) });
+        if (tail === "rendering-sample" && request.method === "POST") return json(response, 200, { chat: await manager.appendRenderingSample(chatId, (await bodyJson(request, 1000)).confirm) });
+        if (tail === "rendering-sample" && request.method === "DELETE") return json(response, 200, { chat: await manager.removeRenderingSample(chatId) });
         if (tail === "commands" && request.method === "GET") {
           const chat = store.get(chatId); if (!chat) return json(response, 404, { error: "Chat not found" });
           return json(response, 200, await commands.list(chat));
+        }
+        if (["apps", "apps/select"].includes(tail) && request.method === "POST") {
+          const input = await bodyJson(request, 2000); request.guardChat();
+          if (tail === "apps/select" && (typeof input.appId !== "string" || typeof input.threadId !== "string")) throw new Error("Choose an app from this chat's picker");
+          const result = await manager.nativeApps(chatId, tail === "apps/select" ? { appId: input.appId, threadId: input.threadId } : {}, request.guardChat);
+          request.guardChat(); return json(response, 200, result);
+        }
+        if (["plugins", "plugins/change", "hooks", "hooks/change", "experimental", "experimental/change", "memories", "memories/change"].includes(tail) && request.method === "POST") {
+          const input = await bodyJson(request, 2000); request.guardChat();
+          const method = tail.startsWith("hooks") ? "nativeHooks" : tail.startsWith("experimental") ? "nativeFeatures" : tail.startsWith("memories") ? "nativeMemories" : "nativePlugins";
+          const result = await manager[method](chatId, tail.endsWith("/change") ? { id: input.id, action: input.action, threadId: input.threadId, revision: input.revision, confirm: input.confirm } : {}, request.guardChat);
+          request.guardChat(); return json(response, 200, result);
+        }
+        if (["imports", "imports/status", "imports/refresh", "imports/start", "imports/acknowledge", "imports/open"].includes(tail) && request.method === "POST") {
+          const input = await bodyJson(request, 16000); request.guardChat();
+          const action = tail.split("/")[1] || "list";
+          const selected = action === "start" ? { requestId: input.requestId, source: input.source, revision: input.revision, threadId: input.threadId, ids: input.ids, confirm: input.confirm }
+            : action === "open" ? { operationId: input.operationId, sessionId: input.sessionId, threadId: input.threadId, confirm: input.confirm }
+            : action === "acknowledge" ? { id: input.id, threadId: input.threadId, confirm: input.confirm } : action === "list" ? { source: input.source } : {};
+          const result = await manager.nativeImports(chatId, action, selected, request.guardChat);
+          request.guardChat(); return json(response, 200, result);
+        }
+        if (tail === "workspace-files" && request.method === "GET") return json(response, 200, await manager.workspaceFiles(chatId, "status"));
+        if (/^workspace-files\/(connect|presence|list|read|attach)$/.test(tail) && request.method === "POST") {
+          const input = await bodyJson(request, 12000); request.guardChat();
+          const result = await manager.workspaceFiles(chatId, tail.split("/")[1], input);
+          request.guardChat(); return json(response, 200, result);
+        }
+        if (tail === "commands/inspect" && request.method === "GET") return json(response, 200, await manager.inspectCommand(chatId, url.searchParams.get("command")));
+        if (tail === "logout" && request.method === "GET") {
+          const result = await manager.nativeLogout(chatId, "status", {}, request.guardChat); request.guardChat(); return json(response, 200, result);
+        }
+        if (["logout/inspect", "logout/confirm"].includes(tail) && request.method === "POST") {
+          const input = await bodyJson(request, 2000); request.guardChat();
+          const result = await manager.nativeLogout(chatId, tail.split("/")[1], { id: input.id, revision: input.revision, threadId: input.threadId, confirm: input.confirm }, request.guardChat);
+          request.guardChat(); return json(response, 200, result);
+        }
+        if (tail === "feedback" && request.method === "GET") {
+          const result = await manager.nativeFeedback(chatId, "status", {}, request.guardChat); request.guardChat();
+          return json(response, 200, result);
+        }
+        if (["feedback/policy", "feedback/prepare", "feedback/send"].includes(tail) && request.method === "POST") {
+          const input = await bodyJson(request, 30000); request.guardChat();
+          const action = tail.split("/")[1];
+          const selected = action === "prepare" ? { classification: input.classification, reason: input.reason, includeLogs: input.includeLogs }
+            : action === "send" ? { id: input.id, revision: input.revision, threadId: input.threadId, confirm: input.confirm } : {};
+          const result = await manager.nativeFeedback(chatId, action, selected, request.guardChat); request.guardChat();
+          return json(response, 200, result);
+        }
+        if (tail === "approvals" && request.method === "GET") {
+          const result = await manager.nativeApprovals(chatId, null, request.guardChat); request.guardChat();
+          return json(response, 200, result);
+        }
+        if (tail === "approvals/retry" && request.method === "POST") {
+          const input = await bodyJson(request, 2000); request.guardChat();
+          const result = await manager.nativeApprovals(chatId, { id: input.id, revision: input.revision, threadId: input.threadId, confirm: input.confirm }, request.guardChat);
+          request.guardChat(); return json(response, 202, result);
+        }
+        if (tail === "commands/inspect" && request.method === "POST") {
+          const input = await bodyJson(request, 1000);
+          if (input.confirm !== true) throw new Error("Confirm stopping the selected background terminal");
+          if (!Object.hasOwn(input, "terminate")) throw new Error("Choose a background terminal from this chat");
+          return json(response, 200, await manager.inspectCommand(chatId, "ps", input.terminate));
+        }
+        if (tail === "side" && request.method === "GET") return json(response, 200, manager.sideChats.get(chatId));
+        if (tail === "subagents" && request.method === "GET") return json(response, 200, await manager.agentThreads.get(chatId));
+        if (tail === "subagents" && request.method === "POST") return json(response, 200, await manager.agentThreadAction(chatId, "refresh"));
+        if (/^subagents\/(select|messages|stop|respond)$/.test(tail) && request.method === "POST") return json(response, 200, await manager.agentThreadAction(chatId, tail.split("/")[1], await bodyJson(request, config.maxBodyBytes)));
+        if (tail === "side" && request.method === "POST") return json(response, 200, await manager.sideChats.open(chatId));
+        if ((tail === "side" && request.method === "DELETE") || (tail.startsWith("side/") && request.method === "POST")) {
+          const input = await bodyJson(request, config.maxBodyBytes);
+          if (typeof input.sideId !== "string" || !input.sideId) throw new Error("Choose the active side chat");
+          if (tail === "side") return json(response, 200, await manager.sideChats.close(chatId, input.sideId));
+          if (tail === "side/messages") return json(response, 202, await manager.sideChats.send(chatId, input.sideId, input));
+          if (tail === "side/stop") return json(response, 200, await manager.sideChats.interrupt(chatId, input.sideId));
+          if (tail === "side/respond") return json(response, 200, await manager.sideChats.respond(chatId, input.sideId, input.requestId, input));
         }
         if (tail === "queue" && request.method === "POST") {
           const body = await bodyJson(request, config.maxBodyBytes);
@@ -335,7 +420,13 @@ export async function createAgentWebServer(options = {}) {
           return json(response, 200, chat.workspaceChanges || { files: chat.workspaceDiff ? [{ filename: "Latest Codex turn", patch: chat.workspaceDiff }] : [], note: "A workspace snapshot is captured after the agent's next completed turn. This view does not wake a sleeping worker." });
         }
         if (tail === "attachments" && request.method === "POST") return json(response, 201, { attachment: await attachments.upload(chatId, await bodyJson(request, 7 * 1024 * 1024)) });
+        const attachmentMatch = /^attachments\/(file_[a-f0-9-]{36})$/.exec(tail);
+        if (attachmentMatch && request.method === "GET") {
+          const [file] = await attachments.resolve(chatId, [attachmentMatch[1]]);
+          request.guardChat(); return json(response, 200, { attachment: file });
+        }
         if (tail === "session-info" && request.method === "GET") return json(response, 200, await manager.sessionInfo(chatId));
+        if (tail === "goal" && request.method === "PATCH") return json(response, 200, { chat: await manager.goalAction(chatId, (await bodyJson(request, 1000)).action) });
         if (tail === "compact" && request.method === "POST") { await manager.compact(chatId); return json(response, 200, { compacted: true }); }
         if (tail === "pull-requests/files" && request.method === "GET") {
           return json(response, 200, await manager.pullRequests.files(chatId, url.searchParams.get("repository"), Number(url.searchParams.get("number"))));
@@ -509,8 +600,9 @@ export async function createAgentWebServer(options = {}) {
       commands,
       adapterFactory: options.adapterFactory || null,
     });
-    manager.browsers = new SharedBrowsers({ store, config, acquire: chatId => manager.browserExecutor(chatId), onIdle: chatId => manager.browserIdle(chatId), ...options.browserOptions });
+    manager.browsers = new SharedBrowsers({ store, config, acquire: chatId => manager.browserExecutor(chatId), onIdle: chatId => manager.browserIdle(chatId), isActive: chatId => manager.presence.has(chatId), onViewers: chatId => manager.refreshActivity(chatId), ...options.browserOptions });
     manager.browsers.personal = new BrowserConnections({ records, store, ttlMs: config.sessionCapabilityTtlMs });
+    manager.browsers.personal.on("viewers", chatId => { void manager.refreshActivity(chatId).catch(() => {}); });
     manager.browsers.personal.on("changed", chatId => {
       manager.browsers.touch(chatId);
       for (const socket of manager.browsers.entries.get(chatId)?.viewers || []) socket.close(4001, "Browser access changed");

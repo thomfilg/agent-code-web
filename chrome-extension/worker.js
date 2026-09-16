@@ -3,6 +3,41 @@
 let socket, saved, tabId = null, grantId = null, chatTitle = "", heartbeat, reconnectTimer, watching = false;
 let viewport = { width: 1280, height: 800 };
 let transition = 0, pendingAuthorization = null;
+let dialogOpen = false;
+let layoutQueue = Promise.resolve(), captureVersion = 0, captureTimer, capturing = false, frameRequested = false, lastCaptureAt = 0;
+const pixelRatio = ({ width, height }) => width * height <= 2097152 ? 2 : 1;
+function updateLayout(action) {
+  const pending = layoutQueue.then(action); layoutQueue = pending.catch(() => {}); return pending;
+}
+function invalidateFrames() { captureVersion++; clearTimeout(captureTimer); captureTimer = null; frameRequested = false; }
+function requestFrame() {
+  if (!watching || !grantId || dialogOpen) return;
+  frameRequested = true;
+  if (captureTimer || capturing) return;
+  captureTimer = setTimeout(() => {
+    captureTimer = null; frameRequested = false; capturing = true;
+    lastCaptureAt = Date.now();
+    void updateLayout(async () => {
+      if (!watching || !grantId || dialogOpen) return;
+      const version = captureVersion, expected = grantId, size = { ...viewport };
+      const { data } = await cdp("Page.captureScreenshot", { format: "png", captureBeyondViewport: false }, expected);
+      if (watching && grantId === expected && captureVersion === version && socket?.bufferedAmount < 2 * 1024 * 1024)
+        send({ event: "frame", grantId: expected, value: { data, mimeType: "image/png", ...size } });
+    }).catch(() => {}).finally(() => { capturing = false; if (frameRequested) requestFrame(); });
+  }, Math.max(0, 100 - (Date.now() - lastCaptureAt)));
+}
+async function setWatching(enabled, expected) {
+  if (grantId !== expected) throw Error("Agent access changed");
+  watching = enabled; invalidateFrames();
+  await cdp("Page.stopScreencast", {}, expected).catch(() => {});
+  if (watching) {
+    // Screencast frames are always 1x: use their repaint notifications to trigger
+    // lossless high-DPI screenshots, coalesced to at most 10 frames per second.
+    await cdp("Page.startScreencast", { format: "png", maxWidth: viewport.width, maxHeight: viewport.height, everyNthFrame: 1 }, expected);
+    if (grantId === expected) requestFrame();
+  }
+  return {};
+}
 // MV3 event listeners must register synchronously. Top-level await prevents
 // Chrome's service worker from starting and leaves popup messages unanswered.
 const initialized = chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
@@ -26,12 +61,13 @@ async function state(expected = grantId) {
   if (tabId === null) return { running: false, mode: "personal", tabs: [] };
   const info = await evaluate("({title:document.title,url:location.href})", expected);
   if (expected !== grantId) throw Error("Agent access changed");
-  return { running: true, mode: "personal", tabId: String(tabId), tabs: [{ id: String(tabId), title: info.title || "Signed-in Chrome", url: info.url || "about:blank" }], viewport };
+  return { running: true, mode: "personal", tabId: String(tabId), tabs: [{ id: String(tabId), title: info.title || "Signed-in Chrome", url: info.url || "about:blank" }], viewport, captureVersion: 2 };
 }
 async function revoke(notify = true, invalidate = true) {
   const previousGrant = grantId || pendingAuthorization;
   if (invalidate) { transition++; pendingAuthorization = null; }
-  const previous = tabId; grantId = null; tabId = null; watching = false; chatTitle = "";
+  const previous = tabId; grantId = null; tabId = null; watching = false; dialogOpen = false; chatTitle = "";
+  invalidateFrames();
   await chrome.action.setBadgeText({ text: "" });
   if (previous !== null) {
     await chrome.debugger.detach({ tabId: previous }).catch(() => {});
@@ -53,7 +89,7 @@ async function authorize(id, params) {
     if (grantId !== id) throw Error("Access cancelled");
     await cdp("Page.enable", {}, id); await cdp("Runtime.enable", {}, id);
     await cdp("Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Request" }] }, id);
-    await cdp("Emulation.setDeviceMetricsOverride", { ...viewport, deviceScaleFactor: 1, mobile: false }, id);
+    await cdp("Emulation.setDeviceMetricsOverride", { ...viewport, deviceScaleFactor: pixelRatio(viewport), mobile: false }, id);
     if (grantId !== id) throw Error("Access cancelled");
     await chrome.action.setBadgeText({ text: "ON" }); await chrome.action.setBadgeBackgroundColor({ color: "#d3992f" });
     return state(id);
@@ -72,20 +108,24 @@ async function command(action, params = {}, expected = grantId) {
   const read = expression => evaluate(expression, expected);
   switch (action) {
     case "status": return state(expected);
-    case "navigate": { const result = await call("Page.navigate", { url: safeUrl(params.url) }); if (result.errorText) throw Error(result.errorText); return {}; }
-    case "reload": return call("Page.reload");
-    case "back": case "forward": { const h = await call("Page.getNavigationHistory"); const entry = h.entries[h.currentIndex + (action === "back" ? -1 : 1)]; if (entry) { safeUrl(entry.url); await call("Page.navigateToHistoryEntry", { entryId: entry.id }); } return {}; }
+    case "navigate": { const result = await updateLayout(() => call("Page.navigate", { url: safeUrl(params.url) })); if (result.errorText) throw Error(result.errorText); return {}; }
+    case "reload": return updateLayout(() => call("Page.reload"));
+    case "back": case "forward": { const h = await call("Page.getNavigationHistory"); const entry = h.entries[h.currentIndex + (action === "back" ? -1 : 1)]; if (entry) { safeUrl(entry.url); await updateLayout(() => call("Page.navigateToHistoryEntry", { entryId: entry.id })); } return {}; }
     case "resize": {
       const { width, height } = params;
       if (!Number.isInteger(width) || width < 320 || width > 2560 || !Number.isInteger(height) || height < 240 || height > 1600) throw Error("Invalid viewport");
-      viewport = { width, height }; await call("Emulation.setDeviceMetricsOverride", { ...viewport, deviceScaleFactor: 1, mobile: false }); return state(expected);
+      return updateLayout(async () => {
+        const wasWatching = watching;
+        await setWatching(false, expected);
+        await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: pixelRatio(params), mobile: false });
+        if (grantId !== expected) throw Error("Agent access changed");
+        viewport = { width, height };
+        if (wasWatching) await setWatching(true, expected);
+        const resized = await state(expected); send({ event: "status", grantId: expected, value: resized }); return resized;
+      });
     }
-    case "watch": {
-      watching = params.enabled === true; await call("Page.stopScreencast").catch(() => {});
-      if (watching) { await call("Page.startScreencast", { format: "jpeg", quality: 75, ...{ maxWidth: viewport.width, maxHeight: viewport.height } }); const { data } = await call("Page.captureScreenshot", { format: "jpeg", quality: 75 }); if (grantId === expected) send({ event: "frame", grantId: expected, value: { data, ...viewport } }); }
-      return {};
-    }
-    case "screenshot": return { ...await call("Page.captureScreenshot", { format: "png" }), ...viewport };
+    case "watch": return updateLayout(() => setWatching(params.enabled === true, expected));
+    case "screenshot": return updateLayout(async () => ({ ...await call("Page.captureScreenshot", { format: "png" }), ...viewport }));
     case "evaluate": return read(params.expression);
     case "snapshot": {
       const { nodes } = await call("Accessibility.getFullAXTree");
@@ -99,15 +139,15 @@ async function command(action, params = {}, expected = grantId) {
       await command("mouse", { type: "mousePressed", ...point, button: "left", buttons: 1, clickCount: 1 }, expected);
       await command("mouse", { type: "mouseReleased", ...point, button: "left", clickCount: 1 }, expected); return {};
     }
-    case "text": if (typeof params.text !== "string" || params.text.length > 30000) throw Error("Invalid input text"); return call("Input.insertText", { text: params.text });
+    case "text": if (typeof params.text !== "string" || params.text.length > 30000) throw Error("Invalid input text"); return updateLayout(() => call("Input.insertText", { text: params.text }));
     case "key": {
       if (!["keyDown", "keyUp", "rawKeyDown"].includes(params.type) || typeof params.key !== "string" || params.key.length > 40) throw Error("Invalid key");
-      return call("Input.dispatchKeyEvent", { type: params.type, key: params.key, code: String(params.code || "").slice(0, 40), windowsVirtualKeyCode: Number(params.keyCode) & 255, modifiers: Number(params.modifiers) & 15, ...(typeof params.text === "string" && params.text.length <= 4 ? { text: params.text } : {}) });
+      return updateLayout(() => call("Input.dispatchKeyEvent", { type: params.type, key: params.key, code: String(params.code || "").slice(0, 40), windowsVirtualKeyCode: Number(params.keyCode) & 255, modifiers: Number(params.modifiers) & 15, ...(typeof params.text === "string" && params.text.length <= 4 ? { text: params.text } : {}) }));
     }
     case "mouse": {
       if (!["mousePressed", "mouseReleased", "mouseMoved", "mouseWheel"].includes(params.type) || ![params.x, params.y].every(Number.isFinite)) throw Error("Invalid pointer event");
-      return call("Input.dispatchMouseEvent", { type: params.type, x: Math.max(0, Math.min(viewport.width, params.x)), y: Math.max(0, Math.min(viewport.height, params.y)), button: ["left", "middle", "right"].includes(params.button) ? params.button : "none", buttons: Number(params.buttons) & 7, modifiers: Number(params.modifiers) & 15,
-        ...(params.type === "mouseWheel" ? { deltaX: Math.max(-3000, Math.min(3000, Number(params.deltaX) || 0)), deltaY: Math.max(-3000, Math.min(3000, Number(params.deltaY) || 0)) } : { clickCount: Math.max(0, Math.min(3, Number(params.clickCount) || 0)) }) });
+      return updateLayout(() => call("Input.dispatchMouseEvent", { type: params.type, x: Math.max(0, Math.min(viewport.width, params.x)), y: Math.max(0, Math.min(viewport.height, params.y)), button: ["left", "middle", "right"].includes(params.button) ? params.button : "none", buttons: Number(params.buttons) & 7, modifiers: Number(params.modifiers) & 15,
+        ...(params.type === "mouseWheel" ? { deltaX: Math.max(-3000, Math.min(3000, Number(params.deltaX) || 0)), deltaY: Math.max(-3000, Math.min(3000, Number(params.deltaY) || 0)) } : { clickCount: Math.max(0, Math.min(3, Number(params.clickCount) || 0)) }) }));
     }
     case "dialog": return call("Page.handleJavaScriptDialog", { accept: params.accept === true, promptText: String(params.text || "").slice(0, 4000) });
     default: throw Error("Unsupported browser action");
@@ -122,9 +162,11 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   }
   if (method === "Page.screencastFrame") {
     void cdp("Page.screencastFrameAck", { sessionId: params.sessionId }).catch(() => {});
-    if (watching && socket?.bufferedAmount < 2 * 1024 * 1024) send({ event: "frame", grantId, value: { data: params.data, ...viewport } });
+    if (watching) requestFrame();
   }
-  if (method === "Page.javascriptDialogOpening") send({ event: "dialog", grantId, value: params });
+  if (method === "Page.javascriptDialogOpening") { dialogOpen = true; send({ event: "dialog", grantId, value: params }); }
+  if (method === "Page.javascriptDialogClosed") { dialogOpen = false; requestFrame(); }
+  if (["Page.frameNavigated", "Page.loadEventFired", "Page.domContentEventFired", "Page.navigatedWithinDocument"].includes(method)) requestFrame();
   if (["Page.frameNavigated", "Page.loadEventFired", "Page.navigatedWithinDocument"].includes(method)) void state(expected).then(value => { if (grantId === expected) send({ event: "status", grantId: expected, value }); }).catch(() => {});
 });
 chrome.debugger.onDetach.addListener(source => { if (source.tabId === tabId) void revoke(); });

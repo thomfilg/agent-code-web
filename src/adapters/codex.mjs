@@ -1,9 +1,23 @@
 import { mkdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { JsonRpcProcess } from "../json-rpc-process.mjs";
 import { buildWorkerEnvironment } from "../worker-process.mjs";
 import { errorMessage, redact } from "../utils.mjs";
 import { codexUsage, safeRateLimits } from "../session-info.mjs";
 import { codexMcpArgs } from "../mcp-connections.mjs";
+import { captureSessionBundle, workerSessionIO } from "../codex-session-bundle.mjs";
+import { CodexAgentThreads } from "../codex-agent-threads.mjs";
+import { CodexApps } from "../codex-apps.mjs";
+import { CodexPlugins, CodexPluginCli } from "../codex-plugins.mjs";
+import { CodexHooks } from "../codex-hooks.mjs";
+import { CodexFeatures } from "../codex-features.mjs";
+import { CodexMemories } from "../codex-memories.mjs";
+import { createCodexImportControls } from "../codex-import-runtime.mjs";
+import { importedTranscript } from "../codex-import-chat.mjs";
+import { codexFeedbackPolicy } from "../codex-feedback.mjs";
+import { codexLogoutPolicy, logoutHash } from "../codex-logout.mjs";
+import { inspectCodexAuthFile } from "../codex-auth-files.mjs";
 
 const toml = (value) => JSON.stringify(value);
 
@@ -56,8 +70,12 @@ function safeToolEvent(item, state) {
 }
 
 export class CodexAdapter {
-  constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks }) {
+  constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, requireResume = Boolean(chat.nativeForkSessionId), restoreFork = null, savedAgentThreads = null }) {
     this.chat = chat;
+    this.apps = new CodexApps((method, params) => {
+      if (!this.rpc) throw new Error("The native app connection is stopped");
+      return this.rpc.request(method, params, 20000);
+    }, () => this.threadId);
     this.store = store;
     this.config = config;
     this.broker = broker;
@@ -68,13 +86,23 @@ export class CodexAdapter {
     this.hooks = hooks;
     this.rpc = null;
     this.threadId = chat.agentSessionId;
+    this.requireResume = requireResume;
+    this.restoreFork = restoreFork;
+    this.savedAgentThreads = savedAgentThreads;
+    this.createdForks = new Set();
     this.current = null;
     this.requests = new Map();
     this.intentionalStop = false;
+    this.goal = null;
+    this.children = new Set();
+    this.sharedParent = null;
+    this.sharedListeners = null;
   }
 
   async start() {
     if (this.rpc) return;
+    if (this.sharedParent) throw new Error("This temporary side chat has closed; open a new side chat");
+    if (this.requireResume && !this.threadId) throw new Error("The fork's native session ID is missing; refusing to start an empty conversation");
     const authMode = this.config.codex.authMode;
     if (authMode === "gateway" && !this.config.codex.providerKey) {
       throw new Error("OPENAI_API_KEY is required when CODEX_AUTH_MODE=gateway");
@@ -98,6 +126,27 @@ export class CodexAdapter {
       environmentPath: this.executor?.environmentPath,
     });
     await ensureDirectory(env.CODEX_HOME);
+    this.nativeHome = env.CODEX_HOME;
+    this.pluginCli = new CodexPluginCli({ command: this.config.codex.bin, workspace: this.workspace, env,
+      ...(this.executor ? { spawn: this.executor.spawn.bind(this.executor) } : { isolation: this.config.processIsolation }) });
+    this.plugins = new CodexPlugins({ run: args => this.pluginCli.run(args),
+      request: (method, params) => { if (!this.rpc) throw new Error("The native plugin connection stopped"); return this.rpc.request(method, params, 30000); },
+      workspace: this.workspace, thread: () => this.threadId, mutable: authMode === "gateway",
+      busy: () => this.nativeSettingsBusy() || Boolean(this.hookControls?.changing || this.featureControls?.changing || this.memoryControls?.changing || this.importControls?.changing || this.importControls?.needsRefresh),
+      changed: () => this.refreshSkills() });
+    this.hookControls = new CodexHooks({ request: (method, params) => { if (!this.rpc) throw new Error("The native hook connection stopped"); return this.rpc.request(method, params, 30000); },
+      workspace: this.workspace, thread: () => this.threadId, mutable: authMode === "gateway",
+      busy: () => this.nativeSettingsBusy() || Boolean(this.plugins?.changing || this.featureControls?.changing || this.memoryControls?.changing || this.importControls?.changing || this.importControls?.needsRefresh) });
+    this.featureControls = new CodexFeatures({ request: (method, params) => { if (!this.rpc) throw new Error("The native feature connection stopped"); return this.rpc.request(method, params, 30000); },
+      workspace: this.workspace, thread: () => this.threadId, mutable: authMode === "gateway",
+      busy: () => this.nativeSettingsBusy() || Boolean(this.plugins?.changing || this.hookControls?.changing || this.memoryControls?.changing || this.importControls?.changing || this.importControls?.needsRefresh) });
+    this.memoryControls = new CodexMemories({ request: (method, params) => { if (!this.rpc) throw new Error("The native memory connection stopped"); return this.rpc.request(method, params, 30000); },
+      workspace: this.workspace, thread: () => this.threadId, mutable: authMode === "gateway",
+      busy: () => this.nativeSettingsBusy() || Boolean(this.plugins?.changing || this.hookControls?.changing || this.featureControls?.changing || this.importControls?.changing || this.importControls?.needsRefresh) });
+    if (this.restoreFork && authMode === "gateway") {
+      if (this.restoreFork.threadId !== this.threadId) throw new Error("Fork history does not match its native session ID");
+      await workerSessionIO(this.executor, { action: "install", home: env.CODEX_HOME, bundle: this.restoreFork });
+    }
 
     const args = ["app-server"];
     args.push(...codexMcpArgs(this.executor?.mcpServers));
@@ -117,15 +166,29 @@ export class CodexAdapter {
       spawnOptions: { cwd: this.workspace, env },
     });
     this.rpc = rpc;
+    this.feedbackStartupPolicy = null;
+    this.logoutStartupPolicy = null; this.accountEpoch = 0; this.logoutChanging = false;
     this.intentionalStop = false;
+    // A new native process gets a new identity. Restoring a record alone is
+    // never evidence that its previous process stopped.
+    const importWorkerId = this.importWorkerId = randomUUID();
+    this.importControls = await createCodexImportControls(this, env, rpc, importWorkerId);
+    const imports = this.importControls;
+    this.importStop = null;
+    this.agents = new CodexAgentThreads({ rpc, root: () => this.threadId, workspace: this.workspace, model: this.config.codex.model, saved: this.savedAgentThreads,
+      publish: snapshot => this.hooks.onAgentThreads?.(snapshot), log: text => this.hooks.onLog?.(text) });
     rpc.on("notification", (message) => this.#notification(message));
     rpc.on("request", (message) => this.#serverRequest(message));
     rpc.on("stderr", (text) => this.hooks.onLog?.(redact(text)));
     rpc.on("protocolError", (error) => this.hooks.onLog?.(errorMessage(error)));
     rpc.on("error", (error) => this.hooks.onFatal?.(error));
     rpc.on("exit", ({ code, signal }) => {
+      const confirmed = this.executor?.metadata?.backend !== "ec2" || Number.isInteger(code) && code >= 0 && code < 255 && !signal;
+      const recorded = imports?.workerStopped(importWorkerId, confirmed).catch(() => this.hooks.onLog?.("Import stop tracking could not be saved; refresh /import before continuing."));
+      if (this.importWorkerId !== importWorkerId) return;
+      this.importStop = recorded;
       if (!this.intentionalStop) this.hooks.onFatal?.(new Error(`Codex worker exited: ${code ?? signal}`));
-      this.rpc = null;
+      if (this.rpc === rpc) this.rpc = null;
       this.#rejectCurrent(new Error("Codex worker stopped before the turn completed"));
     });
     rpc.start();
@@ -135,11 +198,28 @@ export class CodexAdapter {
     });
     rpc.notify("initialized", {});
     await this.#loadThread();
-    try {
-      const result = await rpc.request("skills/list", { cwds: [this.workspace] }, 10000);
-      this.hooks.onEvent?.({ type: "command_catalog", commands: (result.data || []).flatMap(entry => (entry.skills || []).filter(skill => skill.enabled !== false).map(skill => ({ name: skill.name, description: skill.description, path: skill.path, kind: "Skill" }))) });
-    } catch { /* Older workers can still run without skill discovery. */ }
+    // Native feedback retains its invocation configuration after reloads.
+    // Remember its startup policy without blocking ordinary work on old CLIs.
+    try { this.feedbackStartupPolicy = await this.feedbackPolicy(() => {}, true); } catch { /* Logs stay unavailable if startup policy cannot be verified. */ }
+    try { this.logoutStartupPolicy = await codexLogoutPolicy((method, params) => rpc.request(method, params, 5000), this.workspace); } catch { /* No credential mutation without verified startup storage. */ }
+    await this.agents.refresh().catch(error => this.hooks.onLog?.(`Agent picker unavailable: ${errorMessage(error)}`));
+    try { await this.goalAction("get"); } catch (error) { if (this.restoreFork) throw error; /* Older CLIs can still run ordinary turns. */ }
+    if (this.restoreFork) {
+      const saved = this.restoreFork.goal;
+      if (saved && !this.goal) await this.goalAction("set", saved.objective, saved.status === "active" ? "paused" : saved.status, saved.tokenBudget);
+      if (saved && (this.goal?.objective !== saved.objective || this.goal?.tokenBudget !== saved.tokenBudget || this.goal?.status !== (saved.status === "active" ? "paused" : saved.status))) throw new Error("The fork's saved goal changed before initialization; no goal was overwritten");
+      await this.hooks.onForkRestored?.();
+      this.restoreFork = null;
+    }
+    try { await this.refreshSkills(); } catch { /* Older workers can still run without skill discovery. */ }
   }
+
+  async refreshSkills() {
+    const result = await this.rpc.request("skills/list", { cwds: [this.workspace], forceReload: true }, 10000);
+    await this.hooks.onEvent?.({ type: "command_catalog", commands: (result.data || []).flatMap(entry => (entry.skills || []).filter(skill => skill.enabled !== false).map(skill => ({ name: skill.name, description: skill.description, path: skill.path, kind: "Skill" }))) });
+  }
+
+  nativeSettingsBusy() { return Boolean(this.current || this.goal?.status === "active" || this.agents?.busy() || [...this.children].some(child => child.current)); }
 
   async #loadThread() {
     const common = {
@@ -152,8 +232,10 @@ export class CodexAdapter {
     let result;
     if (this.threadId) {
       try {
-        result = await this.rpc.request("thread/resume", { threadId: this.threadId, ...common }, 60_000);
+        result = await this.rpc.request("thread/resume", { threadId: this.threadId, ...common, ...(this.requireResume ? { excludeTurns: true } : {}) }, 60_000);
+        if (this.requireResume && result?.thread?.id !== this.threadId) throw new Error("Codex returned a different native session ID");
       } catch (error) {
+        if (this.requireResume) throw new Error(`The fork's native history could not be resumed. Its session ID was retained; no empty conversation was created. ${errorMessage(error)}`);
         this.hooks.onEvent?.({ type: "notice", text: `Stored Codex thread could not be resumed; starting a new thread. ${errorMessage(error)}` });
         this.threadId = null;
       }
@@ -168,10 +250,218 @@ export class CodexAdapter {
       if (!this.threadId) throw new Error("Codex did not return a thread id");
       await this.hooks.onSessionId?.(this.threadId);
     }
+    this.settings = { model: result.model, serviceTier: result.serviceTier ?? null };
   }
 
-  async send(text, { model, effort, mode = "accept_edits", images = [], skills = [] } = {}) {
+  async forkSide(hooks) {
+    this.assertImportReady();
+    if (!this.rpc || this.intentionalStop) throw new Error("Codex runtime is not active");
+    if (this.sharedParent || this.current?.review) throw new Error("Side chats are unavailable inside a side chat or during review");
+    const rpc = this.rpc;
+    const result = await rpc.request("thread/fork", {
+      threadId: this.threadId, cwd: this.workspace,
+      ephemeral: true, excludeTurns: true,
+    }, 60000);
+    if (!result.thread?.id) throw new Error("Codex did not return a side thread ID");
+    const child = new CodexAdapter({ chat: this.chat, store: this.store, config: this.config, broker: this.broker, gatewayOrigin: this.gatewayOrigin, executor: this.executor, hooks });
+    child.rpc = rpc; child.threadId = result.thread.id; child.sharedParent = this;
+    child.settings = { model: result.model, serviceTier: result.serviceTier ?? null };
+    child.sharedListeners = {
+      notification: message => { if (message.params?.threadId === child.threadId) child.#notification(message); },
+      request: message => { if (message.params?.threadId === child.threadId) child.#serverRequest(message); },
+      exit: () => { child.rpc = null; child.#rejectCurrent(new Error("The side chat's worker stopped")); if (!child.intentionalStop) hooks.onFatal?.(new Error("The side chat's worker stopped")); },
+    };
+    for (const [event, listener] of Object.entries(child.sharedListeners)) rpc.on(event, listener);
+    this.children.add(child);
+    try {
+      if (this.rpc !== rpc || this.intentionalStop) throw new Error("Side chat cancelled because the worker stopped");
+      // Ephemeral side threads have no persisted goal. In particular do not
+      // pass deferGoalContinuation, which is only valid for stored forks.
+      return child;
+    } catch (error) { await child.stop(); throw error; }
+  }
+
+  async forkSession(workspace, { sourceId = this.threadId, check = () => {}, scoped = false } = {}) {
+    this.assertImportReady();
+    if (!this.rpc || this.intentionalStop || this.sharedParent) throw new Error("An active main Codex session is required to fork");
+    check(); const rpc = this.rpc;
+    const result = await rpc.request("thread/fork", { threadId: sourceId, cwd: workspace, excludeTurns: true, deferGoalContinuation: true }, 60000);
+    const forkId = result.thread?.id;
+    if (!forkId || forkId === sourceId) throw new Error("Codex did not return a new forked session");
+    this.createdForks.add(forkId);
+    try {
+      check();
+      const { goal } = await rpc.request("thread/goal/get", { threadId: forkId }, 10000);
+      // Keep a fork parked while its independent worker is being prepared.
+      // The original goal is not modified. Preserve the fork's intended state
+      // separately, so active goals can resume with its first explicit input.
+      if (goal?.status === "active") await rpc.request("thread/goal/set", { threadId: forkId, status: "paused" }, 10000);
+      const bundle = await captureSessionBundle({ threadId: forkId, goal: goal || null,
+        readThread: async id => {
+          check(); const thread = id === forkId ? result.thread : (await rpc.request("thread/read", { threadId: id, includeTurns: false }, 30000)).thread; check();
+          if (scoped && (thread?.cwd !== this.workspace || typeof thread.path !== "string" || path.normalize(thread.path) !== thread.path || !["sessions", "archived"].some(folder => thread.path.startsWith(`${this.nativeHome}/${folder}/`)))) throw new Error("Imported native history is outside this chat's workspace/profile");
+          return thread;
+        },
+        readBytes: async (filename, boundary) => { check(); const bytes = Buffer.from((await workerSessionIO(this.executor, { action: "read", path: filename, boundary })).data, "base64"); check(); return bytes; },
+      });
+      check();
+      return bundle;
+    } catch (error) {
+      // This is only the newly-created failed fork, never the source session.
+      await rpc.request("thread/archive", { threadId: forkId }, 10000).catch(() => {});
+      this.createdForks.delete(forkId);
+      throw error;
+    } finally { await rpc.request("thread/unsubscribe", { threadId: forkId }, 10000).catch(() => {}); }
+  }
+
+  async forkImportedSession(operationId, sessionId, check = () => {}) {
+    this.assertImportReady(); check();
+    if (!this.importControls?.mutable || this.nativeSettingsBusy()) throw new Error("Open imported conversations from an idle private chat profile");
+    const selected = this.importControls.importedSession(operationId, sessionId, check), rpc = this.rpc;
+    if (selected.cwd !== this.workspace) throw new Error("The imported conversation belongs to another workspace");
+    await this.importControls.inspect({ source: selected.source, includeHome: true }, check); check();
+    const original = (await rpc.request("thread/read", { threadId: selected.threadId, includeTurns: false }, 30000)).thread; check();
+    if (original?.id !== selected.threadId || original.cwd !== this.workspace || original.ephemeral || original.status?.type === "active") throw new Error("The selected imported history is unavailable, changed or active");
+    const bundle = await this.forkSession(this.workspace, { sourceId: selected.threadId, check, scoped: true });
+    try {
+      const thread = (await rpc.request("thread/read", { threadId: bundle.threadId, includeTurns: true }, 30000)).thread; check();
+      if (thread?.id !== bundle.threadId || thread.cwd !== this.workspace) throw new Error("The imported fork returned different native history");
+      return { bundle, messages: importedTranscript(thread), title: selected.title, source: selected.source };
+    } catch (error) { await this.discardFork(bundle.threadId).catch(() => {}); throw error; }
+  }
+
+  async discardFork(id) {
+    if (!this.createdForks.has(id)) return;
+    if (this.rpc) await this.rpc.request("thread/archive", { threadId: id }, 1000);
+    this.createdForks.delete(id);
+  }
+
+  releaseFork(id) { this.createdForks.delete(id); }
+
+  async goalAction(action, objective, status = null, tokenBudget = undefined) {
+    if (!["get", "pause", "clear"].includes(action)) this.assertImportReady();
+    if (!this.rpc) throw new Error("Codex runtime is not active");
+    let result;
+    if (action === "get" || action === "clear") result = await this.rpc.request(`thread/goal/${action}`, { threadId: this.threadId }, 10000);
+    else {
+      if (action === "resume" && !this.goal) throw new Error("Set a goal before resuming it");
+      result = await this.rpc.request("thread/goal/set", { threadId: this.threadId, ...(action === "set" ? { objective } : {}), ...(tokenBudget !== undefined ? { tokenBudget } : {}), status: status || (action === "pause" ? "paused" : "active") }, 10000);
+    }
+    this.goal = result?.goal || null;
+    await this.hooks.onEvent?.({ type: "goal", goal: this.goal });
+    return this.goal;
+  }
+
+  assertImportReady() {
+    if (this.logoutChanging || this.sharedParent?.logoutChanging) throw Object.assign(new Error("Wait for native sign-out to finish before starting agent work"), { statusCode: 409 });
+    const imports = this.importControls || this.sharedParent?.importControls;
+    if (imports?.changing || imports?.needsRefresh) throw Object.assign(new Error("Refresh /import to finish reconciling the import before starting agent work"), { statusCode: 409 });
+  }
+
+  async confirmImportWorkerStopped(observed) {
+    if (this.executor?.metadata?.backend === "ec2" && observed?.stopped === true && observed.instanceId === this.executor.metadata.instanceId && this.importControls) {
+      await this.importStop;
+      await this.importControls.workerStopped(this.importWorkerId);
+    }
+  }
+
+  assertInputReady() {
+    this.assertImportReady();
+    if (this.memoryControls?.changing || this.sharedParent?.memoryControls?.changing) throw new Error("Wait for the current memory change to finish");
+    if (this.memoryControls?.needsRefresh || this.sharedParent?.memoryControls?.needsRefresh) throw new Error("Refresh /memories to reconcile the previous memory change before sending");
+    if (this.featureControls?.changing || this.sharedParent?.featureControls?.changing) throw new Error("Wait for the current feature change to finish");
+    if (this.featureControls?.needsRefresh || this.sharedParent?.featureControls?.needsRefresh) throw new Error("Refresh /experimental to reconcile the previous feature change before sending");
+    if (this.hookControls?.changing || this.sharedParent?.hookControls?.changing) throw new Error("Wait for the current hook change to finish");
+    if (this.hookControls?.needsRefresh || this.sharedParent?.hookControls?.needsRefresh) throw new Error("Refresh /hooks to reconcile the previous hook change before sending");
+    if (this.plugins?.changing || this.sharedParent?.plugins?.changing) throw new Error("Wait for the current plugin change to finish");
+    if (this.plugins?.needsRefresh || this.sharedParent?.plugins?.needsRefresh) throw new Error("Refresh /plugins to reconcile the previous plugin change before sending");
+  }
+
+  async logoutSnapshot(check = () => {}) {
+    check(); const rpc = this.rpc, threadId = this.threadId, workerId = this.importWorkerId, accountEpoch = this.accountEpoch || 0;
+    if (!rpc || !threadId || !workerId || this.intentionalStop || this.sharedParent) throw new Error("Connect this chat's native Codex worker before inspecting sign-out");
+    const busy = () => this.nativeSettingsBusy() || [this.plugins, this.hookControls, this.featureControls, this.memoryControls, this.importControls].some(service => service?.changing || service?.needsRefresh);
+    const base = { threadId, workerId, gateway: this.config.codex.authMode === "gateway", privateProfile: this.config.codex.authMode === "gateway",
+      busy: busy(), account: null, credentialPresent: null, storage: null, canLogout: false };
+    if (!base.privateProfile) return { ...base, reason: "This shared host profile may be used by other companies. Native sign-out is locked until company/profile isolation is complete." };
+    const guard = () => {
+      check(); if (this.rpc !== rpc || this.threadId !== threadId || this.importWorkerId !== workerId || this.intentionalStop) throw new Error("The sign-out worker changed or stopped");
+      if ((this.accountEpoch || 0) !== accountEpoch) throw new Error("The native account changed during inspection. Refresh /logout.");
+    };
+    const policy = await codexLogoutPolicy((method, params) => rpc.request(method, params, 15000), this.workspace, guard);
+    base.storage = policy.storage;
+    if (!this.logoutStartupPolicy || this.logoutStartupPolicy.revision !== policy.revision) return { ...base, reason: "Native credential storage changed or its startup policy is unknown. Inspect again after your own worker restart; Relay will not restart it automatically." };
+    if (!["file", "ephemeral"].includes(policy.storage)) return { ...base, reason: "OS keyring/automatic credential storage is locked pending profile-isolation verification. No credential store was accessed or changed." };
+    const files = await inspectCodexAuthFile(this.executor, { home: this.runtimeHome, nativeHome: this.nativeHome }, guard);
+    let info;
+    try { info = await rpc.request("account/read", { refreshToken: false }, 15000); } catch { guard(); throw new Error("The native account could not be inspected. No token refresh or sign-out was requested."); }
+    guard();
+    const account = info?.account;
+    if (typeof info?.requiresOpenaiAuth !== "boolean" || account !== null && (!account || !["apiKey", "chatgpt"].includes(account.type))) return { ...base, reason: "This authentication method cannot be verified for scoped native sign-out." };
+    const after = await inspectCodexAuthFile(this.executor, { home: this.runtimeHome, nativeHome: this.nativeHome }, guard); guard();
+    if (files.revision !== after.revision) throw new Error("Native credentials changed during inspection. Refresh /logout.");
+    const email = typeof account?.email === "string" ? account.email.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 160) : null;
+    const visible = account ? { type: account.type, email } : null;
+    const present = policy.storage === "file" ? files.present : Boolean(account);
+    const safeEphemeral = policy.storage !== "ephemeral" || !files.present;
+    return { ...base, busy: busy(), account: visible, credentialPresent: files.present, canLogout: present && safeEphemeral,
+      revision: logoutHash([threadId, workerId, accountEpoch, policy.revision, files.revision, visible, info.requiresOpenaiAuth]),
+      reason: !safeEphemeral ? "A stored credential file coexists with in-memory authentication. Scoped sign-out is unavailable until the storage choice is reconciled."
+        : policy.storage === "ephemeral" && !info.requiresOpenaiAuth && !account ? "This gateway provider does not expose its in-memory native account. Relay cannot verify scoped removal; gateway access itself is unchanged."
+        : !present ? "No stored native credentials are available to clear. Environment or Relay gateway authentication is not removed by /logout." : "" };
+  }
+
+  async performLogout(revision, check, dispatched) {
+    const rpc = this.rpc, snapshot = await this.logoutSnapshot(check); check();
+    if (!snapshot.canLogout || snapshot.revision !== revision || snapshot.busy || this.nativeSettingsBusy()) throw new Error("The reviewed credentials, storage or agent activity changed. Inspect /logout again.");
+    dispatched(); this.accountEpoch = (this.accountEpoch || 0) + 1;
+    // Invalidate cached account data, without yielding between the final
+    // credential check and native dispatch. Native account/updated follows too.
+    this.hooks.onEvent?.({ type: "native_account_updated" });
+    const response = await rpc.request("account/logout", {}, 30000); check();
+    if (!response || typeof response !== "object" || Array.isArray(response) || Object.keys(response).length) throw new Error("Unrecognized native sign-out acknowledgement");
+    const after = await this.logoutSnapshot(check); check();
+    if (this.rpc !== rpc || after.account !== null || after.credentialPresent !== false || after.storage !== snapshot.storage) throw new Error("Native credential removal could not be verified");
+  }
+
+  async feedbackPolicy(check = () => {}, startup = false) {
+    check(); const rpc = this.rpc, threadId = this.threadId, workerId = this.importWorkerId;
+    if (!rpc || !threadId || this.intentionalStop || this.sharedParent) throw new Error("Connect this chat's native Codex worker before reviewing feedback");
+    const guard = () => { check(); if (this.rpc !== rpc || this.threadId !== threadId || this.importWorkerId !== workerId || this.intentionalStop) throw new Error("The feedback worker changed or stopped"); };
+    const result = await codexFeedbackPolicy({ request: (method, params) => rpc.request(method, params, startup ? 5000 : 20000), workspace: this.workspace,
+      nativeHome: this.nativeHome, privateProfile: this.config.codex.authMode === "gateway", threadId, workerId }, guard);
+    guard(); if (startup) return result;
+    const initial = this.feedbackStartupPolicy;
+    const enabled = result.enabled && initial?.enabled !== false;
+    const logsAllowed = enabled && result.logsAllowed && initial?.logsAllowed === true && initial.revision === result.revision;
+    return { ...result, enabled, logsAllowed, revision: `${result.revision}:${initial?.revision || "unknown-startup"}`,
+      logsReason: !enabled ? "Feedback is disabled by current or startup native configuration. A changed startup setting requires your own worker restart."
+        : result.logsReason || (!logsAllowed ? "Startup diagnostic configuration is unavailable or changed. Logs require a verified fresh worker; Relay will not restart it automatically." : "") };
+  }
+
+  async uploadFeedback(payload, check) {
+    check(); const rpc = this.rpc, threadId = this.threadId;
+    if (!rpc || payload.threadId !== threadId || this.intentionalStop || this.sharedParent) throw new Error("The reviewed feedback worker stopped");
+    // Only CodexFeedback constructs this payload after a persisted confirmation.
+    // There is intentionally no retry on timeout or disconnect.
+    const result = await rpc.request("feedback/upload", payload, 60000); check();
+    if (this.rpc !== rpc || this.threadId !== threadId || this.intentionalStop) throw new Error("The feedback connection changed");
+    return result;
+  }
+
+  async approveDeniedAction(event, check) {
+    this.assertInputReady(); check();
+    const rpc = this.rpc, threadId = this.threadId;
+    if (!rpc || !threadId || this.current || this.sharedParent || this.intentionalStop) throw new Error("The reviewed native session must be connected and idle");
+    const result = await rpc.request("thread/approveGuardianDeniedAction", { threadId, event }, 30000);
+    check();
+    if (this.rpc !== rpc || this.threadId !== threadId || this.intentionalStop || !result || typeof result !== "object") throw new Error("The native approval connection changed");
+  }
+
+  async send(text, { model, effort, mode = "accept_edits", images = [], skills = [], appReferences = [], additionalContext = {}, goalDirective = null, reviewTarget = null, serviceTier, personality } = {}) {
+    this.assertInputReady();
     if (!this.rpc) await this.start();
+    this.assertImportReady();
     if (this.current) throw new Error("A Codex turn is already running for this chat");
 
     let resolveTurn;
@@ -181,21 +471,64 @@ export class CodexAdapter {
       rejectTurn = reject;
     });
     const timer = setTimeout(() => this.#rejectCurrent(new Error("Codex turn timed out after one hour")), 3_600_000);
-    this.current = { text: "", finalText: "", resolveTurn, rejectTurn, timer };
+    const current = this.current = { text: "", finalText: "", resolveTurn, rejectTurn, timer, done: completion.catch(() => {}) };
+    current.review = Boolean(reviewTarget);
+    const startReady = Promise.withResolvers(); current.started = startReady.promise;
+    current.goalRun = !reviewTarget && mode !== "plan" && (Boolean(goalDirective) || this.goal?.status === "active");
+    current.activatingGoal = Boolean(goalDirective) && mode !== "plan";
+    if (current.goalRun) clearTimeout(timer);
 
     try {
-      await this.rpc.request("turn/start", {
+      if (reviewTarget && appReferences.length) throw new Error("Native code review does not accept app references");
+      const appMentions = await this.apps.mentions(appReferences);
+      if (current.interruptRequested || this.current !== current || !this.rpc) throw new Error("Codex turn interrupted before startup");
+      // Setting an ACTIVE goal on a populated thread immediately starts native
+      // continuation. Stage it PAUSED, establish this turn's model/permissions,
+      // then activate while that turn is already tracked. Plan stays paused.
+      if (goalDirective) {
+        if (goalDirective.action === "resume" && !this.goal) throw new Error("Set a goal before resuming it");
+        await this.goalAction(goalDirective.action === "set" ? "set" : "pause", goalDirective.objective, "paused");
+      }
+      if (current.interruptRequested) throw new Error("Codex turn interrupted before startup");
+      const turnSettings = {
         threadId: this.threadId,
-        input: [{ type: "text", text }, ...images.map(imagePath => ({ type: "localImage", path: imagePath })), ...skills.map(skill => ({ type: "skill", name: skill.name, path: skill.path }))],
         ...(model ? { model } : {}),
         ...(effort ? { effort } : {}),
+        ...(serviceTier !== undefined ? { serviceTier } : {}),
+        ...(personality ? { personality } : {}),
         approvalPolicy: "on-request",
+        approvalsReviewer: mode === "auto" ? "auto_review" : "user",
         sandboxPolicy: mode === "plan" ? { type: "readOnly" } : { type: "workspaceWrite", writableRoots: [this.workspace], networkAccess: false },
         collaborationMode: { mode: mode === "plan" ? "plan" : "default", settings: { model: model || this.config.codex.model, reasoning_effort: effort || null, developer_instructions: null } },
-      }, 60_000);
+      };
+      if (reviewTarget) {
+        // Review is its own native turn, not a prompt asking the main agent to
+        // pretend to be the reviewer. Pause an active goal so it cannot start
+        // an editing continuation as soon as the review finishes.
+        if (this.goal?.status === "active") await this.goalAction("pause");
+        await this.rpc.request("thread/settings/update", turnSettings, 10000);
+      }
+      if (current.interruptRequested) throw new Error("Codex turn interrupted before startup");
+      const starting = reviewTarget
+        ? this.rpc.request("review/start", { threadId: this.threadId, target: reviewTarget, delivery: "inline" }, 60_000)
+        : this.rpc.request("turn/start", { ...turnSettings, ...(Object.keys(additionalContext).length ? { additionalContext } : {}), input: [{ type: "text", text }, ...images.map(imagePath => ({ type: "localImage", path: imagePath })), ...skills.map(skill => ({ type: "skill", name: skill.name, path: skill.path })), ...appMentions] }, 60_000);
+      const started = await starting; startReady.resolve(started);
+      if (!reviewTarget) await this.hooks.onInputStarted?.({ forkGoal: Boolean(goalDirective?.fork) });
+      if (reviewTarget) current.reviewTurnId = started.turn?.id;
+      current.turnId ||= started.turn?.id;
+      if (current.pendingReviewCompletion) {
+        const pending = current.pendingReviewCompletion; current.pendingReviewCompletion = null;
+        this.#notification(pending);
+      }
+      if (current.activatingGoal) {
+        if (!current.interruptRequested) await this.goalAction("resume");
+        current.activatingGoal = false;
+        if (current.awaitingContinuation && this.goal?.status !== "active") this.#finishGoalRun();
+      }
       const result = await completion;
       return result;
     } catch (error) {
+      startReady.resolve(null);
       this.#rejectCurrent(error);
       await completion.catch(() => {});
       throw error;
@@ -209,43 +542,135 @@ export class CodexAdapter {
     this.rpc.respond(request.rpcId, payload);
   }
 
+  async interrupt() {
+    const current = this.current;
+    if (!current) return;
+    current.interruptRequested = true;
+    if (this.goal?.status === "active") await this.goalAction("pause");
+    const started = await current.started;
+    if (this.current !== current) return;
+    const turnId = current.turnId || started?.turn?.id;
+    if (!turnId) throw new Error("Codex has not returned the current turn ID; try again shortly");
+    await this.rpc.request("turn/interrupt", { threadId: this.threadId, turnId }, 15000);
+    await current.done;
+    this.requests.clear();
+  }
+
   async inspect() {
     if (!this.rpc) return {};
     const [limits, connectors, account] = await Promise.allSettled([
       this.rpc.request("account/rateLimits/read", {}, 10000),
       this.rpc.request("mcpServerStatus/list", { limit: 100, detail: "toolsAndAuthOnly" }, 10000),
-      this.rpc.request("account/read", {}, 10000),
+      this.rpc.request("account/read", { refreshToken: false }, 10000),
     ]);
     return { rateLimits: limits.status === "fulfilled" ? safeRateLimits(limits.value) : null,
-      account: account.status === "fulfilled" ? { planType: account.value.account?.planType || null } : null,
+      account: account.status === "fulfilled" && account.value.account ? { planType: account.value.account.planType || null } : null,
       connectors: connectors.status === "fulfilled" ? (connectors.value.data || []).map(server => ({ name: server.name, status: server.authStatus || "configured", tools: Object.keys(server.tools || {}).length })) : null };
   }
 
+  async inspectCommand(command) {
+    if (!this.rpc) throw new Error("Codex runtime is not active");
+    if (command === "ps") {
+      const items = [], cursors = new Set(); let cursor;
+      do {
+        const result = await this.rpc.request("thread/backgroundTerminals/list", { threadId: this.threadId, limit: 100, ...(cursor ? { cursor } : {}) }, 10000);
+        items.push(...(result.data || []).map(item => ({ id: item.processId, title: redact(item.command || "Background command"), detail: redact(item.cwd || "") })));
+        cursor = result.nextCursor;
+        if (cursor && cursors.has(cursor)) throw new Error("Native background-terminal pagination repeated a cursor");
+        if (cursor) cursors.add(cursor);
+      } while (cursor && items.length < 1000);
+      return { title: "Background terminals", items, note: "Processes tracked by this Codex thread. Other chats and untracked processes are not included." };
+    }
+    if (command === "debug-config") {
+      const result = await this.rpc.request("config/read", { cwd: this.workspace, includeLayers: false }, 10000);
+      const keys = ["model", "model_provider", "model_reasoning_effort", "service_tier", "personality", "approval_policy", "approvals_reviewer", "sandbox_mode"];
+      // Explicit allowlist: config may include provider secrets, MCP headers,
+      // shell variables and capabilities. Never expose the raw native response.
+      const items = keys.filter(key => typeof result.config?.[key] === "string").map(key => ({ id: key, title: `${key}: ${redact(result.config[key])}`, detail: result.origins?.[key]?.name?.type || "default" }));
+      return { title: "Codex configuration", items, note: "Effective non-secret configuration on disk and its source layers. Per-turn model and permission overrides are shown in this chat's controls. Credentials and environment variables are excluded." };
+    }
+    throw new Error("Unknown native inspection command");
+  }
+
+  async terminateBackground(processId) {
+    if (!this.rpc) throw new Error("Codex runtime is not active");
+    if (processId === "all") return this.rpc.request("thread/backgroundTerminals/clean", { threadId: this.threadId }, 10000);
+    const info = await this.inspectCommand("ps");
+    if (!info.items.some(item => item.id === processId)) throw new Error("That background terminal is no longer tracked by this chat");
+    return this.rpc.request("thread/backgroundTerminals/terminate", { threadId: this.threadId, processId }, 10000);
+  }
+
   async compact() {
+    this.assertImportReady();
     if (!this.rpc || this.current) throw new Error("Compaction needs an active, idle Codex session");
     let resolveTurn, rejectTurn;
     const complete = new Promise((resolve, reject) => { resolveTurn = resolve; rejectTurn = reject; });
     const timer = setTimeout(() => this.#rejectCurrent(new Error("Context compaction timed out")), 180000);
-    this.current = { text: "", finalText: "", resolveTurn, rejectTurn, timer };
+    const startReady = Promise.withResolvers();
+    this.current = { text: "", finalText: "", resolveTurn, rejectTurn, timer, done: complete.catch(() => {}), started: startReady.promise, resolveStarted: startReady.resolve };
     try { await this.rpc.request("thread/compact/start", { threadId: this.threadId }, 10000); return await complete; }
     catch (error) { this.#rejectCurrent(error); await complete.catch(() => {}); throw error; }
   }
 
   async stop() {
     this.intentionalStop = true;
+    await this.pluginCli?.stop();
+    if (this.sharedParent) {
+      const rpc = this.rpc;
+      try {
+        if (rpc) {
+          await this.interrupt().catch(() => {});
+          await rpc.request("thread/backgroundTerminals/clean", { threadId: this.threadId }, 10000).catch(() => {});
+          await rpc.request("thread/unsubscribe", { threadId: this.threadId }, 10000).catch(() => {});
+        }
+      } finally {
+        this.#rejectCurrent(new Error("Side chat closed")); this.requests.clear(); this.rpc = null;
+        for (const [event, listener] of Object.entries(this.sharedListeners || {})) rpc?.off(event, listener);
+        this.sharedListeners = null; this.sharedParent.children.delete(this);
+      }
+      return;
+    }
+    await this.agents?.close();
+    await Promise.allSettled([...this.children].map(child => child.stop()));
+    if (this.goal?.status === "active") await this.goalAction("pause").catch(() => {});
     for (const request of this.requests.values()) {
       try { this.rpc?.respond(request.rpcId, { decision: "cancel" }); } catch {}
     }
     this.requests.clear();
     this.#rejectCurrent(new Error("Turn interrupted because the worker was stopped"));
     const rpc = this.rpc;
+    if (rpc) await Promise.allSettled([...this.createdForks].map(threadId => rpc.request("thread/archive", { threadId }, 1000)));
+    this.createdForks.clear();
     this.rpc = null;
     if (rpc) await rpc.stop();
+    await this.importStop;
     this.broker.revokeChat(this.chat.id);
   }
 
   #notification(message) {
+    this.importControls?.notification(message);
     const { method, params = {} } = message;
+    if (method === "account/updated") { this.accountEpoch = (this.accountEpoch || 0) + 1; this.hooks.onEvent?.({ type: "native_account_updated" }); return; }
+    if (params.threadId && this.threadId && params.threadId !== this.threadId) return;
+    if (method === "item/autoApprovalReview/completed" && params.threadId === this.threadId && params.review?.status === "denied") {
+      this.hooks.onEvent?.({ type: "native_approval_denied", report: params }); return;
+    }
+    if (method === "thread/settings/updated") this.settings = params.threadSettings || this.settings;
+    if (method === "thread/goal/updated" || method === "thread/goal/cleared") {
+      this.goal = params.goal || null;
+      this.hooks.onEvent?.({ type: "goal", goal: this.goal });
+      if (this.current?.awaitingContinuation && !this.current.activatingGoal && this.goal?.status !== "active") this.#finishGoalRun();
+    }
+    if (method === "turn/started" && this.current) {
+      const current = this.current;
+      if (current.goalRun && current.awaitingContinuation) {
+        clearTimeout(current.continuationTimer); current.awaitingContinuation = false;
+        current.text = ""; current.finalText = "";
+        this.hooks.onEvent?.({ type: "goal_turn_started" });
+      }
+      current.turnId = params.turn?.id || current.turnId;
+      current.resolveStarted?.({ turn: params.turn });
+    }
     if (method === "thread/tokenUsage/updated") this.hooks.onEvent?.({ type: "usage", usage: codexUsage(params.tokenUsage) });
     if (method === "account/rateLimits/updated") this.hooks.onEvent?.({ type: "rate_limits", rateLimits: safeRateLimits(params) });
     if (method === "turn/diff/updated") this.hooks.onEvent?.({ type: "workspace_diff", diff: String(params.diff || "").slice(0, 500000) });
@@ -264,16 +689,35 @@ export class CodexAdapter {
       if (method === "item/completed" && params.item.type === "agentMessage" && this.current) {
         this.current.finalText = params.item.text || "";
       }
+      if (method === "item/completed" && params.item.type === "exitedReviewMode" && this.current) this.current.reviewText = params.item.review || "";
       const event = safeToolEvent(params.item, method === "item/started" ? "running" : "completed");
       if (event) this.hooks.onEvent?.(event);
       return;
     }
     if (method === "turn/completed" && this.current) {
       const current = this.current;
-      this.current = null;
-      clearTimeout(current.timer);
+      if (current.turnId && params.turn?.id && current.turnId !== params.turn.id) {
+        // Native inline review reports an inner started-turn ID but completes
+        // the outer review/start turn. Retain both without accepting unrelated
+        // thread turns; the response can arrive after this notification.
+        if (current.review && !current.reviewTurnId) { current.pendingReviewCompletion = message; return; }
+        if (!current.review || params.turn.id !== current.reviewTurnId) return;
+      }
       const status = params.turn?.status || "completed";
-      if (status === "completed") current.resolveTurn({ text: current.text || current.finalText, status });
+      if (status === "completed" && current.goalRun) {
+        this.hooks.onEvent?.({ type: "goal_turn_completed", text: current.text || current.finalText });
+        current.awaitingContinuation = true;
+        if (!current.activatingGoal && this.goal?.status !== "active") this.#finishGoalRun();
+        // If the native dispatcher suppresses a continuation, release the idle
+        // worker too. Automatic turns normally arrive immediately in this stream.
+        else current.continuationTimer = setTimeout(() => { if (this.current === current && current.awaitingContinuation) this.#finishGoalRun(); }, 2000);
+        return;
+      }
+      this.current = null;
+      current.resolveStarted?.(null);
+      clearTimeout(current.timer);
+      clearTimeout(current.continuationTimer);
+      if (status === "completed") current.resolveTurn({ text: current.reviewText || current.text || current.finalText, status });
       else current.rejectTurn(new Error(`Codex turn ended with status ${status}`));
       return;
     }
@@ -282,7 +726,15 @@ export class CodexAdapter {
     }
   }
 
+  #finishGoalRun() {
+    const current = this.current;
+    if (!current) return;
+    this.current = null; clearTimeout(current.timer); clearTimeout(current.continuationTimer);
+    current.resolveTurn({ text: "", status: "completed", turnsHandled: true });
+  }
+
   #serverRequest(message) {
+    if (message.params?.threadId && message.params.threadId !== this.threadId) return;
     const supported = new Set([
       "item/commandExecution/requestApproval",
       "item/fileChange/requestApproval",
@@ -302,7 +754,9 @@ export class CodexAdapter {
     if (!this.current) return;
     const current = this.current;
     this.current = null;
+    current.resolveStarted?.(null);
     clearTimeout(current.timer);
+    clearTimeout(current.continuationTimer);
     current.rejectTurn(error);
   }
 }

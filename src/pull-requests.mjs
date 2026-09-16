@@ -1,6 +1,7 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { repositoryGroup, workflowPatch } from "../public/chat-organization.js";
+import { companyForChat } from "../public/company-scope.js";
 
 const validRepo = value => typeof value === "string" && /^[\w.-]+\/[\w.-]+$/.test(value) && !value.split("/").some(part => [".", ".."].includes(part));
 export function chatRepositories(chat) {
@@ -96,11 +97,14 @@ export class PullRequestMonitor {
     this.stopped = true; clearInterval(this.timer);
     await Promise.allSettled([...this.inflight.values()]);
   }
-  request(route) {
-    const old = this.requests.get(route);
+  async request(route, options = {}) {
+    const repository = /^\/repos\/([^/?]+\/[^/?]+)/.exec(route)?.[1];
+    const connection = this.github.requireConnection ? await this.github.requireConnection({ ...options, repository }) : null;
+    const key = `${connection?.id || options.connectionId || "auto"}:${connection?.revision || 0}:${route}`;
+    const old = this.requests.get(key);
     if (old && old.until > Date.now()) return old.promise;
-    const promise = this.github.request(route);
-    this.requests.set(route, { until: Date.now() + Math.min(this.intervalMs / 2, 15000), promise });
+    const promise = this.github.request(route, { ...options, ...(connection ? { connectionId: connection.id } : {}) });
+    this.requests.set(key, { until: Date.now() + Math.min(this.intervalMs / 2, 15000), promise });
     // Cache errors briefly too, so many chats don't hammer an expired connection.
     for (const [key, value] of this.requests) if (value.until < Date.now()) this.requests.delete(key);
     return promise;
@@ -117,11 +121,15 @@ export class PullRequestMonitor {
     if (!pr || !validRepo(repository) || !Number.isSafeInteger(number)) throw Object.assign(new Error("Choose a verified PR linked to this chat"), { statusCode: 404 });
     return pr;
   }
+  connectionOptions(chat, repository) {
+    const selected = chatRepositories(chat || {}).find(repo => repo.fullName.toLowerCase() === repository?.toLowerCase());
+    return { repository, chatCompany: companyForChat(chat || {}), ...(selected?.githubConnectionId ? { connectionId: selected.githubConnectionId } : {}) };
+  }
   async files(id, repository, number) {
     this.tracked(id, repository, number);
     const files = []; let remaining = 1000000, truncated = false;
     for (let page = 1; page <= 30; page++) {
-      const chunk = await this.github.request(`/repos/${repository}/pulls/${number}/files?per_page=100&page=${page}`);
+      const chunk = await this.github.request(`/repos/${repository}/pulls/${number}/files?per_page=100&page=${page}`, this.connectionOptions(this.store.get(id), repository));
       for (const file of chunk) {
         const patch = file.patch?.slice(0, Math.min(200000, remaining)) || null;
         truncated ||= (file.patch?.length || 0) > (patch?.length || 0);
@@ -137,15 +145,16 @@ export class PullRequestMonitor {
     this.tracked(id, repository, number);
     if (typeof enabled !== "boolean") throw new Error("Auto-merge must be enabled or disabled explicitly");
     const route = `/repos/${repository}`;
-    const pr = await this.github.request(`${route}/pulls/${number}`);
+    const options = this.connectionOptions(this.store.get(id), repository);
+    const pr = await this.github.request(`${route}/pulls/${number}`, options);
     if (pr.state !== "open") throw new Error("Auto-merge is only available for open pull requests");
     if (pr.base?.repo?.full_name?.toLowerCase() !== repository.toLowerCase()) throw new Error("PR repository mismatch");
     if (!pr.node_id || (enabled && !/^[a-f0-9]{40,64}$/i.test(pr.head?.sha || ""))) throw new Error("GitHub did not return a verifiable PR head");
-    const repo = enabled ? await this.github.request(route) : null;
+    const repo = enabled ? await this.github.request(route, options) : null;
     if (enabled && !repo.allow_auto_merge) throw new Error("Enable Allow auto-merge in this repository's GitHub settings first");
     const mergeMethod = repo?.allow_squash_merge ? "SQUASH" : repo?.allow_merge_commit ? "MERGE" : "REBASE";
     const mutation = enabled ? "enablePullRequestAutoMerge" : "disablePullRequestAutoMerge";
-    const result = await this.github.request("/graphql", { method: "POST", body: {
+    const result = await this.github.request("/graphql", { ...options, method: "POST", body: {
       query: `mutation($input: ${enabled ? "EnablePullRequestAutoMergeInput" : "DisablePullRequestAutoMergeInput"}!) { ${mutation}(input: $input) { pullRequest { number } } }`,
       variables: { input: { pullRequestId: pr.node_id, ...(enabled ? { mergeMethod, expectedHeadOid: pr.head.sha } : {}) } },
     } });
@@ -158,6 +167,7 @@ export class PullRequestMonitor {
   async sync(id) {
     const chat = this.store.get(id);
     if (!chat || chat.archived) return;
+    const request = route => this.request(route, this.connectionOptions(chat, /^\/repos\/([^/?]+\/[^/?]+)/.exec(route)?.[1]));
     const allowed = new Set(chatRepositories(chat).map(repo => repo.fullName.toLowerCase()));
     const candidates = new Map();
     for (const pr of [...(chat.pullRequests || []), ...pullRequestLinks(chat)]) {
@@ -169,7 +179,7 @@ export class PullRequestMonitor {
         if (this.stopped) return;
         if (!allowed.has(ref.repository?.toLowerCase()) || typeof ref.branch !== "string") continue;
         const head = `${ref.repository.split("/")[0]}:${ref.branch}`;
-        const pulls = await this.request(`/repos/${ref.repository}/pulls?state=all&head=${encodeURIComponent(head)}&sort=updated&direction=desc&per_page=100`);
+        const pulls = await request(`/repos/${ref.repository}/pulls?state=all&head=${encodeURIComponent(head)}&sort=updated&direction=desc&per_page=100`);
         for (const pr of pulls) {
           if (pr.head?.ref !== ref.branch || pr.head?.repo?.full_name?.toLowerCase() !== ref.repository.toLowerCase()) continue;
           // Reused branch names must not attach old, closed PRs to a new chat.
@@ -184,7 +194,7 @@ export class PullRequestMonitor {
       const previous = chat.pullRequests?.find(pr => pr.repository.toLowerCase() === candidate.repository.toLowerCase() && pr.number === candidate.number);
       try {
         const route = `/repos/${candidate.repository}`;
-        const pr = await this.request(`${route}/pulls/${candidate.number}`);
+        const pr = await request(`${route}/pulls/${candidate.number}`);
         if (pr.base?.repo?.full_name?.toLowerCase() !== candidate.repository.toLowerCase() || pr.number !== candidate.number) throw new Error("PR repository mismatch");
         let checks = "none", checksStale = false, ci = null;
         if (pr.state === "open") {
@@ -193,15 +203,15 @@ export class PullRequestMonitor {
             const runs = [];
             for (let page = 1; ; page++) {
               if (this.stopped) return;
-              const result = await this.request(`${route}/commits/${pr.head.sha}/check-runs?filter=latest&per_page=100&page=${page}`);
+              const result = await request(`${route}/commits/${pr.head.sha}/check-runs?filter=latest&per_page=100&page=${page}`);
               runs.push(...result.check_runs);
               if (result.check_runs.length < 100) break;
             }
-            const first = await this.request(`${route}/commits/${pr.head.sha}/status`);
+            const first = await request(`${route}/commits/${pr.head.sha}/status`);
             const combined = { ...first, statuses: [...(first.statuses || [])] };
             for (let page = 2; combined.statuses?.length < combined.total_count; page++) {
               if (this.stopped) return;
-              const more = await this.request(`${route}/commits/${pr.head.sha}/status?page=${page}`);
+              const more = await request(`${route}/commits/${pr.head.sha}/status?page=${page}`);
               if (!more.statuses?.length) break;
               combined.statuses.push(...more.statuses);
             }

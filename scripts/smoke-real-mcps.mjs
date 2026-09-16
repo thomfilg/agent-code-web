@@ -15,8 +15,8 @@ import { SharedBrowsers } from "../src/shared-browser.mjs";
 const root = await mkdtemp("/tmp/relay-real-mcps-");
 const service = await startMcpFixture({ requireAuth: false });
 const mcps = new McpConnections(new MemoryRecords());
-const connection = await mcps.save({ name: "smoke", type: "http", url: `${service.origin}/mcp`, authMode: "none" });
-const stdio = await mcps.save({ name: "stdio", type: "stdio", command: process.execPath, args: [fileURLToPath(new URL("../test/fixtures/mcp-stdio.mjs", import.meta.url))] });
+const connection = await mcps.save({ name: "smoke", allowUnassigned: true, type: "http", url: `${service.origin}/mcp`, authMode: "none" });
+const stdio = await mcps.save({ name: "stdio", allowUnassigned: true, type: "stdio", command: process.execPath, args: [fileURLToPath(new URL("../test/fixtures/mcp-stdio.mjs", import.meta.url))] });
 const browsers = new SharedBrowsers({ store: { get: id => id === "smoke" ? { id } : null }, config: { sessionCapabilityTtlMs: 60000 }, acquire: async () => { throw new Error("Discovery must not start Chrome"); } });
 const gateway = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");

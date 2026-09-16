@@ -19,20 +19,23 @@ function run(command, args, options = {}) {
   });
 }
 
-export async function prepareRepositories({ destination, repositories, token, onProgress = () => {} }) {
+export async function prepareRepositories({ destination, repositories, getToken, token: suppliedToken, onProgress = () => {} }) {
   await mkdir(destination, { recursive: true, mode: 0o700 });
-  const auth = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
-  const env = {
-    PATH: process.env.PATH, LANG: process.env.LANG || "C.UTF-8", GIT_TERMINAL_PROMPT: "0",
-    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "",
-    GIT_CONFIG_KEY_1: "http.https://github.com/.extraheader", GIT_CONFIG_VALUE_1: auth,
-    GIT_CONFIG_KEY_2: "http.followRedirects", GIT_CONFIG_VALUE_2: "false",
-  };
   for (const repo of repositories) {
     if (!/^[A-Za-z0-9_.-]+--[A-Za-z0-9_.-]+$/.test(repo.directory)) throw new Error("Invalid repository directory");
+    if (repo.cloneUrl !== `https://github.com/${repo.fullName}.git`) throw new Error("Repository clone URL does not match its scoped GitHub identity");
     const target = path.join(destination, repo.directory);
     try { await access(path.join(target, ".git")); continue; } catch {}
+    const token = getToken ? await getToken(repo) : suppliedToken;
+    if (typeof token !== "string" || !token) throw new Error("No scoped GitHub credential is available for this repository");
+    const auth = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+    const env = {
+      PATH: process.env.PATH, LANG: process.env.LANG || "C.UTF-8", GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "",
+      GIT_CONFIG_KEY_1: `http.https://github.com/${repo.fullName}.git.extraheader`, GIT_CONFIG_VALUE_1: auth,
+      GIT_CONFIG_KEY_2: "http.followRedirects", GIT_CONFIG_VALUE_2: "false",
+    };
     await onProgress(`Preparing ${repo.fullName} (${repo.branch})…`);
     const temporary = `${target}.clone-${randomUUID()}`;
     try {

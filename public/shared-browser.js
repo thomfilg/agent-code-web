@@ -1,11 +1,21 @@
 import { openSidePanel, closeSidePanel } from "./side-panels.js";
+import { directBrowserLink } from "./browser-links.js";
 
 const $ = selector => document.querySelector(selector);
 const modifiers = event => (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0);
 
 export class SharedBrowserPanel {
-  constructor({ api }) {
+  constructor({ api, getBackend = () => "local" }) {
     this.api = api; this.panel = $("#browser-panel"); this.canvas = $("#browser-canvas"); this.context = this.canvas.getContext("2d"); this.sequence = 0; this.frameVersion = 0;
+    this.pendingCommands = new Map(); this.resizeQueue = Promise.resolve(); this.resizeVersion = 0;
+    this.getBackend = getBackend;
+    $("#browser-address").addEventListener("input", () => this.updateDirectLink());
+    $("#browser-copy-link").onclick = async () => {
+      const link = this.directLink();
+      if (!link.url) return this.status(link.reason);
+      try { await navigator.clipboard.writeText(link.url); this.status("Direct preview URL copied. This does not enable agent access to your browser."); }
+      catch { this.status("Clipboard unavailable. Right-click Open directly to copy the link."); }
+    };
     $("#open-browser").onclick = () => this.open();
     $("#close-browser").onclick = () => { this.close(); $("#open-browser").focus(); };
     $("#expand-browser").onclick = () => { const expanded = this.panel.classList.toggle("expanded"); $("#expand-browser").setAttribute("aria-pressed", String(expanded)); };
@@ -21,7 +31,12 @@ export class SharedBrowserPanel {
     $("#browser-new-tab").onclick = () => this.send("newTab");
     $("#browser-close-tab").onclick = () => this.send("closeTab", { id: $("#browser-tabs").value });
     $("#browser-tabs").onchange = event => this.send("selectTab", { id: event.target.value });
-    $("#browser-viewport").onchange = event => { const [width, height] = event.target.value.split("x").map(Number); this.send("resize", { width, height }); };
+    $("#browser-viewport").onchange = event => {
+      const custom = event.target.value === "custom"; $("#browser-size-form").hidden = !custom;
+      if (custom) return $("#browser-width").focus();
+      const [width, height] = event.target.value.split("x").map(Number); this.resize(width, height);
+    };
+    $("#browser-size-form").onsubmit = event => { event.preventDefault(); this.resize(Number($("#browser-width").value), Number($("#browser-height").value)); };
     $("#browser-dialog-accept").onclick = () => { this.send("dialog", { accept: true, text: $("#browser-dialog-input").value }); $("#browser-dialog").hidden = true; };
     $("#browser-dialog-dismiss").onclick = () => { this.send("dialog", { accept: false }); $("#browser-dialog").hidden = true; };
     for (const [eventName, type] of [["pointerdown", "mousePressed"], ["pointerup", "mouseReleased"], ["pointermove", "mouseMoved"]]) {
@@ -35,7 +50,7 @@ export class SharedBrowserPanel {
     }
     this.canvas.addEventListener("wheel", event => {
       if (!this.connected) return;
-      event.preventDefault(); const scale = event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? this.canvas.height : 1;
+      event.preventDefault(); const scale = event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? this.frameViewport?.height || this.canvas.height : 1;
       this.send("mouse", { type: "mouseWheel", ...this.point(event), deltaX: event.deltaX * scale, deltaY: event.deltaY * scale, modifiers: modifiers(event) });
     }, { passive: false });
     this.canvas.addEventListener("contextmenu", event => event.preventDefault());
@@ -54,6 +69,10 @@ export class SharedBrowserPanel {
     });
     document.addEventListener("relay-panel-changed", () => { if (this.panel.hidden) this.disconnect(); });
     window.addEventListener("pagehide", () => this.disconnect());
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") { this.resumeVisible = Boolean(this.socket); this.disconnect(); }
+      else if (this.resumeVisible && !this.panel.hidden) { this.resumeVisible = false; this.connect(); }
+    });
   }
   status(message) { $("#browser-status").textContent = message; }
   setChat(chatId) { if (this.chatId !== chatId) { this.close(); this.chatId = chatId; } }
@@ -66,7 +85,10 @@ export class SharedBrowserPanel {
   accessChanged() { this.disconnect(); if (!this.panel.hidden) this.connect(); }
   disconnect() {
     const socket = this.socket; this.socket = null; socket?.close(); this.connected = false;
+    for (const pending of this.pendingCommands.values()) { clearTimeout(pending.timer); pending.reject(new Error("Browser connection changed")); }
+    this.pendingCommands.clear();
     this.frameVersion = (this.frameVersion || 0) + 1;
+    this.pendingFrame = null; this.frameViewport = null;
     this.context.clearRect(0, 0, this.canvas.width, this.canvas.height); this.canvas.hidden = true;
     $("#browser-connect").hidden = false; $("#browser-connect").disabled = false;
     $("#browser-dialog").hidden = true; $("#browser-dialog-input").value = "";
@@ -79,10 +101,17 @@ export class SharedBrowserPanel {
     socket.onmessage = event => {
       if (this.socket !== socket) return;
       let message; try { message = JSON.parse(event.data); } catch { return; }
+      const pending = this.pendingCommands.get(message.id);
+      if (pending) {
+        this.pendingCommands.delete(message.id); clearTimeout(pending.timer);
+        if (message.error) pending.reject(new Error(message.error)); else pending.resolve(message.value);
+        return;
+      }
       if (message.error) { this.status(message.error); return; }
       if (message.event === "status") {
         this.connected = true; $("#browser-connect").hidden = true;
         this.mode = message.value.mode;
+        this.captureVersion = message.value.captureVersion || 1;
         $("#browser-new-tab").disabled = this.mode === "personal"; $("#browser-close-tab").disabled = this.mode === "personal"; $("#browser-tabs").disabled = this.mode === "personal";
         $("#browser-profile-label").textContent = this.mode === "personal" ? "Your signed-in Chrome" : "Separate profile";
         $("#browser-footnote").textContent = this.mode === "personal" ? "Signed-in sharing is ON for this chat. Localhost is your computer, not a remote worker. Turn off the top-right switch to revoke access and close the automation tab." : "You and the agent share this page. Localhost reaches the chat’s worker. Your personal Chrome and its saved logins are not connected.";
@@ -102,31 +131,92 @@ export class SharedBrowserPanel {
   }
   send(action, params = {}) {
     if (!this.connected || this.socket?.readyState !== WebSocket.OPEN) { this.status("Connect to Chrome before interacting with the page."); return; }
-    this.socket.send(JSON.stringify({ id: ++this.sequence, action, params }));
+    const id = ++this.sequence;
+    this.socket.send(JSON.stringify({ id, action, params })); return id;
+  }
+  request(action, params = {}) {
+    const id = this.send(action, params);
+    if (!id) return Promise.reject(new Error("Connect to Chrome before resizing the page"));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.pendingCommands.delete(id); reject(new Error("Browser resize timed out; try again")); }, 30000);
+      this.pendingCommands.set(id, { resolve, reject, timer });
+    });
   }
   navigate(value) {
     if (!value) return;
     const url = /^[a-z]+:\/\//i.test(value) || value === "about:blank" ? value : `http://${value}`;
     this.send("navigate", { url });
   }
+  resize(width, height) {
+    if (!Number.isInteger(width) || width < 320 || width > 2560 || !Number.isInteger(height) || height < 240 || height > 1600) { this.status("Use a width of 320–2560 px and a height of 240–1600 px."); return; }
+    const socket = this.socket, version = ++this.resizeVersion;
+    // Apply changes in order even when connected to a pre-upgrade worker.
+    this.resizeQueue = this.resizeQueue.catch(() => {}).then(async () => {
+      if (socket !== this.socket || version !== this.resizeVersion) return;
+      await this.request("resize", { width, height });
+      if (socket !== this.socket || version !== this.resizeVersion) return;
+      if (this.captureVersion < 2 && this.mode !== "personal" && this.tabId) {
+        // Older workers kept the original screencast size until tab selection.
+        // Reattach to the SAME tab: refresh capture without creating a tab,
+        // navigating, reloading, or discarding form/cart state.
+        await this.request("selectTab", { id: this.tabId });
+      }
+    }).catch(error => { if (socket === this.socket && version === this.resizeVersion) this.status(error.message); });
+    return this.resizeQueue;
+  }
   renderTabs(state) {
+    this.tabId = state.tabId;
     const select = $("#browser-tabs"); select.replaceChildren();
     for (const tab of state.tabs || []) { const option = document.createElement("option"); option.value = tab.id; option.textContent = tab.title || tab.url || "New tab"; select.append(option); }
     select.value = state.tabId;
     if (document.activeElement !== $("#browser-address")) $("#browser-address").value = state.tabs?.find(tab => tab.id === state.tabId)?.url || "";
-    if (state.viewport) $("#browser-viewport").value = `${state.viewport.width}x${state.viewport.height}`;
+    this.updateDirectLink();
+    if (state.viewport) {
+      const { width, height } = state.viewport, value = `${width}x${height}`, select = $("#browser-viewport");
+      select.value = [...select.options].some(option => option.value === value) ? value : "custom";
+      if (document.activeElement !== $("#browser-width")) $("#browser-width").value = width;
+      if (document.activeElement !== $("#browser-height")) $("#browser-height").value = height;
+      $("#browser-size-form").hidden = select.value !== "custom";
+    }
+  }
+  directLink() { return directBrowserLink({ address: $("#browser-address").value, chatId: this.chatId, backend: this.getBackend(), relayOrigin: location.origin, mode: this.mode }); }
+  updateDirectLink() {
+    const result = this.directLink(), link = $("#browser-open-direct");
+    link.title = result.note || result.reason;
+    link.setAttribute("aria-disabled", String(!result.url));
+    if (result.url) link.href = result.url; else link.removeAttribute("href");
+    $("#browser-copy-link").disabled = !result.url;
   }
   point(event) {
     const rect = this.canvas.getBoundingClientRect();
-    return { x: Math.max(0, Math.min(this.canvas.width - 1, (event.clientX - rect.left) * this.canvas.width / rect.width)), y: Math.max(0, Math.min(this.canvas.height - 1, (event.clientY - rect.top) * this.canvas.height / rect.height)) };
+    // Pointer coordinates are CSS viewport pixels, not high-DPI bitmap pixels.
+    const { width, height } = this.frameViewport || this.canvas;
+    return { x: Math.max(0, Math.min(width - 1, (event.clientX - rect.left) * width / rect.width)), y: Math.max(0, Math.min(height - 1, (event.clientY - rect.top) * height / rect.height)) };
   }
   paint(frame) {
-    const version = ++this.frameVersion; const image = new Image();
+    if (!frame || !Number.isInteger(frame.width) || !Number.isInteger(frame.height) || frame.width < 1 || frame.height < 1) return;
+    this.pendingFrame = frame;
+    if (this.decodingFrame) return; // One decoder and only the latest waiting frame.
+    this.decodeFrame();
+  }
+  decodeFrame() {
+    const frame = this.pendingFrame; this.pendingFrame = null;
+    if (!frame || !this.connected) return;
+    this.decodingFrame = true;
+    const version = this.frameVersion, image = new Image();
+    const finish = () => { this.decodingFrame = false; this.decodeFrame(); };
     image.onload = () => {
-      if (this.frameVersion !== version || !this.connected) return;
-      this.canvas.width = frame.width; this.canvas.height = frame.height;
-      this.canvas.hidden = false; this.context.drawImage(image, 0, 0, frame.width, frame.height);
+      if (this.frameVersion !== version || !this.connected) { finish(); return; }
+      if (this.canvas.width !== image.naturalWidth) this.canvas.width = image.naturalWidth;
+      if (this.canvas.height !== image.naturalHeight) this.canvas.height = image.naturalHeight;
+      this.frameViewport = { width: frame.width, height: frame.height };
+      this.canvas.dataset.viewportWidth = frame.width; this.canvas.dataset.viewportHeight = frame.height;
+      this.canvas.style.width = `${frame.width}px`;
+      this.canvas.hidden = false; this.context.drawImage(image, 0, 0);
+      finish();
     };
-    image.src = `data:image/jpeg;base64,${frame.data}`;
+    image.onerror = finish;
+    // Older paired extensions can still supply JPEG until they are reloaded.
+    image.src = `data:${frame.mimeType === "image/png" ? "image/png" : "image/jpeg"};base64,${frame.data}`;
   }
 }

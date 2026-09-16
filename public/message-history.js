@@ -20,7 +20,7 @@ export class MessageHistory {
     const entry = this.chats.get(this.chatId); if (!entry) return false;
     if (entry.index === null) {
       if (!previous) return false;
-      entry.messages = (this.state.active?.messages || []).filter(m => m.role === "user").map(m => m.text || "");
+      entry.messages = (this.state.active?.messages || []).filter(m => m.role === "user" && !m.meta?.renderingSample).map(m => m.text || "");
       if (!entry.messages.length) return false;
       entry.draft = this.input.value; entry.edits.clear(); entry.index = entry.messages.length;
     } else this.saveCurrent();

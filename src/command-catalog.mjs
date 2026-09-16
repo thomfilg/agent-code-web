@@ -4,25 +4,24 @@ import { mkdir } from "node:fs/promises";
 import { JsonRpcProcess } from "./json-rpc-process.mjs";
 import { spawnWorker, terminateWorker } from "./worker-process.mjs";
 import readline from "node:readline";
+import { webCommands } from "../public/web-commands.js";
 
-// The TUI's own commands are not exposed by skills/list. These are the
-// documented CLI commands; terminal-only actions are labelled, never silently
-// passed off as implemented web controls.
-const CODEX_NATIVE = "permissions ide keymap vim agent subagents apps plugins hooks clear rename archive delete compact copy diff exit experimental approve memories skills import feedback init logout mcp mention model fast plan goal personality ps stop fork app side btw raw resume new quit review status usage debug-config statusline title theme pets pet".split(" ");
-const WEB = new Set(["usage", "status", "context", "model", "effort", "plan", "diff", "mcp", "skills", "stop", "rename", "archive", "new", "compact"]);
 const clean = item => ({ name: String(item.name || "").replace(/^\//, "").slice(0, 160), description: String(item.description || "").slice(0, 600), kind: item.kind || "CLI command", aliases: (item.aliases || []).filter(n => typeof n === "string"), ...(item.path ? { path: item.path } : {}) });
 export class CommandCatalog {
-  constructor(config) { this.config = config; this.cache = new Map(); this.pending = new Map(); }
+  constructor(config, models = null) { this.config = config; this.models = models; this.cache = new Map(); this.pending = new Map(); }
   async list(chat) {
-    const key = `${chat.id}:${chat.agent}`;
+    const key = `${chat.id}:${chat.agent}:${chat.model || "default"}`;
     if (this.cache.get(key)?.expires > Date.now()) return this.cache.get(key).value;
     if (this.pending.has(key)) return this.pending.get(key);
-    const promise = this.discover(chat).then(value => { this.cache.set(key, { value, expires: Date.now() + 60000 }); return value; }).finally(() => this.pending.delete(key));
+    const promise = this.discover(chat).then(value => { if (this.pending.get(key) === promise) this.cache.set(key, { value, expires: Date.now() + 60000 }); return value; }).finally(() => { if (this.pending.get(key) === promise) this.pending.delete(key); });
     this.pending.set(key, promise); return promise;
+  }
+  invalidate(chatId) {
+    for (const map of [this.cache, this.pending]) for (const key of map.keys()) if (key.startsWith(`${chatId}:`)) map.delete(key);
   }
   async discover(chat) {
     let items = [], note = "";
-    if (chat.agent === "mock") items = [...WEB].map(name => ({ name, kind: "Web control" }));
+    if (chat.agent === "mock") items = [];
     else if (this.config.workerBackend === "ec2") {
       items = chat.commandCatalog || (chat.slashCommands || []).map(name => ({ name }));
       note = "Last worker-reported commands. Sleeping cloud workers are not started to refresh this list.";
@@ -30,10 +29,14 @@ export class CommandCatalog {
       try { items = chat.agent === "codex" ? await this.codex(chat) : await this.claude(chat); }
       catch { items = chat.commandCatalog || (chat.slashCommands || []).map(name => ({ name })); note = "Command discovery unavailable. Showing web controls and last reported commands."; }
     }
-    if (chat.agent === "codex" && !items.some(item => item.name === "goal")) items.unshift(...CODEX_NATIVE.map(name => ({ name, description: "Native Codex CLI command · terminal-only unless provided by a skill", kind: "CLI command" })));
-    items.push(...[...WEB].map(name => ({ name, description: "Agent Relay control", kind: "Web control" })));
+    // skills/list gives executable Codex skills, not terminal UI settings. Old
+    // cached terminal placeholders must not return as broken menu entries.
+    if (chat.agent === "codex") items = items.filter(item => item.kind === "Skill" && item.path);
+    let model;
+    if (chat.agent === "codex" && this.models) try { model = await this.models.selected(chat); } catch { /* Model-only controls wait for successful catalog discovery. */ }
+    items.push(...webCommands(chat.agent, { personality: model?.supportsPersonality, fast: model?.serviceTiers?.some(tier => /^fast$/i.test(tier.name || "") || ["fast", "priority"].includes(tier.id)) }));
     const map = new Map();
-    for (const raw of items) { const item = clean(raw); if (!/^[\w:.-]+$/.test(item.name) || item.name.startsWith("__")) continue; map.set(item.name, { ...item, web: WEB.has(item.name) }); for (const alias of item.aliases) if (/^[\w:.-]+$/.test(alias)) map.set(alias, { ...item, name: alias, aliasFor: item.name, web: WEB.has(alias) }); }
+    for (const raw of items) { const item = clean(raw); if (!/^[\w:.-]+$/.test(item.name) || item.name.startsWith("__")) continue; map.set(item.name, { ...item, web: item.kind === "Web control" }); for (const alias of item.aliases) if (/^[\w:.-]+$/.test(alias)) map.set(alias, { ...item, name: alias, aliasFor: item.name, web: item.kind === "Web control" }); }
     return { commands: [...map.values()].sort((a, b) => a.name.localeCompare(b.name)), note };
   }
   async env(agent, chat) {
@@ -51,8 +54,7 @@ export class CommandCatalog {
     try {
       rpc.start(); await rpc.request("initialize", { clientInfo: { name: "agent_relay_commands", version: "1" }, capabilities: { experimentalApi: true } }); rpc.notify("initialized", {});
       const result = await rpc.request("skills/list", { cwds: [chat.workspace], forceReload: true });
-      return [...CODEX_NATIVE.map(name => ({ name, description: WEB.has(name) ? "Agent Relay control" : "Native Codex CLI command · terminal-only unless provided by a skill", kind: "CLI command" })),
-        ...(result.data || []).flatMap(entry => (entry.skills || []).filter(s => s.enabled !== false).map(s => ({ name: s.name, description: s.description || s.shortDescription, path: s.path, kind: "Skill" })))];
+      return (result.data || []).flatMap(entry => (entry.skills || []).filter(s => s.enabled !== false).map(s => ({ name: s.name, description: s.description || s.shortDescription, path: s.path, kind: "Skill" })));
     } finally { await rpc.stop(); }
   }
   async claude(chat) {

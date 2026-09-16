@@ -28,7 +28,7 @@ test("compact mobile composer switches agents with Sol/Opus high defaults and pr
 });
 
 test("PR bar opens colored diffs, shows CI counts/conflicts, and requires explicit GitHub auto-merge", async ({ page }) => {
-  await page.request.post("/api/github", { data: { method: "local" } });
+  await page.request.post("/api/github", { data: { method: "local", companies: ["acme", "other"] } });
   await page.goto("/");
   await page.getByRole("button", { name: "Open PR controls fixture", exact: true }).click();
   const bar = page.locator(".pull-request-bar");
@@ -64,7 +64,7 @@ test("upload chips, usage availability, transcript and repository menus are func
   await expect(page.locator("#attachment-chips")).toBeEmpty();
   await page.getByLabel("Context and usage", { exact: true }).click();
   await expect(page.locator("#session-usage")).toContainText("Subscription limits not reported");
-  await expect(page.locator("#session-usage").getByRole("button", { name: "Compact session" })).toBeDisabled();
+  await expect(page.locator("#session-usage").getByRole("button", { name: "Compact session" })).toBeEnabled();
   await page.getByLabel("Chat actions", { exact: true }).click();
   await page.getByRole("button", { name: "Transcript view", exact: true }).click();
   await expect(page.locator("#preview-content")).toContainText("Please inspect the attached files");

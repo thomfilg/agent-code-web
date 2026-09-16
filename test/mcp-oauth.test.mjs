@@ -14,12 +14,12 @@ import { temporaryDirectory, testConfig } from "./helpers.mjs";
 async function fixture(t) {
   const service = await startMcpFixture({ anonymousInitialize: true }); t.after(() => service.close());
   const records = new MemoryRecords(), mcps = new McpConnections(records);
-  const c = await mcps.save({ name: "custom", type: "http", url: `${service.origin}/mcp`, authMode: "oauth" });
+  const c = await mcps.save({ name: "custom", allowUnassigned: true, type: "http", url: `${service.origin}/mcp`, authMode: "oauth" });
   return { service, records, mcps, c };
 }
 async function consent(flow) {
   const url = new URL(flow.authorizationUrl); assert.equal(url.searchParams.get("code_challenge_method"), "S256"); assert.ok(url.searchParams.get("code_challenge"));
-  url.pathname = "/approve"; const approval = await fetch(url, { redirect: "manual" }); assert.equal(approval.status, 302);
+  url.pathname = url.pathname.replace(/\/authorize$/, "/approve"); const approval = await fetch(url, { redirect: "manual" }); assert.equal(approval.status, 302);
   return new URL(approval.headers.get("location")).searchParams;
 }
 const cookies = flow => ({ [oauthCookieName(flow.state)]: flow.cookie });
@@ -47,6 +47,27 @@ test("custom OAuth: PKCE consent, masked encrypted persistence, real MCP discove
   assert.equal(service.calls, 1);
   await restarted.oauth.disconnect(c.id);
   await assert.rejects(client.listTools(), error => error.code === 401);
+});
+
+test("custom OAuth handles Paladira-shaped path discovery, dynamic registration and callbacks without optional issuer parameters", async t => {
+  // Matches public discovery metadata fetched from paladira.com on 2026-09-15;
+  // authentication and tokens below are entirely local fixtures, not a live grant.
+  const service = await startMcpFixture({ mcpPath: "/api/mcp", oauthPrefix: "/api/oauth", issuerParameter: false, anonymousInitialize: true });
+  t.after(() => service.close());
+  const records = new MemoryRecords(), mcps = new McpConnections(records);
+  const connection = await mcps.save({ name: "paladira", companies: ["12-apps"], type: "http", url: `${service.origin}/api/mcp`, authMode: "oauth" });
+  const flow = await mcps.oauth.begin(connection.id, "http://127.0.0.1:8787/oauth/mcp/callback");
+  const authorization = new URL(flow.authorizationUrl);
+  assert.equal(authorization.pathname, "/api/oauth/authorize");
+  assert.equal(authorization.searchParams.get("resource"), `${service.origin}/api/mcp`);
+  assert.equal(authorization.searchParams.get("scope"), "mcp:read mcp:write");
+  assert.equal(authorization.searchParams.get("redirect_uri"), "http://127.0.0.1:8787/oauth/mcp/callback");
+  assert.equal((await mcps.list())[0].oauthConnected, false, "discovery and registration must not imply account consent");
+  const params = await consent(flow); assert.equal(params.has("iss"), false);
+  const saved = await mcps.oauth.finish(params, cookies(flow));
+  assert.equal(saved.oauthConnected, true);
+  assert.equal((await new McpConnections(records).test(connection.id)).health.status, "connected");
+  assert.equal(service.exchanges, 1); assert.equal(service.calls, 0);
 });
 
 test("OAuth callback rejects missing browser cookie, replay, issuer mix-up, stale revision and cancellation", async t => {
@@ -100,9 +121,9 @@ test("environment selections reach both adapters; grants revoke on stop and fres
     adapterFactory: ({ chat, executor }) => ({ start: async () => { seen.push({ agent: chat.agent, servers: executor.mcpServers }); }, send: async () => ({ text: "ready" }), stop: async () => {} }) });
   await app.start(); t.after(() => app.stop());
   const mcps = app.manager.mcps;
-  const included = await mcps.save({ name: "selected", type: "http", url: "https://included.example/mcp", headers: { Authorization: "Bearer upstream-secret" } });
+  const included = await mcps.save({ name: "selected", allowUnassigned: true, type: "http", url: "https://included.example/mcp", headers: { Authorization: "Bearer upstream-secret" } });
   await mcps.save({ name: "not-selected", type: "http", url: "https://excluded.example/mcp" });
-  const environment = await app.manager.environments.save({ name: "Selected MCPs", backend: "local", mcpIds: [included.id] });
+  const environment = await app.manager.environments.save({ name: "Selected MCPs", backend: "local", allowUnassigned: true, mcpIds: [included.id] });
   for (const agent of ["codex", "claude"]) {
     const chat = await app.manager.createChat({ agent, title: "MCP worker", environmentId: environment.id });
     await app.manager.send(chat.id, "load tools"); const runtime = seen.at(-1);

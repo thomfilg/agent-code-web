@@ -6,6 +6,7 @@ process.stdin.on("data", (chunk) => { prompt += chunk; });
 process.stdin.on("end", () => {
   const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
   send({ type: "system", subtype: "init", session_id: "fixture" });
+  if (prompt === "wait for interruption") { setInterval(() => {}, 1000); return; }
   if (prompt === "inspect-settings") {
     const flag = name => { const i = process.argv.indexOf(name); return i < 0 ? null : process.argv[i + 1]; };
     send({ type: "result", subtype: "success", result: JSON.stringify({ model: flag("--model"), effort: flag("--effort"), mode: flag("--permission-mode"), environmentEffort: process.env.CLAUDE_CODE_EFFORT_LEVEL || null }) }); return;

@@ -22,11 +22,30 @@ test("model catalog validates provider-specific effort and resets sticky Codex s
   assert.deepEqual(await catalog.creationSettings("claude", { model: "haiku" }), { model: "haiku", effort: null });
   assert.deepEqual(await catalog.turnSettings({ agent: "claude", modelSelectionSet: true }), { model: "opus", effort: "high", resetEffort: false });
 });
+
+test("Fast and personality settings use the selected model's advertised capabilities", async () => {
+  const catalog = new ModelCatalog(testConfig("/tmp/unused-command-model-fixture"));
+  catalog.codex = async () => ({ models: [
+    { id: "gpt-5.6-sol", efforts: ["high"], supportsPersonality: true, serviceTiers: [{ id: "priority", name: "Fast" }] },
+    { id: "plain", efforts: ["high"], supportsPersonality: false, serviceTiers: [] },
+  ] });
+  const chat = { agent: "codex", model: "gpt-5.6-sol", effort: "high" };
+  assert.deepEqual(await catalog.fastSettings(chat), { serviceTier: "priority" });
+  assert.deepEqual(await catalog.fastSettings({ ...chat, serviceTier: "priority" }), { serviceTier: null });
+  assert.deepEqual(await catalog.fastSettings(chat, "off"), { serviceTier: null });
+  assert.deepEqual(await catalog.validate("codex", { ...chat, serviceTier: "priority", personality: "friendly" }), { model: chat.model, effort: "high", serviceTier: "priority", personality: "friendly" });
+  await assert.rejects(catalog.validate("codex", { ...chat, serviceTier: "invented" }), /not available/);
+  await assert.rejects(catalog.validate("codex", { ...chat, personality: "invented" }), /supported personality/);
+  await assert.rejects(catalog.validate("codex", { ...chat, model: "plain", personality: "pragmatic" }), /supported personality/);
+  await assert.rejects(catalog.fastSettings({ ...chat, model: "plain" }), /does not advertise/);
+  assert.deepEqual(await catalog.turnSettings({ ...chat, serviceTier: "priority", personality: "pragmatic" }), { model: chat.model, effort: "high", resetEffort: false, serviceTier: "priority", personality: "pragmatic" });
+  assert.deepEqual(await catalog.turnSettings({ ...chat, model: "plain", serviceTier: "priority", personality: "pragmatic" }), { model: "plain", effort: "high", resetEffort: false, serviceTier: null, personality: "none" });
+});
 test("Docker is persisted as a capability but cannot share a local control-plane daemon", async () => {
   const environments = new Environments(new MemoryRecords());
   assert.ok(SOFTWARE_CATALOG.some(item => item.id === "docker"));
   await assert.rejects(environments.save({ name: "Unsafe local", backend: "local", software: ["docker"] }), /dedicated EC2/);
-  const environment = await environments.save({ name: "Container worker", backend: "ec2", software: ["docker"] });
+  const environment = await environments.save({ name: "Container worker", backend: "ec2", allowUnassigned: true, software: ["docker"] });
   assert.deepEqual((await environments.runtime(environment.id)).software, ["docker"]);
   await assert.rejects(prepareSoftware({ runtimeHome: "/tmp/fake-home", metadata: { backend: "local" }, mkdir: async () => {}, spawn: () => assert.fail("Local Docker must not be contacted") }, { software: ["docker"] }, async () => {}), /dedicated EC2/);
 });
