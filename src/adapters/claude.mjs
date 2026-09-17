@@ -250,6 +250,11 @@ export class ClaudeAdapter {
             if (session.hasScheduledWork() && !session.ended) this.applicationSession = session;
             this.hooks.onEvent?.({ type: "scheduled_work" });
           },
+          onWorkflowsChanged: () => {
+            if (this.stopped || ![this.turnSession, this.applicationSession].includes(session)) return;
+            if (session.hasWorkflowWork() && !session.ended) this.applicationSession = session;
+            this.hooks.onEvent?.({ type: "background_turn", active: this.isBackgroundBusy() });
+          },
         });
         return session;
       };
@@ -512,7 +517,7 @@ export class ClaudeAdapter {
   }
 
   isBackgroundBusy() {
-    return !this.stopped && !this.applicationSession?.ended && Boolean(this.applicationSession?.backgroundCommand);
+    return !this.stopped && !this.applicationSession?.ended && Boolean(this.applicationSession?.backgroundCommand || this.applicationSession?.hasWorkflowWork());
   }
 
   permissionMode(event) {
@@ -538,9 +543,11 @@ export class ClaudeAdapter {
     if (event.type === "assistant" && !event.parent_tool_use_id && event.message?.usage) this.backgroundRequest = event.message;
     if (event.type === "result") {
       this.hooks.onEvent?.({ type: "usage", usage: claudeUsage(event, this.backgroundRequest, randomUUID()) });
-      const failed = event.is_error === true || Boolean(event.subtype && event.subtype !== "success");
+      const interrupted = event.relayWorkflowInterrupted === true;
+      const failed = !interrupted && (event.is_error === true || Boolean(event.subtype && event.subtype !== "success"));
       const text = this.backgroundOutput.text || (failed ? redact(event.result || "Claude background task failed") : "");
       if (text) this.hooks.onEvent?.({ type: "background_response", text, failed });
+      if (interrupted) this.hooks.onEvent?.({ type: "notice", text: "Native workflow report interrupted to send your queued message." });
       this.backgroundOutput = null; this.backgroundRequest = null;
     }
   }
@@ -565,7 +572,8 @@ export class ClaudeAdapter {
     await this.reviewInterruption?.();
     if (child) await terminateWorker(child);
     else if (this.turnSession?.pending) await this.turnSession.stop();
-    else if (this.isBackgroundBusy()) await this.applicationSession.interruptBackground();
+    await this.applicationSession?.interruptWorkflows();
+    if (this.applicationSession?.backgroundCommand) await this.applicationSession.interruptBackground();
   }
 
   async stop() {

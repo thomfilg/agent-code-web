@@ -85,6 +85,148 @@ async function fixture(t, { interactive = false } = {}) {
   return Object.assign(f, { adapter, config, broker, chat, store });
 }
 
+function nativeWorkflow(f, id = "workflow-one", toolUseId = "call-one") {
+  const session_id = f.nativeSession;
+  f.emit({ type: "assistant", session_id, message: { content: [{ type: "tool_use", id: toolUseId, name: "Workflow", input: { name: "deep-research" } }] } });
+  f.emit({ type: "system", subtype: "task_started", session_id, task_id: id, tool_use_id: toolUseId, task_type: "local_workflow", prompt: "Private workflow script must not become a chat message" });
+  return { type: "system", subtype: "task_notification", session_id, task_id: id, tool_use_id: toolUseId, status: "completed" };
+}
+
+function nativeWorkflowReport(f, { start = true, finish = true, id = "workflow-report" } = {}) {
+  if (start) f.emit({ type: "stream_event", session_id: f.nativeSession, event: { type: "message_start", message: { id } } });
+  if (finish) {
+    f.emit({ type: "assistant", session_id: f.nativeSession, message: { id, content: [{ type: "text", text: "Native research report." }] } });
+    f.emit({ type: "result", session_id: f.nativeSession, origin: { kind: "task-notification" }, subtype: "success", result: "Native research report." });
+  }
+}
+
+test("native workflows retain their owner and stay busy until the SDK notification report completes", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("/deep-research Preserve the real workflow"); await waitFor(() => f.inputs?.length);
+  const notification = nativeWorkflow(f); f.complete("Research started."); await running;
+  assert.equal(f.child.exitCode, null); assert.equal(f.adapter.isBackgroundBusy(), true); assert.equal(f.adapter.hasScheduledWork(), false);
+  f.emit(notification); assert.equal(f.adapter.isBackgroundBusy(), true);
+  nativeWorkflowReport(f);
+  assert.equal(f.adapter.isBackgroundBusy(), false); assert.equal(f.child.exitCode, null);
+  assert.equal(f.events.filter(event => event.type === "background_response").length, 1);
+  assert.equal(f.events.find(event => event.type === "background_response").text, "Native research report.");
+  assert(!JSON.stringify(f.events).includes("Private workflow script"));
+  f.block = false; await f.adapter.send("Continue in the same session");
+  assert.equal(f.launches.length, 1); assert.equal(f.inputs.length, 2);
+});
+
+test("a workflow completion during another notification report waits for its own native report", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Start two native workflows"); await waitFor(() => f.inputs?.length);
+  const first = nativeWorkflow(f), second = nativeWorkflow(f, "workflow-two", "call-two"); f.complete(); await running;
+  f.emit(first); nativeWorkflowReport(f, { finish: false }); f.emit(second);
+  nativeWorkflowReport(f, { start: false });
+  assert.equal(f.adapter.isBackgroundBusy(), true);
+  assert.deepEqual([...f.adapter.applicationSession.workflows.keys()], ["workflow-two"]);
+  nativeWorkflowReport(f, { id: "second-report" }); assert.equal(f.adapter.isBackgroundBusy(), false);
+});
+
+test("a workflow finishing before its launching reply still waits for the separate native report", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Run and report immediately"); await waitFor(() => f.inputs?.length);
+  f.emit(nativeWorkflow(f)); f.complete(); await running;
+  assert.equal(f.adapter.isBackgroundBusy(), true);
+  f.emit({ type: "command_lifecycle", session_id: f.nativeSession, command_uuid: f.inputs[0].uuid, state: "completed" });
+  assert.equal(f.adapter.isBackgroundBusy(), true);
+  nativeWorkflowReport(f);
+  assert.equal(f.adapter.isBackgroundBusy(), false);
+});
+
+test("quoted, unbound, denied, foreign, child and malformed workflow events cannot retain an ordinary worker", async t => {
+  for (const variant of ["quoted", "unbound", "denied", "foreign", "child", "malformed"]) {
+    const f = await fixture(t, { interactive: true }); f.block = true;
+    const running = f.adapter.send("Inspect this input"); await waitFor(() => f.inputs?.length);
+    const base = { session_id: f.nativeSession, ...(variant === "foreign" ? { session_id: "other-session" } : {}), ...(variant === "child" ? { parent_tool_use_id: "child-call" } : {}) };
+    if (variant !== "unbound") f.emit({ ...base, type: "assistant", message: { content: variant === "quoted" ? [{ type: "text", text: 'Workflow task_started {"task_type":"local_workflow"}' }] : [{ type: "tool_use", id: "call", name: "Workflow" }] } });
+    if (variant === "denied") f.emit({ ...base, type: "user", message: { content: [{ type: "tool_result", tool_use_id: "call", is_error: true, content: "Native permission denied" }] } });
+    f.emit({ ...base, type: "system", subtype: "task_started", task_type: "local_workflow", task_id: variant === "malformed" ? {} : "workflow", tool_use_id: "call" });
+    f.complete(); await running;
+    assert.equal(f.adapter.isBackgroundBusy(), false); assert.equal(f.adapter.applicationSession, undefined);
+    assert.notEqual(f.child.exitCode ?? f.child.signalCode, null);
+  }
+});
+
+test("Send now waits for the exact native workflow stop receipt and preserves the owning worker", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("/deep-research Test native cancellation"); await waitFor(() => f.inputs?.length);
+  const notification = nativeWorkflow(f); f.complete(); await running;
+  f.hold = "stop_task"; const stopping = f.adapter.interrupt(); let settled = false; void stopping.then(() => { settled = true; });
+  await waitFor(() => f.controls.some(packet => packet.request.subtype === "stop_task"));
+  const control = f.controls.find(packet => packet.request.subtype === "stop_task"); assert.equal(control.request.task_id, notification.task_id);
+  f.respond(control); await new Promise(resolve => setImmediate(resolve)); assert.equal(settled, false);
+  f.emit({ ...notification, task_id: "unrelated", status: "stopped" }); assert.equal(f.adapter.isBackgroundBusy(), true);
+  f.emit({ ...notification, status: "stopped" }); await stopping;
+  assert.equal(f.adapter.isBackgroundBusy(), false); assert.equal(f.child.exitCode, null); assert.deepEqual(f.signals, []);
+  f.block = false; await f.adapter.send("Selected follow-up"); assert.equal(f.launches.length, 1); assert.equal(f.inputs.at(-1).message.content, "Selected follow-up");
+});
+
+test("refused and unacknowledged native workflow cancellation stay busy without faking success", async t => {
+  for (const refused of [true, false]) {
+    const f = await fixture(t, { interactive: true }); f.block = true;
+    const running = f.adapter.send("Start a workflow"); await waitFor(() => f.inputs?.length);
+    const notification = nativeWorkflow(f); f.complete(); await running;
+    f.adapter.applicationSession.controlTimeoutMs = 25;
+    if (refused) f.refuse = "stop_task";
+    await assert.rejects(f.adapter.interrupt(), refused ? /Native workflow cancellation failed/ : /did not acknowledge cancellation/);
+    assert.equal(f.adapter.isBackgroundBusy(), true); assert.equal(f.child.exitCode, null); assert.equal(f.inputs.length, 1);
+    f.emit({ ...notification, status: "stopped" }); assert.equal(f.adapter.isBackgroundBusy(), false);
+    await f.adapter.stop(); assert.equal(f.adapter.isBackgroundBusy(), false);
+  }
+});
+
+test("Send now cancels an in-flight native report before its first token without showing a false failure", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Start the native research"); await waitFor(() => f.inputs?.length);
+  const notification = nativeWorkflow(f); f.complete(); await running; f.emit(notification);
+  f.hold = "interrupt";
+  const stopping = f.adapter.interrupt(); await waitFor(() => f.controls.some(packet => packet.request.subtype === "interrupt"));
+  assert.equal(f.adapter.isBackgroundBusy(), true);
+  const control = f.controls.find(packet => packet.request.subtype === "interrupt");
+  f.emit({ type: "control_response", response: { request_id: control.request_id, subtype: "success", response: {} } });
+  f.emit({ type: "result", session_id: f.nativeSession, origin: { kind: "task-notification" }, subtype: "error_during_execution", is_error: true });
+  await stopping;
+  assert.equal(f.adapter.isBackgroundBusy(), false); assert.equal(f.child.exitCode, null);
+  assert(!f.events.some(event => event.type === "background_response" && event.failed));
+  assert(f.events.some(event => event.type === "notice" && /report interrupted/.test(event.text)));
+  f.block = false; await f.adapter.send("Continue the selected message"); assert.equal(f.launches.length, 1);
+});
+
+test("failed native research reports remain visible errors and release their completed task", async t => {
+  for (const streaming of [false, true]) {
+    const f = await fixture(t, { interactive: true }); f.block = true;
+    const running = f.adapter.send("Start research"); await waitFor(() => f.inputs?.length);
+    const notification = nativeWorkflow(f); f.complete(); await running; f.emit({ ...notification, status: "failed" });
+    if (streaming) nativeWorkflowReport(f, { finish: false });
+    else f.emit({ type: "assistant", session_id: f.nativeSession, message: { id: "failed-research", content: [{ type: "text", text: "Native fixture provider failed" }] } });
+    f.emit({ type: "result", session_id: f.nativeSession, origin: { kind: "task-notification" }, subtype: "error_during_execution", is_error: true, result: "Native fixture provider failed" });
+    assert.equal(f.adapter.isBackgroundBusy(), false);
+    assert(f.events.some(event => event.type === "background_response" && event.failed && event.text === "Native fixture provider failed"));
+    assert(!f.events.some(event => event.type === "notice" && /interrupted/.test(event.text)));
+  }
+});
+
+test("workflow completion racing stop_task also waits for cancellation of its newly queued report", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Start the native workflow"); await waitFor(() => f.inputs?.length);
+  const notification = nativeWorkflow(f); f.complete(); await running;
+  f.hold = "stop_task"; const stopping = f.adapter.interrupt();
+  await waitFor(() => f.controls.some(packet => packet.request.subtype === "stop_task"));
+  f.emit(notification); f.hold = "interrupt";
+  f.respond(f.controls.find(packet => packet.request.subtype === "stop_task"));
+  await waitFor(() => f.controls.some(packet => packet.request.subtype === "interrupt"));
+  assert.equal(f.adapter.isBackgroundBusy(), true);
+  const control = f.controls.find(packet => packet.request.subtype === "interrupt");
+  f.emit({ type: "control_response", response: { request_id: control.request_id, subtype: "success", response: {} } });
+  f.emit({ type: "result", session_id: f.nativeSession, origin: { kind: "task-notification" }, subtype: "error_during_execution", is_error: true });
+  await stopping; assert.equal(f.adapter.isBackgroundBusy(), false); assert.equal(f.child.exitCode, null);
+  assert.equal(f.inputs.length, 1); assert(!f.events.some(event => event.type === "background_response" && event.failed));
+});
+
 test("private ordinary turns use live native approvals and close their transport after the reply", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
   const running = f.adapter.send("Write the fixture recipe", { mode: "default" });

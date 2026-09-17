@@ -48,6 +48,7 @@ and remain at the beginning of native stream-json input.
 | Installed Codex skills | `skills/list` plus structured skill input. No fake terminal entries substituted for skills. |
 | Installed Claude commands / plugin aliases | Native prefixes and arguments remain intact. Installed legacy commands and skills with the same basename execute distinct file effects, retain Unicode/multiline FIFO and resume history. Native Plan refusals and private-chat isolation pass. `/reload-skills` refreshes both menu caches; actual plugin reload is covered below. Other advertised commands and account-backed acceptance remain open. |
 | `/reload-plugins [--force]` (Claude) | Actual native `reload_plugins` SDK control, verified component counts and sanitized catalog/connector refresh; no inference or fake native input. First-command Stop/retry works without a missing journal. Same live CLI and HTTP app/state survive reload; explicit Stop ends the app. Failed/partial/late results, bounded cancellation, files and shared-host gates are covered. |
+| `/deep-research` (Claude) | Native private-SDK workflow orchestration, owner lifetime through the final report, FIFO, Stop/resume and targeted Send now. Actual native phase/dedup/voting execution with authored structured replies is verified; this is not a claim about public-source retrieval or research quality. Running apps remain intact until explicit Stop; account/shared-host/live gates remain. |
 | `/config key=value`, `/settings key=value` (Claude) | Native private-profile settings, with verified model/mode readback into Relay and subsequent-turn/Stop persistence. Partial native results remain visible; newer web selections win over late readback. Shared host mutations stay locked on item 21. Attachments are rejected before accepting/queueing the command. |
 | `/autocompact [auto/tokens]` (Claude) | Native current-window inspection, private-profile threshold persistence and reset. Actual automatic summary/compact-boundary and same-session Stop/resume verified; disabled state and native environment precedence retained. Shared host mutation and linked files fail closed; attached input is rejected before sending/queueing. Live activation pending. |
 | `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. Installed-CLI acceptance verifies effort changes inside a retained application session and explicit worker-environment precedence. |
@@ -99,7 +100,8 @@ Do not treat removing entries from autocomplete as implementing them.
   and resume, not every command's effect. `/simplify` integration and active
   `/loop` scheduling now have effect-level acceptance below, including dynamic
   wakeups with the installed SDK's limitations. Installed plugin namespaces
-  and actual SDK reload are accepted below. `/code-review --comment`, account-backed
+  and actual SDK reload are accepted below. Native `/deep-research` orchestration,
+  lifetime, report delivery and cancellation are accepted below. `/code-review --comment`, account-backed
   commands and shared
   host-profile writes also need the company-isolation gate in item 21. Do not
   infer support from a catalog entry or treat a native removal notice as a
@@ -107,7 +109,7 @@ Do not treat removing entries from autocomplete as implementing them.
   added only in newer documentation.
 
 - The fresh installed **2.1.222** SDK catalog also advertises these entries
-  without effect-level evidence in this ledger: `/deep-research`, `/design-sync`,
+  without effect-level evidence in this ledger: `/design-sync`,
   `/dataviz`, `/update-config`, `/debug`, `/batch`, `/fewer-permission-prompts`,
   `/doctor`, `/claude-api`, `/agents`, `/color`, `/heapdump`,
   `/workflow-launch-exec`, `/security-review`, `/insights`, `/recap`, `/design`,
@@ -115,6 +117,57 @@ Do not treat removing entries from autocomplete as implementing them.
   installed behavior and verify/implement each applicable action, starting with
   the first entries. This is explicit inventory within item 20, not new feature
   requests or an increased queue count. Discovery is not effect acceptance.
+
+### Claude native research workflow checkpoint
+
+Installed **2.1.222** reproduced `/deep-research` being killed immediately after
+its launching reply: Relay closed the native process while its real Workflow
+task was still running. Bound main-session `local_workflow` task events now
+retain that private SDK owner and keep the chat busy. Foreign, child, quoted,
+denied, malformed and unbound task events cannot retain it.
+
+Computation completion is not report completion. Native task-notification
+queries do not emit `command_lifecycle`; their actual result closes the report.
+This also handles research that finishes before the launching reply, overlapping
+completion notifications, non-streamed errors and cancellation before the first
+summary token. The final report is persisted before FIFO input is released.
+Send now uses the native `stop_task` control and verifies its terminal receipt,
+then interrupts an in-flight summary when needed. Failure/timeout stays visible;
+intentional summary cancellation is a notice, not a fabricated execution error.
+Explicit Stop still shuts down the owner; native history resumes normally.
+
+`node scripts/smoke-real-claude-research.mjs` runs the installed Workflow engine
+against authored model/StructuredOutput replies in a fresh loopback-only
+network/PID namespace. Three fixture search angles produce six references to two
+sources; the native pipeline deduplicates them, extracts two fixture claims,
+coordinates six verification votes, and synthesizes one confirmed finding while
+retaining one refuted claim. Its actual result reaches the native final report.
+These are invented fixture sources: no real web retrieval, paid inference or
+model-quality claim is made.
+
+- Default completion and history resume: **17** authored model replies.
+- `--interrupt` and `--send-now`: **4** replies each, retained unrelated queue.
+- `--report --send-now`: **17** replies, cancellation before any summary token.
+- `--early --drain`: **18** replies; the early finish still waits for its report.
+- `--drain --application`, `--early --drain --application` and
+  `--report --send-now --application`: **20** replies each; actual HTTP PID/data
+  remain unchanged until explicit Stop, and subsequent native history resumes.
+
+Nine session/controller tests cover receipt binding, failures, completion races,
+report ordering and cancellation. Syntax/unit **530/530** and browser **65/65**
+pass; the two new responsive browser cases cover literal command submission,
+running state, cancellation retry, links and draft/file preservation. Native
+first-app Send now (**8** requests), dynamic-loop cancellation (**7** main
+replies) and retained plugin/app (**15** main replies) regressions pass.
+No live service, real account, personal profile or existing chat was changed.
+Item 20 and the overall queue remain open.
+
+Installed-source classification for the next entries: `/design-sync` uploads a
+React design bundle to `claude.ai/design`; it and Design consent/revocation need
+explicit account/company scope, not a real-account test by default. `/agents`
+currently returns a removal notice. `/heapdump` is a hidden heap diagnostic;
+`/workflow-launch-exec` is a hidden server-launch handoff, not an ordinary user
+workflow. These classifications do not count as implemented web replacements.
 
 ### Claude installed plugin namespaces and SDK reload checkpoint
 

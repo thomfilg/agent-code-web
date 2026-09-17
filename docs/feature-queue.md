@@ -62,6 +62,20 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: reproduced and fixed `/deep-research` losing its native Workflow owner
+  at the launching reply. Bound native task events now retain the private SDK
+  process; busy/idle/FIFO wait for the actual final report, including an early
+  research finish. Send now uses native task cancellation and waits for the
+  matching receipt/report; failures stay actionable and deliberate cancellation
+  is not shown as a fake failure. Installed **2.1.222** verifies real orchestration
+  with authored structured replies: phase fan-out, URL deduplication, six votes,
+  synthesis, Stop/resume, queue ordering and an unchanged HTTP app/PID/data
+  (**17/4/4/17/18/20/20/20** model replies across variants). This is not real
+  web retrieval or a model-quality claim. Nine unit/session additions, syntax/unit
+  **530/530**, browser **65/65**; app Send-now, dynamic-loop cancellation and
+  plugin/app regressions pass. Other commands and company/account/live gates
+  remain in `command-support.md`; item 20/order/count unchanged. Save to PR #2
+  without merge, deployment or live-data/account changes.
 - 20: installed Claude plugin namespaces now have real legacy-command/skill
   effects, same-basename isolation, Unicode/multiline FIFO, Stop/resume and
   private-chat isolation acceptance. Reproduced `/reload-plugins` returning

@@ -23,6 +23,41 @@ async function fixture(page) {
 const requestEvent = (page, id, event) => page.evaluate(({ id, event }) => window.fixtureSources.find(source => source.url.includes(`/chats/${id}/events`))
   .dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) })), { id, event });
 
+for (const width of [1280, 320]) test(`native research at ${width}px stays running after launch and keeps draft/files on a failed Send now`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input"), actions = [];
+  f.catalog = [{ name: "deep-research", description: "Native multi-source research workflow" }];
+  f.snapshot.status = "idle"; await f.emit();
+  await input.fill("/deep-res"); await expect(page.locator("#slash-options")).toContainText("/deep-research");
+  await page.locator("#slash-options [role=option]").click(); await expect(input).toHaveValue("/deep-research ");
+  const text = "/deep-research Compare the fixture records\nPreserve ação and this second line.";
+  await input.fill(text); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect.poll(() => f.calls.length).toBe(1); expect(f.calls[0]).toEqual({ tail: "messages", text, attachments: [] });
+  f.snapshot = { ...f.snapshot, status: "running", statusDetail: "Native background task is working", idleDeadlineAt: null,
+    messages: [{ id: "research-start", role: "assistant", kind: "message", text: "Research is running in the native workflow." }],
+    queuedMessages: [{ id: "later", text: "Retain this queued input" }, { id: "now", text: "Send this selected input now" }] }; await f.emit();
+  await expect(page.locator("#runtime-status")).toHaveText("running"); await expect(page.locator("#queue-message")).toBeVisible();
+  await expect(page.locator("#countdown")).not.toContainText("SLEEPS IN");
+  await input.fill("Keep this unsent draft");
+  await page.locator("#attachment-input").setInputFiles({ name: "research-context.txt", mimeType: "text/plain", buffer: Buffer.from("Keep this attachment") });
+  let failed = true;
+  await page.route(`**/api/chats/${f.snapshot.id}/queue`, async route => {
+    actions.push(route.request().postDataJSON());
+    if (failed) return route.fulfill({ status: 503, json: { error: "Native workflow cancellation failed; the queued message was not sent. Retry or explicitly Stop the worker." } });
+    f.snapshot = { ...f.snapshot, revision: f.snapshot.revision + 1, queuedMessages: f.snapshot.queuedMessages.filter(item => item.id !== "now") };
+    await route.fulfill({ json: { chat: f.snapshot } });
+  });
+  const sendNow = page.locator('[data-queue-id="now"]').getByRole("button", { name: "Send now", exact: true });
+  await sendNow.click(); await expect(page.locator("#toasts")).toContainText("the queued message was not sent");
+  await expect(page.locator(".queue-row")).toHaveCount(2); await expect(sendNow).toBeEnabled();
+  failed = false; await sendNow.click(); await expect(page.locator(".queue-row")).toHaveCount(1);
+  expect(actions).toEqual([{ sendNowId: "now" }, { sendNowId: "now" }]);
+  f.snapshot = { ...f.snapshot, status: "idle", messages: [...f.snapshot.messages, { id: "research-report", role: "assistant", kind: "message", text: "Native report: [Fixture source](https://alpha.example.test/record)." }] }; await f.emit();
+  await expect(page.locator("#messages").getByRole("link", { name: "Fixture source" })).toHaveAttribute("href", "https://alpha.example.test/record");
+  await expect(input).toHaveValue("Keep this unsent draft"); await expect(page.locator("#attachment-chips")).toContainText("research-context.txt");
+  expect(f.calls).toHaveLength(1); expect(f.errors).toEqual([]);
+});
+
 for (const width of [1280, 320]) test(`native loops at ${width}px expose awake/running state and Send now without consuming the draft`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page), input = page.locator("#message-input"), actions = [];

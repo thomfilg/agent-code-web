@@ -19,13 +19,14 @@ export const CLAUDE_SCHEDULE_DIAGNOSTICS = ["--debug=ScheduledTasks,resume,loop/
 // the same stream contract as the one-shot adapter, but a result closes only
 // that logical turn, not the CLI which owns its background application tasks.
 export class ClaudeSession {
-  constructor(child, args, env, onBackgroundEvent = () => {}, { controlTimeoutMs = 30000, requestHooks, cwd, onSchedulesChanged = () => {} } = {}) {
+  constructor(child, args, env, onBackgroundEvent = () => {}, { controlTimeoutMs = 30000, requestHooks, cwd, onSchedulesChanged = () => {}, onWorkflowsChanged = () => {} } = {}) {
     this.child = child; this.args = args; this.env = env; this.active = null; this.pending = false;
     this.sessionId = flag(args, "--session-id") || flag(args, "--resume");
     this.controlTimeoutMs = controlTimeoutMs;
     this.scheduledJobs = new Set(); this.scheduleCalls = new Map(); this.onSchedulesChanged = onSchedulesChanged;
     this.restoredJobs = 0;
     this.fixedJobs = new Set(); this.reportedJobs = new Set(); this.dynamicWakeup = null;
+    this.workflowCalls = new Set(); this.workflows = new Map(); this.onWorkflowsChanged = onWorkflowsChanged;
     this.onBackgroundEvent = onBackgroundEvent;
     this.control = new ClaudeControlChannel(child, controlTimeoutMs);
     this.requests = requestHooks ? new ClaudeRequests(child, requestHooks, cwd) : null;
@@ -33,9 +34,11 @@ export class ClaudeSession {
     this.lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     this.lines.on("line", line => {
       let event; try { event = JSON.parse(line); } catch { return; }
+      if (event.type === "result") event.relayWorkflowInterrupted = false;
       this.control.accept(event);
       if (this.requests?.accept(event)) return;
       this.trackSchedules(event);
+      const workflowsCompleted = this.trackWorkflows(event);
       if (event.type === "result") {
         const previous = this.usageBaseline;
         this.usageBaseline = event;
@@ -54,6 +57,8 @@ export class ClaudeSession {
         turn.stdout.write(`${JSON.stringify(event)}\n`);
         if (event.type === "result") this.finish(turn, 0, null);
       } else if (event.type !== "command_lifecycle") this.onBackgroundEvent(event);
+      // Persist the final native report before releasing queued user input.
+      if (workflowsCompleted) this.onWorkflowsChanged();
     });
     const diagnostics = CLAUDE_SCHEDULE_DIAGNOSTICS.every(argument => args.includes(argument));
     const decoder = new StringDecoder("utf8"); let stderr = "", dropping = false;
@@ -78,6 +83,12 @@ export class ClaudeSession {
       if (diagnostics && stderr && !dropping) stderrLine(stderr + decoder.end());
       this.ended = true; this.control.close(); this.lines.close();
       this.finishBackground();
+      this.workflowCalls.clear();
+      const workflows = this.workflows.size;
+      for (const workflow of this.workflows.values()) workflow.terminal.resolve();
+      this.workflowReport?.done.resolve(); this.workflowReport = null;
+      this.workflows.clear();
+      if (workflows) this.onWorkflowsChanged();
       this.scheduleCalls.clear();
       const scheduled = this.hasScheduledWork();
       this.scheduledJobs.clear(); this.fixedJobs.clear(); this.reportedJobs.clear(); this.restoredJobs = 0; this.dynamicWakeup = null;
@@ -104,6 +115,94 @@ export class ClaudeSession {
     try {
       await Promise.race([done, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("Native scheduled task did not acknowledge cancellation. Stop the worker before retrying; the queued message was not sent.")), this.controlTimeoutMs); })]);
     } finally { clearTimeout(timer); }
+  }
+
+  hasWorkflowWork() { return this.workflows.size > 0; }
+
+  trackWorkflows(event) {
+    if (this.ended || this.stopping || event.session_id !== this.sessionId || event.parent_tool_use_id) return;
+    const before = this.workflows.size;
+    const canStart = !this.active?.interrupting && !this.requests?.suspended;
+    const validId = id => typeof id === "string" && id.length > 0 && id.length <= 200;
+    // Retain only an actual native task bound to this main session's tool use.
+    // Workflow prompts, child tasks and quoted/foreign IDs are not evidence.
+    if (canStart && event.type === "assistant" && Array.isArray(event.message?.content)) {
+      for (const block of event.message.content) if (block.type === "tool_use" && ["Workflow", "RunWorkflow"].includes(block.name)
+        && validId(block.id) && this.workflowCalls.size < 100) this.workflowCalls.add(block.id);
+    } else if (event.type === "user" && Array.isArray(event.message?.content)) {
+      for (const block of event.message.content) if (block.type === "tool_result") this.workflowCalls.delete(block.tool_use_id);
+    } else if (canStart && event.type === "system" && event.subtype === "task_started" && event.task_type === "local_workflow"
+      && validId(event.task_id) && this.workflowCalls.has(event.tool_use_id) && !this.workflows.has(event.task_id)) {
+      this.workflows.set(event.task_id, { toolUseId: event.tool_use_id, terminal: Promise.withResolvers(), settled: false });
+    } else if (event.type === "system" && event.subtype === "task_notification") {
+      const workflow = this.workflows.get(event.task_id);
+      if (workflow && workflow.toolUseId === event.tool_use_id && ["completed", "failed", "stopped"].includes(event.status)) {
+        workflow.settled = true; workflow.terminal.resolve();
+        if (event.status === "stopped") this.workflows.delete(event.task_id);
+        // This reports computation, not consumption of its result. Even when
+        // a foreground command is active, a separate native notification query
+        // can still be pending after that command's lifecycle completes.
+      }
+    } else if (event.type === "result") {
+      this.workflowCalls.clear();
+      if (event.origin?.kind === "task-notification" && this.workflowReport) {
+        event.relayWorkflowInterrupted = this.workflowReport.interrupting === true && event.subtype === "error_during_execution";
+        for (const id of this.workflowReport.ids) this.workflows.delete(id);
+        this.workflowReport.done.resolve(); this.workflowReport = null;
+      }
+    }
+    if (!this.active?.started && !this.backgroundCommand && !this.workflowReport
+      && (event.type === "stream_event" && event.event?.type === "message_start" || event.type === "assistant")) {
+      // Installed SDK task-notification turns do not emit command_lifecycle.
+      // Bind the report's first main output to already-settled tasks. A later
+      // completion must wait for its own report rather than this one's result.
+      const ids = [...this.workflows].filter(([, workflow]) => workflow.settled).map(([id]) => id);
+      if (ids.length) this.workflowReport = { ids, done: Promise.withResolvers() };
+    }
+    if (before !== this.workflows.size) {
+      if (event.type === "result") return true;
+      this.onWorkflowsChanged();
+    }
+  }
+
+  async interruptWorkflows() {
+    this.workflowCalls.clear();
+    const targets = [...this.workflows];
+    for (const [id, workflow] of targets) {
+      try { await this.control.request("stop_task", { task_id: id }); }
+      catch (error) { throw Error(error.message === "Blocked by managed policy" ? "Native workflow cancellation was blocked by managed policy; the queued message was not sent." : "Native workflow cancellation failed; the queued message was not sent. Retry or explicitly Stop the worker."); }
+      let timer;
+      try {
+        await Promise.race([workflow.terminal.promise, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Error("Native workflow did not acknowledge cancellation. Stop the worker before retrying; the queued message was not sent.")), this.controlTimeoutMs);
+        })]);
+        if (this.ended) throw Error("Native workflow owner stopped during cancellation; the queued message was not sent.");
+      } finally { clearTimeout(timer); }
+    }
+    // Work can complete while stop_task is in flight. Inspect the latest
+    // state after its receipt, including a summary query before its first
+    // token; it still needs an actual task-notification cancellation result.
+    const awaitingReport = targets.filter(([id, workflow]) => this.workflows.get(id) === workflow && workflow.settled).map(([id]) => id);
+    if (!this.workflowReport && awaitingReport.length) this.workflowReport = { ids: awaitingReport, done: Promise.withResolvers() };
+    const report = this.workflowReport;
+    if (report && this.workflowReport === report) {
+      report.interrupting = true;
+      try { await this.control.request("interrupt"); }
+      catch {
+        report.interrupting = false;
+        throw Error("Native workflow report cancellation failed; the queued message was not sent. Retry or explicitly Stop the worker.");
+      }
+      let timer;
+      try {
+        await Promise.race([report.done.promise, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Error("Native workflow report did not acknowledge cancellation; the queued message was not sent.")), this.controlTimeoutMs);
+        })]);
+        if (this.ended) throw Error("Native workflow owner stopped during report cancellation; the queued message was not sent.");
+      } finally { clearTimeout(timer); }
+    }
+    for (const [id, workflow] of targets) {
+      if (this.workflows.get(id) === workflow) { this.workflows.delete(id); this.onWorkflowsChanged(); }
+    }
   }
 
   hasScheduledWork() { return Boolean(this.scheduledJobs.size || this.restoredJobs || this.dynamicWakeup); }
