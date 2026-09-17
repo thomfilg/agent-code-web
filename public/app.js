@@ -1,4 +1,5 @@
 import { ChatSidebar } from "./chat-sidebar.js";
+import { GoogleLogin } from "./google-login.js";
 import { closeSidePanel } from "./side-panels.js";
 import { WorkspaceSettings } from "./workspace-settings.js";
 import { ModelPicker } from "./model-picker.js";
@@ -81,6 +82,7 @@ async function api(path, options = {}) {
     headers: { "content-type": "application/json", ...(options.headers || {}) },
   });
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 401 && state.config?.features.googleLogin) window.dispatchEvent(new Event("relay-auth-required"));
   if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
   return payload;
 }
@@ -662,6 +664,7 @@ function toast(message, { outsideDialog = false } = {}) {
 async function boot() {
   setupPanelResizers();
   const auth = await api("/api/auth");
+  googleLogin.render(auth);
   if (auth.required && !auth.authenticated) {
     elements.loginDialog.showModal();
     return;
@@ -785,6 +788,7 @@ const sidebar = new ChatSidebar({ state, api, select: selectChat, remove: delete
   },
 });
 const workspaceSettings = new WorkspaceSettings({ state, api, toast });
+const googleLogin = new GoogleLogin({ api, beforeSignOut: () => !(elements.input.value.trim() || chatControls.attachments().length) || confirm("Sign out? Your unsent draft and attachment selection will be cleared. Saved conversations and files will remain.") });
 const mcpSettings = new McpSettings({ api, toast, state });
 const toolActivity = new ToolActivity();
 const usagePanel = new UsagePanel({ state, api, toast });

@@ -30,6 +30,8 @@ import { safeMcpUrl, oauthCookieName } from "./mcp-oauth.mjs";
 import { SharedBrowsers } from "./shared-browser.mjs";
 import { WebSocketServer } from "ws";
 import { BrowserUsers } from "./browser-users.mjs";
+import { GoogleAuth } from "./google-auth.mjs";
+import { UserServices } from "./user-services.mjs";
 import { BrowserConnections } from "./browser-connections.mjs";
 import { zipSync } from "fflate";
 
@@ -101,8 +103,9 @@ export async function createAgentWebServer(options = {}) {
   const store = options.store || new ChatStore(config.dataDir, records);
   await store.initialize();
   const broker = options.broker || new CapabilityBroker({ ttlMs: config.sessionCapabilityTtlMs });
-  const auth = new BrowserAuth({ token: config.authToken, secure: config.cookieSecure });
-  const browserUsers = new BrowserUsers(records, { secure: config.cookieSecure });
+  const auth = new BrowserAuth({ token: config.google?.enabled ? "" : config.authToken, secure: config.cookieSecure });
+  const googleAuth = new GoogleAuth(records, config.google || { enabled: false }, { ...options.googleAuthOptions, onSignOut: user => releaseIdentity(user) });
+  const browserUsers = googleAuth.enabled ? googleAuth : new BrowserUsers(records, { secure: config.cookieSecure });
   const keymaps = new KeymapPreferences(records);
   const statuslines = new StatusLinePreferences(records);
   const tabTitles = new TabTitlePreferences(records);
@@ -120,6 +123,7 @@ export async function createAgentWebServer(options = {}) {
   const models = options.models || new ModelCatalog(config);
   const attachments = new Attachments(records, store);
   const commands = options.commands || new CommandCatalog(config, models);
+  const resources = new UserServices({ records, config, identity: googleAuth, store, legacy: { records, github, mcps, environments, organization }, changed: sidebarChanged });
   await environments.initialize();
   let manager = null;
   const browserSockets = new WebSocketServer({ noServer: true, maxPayload: 100000, perMessageDeflate: false });
@@ -129,21 +133,24 @@ export async function createAgentWebServer(options = {}) {
     await manager?.browsers.personal?.revokeOwner(user.id);
     for (const client of sseClients) if (client.ownerId === user.id) client.close();
     for (const socket of browserSockets.clients) if (socket.ownerId === user.id) socket.close(1000, "Signed out");
+    for (const response of sidebarClients) if (response.ownerId === user.id) response.end();
   };
+  await googleAuth.initialize();
 
   const server = http.createServer(async (request, response) => {
     securityHeaders(response);
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
     try {
       if (await gateway.handle(request, response, url)) return;
-      if (await mcps.handle(request, response, url)) return;
+      if (await resources.handleMcp(request, response, url)) return;
       if (await manager?.browsers?.handle(request, response, url)) return;
+      if (await googleAuth.handle(request, response, url)) return;
       if (url.pathname === "/oauth/mcp/callback" && request.method === "GET") {
         // Browser session cookies are Strict. This callback instead requires its
         // own Lax, HttpOnly flow cookie, minted by an authenticated same-origin POST.
         const cookies = Object.fromEntries((request.headers.cookie || "").split(";").map(part => { const i = part.indexOf("="); return [part.slice(0, i).trim(), part.slice(i + 1)]; }));
         let ok = false, message;
-        try { await mcps.oauth.finish(url.searchParams, cookies); ok = true; message = "Signed in successfully. Return to MCP connections to test and select this connection in an environment."; }
+        try { await (await resources.oauthFor(url.searchParams.get("state"))).finish(url.searchParams, cookies); ok = true; message = "Signed in successfully. Return to MCP connections to test and select this connection in an environment."; }
         catch (error) { message = error.statusCode ? error.message : "OAuth sign-in failed. Start again from MCP connections."; }
         const state = url.searchParams.get("state") || "";
         if (/^[\w-]{43}$/.test(state)) response.setHeader("set-cookie", `${oauthCookieName(state)}=; Path=/oauth/mcp/; HttpOnly; SameSite=Lax; Max-Age=0${config.cookieSecure || publicOrigin?.startsWith("https:") ? "; Secure" : ""}`);
@@ -168,10 +175,16 @@ export async function createAgentWebServer(options = {}) {
         return response.end(await readFile(new URL(`../node_modules/${vendor}`, import.meta.url)));
       }
       if (!validateOrigin(request)) return json(response, 403, { error: "cross-origin request rejected" });
+      if (googleAuth.enabled && url.pathname.startsWith("/api/") && !["GET", "HEAD"].includes(request.method) && request.headers.origin !== googleAuth.config.origin) return json(response, 403, { error: "same-origin request required" });
 
       if (url.pathname === "/api/auth" && request.method === "GET") {
+        if (googleAuth.enabled) {
+          const user = await googleAuth.session(request);
+          return json(response, 200, { required: true, authenticated: Boolean(user), method: "google", google: googleAuth.info(), user: googleAuth.public(user) });
+        }
         return json(response, 200, { required: auth.required, authenticated: auth.authenticated(request) });
       }
+      if (googleAuth.enabled && url.pathname === "/api/session") return json(response, 405, { error: "Use Google sign-in / sign-out" });
       if (url.pathname === "/api/session" && request.method === "POST") {
         const body = await bodyJson(request, config.maxBodyBytes);
         if (!auth.acceptsToken(body.token || "")) return json(response, 401, { error: "invalid access token" });
@@ -188,6 +201,9 @@ export async function createAgentWebServer(options = {}) {
       }
       if (!manager && url.pathname.startsWith("/api/")) return json(response, 503, { error: "control plane is starting" });
       const user = url.pathname.startsWith("/api/") ? await browserUsers.session(request) : null;
+      if (googleAuth.enabled && url.pathname.startsWith("/api/") && !user) return json(response, 401, { error: "Sign in with Google to use Relay" });
+      if (url.pathname.startsWith("/api/")) {
+      const { github, mcps, environments, organization, records } = await resources.forOwner(user?.id);
       const visibleChats = () => store.list().filter(chat => browserUsers.canRead(chat, user));
       if (url.pathname === "/api/pets" || url.pathname.startsWith("/api/pets/")) {
         const scope = user?.id || "shared", guard = async () => {
@@ -225,7 +241,8 @@ export async function createAgentWebServer(options = {}) {
         const result = request.method === "PATCH" ? await keymaps.save(scope, await bodyJson(request, 8000), guard) : await keymaps.get(scope, guard);
         return json(response, 200, { ...result, account: browserUsers.public(user) });
       }
-      if (url.pathname === "/api/browser-account" && request.method === "GET") return json(response, 200, { user: browserUsers.public(user) });
+      if (url.pathname === "/api/browser-account" && request.method === "GET") return json(response, 200, { user: browserUsers.public(user), ...(googleAuth.enabled ? { method: "google" } : {}) });
+      if (googleAuth.enabled && url.pathname.startsWith("/api/browser-account") && request.method !== "GET") return json(response, 405, { error: "Your Chrome connections use your Google Relay account. Use Google sign-out to switch users." });
       if (["/api/browser-account/register", "/api/browser-account/login"].includes(url.pathname) && request.method === "POST") {
         const input = await bodyJson(request, 10000);
         const result = await browserUsers[url.pathname.endsWith("register") ? "register" : "login"](input, request.socket.remoteAddress);
@@ -260,10 +277,11 @@ export async function createAgentWebServer(options = {}) {
           idleTimeoutMs: config.idleTimeoutMs,
           processIsolation: config.processIsolation,
           workerBackend: config.workerBackend,
-          agents: manager.availableAgents(),
-          workspaceSource: config.workspaceSource,
+          agents: manager.availableAgents(user?.id),
+          workspaceSource: resources.isLegacy(user?.id) ? config.workspaceSource : "",
           database: records.kind,
-          features: { companyScopes: true },
+          features: { companyScopes: true, googleLogin: googleAuth.enabled },
+          ...(googleAuth.enabled ? { user: googleAuth.public(user) } : {}),
         });
       }
       if (url.pathname === "/api/github" && request.method === "GET") return json(response, 200, await github.status());
@@ -287,7 +305,11 @@ export async function createAgentWebServer(options = {}) {
         const flow = await mcps.oauth.begin(id, `${origin}/oauth/mcp/callback`);
         return json(response, 200, { authorizationUrl: flow.authorizationUrl }, { "set-cookie": `${oauthCookieName(flow.state)}=${flow.cookie}; Path=/oauth/mcp/; HttpOnly; SameSite=Lax; Max-Age=600${origin.startsWith("https:") || config.cookieSecure ? "; Secure" : ""}` });
       }
-      if (url.pathname === "/api/models" && request.method === "GET") return json(response, 200, await models.list(url.searchParams.get("agent")));
+      if (url.pathname === "/api/models" && request.method === "GET") {
+        const agent = url.searchParams.get("agent");
+        if (googleAuth.enabled && agent !== "mock" && !resources.isLegacy(user.id)) return json(response, 403, { error: "No agent account is connected for this user" });
+        return json(response, 200, await models.list(agent));
+      }
       if (url.pathname === "/api/github" && request.method === "POST") return json(response, 200, await github.connect(await bodyJson(request, config.maxBodyBytes)));
       if (url.pathname === "/api/github" && request.method === "DELETE") return json(response, 200, await github.disconnect());
       const githubRoute = /^\/api\/github\/connections\/(github(?:_[a-f0-9-]{36})?)$/.exec(url.pathname);
@@ -313,6 +335,7 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/preferences" && request.method === "GET") return json(response, 200, { preferences: await records.get("preferences", "new-chat") || {} });
       if (url.pathname === "/api/preferences" && request.method === "PATCH") {
         const body = await bodyJson(request, config.maxBodyBytes);
+        if (googleAuth.enabled && body.agent !== "mock" && !resources.isLegacy(user.id)) return json(response, 403, { error: "No agent account is connected for this user" });
         await environments.get(body.environmentId);
         if (!Array.isArray(body.repositories) || body.repositories.length > 100 || body.repositories.some(repo => typeof repo.fullName !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(repo.fullName) || typeof repo.branch !== "string" || repo.branch.length > 250)) throw new Error("Invalid repository preferences");
         const modelSettings = await models.validate(body.agent, body);
@@ -338,7 +361,11 @@ export async function createAgentWebServer(options = {}) {
         response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform", connection: "keep-alive", "x-accel-buffering": "no" });
         response.write('data: {"type":"sidebar_changed"}\n\n');
         sidebarClients.add(response);
-        const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15000);
+        response.ownerId = user?.id;
+        const heartbeat = setInterval(() => {
+          if (user) void browserUsers.session(request).then(current => { if (current?.id !== user.id) response.end(); else response.write(": heartbeat\n\n"); }).catch(() => response.end());
+          else response.write(": heartbeat\n\n");
+        }, 15000);
         heartbeat.unref?.();
         request.once("close", () => { clearInterval(heartbeat); sidebarClients.delete(response); });
         return;
@@ -579,6 +606,7 @@ export async function createAgentWebServer(options = {}) {
         }
       }
 
+      }
       if (request.method === "GET" || request.method === "HEAD") {
         const relative = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
         const file = path.resolve(config.publicDir, relative);
@@ -616,7 +644,7 @@ export async function createAgentWebServer(options = {}) {
       personalSockets.handleUpgrade(request, socket, head, ws => manager.browsers.personal.accept(ws, origin.hostname)); return;
     }
     const routed = routeChat(url.pathname);
-    const expectedProtocol = config.cookieSecure ? "https:" : "http:";
+    const expectedProtocol = config.cookieSecure || googleAuth.config.origin?.startsWith("https:") ? "https:" : "http:";
     if (origin.host !== request.headers.host || origin.protocol !== expectedProtocol || url.search || !auth.authenticated(request)) { reject("403 Forbidden"); return; }
     let user; try { user = await browserUsers.session(request); } catch { reject("503 Service Unavailable"); return; }
     if (!manager || !routed || routed.tail !== "browser/live" || !browserUsers.canRead(store.get(routed.chatId), user)) { reject("404 Not Found"); return; }
@@ -671,6 +699,7 @@ export async function createAgentWebServer(options = {}) {
       attachments,
       mcps,
       commands,
+      resources,
       adapterFactory: options.adapterFactory || null,
     });
     manager.browsers = new SharedBrowsers({ store, config, acquire: chatId => manager.browserExecutor(chatId), onIdle: chatId => manager.browserIdle(chatId), isActive: chatId => manager.presence.has(chatId), onViewers: chatId => manager.refreshActivity(chatId), ...options.browserOptions });
@@ -699,7 +728,7 @@ export async function createAgentWebServer(options = {}) {
     if (!options.records) await records.close();
   }
 
-  return { server, store, records, organization, broker, config, browserUsers, start, stop, get manager() { return manager; } };
+  return { server, store, records, organization, broker, config, browserUsers, googleAuth, resources, start, stop, get manager() { return manager; } };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

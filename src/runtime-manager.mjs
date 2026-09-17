@@ -177,7 +177,7 @@ export class RuntimeManager extends EventEmitter {
     }
   }
 
-  constructor({ store, config, broker, gatewayOrigin, workerBackend = null, adapterFactory = null, github = null, environments = null, models = null, attachments = null, mcps = null, commands = null }) {
+  constructor({ store, config, broker, gatewayOrigin, workerBackend = null, adapterFactory = null, github = null, environments = null, models = null, attachments = null, mcps = null, commands = null, resources = null }) {
     super();
     this.store = store;
     this.config = config;
@@ -205,11 +205,12 @@ export class RuntimeManager extends EventEmitter {
     this.models = models;
     this.attachments = attachments;
     this.mcps = mcps;
+    this.resources = resources;
     if (this.environments) this.environments.onSaved = environment => {
       for (const chat of this.store.list()) if (chat.environmentId === environment.id) this.mcps?.restrictChat(chat.id, scopeAllows(environment, companyForChat(chat)) ? environment.mcpIds || [] : []);
     };
     this.commands = commands;
-    this.pullRequests = new PullRequestMonitor({ store, github, publish: chat => this.publishChat(chat) });
+    this.pullRequests = new PullRequestMonitor({ store, github: resources?.githubForMonitor() || github, publish: chat => this.publishChat(chat) });
     this.agentThreads = new NativeAgentSnapshots(store, (chatId, snapshot) => this.#emit(chatId, { type: "agent_threads_updated", ...snapshot }, false));
     this.approvals = new CodexApprovals(store, config);
     this.feedback = new CodexFeedback(store, config);
@@ -481,7 +482,7 @@ export class RuntimeManager extends EventEmitter {
     const guard = () => { action.controller.signal.throwIfAborted(); check(); };
     let imported, targetId;
     try {
-      if (source.environmentId) await this.environments.runtime(source.environmentId, source); guard();
+      if (source.environmentId) await (await this.servicesFor(source)).environments.runtime(source.environmentId, source); guard();
       imported = await runtime.adapter.forkImportedSession(input.operationId, input.sessionId, guard); guard();
       validateSessionBundle(imported.bundle);
       const chat = await this.store.create({ title: selected.title.slice(0, 120), ownerId: source.ownerId, agent: "codex", source: source.source, repositories: source.repositories,
@@ -557,18 +558,21 @@ export class RuntimeManager extends EventEmitter {
     return { prompt, settings: { ...settings, ...contextForTurn(files, workspace), appReferences: appReferencesForTurn(chat, files, companyForChat(chat)), mode: chat.mode || "accept_edits", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) } };
   }
 
-  availableAgents() {
+  async servicesFor(chat) { return this.resources ? this.resources.forOwner(chat?.ownerId) : { environments: this.environments, github: this.github, mcps: this.mcps }; }
+  revokeChatMcps(chatId) { if (this.resources) this.resources.revokeChat(chatId); else this.mcps?.revokeChat(chatId); }
+  availableAgents(ownerId = null) {
+    const ownsServerCredentials = !this.resources || this.resources.isLegacy(ownerId);
     return [
       {
         id: "codex",
         label: "Codex",
-        enabled: this.config.codex.authMode === "host" || Boolean(this.config.codex.providerKey),
+        enabled: ownsServerCredentials && (this.config.codex.authMode === "host" || Boolean(this.config.codex.providerKey)),
         authMode: this.config.codex.authMode,
       },
       {
         id: "claude",
         label: "Claude Code",
-        enabled: this.config.claude.authMode === "host" || Boolean(this.config.claude.providerKey),
+        enabled: ownsServerCredentials && (this.config.claude.authMode === "host" || Boolean(this.config.claude.providerKey)),
         authMode: this.config.claude.authMode,
       },
       ...(this.config.enableMock ? [{ id: "mock", label: "Mock agent", enabled: true, authMode: "none" }] : []),
@@ -586,9 +590,9 @@ export class RuntimeManager extends EventEmitter {
     if (this.#executors.has(chatId)) return this.#executors.get(chatId);
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const pending = (async () => {
-      if (chat.environmentId) await this.environments.runtime(chat.environmentId, chat);
+      if (chat.environmentId) await (await this.servicesFor(chat)).environments.runtime(chat.environmentId, chat);
       if (chat.repositories?.length && !chat.workspaceReady) {
-        await prepareRepositories({ destination: chat.workspace, repositories: chat.repositories, getToken: repository => this.github.tokenForRepository(repository, chat),
+        await prepareRepositories({ destination: chat.workspace, repositories: chat.repositories, getToken: async repository => (await this.servicesFor(chat)).github.tokenForRepository(repository, chat),
           onProgress: detail => this.#setStatus(chatId, "starting", detail, null) });
         await this.store.update(chatId, { workspaceReady: true });
       }
@@ -672,7 +676,7 @@ export class RuntimeManager extends EventEmitter {
   async switchAgent(chatId, agent) {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
-    if (!this.availableAgents().some(item => item.id === agent && item.enabled)) throw new Error("Choose an enabled agent");
+    if (!this.availableAgents(chat.ownerId).some(item => item.id === agent && item.enabled)) throw new Error("Choose an enabled agent for this user");
     if (this.isBusy(chatId) || chat.status === "stopping") throw Object.assign(new Error("Stop the working agent before switching"), { statusCode: 409 });
     if (agent === chat.agent) return chat;
     this.#switching.add(chatId);
@@ -858,9 +862,9 @@ export class RuntimeManager extends EventEmitter {
     if ((chat.repositories?.length || 0) >= 100) throw new Error("A chat supports up to 100 repositories");
     this.#switching.add(chatId);
     try {
-      const [repository] = await this.github.resolveSelections([selection], { company: companyForChat(chat) || undefined });
+      const [repository] = await (await this.servicesFor(chat)).github.resolveSelections([selection], { company: companyForChat(chat) || undefined });
       if (chat.repositories?.some(repo => repo.fullName.toLowerCase() === repository.fullName.toLowerCase())) throw new Error("This repository is already in the chat");
-      if (chat.environmentId) await this.environments.runtime(chat.environmentId, { ...chat, repositories: [...(chat.repositories || []), repository] });
+      if (chat.environmentId) await (await this.servicesFor(chat)).environments.runtime(chat.environmentId, { ...chat, repositories: [...(chat.repositories || []), repository] });
       await this.stop(chatId, "repository-added");
       const updated = await this.store.update(chatId, current => ({ repositories: [...(current.repositories || []), repository], workspaceReady: false,
         statusDetail: "Repository added. It will be cloned when you next send a message." }));
@@ -954,16 +958,18 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async createChat(input = {}, ownerId = null) {
-    const allowed = this.availableAgents().filter((agent) => agent.enabled).map((agent) => agent.id);
+    const allowed = this.availableAgents(ownerId).filter((agent) => agent.enabled).map((agent) => agent.id);
     const agent = input.agent || allowed[0];
     if (!allowed.includes(agent)) throw new Error(`agent is not enabled: ${agent}`);
     const title = input.title ? clampText(input.title, 120, "title") : agent === "mock" ? "New mock conversation" : "New conversation";
-    const source = typeof input.source === "string" ? input.source.trim() : this.config.workspaceSource;
-    const workspaceIdentity = { repositories: input.repositories || [], source: input.repositories?.length ? "" : source };
-    const environment = input.environmentId ? await this.environments?.runtime(input.environmentId, workspaceIdentity) : null;
+    if (this.resources && !this.resources.isLegacy(ownerId) && input.source) throw new Error("Server-local workspace sources are private to the server owner");
+    const source = typeof input.source === "string" ? input.source.trim() : this.resources && !this.resources.isLegacy(ownerId) ? "" : this.config.workspaceSource;
+    const workspaceIdentity = { ownerId, repositories: input.repositories || [], source: input.repositories?.length ? "" : source };
+    const services = await this.servicesFor(workspaceIdentity);
+    const environment = input.environmentId ? await services.environments?.runtime(input.environmentId, workspaceIdentity) : null;
     if (environment?.archived) throw new Error("Choose an environment that is not archived");
     if (environment && environment.backend !== this.config.workerBackend) throw new Error(`This server uses ${this.config.workerBackend} workers. Select an environment with that backend.`);
-    const repositories = input.repositories ? await this.github.resolveSelections(input.repositories) : [];
+    const repositories = input.repositories ? await services.github.resolveSelections(input.repositories) : [];
     const modelSettings = this.models ? await this.models.creationSettings(agent, input) : {};
     const chat = await this.store.create({ title, agent, ownerId, ...modelSettings, modelSelectionSet: Object.hasOwn(input, "model") || Object.hasOwn(input, "effort"), source: repositories.length ? "" : source, repositories,
       environmentId: environment?.id, environmentName: environment?.name, autoTitle: !input.title });
@@ -1034,7 +1040,7 @@ export class RuntimeManager extends EventEmitter {
     const signal = action.controller.signal;
     let runtime, bundle, targetId;
     try {
-      if (source.environmentId) await this.environments.runtime(source.environmentId, source);
+      if (source.environmentId) await (await this.servicesFor(source)).environments.runtime(source.environmentId, source);
       signal.throwIfAborted();
       action.workspaceOnly = !source.agentSessionId && !source.nativeForkSessionId;
       runtime = action.workspaceOnly ? { executor: await this.browserExecutor(source.id) } : this.#runtimes.get(source.id) || await this.#start(source.id);
@@ -1128,7 +1134,7 @@ export class RuntimeManager extends EventEmitter {
       const files = this.attachments ? await this.attachments.resolve(chatId, attachmentIds) : [];
       appReferencesForTurn(chat, files, companyForChat(chat));
       if (files.length && commandAction && !commandAction.prompt) throw new Error(`/${text.slice(1).split(/\s/)[0]} does not accept attachments. Remove them or send them in a separate message.`);
-      if (chat.environmentId) await this.environments.runtime(chat.environmentId, chat);
+      if (chat.environmentId) await (await this.servicesFor(chat)).environments.runtime(chat.environmentId, chat);
       let skill = null;
       const slash = /^\/([\w:.-]+)(?:\s|$)/.exec(text);
       if (chat.agent === "codex" && slash && this.commands && !commandAction) {
@@ -1340,7 +1346,7 @@ export class RuntimeManager extends EventEmitter {
     // Gateway access ends at Stop, not after slow persistence, side-chat or
     // worker shutdown. Native interruption can still checkpoint its journal.
     this.broker.revokeChat(chatId);
-    this.mcps?.revokeChat(chatId);
+    this.revokeChatMcps(chatId);
     this.publishChat(await this.store.update(chatId, { queuePaused: true, ...(reason === "manual" ? { forkGoalPending: false } : {}) }));
     const runtime = this.#runtimes.get(chatId);
     if (this.config.workerBackend === "ec2" && chat.agent !== "mock") {
@@ -1441,6 +1447,7 @@ export class RuntimeManager extends EventEmitter {
 
   async #start(chatId) {
     const chat = this.store.get(chatId);
+    if (this.resources && !this.resources.isLegacy(chat?.ownerId) && chat?.agent !== "mock") throw new Error("Connect an agent account for this user before starting a worker");
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const checkCancelled = () => { if ((this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" }); };
     await this.#setStatus(chatId, "starting", "Starting isolated agent runtime", null);
@@ -1499,11 +1506,11 @@ export class RuntimeManager extends EventEmitter {
       if (executor?.metadata) await this.store.update(chatId, { runtimeMetadata: executor.metadata });
       checkCancelled();
       if (executor && chat.environmentId) {
-        const environment = await this.environments.runtime(chat.environmentId, chat);
+        const environment = await (await this.servicesFor(chat)).environments.runtime(chat.environmentId, chat);
         if (environment.backend !== this.config.workerBackend) throw new Error("The environment backend changed. Use the original worker backend to resume this chat.");
         await prepareSoftware(executor, environment, detail => this.#setStatus(chatId, "starting", detail, null));
         executor.environmentVariables = { ...environment.variables, ...executor.capabilityVariables };
-        executor.mcpServers = await this.mcps?.runtime(chatId, environment.mcpIds || [], executor.gatewayOrigin || this.gatewayOrigin, chat) || {};
+        executor.mcpServers = await (await this.servicesFor(chat)).mcps?.runtime(chatId, environment.mcpIds || [], executor.gatewayOrigin || this.gatewayOrigin, chat) || {};
         if (environment.setupScript) {
           await this.#setStatus(chatId, "starting", "Running environment setup script", null);
           try {
@@ -1527,7 +1534,7 @@ export class RuntimeManager extends EventEmitter {
       }
       checkCancelled();
     } catch (error) {
-      this.mcps?.revokeChat(chatId);
+      this.revokeChatMcps(chatId);
       await this.browsers?.stop(chatId);
       this.#executors.delete(chatId);
       if (executor) await this.workerBackend.sleep(chat).catch(() => {});
@@ -1547,7 +1554,7 @@ export class RuntimeManager extends EventEmitter {
       return runtime;
     } catch (error) {
       this.#runtimes.delete(chatId);
-      this.mcps?.revokeChat(chatId);
+      this.revokeChatMcps(chatId);
       await this.browsers?.stop(chatId);
       this.#executors.delete(chatId);
       await adapter.stop().catch(() => {});
@@ -1695,7 +1702,7 @@ export class RuntimeManager extends EventEmitter {
     this.#runtimes.delete(chatId);
     await this.sideChats.close(chatId).catch(() => {});
     this.broker.revokeChat(chatId);
-    this.mcps?.revokeChat(chatId);
+    this.revokeChatMcps(chatId);
     await runtime.adapter.stop().catch(() => {});
     await this.agentThreads.flush(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
     await this.browsers?.stop(chatId);

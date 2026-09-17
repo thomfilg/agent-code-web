@@ -19,7 +19,7 @@ from a browser. It is intentionally a POC, but the core lifecycle is real:
 - Claude Code through `claude --print --output-format stream-json`;
 - automatic process shutdown five minutes after a completed turn;
 - transparent restart/resume when the next message arrives;
-- optional login token for exposing the UI beyond localhost;
+- Google sign-in with per-user records, or a legacy local/operator login token;
 - a credential gateway that keeps long-lived provider keys out of worker
   environments;
 - optional one-EC2-instance-per-chat workers that are stopped—not merely made
@@ -104,11 +104,28 @@ existing fixed expiry; this lease is not a wider credential-sharing grant.
 
 ## Configuration
 
+For per-user Google sign-in, follow [Google login setup](docs/google-login.md).
+It reuses `@12-apps/auth` from `12-apps/shared-packages`; Google identifies the
+Relay user, separately from agent-provider credentials.
+
+Local Google development uses Doppler project `code-web`, config `dev`:
+`doppler setup --no-interactive`, `npm run doppler:check`, then
+`npm run start:google` (or `npm run dev` for watch mode). Configure the Google
+client and owner email in Doppler, not in committed files. The check reports
+presence only and does not open the saved database. See the setup guide for
+the project-scoped token/CLI login and optional manual environment launch.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `AGENT_WEB_HOST` | `127.0.0.1` | HTTP bind address |
 | `AGENT_WEB_PORT` | `8787` | HTTP port (`0` is useful in tests) |
-| `AGENT_WEB_AUTH_TOKEN` | empty | UI/API bearer secret; mandatory on non-loopback binds |
+| `AGENT_WEB_AUTH_TOKEN` | empty | Legacy UI/API bearer secret; required on non-loopback binds unless Google mode is enabled |
+| `AGENT_GOOGLE_AUTH` | auto when Google client settings exist | Require Google login; incomplete setup fails closed |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | empty | This Relay application's Google OAuth web-client credentials |
+| `AGENT_WEB_PUBLIC_URL` | empty | Exact public origin; required for Google login, HTTPS outside loopback |
+| `AGENT_OWNER_EMAIL` | empty | Verified Google account that can initially claim existing shared data |
+| `AGENT_ALLOWED_EMAILS` | empty | Additional trusted Google accounts, comma-separated; no open registration |
+| `AUTH_SECRET` | generated and encrypted in PostgreSQL | Optional explicit session encryption secret, at least 32 characters |
 | `AGENT_COOKIE_SECURE` | `0` | mark the browser session cookie Secure when served over HTTPS |
 | `AGENT_IDLE_TIMEOUT_MS` | `300000` | inactivity-to-worker-stop delay, paused while a chat tab or browser viewer is active |
 | `AGENT_DATA_DIR` | `./data` | persisted chats, workspaces, and CLI state |

@@ -36,6 +36,7 @@
         <nav class="chat-list" id="chat-list" aria-label="Conversations"></nav>
 
         <div class="sidebar-footer">
+          <button type="button" class="secondary-button relay-account-button" id="relay-account-button" aria-label="Your Relay account" hidden></button>
           <div class="settings-buttons"><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button><button class="secondary-button" id="mcps-button">MCP connections</button><button class="secondary-button" id="browser-connections-button">Browser connections</button></div>
           <div class="system-state">
             <span class="live-dot"></span>
@@ -378,6 +379,16 @@
     </dialog>
 
     <dialog id="login-dialog">
+      <section class="dialog-card compact google-login-card" id="google-login-card" aria-labelledby="google-login-title" hidden>
+        <p class="eyebrow">YOUR PRIVATE WORKSPACE</p>
+        <h2 id="google-login-title">Sign in to Agent Relay</h2>
+        <p class="muted">Use your Google account to access your conversations and connections. Claude and Codex accounts are connected separately.</p>
+        <button type="button" class="secondary-button full google-sign-in" id="google-sign-in">Continue with Google</button>
+        <a id="google-canonical" class="secondary-button" hidden>Open the configured Relay address to sign in</a>
+        <div id="google-setup" class="google-setup" hidden><h3>Configure Google sign-in</h3><p class="muted">The administrator needs to set these server variables:</p><code id="google-missing"></code><p class="muted">Register this authorized redirect URI in your Google OAuth web client:</p><code id="google-callback"></code><p class="muted">Keep the client secret on the server. Do not paste it into a conversation.</p></div>
+        <p id="google-sign-in-error" class="form-error" role="alert"></p>
+        <p class="muted">Signing in does not give agents access to your personal Chrome.</p>
+      </section>
       <form method="dialog" class="dialog-card compact" id="login-form">
         <p class="eyebrow">PRIVATE CONTROL PLANE</p>
         <h2>Enter your access token</h2>
@@ -390,6 +401,7 @@
         <button class="primary-button full" value="default">Continue</button>
       </form>
     </dialog>
+    <dialog id="relay-account-dialog"><section class="dialog-card compact"><div class="dialog-heading"><h2>Your Relay account</h2><button type="button" class="icon-button" id="relay-account-close" aria-label="Close account">×</button></div><p id="relay-account-email" class="relay-account-email"></p><p class="muted">Your conversations, GitHub connections, environments and MCP connections are private to this account. Signing out revokes personal Chrome access; it does not delete conversations.</p><button type="button" class="secondary-button full" id="relay-sign-out">Sign out</button><p class="form-error" id="relay-account-error" role="alert"></p></section></dialog>
 
     <div class="toast-region" id="toasts" aria-live="assertive"></div>
     <div class="sr-only" id="sidebar-announcement" role="status"></div>

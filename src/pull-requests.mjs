@@ -119,7 +119,7 @@ export class PullRequestMonitor {
   async request(route, options = {}) {
     const repository = /^\/repos\/([^/?]+\/[^/?]+)/.exec(route)?.[1];
     const connection = this.github.requireConnection ? await this.github.requireConnection({ ...options, repository }) : null;
-    const key = `${connection?.id || options.connectionId || "auto"}:${connection?.revision || 0}:${route}`;
+    const key = `${options.ownerId || "legacy"}:${connection?.id || options.connectionId || "auto"}:${connection?.revision || 0}:${route}`;
     const old = this.requests.get(key);
     if (old && old.until > Date.now()) return old.promise;
     const promise = this.github.request(route, { ...options, ...(connection ? { connectionId: connection.id } : {}) });
@@ -142,7 +142,7 @@ export class PullRequestMonitor {
   }
   connectionOptions(chat, repository) {
     const selected = chatRepositories(chat || {}).find(repo => repo.fullName.toLowerCase() === repository?.toLowerCase());
-    return { repository, chatCompany: companyForChat(chat || {}), ...(selected?.githubConnectionId ? { connectionId: selected.githubConnectionId } : {}) };
+    return { repository, ownerId: chat?.ownerId, chatCompany: companyForChat(chat || {}), ...(selected?.githubConnectionId ? { connectionId: selected.githubConnectionId } : {}) };
   }
   async files(id, repository, number) {
     this.tracked(id, repository, number);

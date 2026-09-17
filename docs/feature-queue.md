@@ -29,8 +29,8 @@ original queue; new requests still append at the end. The old count conflated
 implementation tests with usable delivery: item 09 is a technical answer, and
 the other **17 were reopened for delivery acceptance**, not newly discovered
 defects. After the saved-data acceptance of item 01 below, the current total is
-**1 delivered, 1 answered and 40 not fully delivered** (16 priority re-audits
-plus the previous 24 open items).
+**1 delivered, 1 answered and 42 not fully delivered** (16 priority re-audits,
+the previous 24 open items, and two authentication requests below).
 
 For each reopened item, verify its full acceptance condition on current code,
 then verify the applicable deployed UI/backend/native integration. Preserve real
@@ -48,7 +48,9 @@ is not enabled. Do not silently adopt host credentials or count provider/native
 integration gates as passed. Tests run one suite at a time with inherited
 two-CPU affinity and nice 10. This correction supersedes historical
 completion/count statements in the ledger below; their test evidence remains
-useful but is not deployment proof. Item 02 is next; item 20 stays paused.
+useful but is not deployment proof. The user then explicitly requested Google
+login using `12-apps/shared-packages` and per-user agent onboarding; this
+authentication prerequisite is current. Item 02 follows it; item 20 stays paused.
 
 | # | Request / acceptance condition | State |
 | --- | --- | --- |
@@ -94,8 +96,30 @@ useful but is not deployment proof. Item 02 is next; item 20 stays paused.
 | 40 | Search across messages the user wrote and the AI's final answers, with conversation/result navigation. Do not store or index reasoning/chain-of-thought for this feature; exclude tool activity and intermediate responses from results | New feature appended after saved prompts; search-screen reference received; not started |
 | 41 | Deleting a worker/container must preserve the chat and its messages outside disposable storage; only explicit chat deletion removes the conversation. Reproduce actual container deletion independently of stop/restart, using disposable fixtures | New data-loss report appended; item 05 stop/restart verification does not establish container-deletion safety; not started |
 | 42 | Explore and implement a third-column panel showing the main agent's active secondary agents, with native status and supported conversation details. Selecting a secondary agent opens a popup/composer for prompts addressed to that agent, including while it is working; retain accessible keyboard navigation and keep the main agent/conversation independent. Investigate actual Claude Code/Claude web and Codex capabilities, reusing item 20's Codex descendant-navigation work where applicable. Do not invent child sessions or claim unsupported native messaging/steering | Codex feasibility confirmed read-only: descendant listing, status and direct input/steering are available, with experimental API caveats. Claude capability investigation and the requested both-provider panel/popup remain queued, not implemented |
+| 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | Native CLI commands/documentation investigated; no live authorization and no finished provider-login UI. Global prototype was not activated; implement account-bound flows under the Relay user |
+| 44 | Authenticate Relay users with Google using `@12-apps/auth`; persist data privately per user and support multiple named Claude/Codex accounts (personal/company), explicitly selected per chat with no credential fallback | Google/shared-package integration and per-user data boundaries implemented with offline OAuth/browser checks. Real Google setup/consent pending. Multiple native provider accounts, token/profile synchronization and selection are not implemented yet |
 
 ## Verification ledger
+
+- Authentication prerequisite (2026-09-17): installed the published
+  `@12-apps/auth@2.21.0` server factory, not a framework rewrite. Google login,
+  stable per-user identity, revocable encrypted sessions and user-specific
+  GitHub/MCP/environment/group/preference namespaces are implemented. Dedicated
+  offline OAuth/browser coverage is recorded in `docs/google-login.md`:
+  **86/86 selected API/runtime/launcher checks**, **4/4 Google browser checks**
+  and **8/8 legacy document/PR/Chrome browser regressions** pass. The auth build,
+  changed JavaScript syntax and diff checks pass; one test worker, two CPUs,
+  nice 10. Browser tests use disposable offline fixtures, not the saved database.
+  No real Google account has been authorized; the existing live process/data
+  have not been changed by this implementation. With the user's Doppler CLI
+  authorization, this repository is now scoped to `code-web/dev`; a live
+  value-redacted check confirms both Google client settings are present.
+  `AGENT_OWNER_EMAIL` is still missing, so activation awaits that explicit
+  ownership choice. `npm run start:google` / `npm run dev` use Doppler, reject
+  wrong project/config metadata and do not write secret fallback files or pass
+  the Doppler token to Relay. Multiple native
+  provider-account login/selection remains unfinished, not an implied result
+  of Google sign-in.
 
 - Priority delivery acceptance, 01 (2026-09-17): after explicit user startup
   consent, backed up the existing encrypted control directory offline, then

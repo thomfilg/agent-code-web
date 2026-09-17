@@ -35,7 +35,19 @@ export function isLoopbackHost(host) {
 export function loadConfig(env = process.env) {
   const host = env.AGENT_WEB_HOST || "127.0.0.1";
   const authToken = env.AGENT_WEB_AUTH_TOKEN || "";
-  if (!isLoopbackHost(host) && !authToken) {
+  const googleEnabled = boolean(env, "AGENT_GOOGLE_AUTH", Boolean(env.GOOGLE_CLIENT_ID || env.GOOGLE_CLIENT_SECRET));
+  let googleOrigin = env.AGENT_WEB_PUBLIC_URL || env.AUTH_URL || "";
+  if (googleEnabled && googleOrigin) {
+    const url = new URL(googleOrigin);
+    if (url.username || url.password || url.search || url.hash || url.pathname !== "/" ||
+        (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname)))) throw new Error("Google login requires a public HTTPS origin (HTTP is allowed only on loopback)");
+    googleOrigin = url.origin;
+  }
+  const ownerEmail = (env.AGENT_OWNER_EMAIL || "").trim().toLowerCase();
+  const allowedEmails = (env.AGENT_ALLOWED_EMAILS || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+  if (googleEnabled && [ownerEmail, ...allowedEmails].filter(Boolean).some(email => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) throw new Error("Configure valid Google account emails in AGENT_OWNER_EMAIL / AGENT_ALLOWED_EMAILS");
+  if (googleEnabled && env.AUTH_SECRET && env.AUTH_SECRET.length < 32) throw new Error("AUTH_SECRET must contain at least 32 characters");
+  if (!isLoopbackHost(host) && !authToken && !googleEnabled) {
     throw new Error("AGENT_WEB_AUTH_TOKEN is required when AGENT_WEB_HOST is not loopback");
   }
 
@@ -59,6 +71,7 @@ export function loadConfig(env = process.env) {
     host,
     port: integer(env, "AGENT_WEB_PORT", 8787, { max: 65_535 }),
     authToken,
+    google: { enabled: googleEnabled, clientId: env.GOOGLE_CLIENT_ID || "", clientSecret: env.GOOGLE_CLIENT_SECRET || "", origin: googleOrigin, ownerEmail, allowedEmails, secret: env.AUTH_SECRET || "" },
     cookieSecure: boolean(env, "AGENT_COOKIE_SECURE", false),
     publicOrigin: env.AGENT_WEB_PUBLIC_URL || "",
     database: {

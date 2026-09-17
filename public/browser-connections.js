@@ -11,6 +11,7 @@ export class BrowserConnectionSettings {
     $("#browser-share-manage").onclick = () => { this.share.close(); this.open(); };
     $("#browser-account-form").onsubmit = event => this.authenticate(event);
     $("#browser-account-logout").onclick = async () => {
+      if (this.state.config?.features.googleLogin) { this.dialog.close(); document.querySelector("#relay-account-button").click(); return; }
       this.identityVersion++; this.clearPairing();
       try { await this.api("/api/browser-account", { method: "DELETE" }); this.user = null; this.toggle.checked = false; this.browser.disconnect(); await this.accountChanged(); await this.load(); }
       catch (error) { this.error(error); }
@@ -52,6 +53,7 @@ export class BrowserConnectionSettings {
     const identity = this.identityVersion, account = await this.api("/api/browser-account");
     if (identity !== this.identityVersion) return;
     this.user = account.user;
+    $("#browser-account-logout").textContent = account.method === "google" ? "Relay account" : "Sign out";
     $("#browser-account-form").hidden = Boolean(this.user); $("#browser-account-signed-in").hidden = !this.user;
     if (!this.user) { this.connections = []; $("#browser-connection-list").replaceChildren(); this.clearPairing(); return; }
     $("#browser-account-name").textContent = `Signed in as ${this.user.username}`;

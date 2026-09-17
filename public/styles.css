@@ -733,3 +733,10 @@ dialog { max-height: calc(100dvh - 28px); }
 .saved-chat-choices button { text-align: left; overflow-wrap: anywhere; }
 .native-command-item { padding-block: 10px; border-bottom: 1px solid var(--border); }
 .native-command-item pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+:is(.google-login-card, #relay-account-dialog) { overflow-wrap: anywhere; }
+.google-sign-in { min-height: 44px; background: #f2f2f2; color: #1f1f1f; border-color: #8e918f; font-family: Arial, sans-serif; font-weight: 600; }
+.google-sign-in:hover:not(:disabled) { background: #fff; }
+.google-setup { border: 1px solid var(--border, #3a3e32); border-radius: 10px; padding: 12px; margin-top: 16px; }
+.google-setup code { display: block; white-space: normal; user-select: all; font-size: 12px; }
+.relay-account-button { width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.relay-account-email { overflow-wrap: anywhere; }
