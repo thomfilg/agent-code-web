@@ -4,7 +4,7 @@ export function codexAccountFixture() {
   const clients = [];
   const factory = () => {
     const client = {
-      auth: null, identity: "workspace-fixture", subject: "user-fixture", email: "codex@example.test", closed: false, snapshotCalls: [],
+      auth: null, identity: "workspace-fixture", subject: "user-fixture", email: "codex@example.test", userCode: "TEST-1234", closed: false, snapshotCalls: [],
       rpc: { request: async method => {
         if (method !== "model/list") throw new Error("Unexpected fixture RPC");
         return { data: [{ model: "fixture-gpt", displayName: "Fixture GPT", isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: "high" }], defaultReasoningEffort: "high" }], nextCursor: null };
@@ -12,7 +12,7 @@ export function codexAccountFixture() {
       async start(auth) { this.auth = auth; return this; },
       async login() {
         this.completed = new Promise((resolve, reject) => { this.approve = resolve; this.reject = reject; });
-        return { verificationUrl: "https://auth.openai.com/codex/device", userCode: "TEST-1234", completed: this.completed };
+        return { verificationUrl: "https://auth.openai.com/codex/device", userCode: this.userCode, completed: this.completed };
       },
       async snapshot(options = {}) {
         this.snapshotCalls.push(options);

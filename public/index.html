@@ -290,14 +290,17 @@
         <div class="dialog-heading"><h2 id="agent-accounts-title">Your agent accounts</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close agent accounts">×</button></div>
         <p class="muted">Connect your own accounts. Google sign-in does not sign you in to Codex or Claude. Server logins are never imported.</p>
         <div id="agent-account-list"></div>
-        <button type="button" class="secondary-button" id="agent-account-new">＋ Add Codex account</button>
-        <form id="agent-account-form">
-          <label><span>Account name</span><input id="agent-account-name" required maxlength="80" placeholder="Personal Codex or company Codex" autocomplete="off"></label>
-          <div id="agent-account-companies"></div>
-          <button type="submit" class="primary-button" id="agent-account-submit">Sign in to Codex</button>
+        <button type="button" class="secondary-button" id="agent-account-new" aria-expanded="false" aria-controls="agent-account-form">＋ Add Codex account</button>
+        <form id="agent-account-form" aria-labelledby="agent-account-form-title" hidden>
+          <h3 id="agent-account-form-title">Add a Codex account</h3>
+          <fieldset id="agent-account-fields">
+            <label><span>Account name</span><input id="agent-account-name" required maxlength="80" placeholder="Personal Codex or company Codex" autocomplete="off"></label>
+            <div id="agent-account-companies"></div>
+            <div class="dialog-actions"><button type="button" class="secondary-button" id="agent-account-cancel">Cancel</button><button type="submit" class="primary-button" id="agent-account-submit">Sign in to Codex</button></div>
+          </fieldset>
+          <p id="agent-account-progress" class="agent-account-progress" role="status" hidden></p>
+          <p id="agent-account-error" class="form-error" role="alert"></p>
         </form>
-        <div id="agent-account-login" class="agent-account-login" role="status"></div>
-        <p id="agent-account-error" class="form-error" role="alert"></p>
         <p class="muted">Claude account sign-in is not available yet. Credentials are encrypted on the controller. Local workers share the host filesystem; use isolated cloud workers for untrusted multi-user workloads.</p>
       </section>
     </dialog>

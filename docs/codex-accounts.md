@@ -14,12 +14,20 @@ Relay; each user must separately connect their own Codex accounts.
 - Device-code sign-in must be allowed in the user's ChatGPT security settings
   and, where applicable, by their workspace administrator.
 
-Open **Agent accounts**, name the account (for example Personal or Company),
-choose its allowed companies, and select **Sign in to Codex**. Open the supplied
-OpenAI link and enter the one-time code. Relay stays pending until the native
-client confirms completion and the controller verifies the saved identity.
-Codes expire after ten minutes; closing the panel does not authorize anything.
-An interrupted server login must be restarted.
+Open **Agent accounts** and select **+ Add Codex account** to expand the form.
+Name the account (for example Personal or Company), choose its allowed companies,
+and select **Sign in to Codex**. The button immediately shows **Connecting…**
+while the native client prepares the sign-in link. The form cannot be submitted
+again during this request. Collapsing an unsent form preserves its draft.
+
+Each pending account displays its own OpenAI link, one-time code, Copy and
+Cancel controls **inside that account's card**. Open the link and enter that
+card's code. Closing/reopening the panel restores pending sign-in details
+automatically, including a link that was still being prepared. Relay stays
+pending until the native client confirms completion and the controller verifies
+the saved identity. Codes expire after ten minutes; closing the panel does not
+authorize anything. An interrupted server login must be restarted with
+**Reconnect** on the affected account.
 
 Choose the account explicitly when creating a chat. Existing chats expose an
 account button next to the agent picker: open it and select **Use in this chat**.
@@ -77,9 +85,29 @@ no `auth.json` was created, and the temporary profile was removed. This verifies
 native code issuance and cancellation, not successful user consent or a model
 turn.
 
-Before marking Codex delivered, the user must complete real sign-in, explicitly
-authorize a minimal real prompt, confirm which named account ran it, and verify
-that the same chat/account resumes after a controlled restart. Claude, GitHub,
-Linear and AWS have separate open MVP gates in [feature-queue.md](feature-queue.md).
+The user subsequently completed real sign-in for the named Personal account.
+Their screenshot and a read-only encrypted-record check confirmed connected
+status and the presence of its saved credential payload; no credentials were
+printed or account records changed by the verifier. This is consent evidence,
+not evidence of model execution.
+
+The account UX follow-up covers **12 account/Google browser scenarios**, all
+with passing runs, and **25/25 focused account/server checks**. The ledger
+records browser-network failures and reruns separately. Scenarios include slow
+code issuance, pending details after reload, multiple separately labelled
+codes, copy/open/cancel, a stale response after cancellation, failed submission
+and retry, and form toggling with retained draft and mobile layout. Four server
+regressions prevent an in-flight authentication/resource lookup from opening
+an event stream after shutdown has already closed existing streams.
+
+The authorized follow-up restart preserved all 13 encrypted record payloads and
+the local credential file byte-for-byte, including Personal's connected account.
+The database contained no chats; this proves account-record preservation, not a
+live model session's resumption.
+
+Before marking Codex delivered, the user must explicitly authorize a minimal
+real prompt, confirm which named account ran it, and verify that the same
+chat/account resumes after a controlled restart. Claude, GitHub, Linear and AWS
+have separate open MVP gates in [feature-queue.md](feature-queue.md).
 
 Protocol reference: [official Codex app-server authentication documentation](https://learn.chatgpt.com/docs/app-server#auth-endpoints).

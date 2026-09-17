@@ -743,7 +743,14 @@ dialog { max-height: calc(100dvh - 28px); }
 /* Account onboarding reuses the existing dialog and company picker controls. */
 .agent-account-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 12px; overflow-wrap: anywhere; }
 .agent-account-card p { margin: 8px 0; }
+.agent-account-card h3, #agent-account-form h3 { margin: 0; font-size: 1rem; }
 .agent-account-login { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; overflow-wrap: anywhere; }
 .agent-account-login p { flex-basis: 100%; }
+.agent-account-login a.primary-button { display: inline-flex; align-items: center; justify-content: center; text-align: center; text-decoration: none; }
 .agent-account-login code { padding: 10px; font-size: 1.2rem; user-select: all; }
-#agent-account-form { display: grid; gap: 16px; margin-top: 16px; }
+#agent-account-form { display: grid; gap: 16px; margin-top: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; }
+#agent-account-fields { display: grid; gap: 16px; min-width: 0; padding: 0; margin: 0; border: 0; }
+.agent-account-progress { display: flex; align-items: center; gap: 10px; overflow-wrap: anywhere; }
+.agent-account-progress::before { content: ""; width: 14px; height: 14px; flex: 0 0 14px; border: 2px solid var(--line); border-top-color: currentColor; border-radius: 50%; animation: agent-account-spin 1s linear infinite; }
+@keyframes agent-account-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .agent-account-progress::before { animation: none; } }

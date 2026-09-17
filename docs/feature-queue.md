@@ -23,9 +23,10 @@ restart live services or alter live user data/accounts. This delivery step does
 not reorder the feature queue.
 
 Restart authorization (2026-09-17): the user explicitly said not to ask again
-and to restart Relay for the current Codex activation. Preserve existing data
-and use the configured Doppler project. This authorizes the requested controlled
-restart, not OAuth consent, automatic real model prompts or an AWS deployment.
+and, subsequently, to restart Relay whenever needed. Preserve existing data,
+check for active work before a controlled restart, and use the configured
+Doppler project. This authorizes necessary Relay restarts, not OAuth consent,
+automatic real model prompts or an AWS deployment.
 
 Priority clarification (2026-09-17): finish and test already-started work before
 starting an unimplemented feature. Work on one complete feature at a time,
@@ -61,8 +62,9 @@ database already contained zero chats before this activation. The earlier
 510-message acceptance remains historical evidence, not the current chat count;
 this activation did not delete those messages. No worker or real model turn
 was started. The subsequent authorized Codex activation below now serves the
-named-account onboarding UI. Codex remains disabled until this user connects an
-account; Claude is still unimplemented. Neither Google sign-in nor a saved
+named-account onboarding UI. The user has since connected the named Personal
+Codex account; a consented real turn and chat/account resume still need checking.
+Claude is still unimplemented. Neither Google sign-in nor a saved
 GitHub/MCP connection establishes successful provider onboarding.
 Do not silently adopt host credentials or count native integration gates as
 passed. Tests run one suite at a time with inherited two-CPU affinity and
@@ -82,7 +84,7 @@ mock or unauthenticated MCP handshake does not satisfy this gate.
 
 | Required integration | End-to-end acceptance | Queue items / current gap |
 | --- | --- | --- |
-| Codex | Detect missing authentication; show a working Connect action and the supported native browser authorization URL/code. Complete sign-in from the user's browser, select a named account for the chat, run a consented real turn and resume that account after restart. Surface expired/revoked access and reconnect without falling back to the host CLI | 43/44: named-account implementation and automated checks pass on `feat/codex-account-login`; real browser consent, real turn and live restart acceptance still open |
+| Codex | Detect missing authentication; show a working Connect action and the supported native browser authorization URL/code. Complete sign-in from the user's browser, select a named account for the chat, run a consented real turn and resume that account after restart. Surface expired/revoked access and reconnect without falling back to the host CLI | 43/44: named-account implementation, account-scoped login UX and automated checks pass on `feat/codex-account-login`; real Personal account consent confirmed, real turn and live chat/account resume acceptance still open |
 | Claude | The same complete onboarding and reconnect path, using Claude's supported native authentication flow. The selected named personal/company account must actually be used for a consented real turn and restored after restart | 43/44: provider-login UI, account-bound flow and real acceptance unfinished |
 | GitHub | A simple Relay sign-in action runs `gh auth login` in a private account profile and gives the user the authorization URL/code. Remove token-entry and “Use this server's gh login” options; never import the global CLI identity. After authentication, identify the account and explicitly allowed companies/repositories; list, select and clone an authorized repository and read its PR/check status. Handle denied/revoked access without borrowing another connection | 21: latest UX clarification queued within this existing MVP gate, after the current Codex feature; current native onboarding, scope and runtime acceptance remain open |
 | Linear | Complete real browser OAuth, discover tools and perform a non-mutating authenticated workspace read through the selected agent/environment. Support independent g2i and 12-apps connections, including the same MCP name, with no cross-company credential fallback | 02/03/04/10/21: configuration/discovery evidence is not completed OAuth or runtime acceptance |
@@ -229,11 +231,46 @@ References inspected for this request:
 | 40 | Search across messages the user wrote and the AI's final answers, with conversation/result navigation. Do not store or index reasoning/chain-of-thought for this feature; exclude tool activity and intermediate responses from results | New feature appended after saved prompts; search-screen reference received; not started |
 | 41 | Deleting a worker/container must preserve the chat and its messages outside disposable storage; only explicit chat deletion removes the conversation. Reproduce actual container deletion independently of stop/restart, using disposable fixtures | New data-loss report appended; item 05 stop/restart verification does not establish container-deletion safety; not started |
 | 42 | Explore and implement a third-column panel showing the main agent's active secondary agents, with native status and supported conversation details. Selecting a secondary agent opens a popup/composer for prompts addressed to that agent, including while it is working; retain accessible keyboard navigation and keep the main agent/conversation independent. Investigate actual Claude Code/Claude web and Codex capabilities, reusing item 20's Codex descendant-navigation work where applicable. Do not invent child sessions or claim unsupported native messaging/steering | Codex feasibility confirmed read-only: descendant listing, status and direct input/steering are available, with experimental API caveats. Claude capability investigation and the requested both-provider panel/popup remain queued, not implemented |
-| 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | Codex account-bound device-code UI and automated checks pass; real consent/turn acceptance remains open. Claude native login is next, not implemented. No global profile is imported |
+| 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | Codex account-bound device-code UI and automated checks pass; real Personal account consent confirmed, real turn/resume acceptance remains open. Claude native login is next, not implemented. No global profile is imported |
 | 44 | Authenticate Relay users with Google using `@12-apps/auth`; persist data privately per user and support multiple named Claude/Codex accounts (personal/company), explicitly selected per chat with no credential fallback | Google login is live. Codex named accounts, encrypted persistence, explicit chat binding and access-only worker renewal pass automated checks. Real Codex account acceptance and Claude multi-account support remain open |
 | 45 | Provide a repeatable AWS deployment script for the complete Relay application, following future-pay's deployment guidance; add reusable AWS support to `12-apps/ci` and keep Relay a thin application-specific consumer | MVP blocker: references reviewed and acceptance criteria recorded above. Shared registry currently has only DigitalOcean/Cloudflare; existing Relay EC2 worker scaffolding is not a complete controller deployment. No AWS provisioning or deployment performed |
 
 ## Verification ledger
+
+- Codex sign-in UX follow-up (2026-09-17): Add account now explicitly expands
+  or collapses a focused form and retains the unsent name/company selection.
+  Submission immediately displays Connecting and disables duplicate requests.
+  Each account card owns its sign-in status, link/code and Copy/Cancel controls;
+  reopening the dialog automatically restores pending details. Previously,
+  the backend could announce pending before code issuance, while the UI treated
+  missing details as "Sign-in is not pending" and ignored still-pending poll
+  updates. That transition is now handled, with stale-response guards and
+  independent account controls. All **12 account/Google browser scenarios** have
+  passing runs, and **25/25 focused account/server checks** pass, with one
+  worker/two CPUs/nice 10.
+  Cases cover slow issuance/reload, distinct simultaneous codes, copy/open,
+  cancellation races, failure/retry, draft retention and mobile layout. Reviewed
+  mobile and multi-account screenshots. These tests use offline consent fixtures.
+  The user's separate real Personal sign-in is confirmed by their screenshot and
+  a read-only encrypted-record check; the verifier printed no credentials and
+  made no account writes. A subsequent browser run exposed a server-teardown
+  race: an already accepted request could finish its asynchronous owner lookup
+  after stream cleanup and then open a new SSE stream. Four deterministic
+  regressions failed before the fix and passed afterward; API dispatch now
+  rejects these late requests while restarting. Two later full browser runs
+  each passed 11/12 and hit Chromium's `ERR_NETWORK_CHANGED` before fixture
+  consent (on `/api/auth` and `/api/auth/csrf`, respectively). These were not
+  clean full-suite passes; the affected cancellation scenario subsequently
+  passed **two consecutive isolated reruns**. No assertion or authentication
+  requirement was relaxed.
+  Under the user's standing authorization, Relay was then restarted through
+  Doppler with the same settings after checking for active chats/pending consent.
+  The offline backup `relay-before-codex-ux-K5wRZH` was verified before startup.
+  All **13 encrypted record payloads** and the credential file remained identical,
+  Personal stayed connected, Google was configured and anonymous account access
+  remained 401. The database had zero chats before and after this restart.
+  Real model execution and chat/account resume after restart remain open; no
+  real prompt was submitted automatically.
 
 - Authorized Codex activation (2026-09-17): stopped the original Relay and
   embedded PostgreSQL cleanly, copied both the control database/credential
@@ -247,9 +284,10 @@ References inspected for this request:
   Google reports configured, the served account module matches the current
   source, and anonymous account API access returns 401. These are live backend
   and static-serving checks, not a claim of authenticated UI acceptance.
-  The user must still authorize a Codex account, exercise a consented real turn
-  and verify that account/chat resumes after restart. No model turn or account
-  authorization was performed automatically.
+  At that checkpoint, user consent, a consented real turn and account/chat
+  resume after restart were still open. The later UX follow-up above confirms
+  Personal account consent. No model turn or account authorization was performed
+  automatically.
 
 - Codex native follow-up (2026-09-17): the production controller client and
   installed Codex 0.154.0 successfully requested a real device-code URL/code

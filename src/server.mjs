@@ -213,6 +213,9 @@ export async function createAgentWebServer(options = {}) {
       if (googleAuth.enabled && url.pathname.startsWith("/api/") && !user) return json(response, 401, { error: "Sign in with Google to use Relay" });
       if (url.pathname.startsWith("/api/")) {
       const { github, mcps, environments, organization, records } = await resources.forOwner(user?.id);
+      // Authentication/resource lookup can outlive shutdown's stream cleanup.
+      // Do not let an already accepted request open a new SSE stream afterward.
+      if (stopping) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
       const visibleChats = () => store.list().filter(chat => browserUsers.canRead(chat, user));
       if (url.pathname === "/api/pets" || url.pathname.startsWith("/api/pets/")) {
         const scope = user?.id || "shared", guard = async () => {
