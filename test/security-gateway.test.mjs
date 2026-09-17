@@ -20,6 +20,44 @@ function close(server) {
   return new Promise((resolve) => server.close(resolve));
 }
 
+test("controller leases renew only live scopes; ordinary capabilities keep their fixed expiry", t => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: 1000000 });
+  const broker = new CapabilityBroker({ ttlMs: 3000 });
+  let allowed = true, checks = 0;
+  const leased = broker.issue({ chatId: "owned", provider: "anthropic", renewable: true, validWhile: () => { checks++; return allowed; } });
+  const fixed = broker.issue({ chatId: "another", provider: "anthropic" });
+  t.after(() => broker.revokeChat("owned"));
+  const notified = [], off = broker.observeProvider(leased, "anthropic", value => notified.push(value));
+  const response = broker.captureProviderObserver(leased, "anthropic");
+  for (let i = 0; i < 7; i++) t.mock.timers.tick(1000);
+  assert(broker.validate(leased, "anthropic")); assert.equal(broker.validate(leased, "openai"), null);
+  assert.equal(broker.validate(fixed, "anthropic"), null);
+  response("same request after renewal"); assert.deepEqual(notified, ["same request after renewal"]);
+  off(); const later = broker.observeProvider(leased, "anthropic", value => notified.push(value));
+  response("do not leak to the later turn"); assert.equal(notified.length, 1); later();
+  allowed = false; assert.equal(broker.validate(leased, "anthropic"), null);
+  const before = checks; allowed = true; t.mock.timers.tick(3000);
+  assert.equal(checks, before); assert.equal(broker.validate(leased, "anthropic"), null); assert.equal(broker.size, 0);
+});
+
+test("missed renewal, revocation, guard errors and replacement tokens never resurrect expired authority", t => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let now = 1000000, checks = 0;
+  const broker = new CapabilityBroker({ ttlMs: 3000, now: () => now });
+  const issue = validWhile => broker.issue({ chatId: "owned", provider: "anthropic", renewable: true, validWhile });
+  assert.throws(() => issue(null), /scope guard/);
+  const expired = issue(() => { checks++; return true; });
+  now += 3001; t.mock.timers.tick(1000);
+  assert.equal(broker.validate(expired, "anthropic"), null); assert.equal(checks, 0);
+  const broken = issue(() => { throw Error("Private scope error"); });
+  assert.equal(broker.validate(broken, "anthropic"), null);
+  const previous = issue(() => true), replacement = issue(() => true);
+  broker.revoke(previous); assert(broker.validate(replacement, "anthropic"));
+  broker.revokeChat("owned"); t.mock.timers.tick(10000);
+  assert.equal(broker.validate(previous, "anthropic"), null); assert.equal(broker.validate(replacement, "anthropic"), null);
+  assert.equal(broker.size, 0);
+});
+
 test("gateway swaps a chat capability for the real provider key", async (t) => {
   let received;
   let upstreamRequests = 0;

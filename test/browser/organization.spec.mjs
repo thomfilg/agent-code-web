@@ -1,5 +1,44 @@
 import { test, expect } from "@playwright/test";
 
+test("chat rows stay single-line with accessible status and inline pin / organize actions", async ({ page }) => {
+  await page.goto("/");
+  const row = page.locator(".chat-row").filter({ hasText: "Existing beta" });
+  await expect(row.locator(".chat-item-meta, .chat-origin, .chat-age")).toHaveCount(0);
+  await expect(row.getByRole("img", { name: "Idle", exact: true })).toBeVisible();
+  const bounds = await row.evaluate(n => {
+    const title = n.querySelector(".chat-item-title").getBoundingClientRect();
+    return { height: n.getBoundingClientRect().height, centers: [...n.querySelectorAll(".small-icon")].map(b => { const r = b.getBoundingClientRect(); return Math.abs(r.top + r.height / 2 - title.top - title.height / 2); }) };
+  });
+  expect(bounds.height).toBeLessThan(40); expect(bounds.centers.every(delta => delta < 3)).toBe(true);
+  await page.screenshot({ path: "test-results/compact-sidebar.png", fullPage: true });
+});
+
+test("Organize deletes only the confirmed chat, keeps other drafts, and updates another tab", async ({ page, context, request }) => {
+  const create = async title => (await (await request.post("/api/chats", { data: { title, agent: "mock" } })).json()).chat;
+  const active = await create("Delete test active"), other = await create("Delete test other");
+  try {
+    await page.goto("/"); await page.getByRole("button", { name: `Open ${active.title}`, exact: true }).click();
+    await page.getByLabel("Message", { exact: true }).fill("Keep this draft");
+    await page.getByRole("button", { name: `Organize ${other.title}`, exact: true }).click();
+    page.once("dialog", dialog => dialog.dismiss()); await page.locator("#organize-delete-chat").click();
+    await expect(page.locator("#organize-dialog")).toBeVisible(); expect((await request.get(`/api/chats/${other.id}`)).ok()).toBe(true);
+    page.once("dialog", dialog => { expect(dialog.message()).toContain("cannot be undone"); return dialog.accept(); });
+    await page.locator("#organize-delete-chat").click(); await expect(page.locator("#organize-dialog")).not.toBeVisible();
+    await expect(page.locator(`[data-chat-id="${other.id}"]`)).toHaveCount(0);
+    await expect(page.locator("#chat-title")).toHaveText(active.title); await expect(page.getByLabel("Message", { exact: true })).toHaveValue("Keep this draft");
+    expect((await request.get(`/api/chats/${other.id}`)).status()).toBe(404);
+    const tab = await context.newPage(); await tab.goto("/"); await tab.getByRole("button", { name: `Open ${active.title}`, exact: true }).click();
+    await page.setViewportSize({ width: 390, height: 844 }); await page.getByRole("button", { name: "Open chats", exact: true }).click();
+    await page.getByRole("button", { name: `Organize ${active.title}`, exact: true }).click();
+    await expect(page.locator("#organize-delete-chat")).toBeInViewport();
+    expect(await page.locator("#organize-dialog").evaluate(n => n.scrollWidth <= n.clientWidth)).toBe(true);
+    page.once("dialog", dialog => dialog.accept()); await page.locator("#organize-delete-chat").click();
+    await expect(page.locator("#organize-dialog")).not.toBeVisible();
+    await expect(tab.locator("#chat-title")).not.toHaveText(active.title);
+    expect((await request.get(`/api/chats/${active.id}`)).status()).toBe(404);
+  } finally { await request.delete(`/api/chats/${active.id}`); await request.delete(`/api/chats/${other.id}`); }
+});
+
 test("automatic sidebar status symbols use the requested colors and accessible labels", async ({ page }) => {
   const states = [
     ["working", "Working", "rgb(139, 143, 135)"], ["asking_question", "Asking question", "rgb(234, 191, 85)"],
@@ -22,6 +61,9 @@ test("automatic sidebar status symbols use the requested colors and accessible l
 });
 
 test("pin, drag to a custom group, restore grouping, sort, and persist across tabs", async ({ page, context }) => {
+  // Keep both drag endpoints visible; the settings footer leaves less room in
+  // a short viewport, and dragTo cannot auto-scroll between clipped endpoints.
+  await page.setViewportSize({ width: 1280, height: 1000 });
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   await page.goto("/");
   await page.getByRole("button", { name: "Pin Existing alpha", exact: true }).click();
@@ -43,7 +85,7 @@ test("pin, drag to a custom group, restore grouping, sort, and persist across ta
   await expect(other.locator("#organize-status")).toContainText("Idle");
   await other.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect(page.locator('[data-section="company:personal"]')).toContainText("Existing beta");
-  await expect(page.locator(".chat-row").filter({ hasText: "Existing beta" })).toContainText("Idle");
+  await expect(page.locator(".chat-row").filter({ hasText: "Existing beta" }).getByRole("img", { name: "Idle", exact: true })).toBeVisible();
   await page.reload(); await expect(page.locator('[data-section="pinned"]')).toContainText("Existing alpha");
   expect(errors).toEqual([]);
 });
@@ -52,11 +94,13 @@ test("GitHub picker preserves repository order, branches, selection and inline e
   await page.goto("/"); await page.getByRole("button", { name: /New chat/ }).click();
   await expect(page.locator("#new-chat-title")).toHaveCount(0);
   await page.locator("#connect-github-button").click();
+  await page.locator("#github-companies").getByLabel("Add companies", { exact: true }).fill("acme, other");
+  await page.locator("#github-companies").getByRole("button", { name: "Add companies", exact: true }).click();
   await page.getByRole("button", { name: "Use this server’s gh login" }).click();
   await expect(page.locator("#github-dialog")).not.toBeVisible();
   await page.locator(".repository-picker-dropdown > summary").click();
-  await page.getByLabel("Acme/api", { exact: false }).check();
-  await page.getByLabel("Other/library", { exact: false }).check();
+  await page.getByRole("checkbox", { name: /^Acme\/api / }).check();
+  await page.getByRole("checkbox", { name: /^Other\/library / }).check();
   await page.getByLabel("Branch for Acme/api").focus();
   await expect(page.getByLabel("Branch for Acme/api").locator("option")).toHaveCount(2);
   await page.getByLabel("Branch for Acme/api").selectOption("develop");
@@ -89,10 +133,10 @@ test("mobile group menu and masked environment editor", async ({ page }) => {
   await page.getByRole("button", { name: "Open chats", exact: true }).click();
   await page.getByRole("button", { name: "Organize Existing alpha", exact: true }).click();
   await page.getByRole("button", { name: "Archive chat", exact: true }).click();
-  await expect(page.locator(".chat-row").filter({ hasText: "Existing alpha" })).toContainText("Archived");
+  await expect(page.locator(".chat-row").filter({ hasText: "Existing alpha" }).getByRole("img", { name: "Archived", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Organize Existing alpha", exact: true }).click();
   await page.getByRole("button", { name: "Unarchive chat", exact: true }).click();
-  await expect(page.locator(".chat-row").filter({ hasText: "Existing alpha" })).toContainText("Idle");
+  await expect(page.locator(".chat-row").filter({ hasText: "Existing alpha" }).getByRole("img", { name: "Idle", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Environments", exact: true }).click();
   await page.getByRole("button", { name: "Add environment", exact: false }).click();
   await page.getByLabel("Environment name", { exact: true }).fill("Browser sandbox");

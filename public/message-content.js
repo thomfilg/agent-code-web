@@ -1,9 +1,10 @@
 import { marked } from "/vendor/marked.js";
 import DOMPurify from "/vendor/purify.js";
+import { highlightCode } from "./syntax-highlight.js";
 const escape = value => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
 const renderer = new marked.Renderer();
 renderer.html = ({ text }) => `<pre class="html-source"><code>${escape(text)}</code></pre>`;
-export function renderContent(root, text) {
+export function renderContent(root, text, { onPreview } = {}) {
   root.classList.add("markdown");
   root.innerHTML = DOMPurify.sanitize(marked.parse(text, { renderer, gfm: true }), {
     USE_PROFILES: { html: true }, FORBID_TAGS: ["style", "form", "input", "button", "iframe", "video", "audio"],
@@ -17,24 +18,22 @@ export function renderContent(root, text) {
   for (const img of root.querySelectorAll("img")) {
     if (!/^data:image\/(png|jpeg|gif|webp);base64,/i.test(img.getAttribute("src") || "")) img.replaceWith(document.createTextNode(img.alt || "[Image]"));
   }
-  for (const pre of root.querySelectorAll("pre")) {
+  for (const [index, pre] of [...root.querySelectorAll("pre")].entries()) {
     const code = pre.querySelector("code"); if (!code) continue;
     const source = code.textContent;
+    const language = pre.classList.contains("html-source") ? "html" : [...code.classList].find(name => name.startsWith("language-"))?.slice(9).toLowerCase();
     const toolbar = document.createElement("div"); toolbar.className = "code-toolbar";
     const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy";
     copy.onclick = async () => { try { await navigator.clipboard.writeText(source); copy.textContent = "Copied"; } catch { copy.textContent = "Copy unavailable"; } };
     toolbar.append(copy); pre.before(toolbar);
-    if (code.classList.contains("language-html") || pre.classList.contains("html-source")) {
-      const details = document.createElement("details"); details.className = "html-preview";
-      const summary = document.createElement("summary"); summary.textContent = "HTML preview · isolated, scripts and network disabled";
-      details.append(summary); pre.after(details);
-      details.addEventListener("toggle", () => {
-        if (!details.open || details.querySelector("iframe")) return;
-        const frame = document.createElement("iframe"); frame.title = "Isolated HTML preview";
-        frame.setAttribute("sandbox", "allow-scripts"); frame.referrerPolicy = "no-referrer";
-        frame.src = `/preview.html#${encodeURIComponent(source.slice(0, 300000))}`;
-        details.append(frame);
-      });
+    if (onPreview) {
+      const format = pre.classList.contains("html-source") || ["html", "htm"].includes(language) ? "html" : ["md", "markdown"].includes(language) ? "markdown" : language === "svg" ? "svg" : "text";
+      const title = { html: "HTML preview", markdown: "Markdown preview", svg: "SVG preview", text: "Text preview" }[format];
+      const preview = document.createElement("button"); preview.type = "button"; preview.className = "document-preview-button";
+      preview.textContent = `Open ${title} ↗`; preview.setAttribute("aria-controls", "preview-panel"); preview.dataset.previewIndex = index;
+      preview.onclick = () => onPreview({ source, format, title, trigger: preview, index });
+      pre.after(preview);
     }
+    highlightCode(code, language);
   }
 }

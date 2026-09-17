@@ -51,9 +51,10 @@ test("EC2 backend starts a stopped per-chat instance and stops it on sleep", asy
   assert.ok(calls.some(({ command, args }) => command === "ssh" && args.at(-1).includes("command -v codex")));
   assert.ok(calls.some(({ command, args }) => command === "ssh" && args.at(-1).includes(".heartbeat")));
 
-  await backend.sleep(chat);
+  assert.deepEqual(await backend.sleep(chat), { instanceId: "i-fixture", stopped: true });
   assert.ok(calls.some(({ args }) => args.includes("stop-instances")));
   assert.ok(calls.some(({ args }) => args.includes("instance-stopped")));
+  assert.deepEqual(await backend.sleep(chat), { instanceId: "i-fixture", stopped: true });
 });
 
 test("EC2 backend creates encrypted, IMDSv2-only worker tagged to one chat", async () => {

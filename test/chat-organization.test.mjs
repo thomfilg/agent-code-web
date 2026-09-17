@@ -104,6 +104,26 @@ test("organization records use authenticated ciphertext, bound to the record id"
   assert.throws(() => cipher.open("chat-group", "2", encrypted));
   encrypted[35] ^= 1; assert.throws(() => cipher.open("chat-group", "1", encrypted));
 });
+
+test("question responses validate IDs and preserve a newer request arriving during the native reply", async t => {
+  let hooks, finish, received;
+  const question = id => ({ requestId: id, method: "item/tool/requestUserInput", params: { questions: [{ id: "branch", question: "Which branch?" }] } });
+  const { store, manager } = await fixture(t, ({ hooks: callbacks }) => {
+    hooks = callbacks;
+    return { start: async () => {}, send: () => new Promise(resolve => { finish = resolve; }), stop: async () => { finish?.({ text: "stopped" }); },
+      respond: async (requestId, payload) => { received = { requestId, payload }; await hooks.onRequest(question("newer")); } };
+  });
+  const chat = await manager.createChat({ agent: "mock" });
+  const turn = await manager.submit(chat.id, "Ask me"); await waitFor(() => finish);
+  await hooks.onRequest(question("first"));
+  await assert.rejects(manager.respond(chat.id, "first", { answers: [] }), /answers object/);
+  await assert.rejects(manager.respond(chat.id, "first", { answers: { unknown: "main" } }), /requested question/);
+  await assert.rejects(manager.respond(chat.id, "first", { answers: { branch: { value: "main" } } }), /contain text/);
+  await manager.respond(chat.id, "first", { answers: { branch: "main" } });
+  assert.deepEqual(received, { requestId: "first", payload: { answers: { branch: { answers: ["main"] } } } });
+  assert.equal(store.get(chat.id).pendingRequest.requestId, "newer");
+  finish({ text: "done" }); await turn.completion;
+});
 test("HTTP organization routes require auth, validate origin, and update sidebar", async t => {
   const root = await temporaryDirectory(t);
   const app = await createAgentWebServer({ config: testConfig(root, { AGENT_WEB_AUTH_TOKEN: "test-secret" }) });

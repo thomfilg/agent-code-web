@@ -5,21 +5,38 @@
   "type": "module",
   "description": "A lightweight multi-chat web control plane for Codex and Claude Code CLI workers.",
   "scripts": {
+    "postinstall": "node scripts/build-auth.mjs",
+    "build:auth": "node scripts/build-auth.mjs",
     "start": "node src/server.mjs",
-    "dev": "AGENT_ENABLE_MOCK=1 node --watch src/server.mjs",
+    "start:google": "node scripts/doppler.mjs start",
+    "start:google:env": "node --env-file=.env.google src/server.mjs",
+    "doppler:check": "node scripts/doppler.mjs check",
+    "dev": "node scripts/doppler.mjs dev",
+    "dev:local": "AGENT_ENABLE_MOCK=1 node --watch src/server.mjs",
     "test": "node --test test/*.test.mjs",
     "test:browser": "playwright test",
-    "check": "find src public scripts test -type f \\( -name '*.mjs' -o -name '*.js' \\) -print0 | xargs -0 -n1 node --check && node --test test/*.test.mjs",
-    "smoke:codex": "node scripts/smoke-real-codex.mjs"
+    "test:google:browser": "playwright test --config playwright.google.config.mjs",
+    "check": "find src public scripts test chrome-extension -type f \\( -name '*.mjs' -o -name '*.js' \\) -print0 | xargs -0 -n1 node --check && node --test test/*.test.mjs",
+    "smoke:codex": "node scripts/smoke-real-codex.mjs",
+    "smoke:mcps": "node scripts/smoke-real-mcps.mjs"
   },
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
+    "@12-apps/auth": "2.21.0",
+    "@auth/core": "0.41.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@playwright/mcp": "0.0.81",
+    "codemirror": "5.65.21",
     "dompurify": "^3.4.15",
     "embedded-postgres": "^17.10.0-beta.17",
+    "esbuild": "0.25.12",
+    "fflate": "^0.8.3",
     "marked": "^18.0.13",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "ws": "^8.21.3",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0"

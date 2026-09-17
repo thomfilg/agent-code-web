@@ -1,7 +1,7 @@
 // The workspace and visible chat stay shared; provider-native session IDs do not.
 export function handoffPrompt(chat, prompt) {
   if (!chat.needsAgentHandoff) return prompt;
-  const messages = chat.messages.slice(0, -1).filter(message => ["user", "assistant", "tool"].includes(message.role));
+  const messages = chat.messages.slice(0, -1).filter(message => !message.meta?.renderingSample && ["user", "assistant", "tool"].includes(message.role));
   const history = []; let remaining = 80000;
   for (const message of [...messages].reverse()) {
     const text = `${message.text || ""}${message.role === "tool" && message.meta?.output ? `\n${message.meta.output}` : ""}${message.attachments?.length ? `\nUser attachments: ${JSON.stringify(message.attachments.map(({ name, path }) => ({ name, path })))}` : ""}`;

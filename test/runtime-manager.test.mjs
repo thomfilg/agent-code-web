@@ -29,13 +29,33 @@ test("multiple chats stream independently, persist responses, autosleep, and res
   assert.notEqual(first.workspace, second.workspace);
   assert.ok(events.some((event) => event.chatId === first.id && event.type === "assistant_delta"));
 
-  await waitFor(() => store.get(first.id).status === "stopped");
+  await waitFor(() => store.get(first.id).status === "stopped" && store.get(second.id).status === "stopped");
   assert.equal(store.get(second.id).status, "stopped");
   const startsBefore = events.filter((event) => event.chatId === first.id && event.type === "runtime_started").length;
   await manager.send(first.id, "wake again");
   const startsAfter = events.filter((event) => event.chatId === first.id && event.type === "runtime_started").length;
   assert.equal(startsAfter, startsBefore + 1);
   assert.match(store.get(first.id).messages.at(-1).text, /wake again/);
+});
+
+test("native schedules pause idle sleep, reconcile cancellation and never prevent explicit Stop", async t => {
+  const root = await temporaryDirectory(t), config = testConfig(root), store = new ChatStore(root); await store.initialize();
+  config.idleTimeoutMs = 100;
+  let hooks, scheduled = true, stopped = 0;
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10000 }), gatewayOrigin: "http://localhost",
+    adapterFactory: params => { hooks = params.hooks; return { start: async () => {}, send: async () => ({ text: "Scheduled" }),
+      hasScheduledWork: () => scheduled, stop: async () => { stopped++; } }; },
+  });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "mock" });
+  await manager.send(chat.id, "Schedule a task");
+  assert.equal(store.get(chat.id).idleKeepAwakeReason, "schedule"); assert.equal(store.get(chat.id).idleDeadlineAt, null);
+  await new Promise(resolve => setTimeout(resolve, 160)); assert.equal(stopped, 0);
+  scheduled = false; await hooks.onEvent({ type: "scheduled_work" });
+  await waitFor(() => store.get(chat.id).status === "stopped"); assert.equal(stopped, 1);
+  scheduled = true; await manager.send(chat.id, "Schedule again");
+  assert.equal(store.get(chat.id).idleKeepAwakeReason, "schedule");
+  await manager.stop(chat.id); assert.equal(stopped, 2); assert.equal(store.get(chat.id).status, "stopped");
 });
 
 test("a chat rejects a second turn while the first is active", async (t) => {
@@ -51,6 +71,32 @@ test("a chat rejects a second turn while the first is active", async (t) => {
   await first.completion;
 });
 
+test("native background work queues normal input and Send now interrupts only that turn", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  let hooks, background = false, interrupted = 0, stopped = 0;
+  const sent = [], manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }), gatewayOrigin: "http://localhost",
+    adapterFactory: params => { hooks = params.hooks; return {
+      start: async () => {}, send: async text => { sent.push(text); return { text: "Done" }; },
+      hasScheduledWork: () => true, isBackgroundBusy: () => background, stop: async () => { stopped++; background = false; },
+      interrupt: async () => { interrupted++; background = false; await hooks.onEvent({ type: "background_turn", active: false }); },
+    }; },
+  });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "mock" }); await manager.send(chat.id, "Schedule");
+  background = true; await hooks.onEvent({ type: "background_turn", active: true });
+  assert.equal(manager.isBusy(chat.id), true); assert.equal(store.get(chat.id).status, "running");
+  await assert.rejects(manager.submit(chat.id, "Cannot overlap"), /already has a running turn/);
+  await store.update(chat.id, { queuePaused: true }); await manager.enqueue(chat.id, "Keep queued");
+  const selected = await manager.enqueue(chat.id, "Send this now");
+  await manager.sendQueuedNow(chat.id, selected.queuedMessages.at(-1).id);
+  await waitFor(() => !manager.isBusy(chat.id));
+  assert.equal(interrupted, 1); assert.equal(stopped, 0); assert.deepEqual(sent, ["Schedule", "Send this now"]);
+  assert.deepEqual(store.get(chat.id).queuedMessages.map(item => item.text), ["Keep queued"]);
+  assert.equal(store.get(chat.id).idleKeepAwakeReason, "schedule");
+  background = true; await hooks.onEvent({ type: "background_turn", active: true });
+  await manager.stop(chat.id); assert.equal(stopped, 1); assert.equal(store.get(chat.id).status, "stopped");
+});
+
 test("stopping during adapter startup never starts a late turn or resurrects working state", async t => {
   const root = await temporaryDirectory(t); const store = new ChatStore(root); await store.initialize();
   let releaseStart, sends = 0;
@@ -64,6 +110,20 @@ test("stopping during adapter startup never starts a late turn or resurrects wor
   await manager.stop(chat.id);
   releaseStart(); await turn.completion;
   assert.equal(sends, 0); assert.equal(store.get(chat.id).status, "stopped"); assert.equal(store.get(chat.id).workflowState, "idle");
+});
+
+test("Stop revokes gateway access before awaiting slow persistence or worker shutdown", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const broker = new CapabilityBroker({ ttlMs: 10000 });
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker, gatewayOrigin: "http://localhost" });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "mock" }), release = Promise.withResolvers();
+  const token = broker.issue({ chatId: chat.id, provider: "anthropic", renewable: true, validWhile: () => true });
+  const update = store.update.bind(store);
+  store.update = async (...args) => { await release.promise; return update(...args); };
+  const stopping = manager.stop(chat.id);
+  try { assert.equal(broker.validate(token, "anthropic"), null); }
+  finally { release.resolve(); await stopping; }
 });
 
 test("a non-mock chat acquires, sleeps, resumes, and destroys its worker backend", async (t) => {

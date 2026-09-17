@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { companyForChat, companyScope, normalizeCompanyScope, scopeAllows } from "../public/company-scope.js";
 
 export const SOFTWARE_CATALOG = [
+  { id: "chrome", name: "Google Chrome", version: "Stable", description: "Shared live browser and agent tools; a separate profile without your saved logins", check: "google-chrome --version" },
   { id: "docker", name: "Docker", version: "Engine + Compose", description: "Containers and builds on a dedicated EC2 worker only; never the control-plane socket", check: "docker info --format '{{.ServerVersion}}' && docker compose version && docker buildx version", backends: ["ec2"] },
   { id: "node", name: "Node.js", version: "22", description: "JavaScript runtime and npm", check: "node --version" },
   { id: "python", name: "Python", version: "3", description: "Private virtualenv using the base Python 3 runtime", check: "python3 --version" },
@@ -29,14 +31,14 @@ export function validateVariables(input, previous = []) {
 }
 
 function publicEnvironment(environment) {
-  return { ...environment, variables: environment.variables.map(({ value, ...v }) => ({ ...v, ...(v.secret ? { hasValue: true } : { value }) })) };
+  return { ...environment, ...companyScope(environment), scopeNeedsReview: !Array.isArray(environment.companies), variables: environment.variables.map(({ value, ...v }) => ({ ...v, ...(v.secret ? { hasValue: true } : { value }) })) };
 }
 
 export class Environments {
   constructor(records, defaultBackend = "local", mcps = null) { this.records = records; this.defaultBackend = defaultBackend; this.mcps = mcps; this.queue = Promise.resolve(); }
   async initialize() {
     if (!(await this.records.list("environment")).length) {
-      await this.save({ name: "Default", backend: this.defaultBackend, variablesEnabled: true, software: [], variables: [] });
+      await this.save({ name: "Default", backend: this.defaultBackend, allowUnassigned: true, variablesEnabled: true, software: [], variables: [] });
     }
   }
   async list() { return (await this.records.list("environment")).map(publicEnvironment); }
@@ -69,7 +71,7 @@ export class Environments {
     else if (mcpIds.length) throw new Error("MCP connections are unavailable");
     if (all.some(env => env.id !== id && env.name.toLowerCase() === name.toLowerCase())) throw new Error("An environment with this name already exists");
     const value = {
-      id: id || `env_${randomUUID()}`, name, backend: input.backend,
+      id: id || `env_${randomUUID()}`, name, backend: input.backend, ...normalizeCompanyScope(input, old || {}),
       mcpIds,
       description: String(input.description || "").slice(0, 500),
       variablesEnabled: input.variablesEnabled !== false,
@@ -78,6 +80,7 @@ export class Environments {
       revision: (old?.revision || 0) + 1, createdAt: old?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
     await this.records.put("environment", value.id, value);
+    await this.onSaved?.(value);
     return publicEnvironment(value);
   }
   async remove(id, chats) {
@@ -86,10 +89,13 @@ export class Environments {
     if (chats.some(chat => chat.environmentId === id)) throw new Error("This environment is used by a conversation. Delete its conversations first.");
     await this.records.delete("environment", id);
   }
-  async runtime(id) {
+  async runtime(id, chat = {}) {
     const env = await this.get(id, { reveal: true });
+    const company = companyForChat(chat);
+    if (!scopeAllows(env, company)) throw Object.assign(new Error(`Environment “${env.name}” is not available for ${company || "unassigned chats"}. Select that company in its settings first.`), { statusCode: 403 });
     return {
       id: env.id, name: env.name, revision: env.revision, backend: env.backend, software: env.software,
+      ...companyScope(env),
       mcpIds: env.mcpIds || [],
       setupScript: env.setupScript || "", archived: Boolean(env.archived),
       variables: Object.fromEntries(env.variables.filter(v => env.variablesEnabled && v.enabled && !v.secret).map(v => [v.key, v.value])),

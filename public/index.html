@@ -7,6 +7,9 @@
     <meta name="theme-color" content="#10110f">
     <title>Agent Relay</title>
     <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="syntax-theme.css">
+    <link rel="stylesheet" href="pets.css">
+    <link rel="stylesheet" href="desktop-handoff.css">
   </head>
   <body>
     <div class="shell">
@@ -33,7 +36,8 @@
         <nav class="chat-list" id="chat-list" aria-label="Conversations"></nav>
 
         <div class="sidebar-footer">
-          <div class="settings-buttons"><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button><button class="secondary-button" id="mcps-button">MCP connections</button></div>
+          <button type="button" class="secondary-button relay-account-button" id="relay-account-button" aria-label="Your Relay account" hidden></button>
+          <div class="settings-buttons"><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button><button class="secondary-button" id="mcps-button">MCP connections</button><button class="secondary-button" id="browser-connections-button">Browser connections</button></div>
           <div class="system-state">
             <span class="live-dot"></span>
             <div>
@@ -52,11 +56,23 @@
             <div class="chat-meta" id="chat-meta">Independent workspaces. Disposable runtimes.</div>
           </div>
           <div class="topbar-actions" id="chat-actions" hidden>
+            <label class="signed-chrome-toggle" title="Use my signed-in Chrome · off by default"><input type="checkbox" role="switch" id="signed-chrome-toggle" aria-label="Use my signed-in Chrome"><span class="toggle-track" aria-hidden="true"></span><span class="toggle-text">Signed-in Chrome</span></label>
+            <button type="button" class="secondary-button" id="open-browser" title="Open the Chrome shared with your agent" aria-label="Open shared Chrome">◉ <span>Browser</span></button>
+            <button type="button" class="secondary-button" id="open-side" aria-label="Open side chat" title="Ask a side question without interrupting the main chat" hidden>Side chat</button>
+            <button type="button" class="secondary-button" id="open-agents" aria-label="Open agent threads" title="Inspect or continue this chat's native child agents" hidden>Agents</button>
             <details class="control-menu" id="repositories-menu"><summary aria-label="Repositories" title="Repositories">▱</summary><div class="control-popover" id="chat-repositories"></div></details>
             <button class="icon-button" id="view-changes" title="View changes" aria-label="View changes">▣</button>
             <button class="icon-button" id="copy-chat-link" title="Copy private chat link" aria-label="Copy chat link">↥</button>
             <details class="control-menu"><summary aria-label="Chat actions" title="Chat actions">⋮</summary><div class="control-popover">
               <button type="button" id="background-tasks">Background tasks</button>
+              <button type="button" id="keymap-button">Keyboard shortcuts</button>
+              <button type="button" id="statusline-button">Status line</button>
+              <button type="button" id="tab-title-button">Browser tab title</button>
+              <button type="button" id="syntax-theme-button">Syntax theme</button>
+              <button type="button" id="pets-button">Pets</button>
+              <button type="button" id="desktop-app-button" hidden>Open in desktop app</button>
+              <button type="button" id="workspace-trust-button" hidden>Workspace trust</button>
+              <button type="button" id="vim-button" aria-pressed="false">Enable Vim editing</button>
               <button type="button" id="open-workspace">Open in…</button>
               <button type="button" id="organize-chat-button" aria-label="Organize current chat">Rename / organize</button>
               <button type="button" id="transcript-view">Transcript view</button>
@@ -91,20 +107,35 @@
               </div>
             </div>
             <div class="countdown" id="countdown"></div>
+            <div class="chat-pet" id="chat-pet" role="group" aria-label="Current chat pet" hidden></div>
           </div>
           <div class="messages" id="messages" aria-live="polite"></div>
+          <nav id="message-navigator" class="message-navigator" aria-label="Message navigation" hidden><button type="button" class="message-nav-toggle" aria-label="Message navigator" aria-controls="message-nav-list" aria-expanded="false"><span class="message-nav-ticks" aria-hidden="true"></span></button><div id="message-nav-list" class="message-nav-list"></div></nav>
           <div class="approval-card" id="approval-card" hidden></div>
           <div class="composer-wrap">
+            <div id="goal-status"></div>
             <div id="message-queue" aria-live="polite"></div>
             <div id="pull-request-bars" class="pull-request-bars"></div>
             <form class="composer" id="composer">
-              <div id="slash-menu" role="listbox" aria-label="Commands and skills" hidden></div>
+              <div id="slash-menu" hidden>
+                <div class="slash-heading"><span class="slash-symbol" aria-hidden="true">/</span><div><strong>Commands &amp; skills</strong><span id="slash-caption"></span></div><span id="slash-count"></span></div>
+                <div id="slash-options" role="listbox" aria-label="Commands and skills"></div>
+                <p id="slash-status" role="status" hidden></p>
+                <div class="slash-footer" aria-hidden="true"><span><kbd>↑</kbd> <kbd>↓</kbd> Navigate</span><span><kbd>↵</kbd> Insert</span><span><kbd>esc</kbd> Close</span></div>
+              </div>
+              <div id="file-menu" hidden>
+                <div class="slash-heading"><strong>Workspace references</strong></div>
+                <div id="file-options" role="listbox" aria-label="Workspace references"></div>
+                <p id="file-status" role="status"></p>
+              </div>
               <div id="attachment-chips" class="attachment-chips"></div>
-              <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message"></textarea>
+              <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message" aria-describedby="composer-keyboard-hint"></textarea>
+              <div id="vim-status" class="vim-status" hidden><span id="vim-mode" role="status"></span><span class="muted">i to edit · Esc for Normal</span><button type="button" id="vim-help">Keys</button><button type="button" id="vim-disable">Vim off</button></div>
               <div class="composer-footer">
                 <div class="composer-pickers">
-                  <details class="control-menu upward"><summary aria-label="Add to message" title="Add to message">＋</summary><div class="control-popover">
+                  <details class="control-menu upward composer-add"><summary aria-label="Add to message" title="Add files, commands or connectors">+</summary><div class="control-popover">
                     <button type="button" id="add-attachments">Add files or photos</button>
+                    <button type="button" id="add-workspace-context">Workspace files &amp; selections</button>
                     <button type="button" id="slash-commands">Slash commands</button>
                     <button type="button" id="show-connectors">Connectors</button>
                   </div></details>
@@ -113,6 +144,8 @@
                     <button type="button" data-agent-mode="auto">Auto<small>Provider-managed approvals</small></button>
                     <button type="button" data-agent-mode="accept_edits">Accept edits<small>Allow workspace edits; commands may need approval</small></button>
                     <button type="button" data-agent-mode="plan">Plan<small>Make a plan before changing files</small></button>
+                    <button type="button" data-agent-mode="default" data-claude-mode hidden>Manual<small>Native default policy; asks before restricted actions</small></button>
+                    <button type="button" data-agent-mode="dont_ask" data-claude-mode hidden>Deny prompts<small>Deny actions requiring approval; keep existing allowed actions</small></button>
                     <p class="muted" id="mode-provider-note"></p>
                   </div></details>
                   <select id="chat-agent-select" aria-label="Chat agent" title="Switch agent · conversation and workspace are retained"></select>
@@ -123,25 +156,78 @@
                       <select class="effort-select" aria-label="Chat effort" title="Effort"></select>
                       <input class="effort-slider" type="range" min="0" max="0" step="1" aria-label="Effort level">
                       <div class="effort-scale"><span>Faster</span><span>More reasoning</span></div>
+                      <p class="muted effort-auto-note" hidden>Auto uses Claude's native effort choice. Select a fixed level above to use the slider.</p>
                       <p class="muted">Higher effort can take longer and use more tokens. Available levels come from the selected model.</p>
                     </div></details>
                     <p class="model-note" role="status"></p>
                   </div>
                 </div>
+                <div class="composer-actions">
                 <details class="control-menu upward usage-menu" id="usage-menu"><summary aria-label="Context and usage" title="Context and usage"><span id="usage-ring" aria-hidden="true"></span></summary><div class="control-popover" id="session-usage"><p>Loading usage…</p></div></details>
                 <button class="send-button" id="send-button" type="submit" aria-label="Send message">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
                 </button>
                 <button type="submit" class="secondary-button queue-send" id="queue-message" hidden>Queue</button>
+                </div>
               </div>
             </form>
             <input type="file" id="attachment-input" multiple hidden>
-            <p class="composer-hint">Enter to send · Shift + Enter for a new line</p>
+            <div class="composer-help"><span>Type <kbd>/</kbd> for commands</span><p class="composer-hint" id="composer-keyboard-hint">Enter to send · Shift + Enter for a new line</p></div>
+            <div id="chat-statusline" class="chat-statusline" role="group" aria-label="Chat status line" hidden></div>
           </div>
         </section>
+        <aside class="side-panel" id="workspace-panel" aria-labelledby="workspace-title" hidden>
+          <div class="preview-heading"><strong id="workspace-title">Workspace context</strong><button type="button" class="secondary-button" id="workspace-connect">Connect</button><button type="button" class="icon-button" id="close-workspace-context" aria-label="Close workspace context">×</button></div>
+          <p class="muted" id="workspace-status" role="status"></p>
+          <p class="muted">Relay's read-only viewer, not an external IDE connection. Nothing is sent until you attach context and submit a message.</p>
+          <div class="workspace-toolbar"><button type="button" class="secondary-button" id="workspace-up" aria-label="Parent workspace folder">↑</button><span id="workspace-directory"></span></div>
+          <input id="workspace-search" type="search" placeholder="Find a workspace path…" aria-label="Find workspace files" autocomplete="off" spellcheck="false">
+          <div id="workspace-files" aria-label="Workspace files"></div>
+          <p class="muted" id="workspace-files-note"></p>
+          <div class="workspace-toolbar"><label class="sr-only" for="workspace-tabs">Open workspace files</label><select id="workspace-tabs"></select><button type="button" class="icon-button" id="workspace-close-file" aria-label="Close workspace file">×</button></div>
+          <textarea id="workspace-code" readonly spellcheck="false" wrap="off" aria-label="Workspace file contents"></textarea>
+          <p class="muted" id="workspace-selection-status" role="status"></p>
+          <div class="workspace-actions"><button type="button" class="secondary-button" id="workspace-attach-file">Attach file reference</button><button type="button" class="secondary-button" id="workspace-attach-selection">Attach selected text</button><button type="button" class="secondary-button" id="workspace-ide">Use open files as context</button></div>
+        </aside>
+        <aside class="side-panel" id="agents-panel" aria-labelledby="agents-title" hidden>
+          <div class="preview-heading"><strong id="agents-title">Agent threads</strong><button type="button" class="secondary-button" id="agents-refresh">Connect to agents</button><button type="button" class="icon-button" id="hide-agents" aria-label="Return to main chat">×</button></div>
+          <label class="sr-only" for="agents-picker">Choose agent thread</label><select id="agents-picker"></select>
+          <p id="agents-status" class="muted" role="status"></p>
+          <p id="agents-limit" class="muted" hidden>Showing up to 200 native agents.</p>
+          <div class="side-form-actions"><button type="button" class="secondary-button" id="agents-older" hidden>Earlier agent messages</button><button type="button" class="secondary-button" id="agents-latest" hidden>Latest agent messages</button></div>
+          <div id="agents-messages" aria-label="Selected agent conversation"></div>
+          <div id="agents-approval" class="approval-card" hidden></div>
+          <p id="agents-error" role="alert"></p>
+          <form id="agents-form" hidden><textarea id="agents-input" rows="3" maxlength="100000" placeholder="Message this agent…" aria-label="Message selected agent"></textarea><div class="side-form-actions"><span class="muted">Sent only to the selected agent</span><button type="button" class="secondary-button" id="agents-stop" hidden>Stop agent reply</button><button type="submit" class="primary-button" id="agents-send">Send to agent</button></div></form>
+        </aside>
+        <aside class="side-panel" id="side-panel" aria-labelledby="side-title" hidden>
+          <div class="preview-heading"><strong id="side-title">Side chat</strong><button type="button" class="secondary-button" id="end-side">End side chat</button><button type="button" class="icon-button" id="hide-side" aria-label="Hide side chat">×</button></div>
+          <p class="muted">Temporary conversation, branched from the main chat. Both agents share the workspace and selected permissions. Ending this side chat or stopping the worker discards this conversation.</p>
+          <div class="side-status"><span id="side-status" role="status"></span><span id="side-main-status" class="muted"></span></div>
+          <div id="side-messages" aria-label="Side conversation"></div>
+          <div id="side-approval" class="approval-card" hidden></div>
+          <p id="side-error" role="alert"></p>
+          <form id="side-form"><textarea id="side-input" rows="3" maxlength="100000" placeholder="Ask a side question…" aria-label="Side message"></textarea><div class="side-form-actions"><span class="muted">Enter to send · Shift + Enter for a new line</span><button type="button" class="secondary-button" id="side-stop" hidden>Stop side reply</button><button type="submit" class="primary-button" id="side-send">Send to side chat</button></div></form>
+        </aside>
+        <aside class="browser-panel" id="browser-panel" aria-labelledby="browser-title" hidden>
+          <div class="preview-heading"><strong id="browser-title">Shared Chrome</strong><span class="browser-profile-label" id="browser-profile-label">Separate profile</span><button type="button" class="icon-button" id="expand-browser" aria-label="Expand browser" aria-pressed="false">⤢</button><button type="button" class="icon-button" id="close-browser" aria-label="Close browser panel">×</button></div>
+          <div class="browser-tabbar"><select id="browser-tabs" aria-label="Browser tabs"></select><button type="button" class="icon-button" id="browser-new-tab" aria-label="New browser tab">+</button><button type="button" class="icon-button" id="browser-close-tab" aria-label="Close current browser tab">×</button></div>
+          <form id="browser-address-form" class="browser-toolbar"><button type="button" class="icon-button" id="browser-back" aria-label="Browser back">←</button><button type="button" class="icon-button" id="browser-forward" aria-label="Browser forward">→</button><button type="button" class="icon-button" id="browser-reload" aria-label="Reload browser page">↻</button><input type="text" id="browser-address" aria-label="Browser address" placeholder="http://localhost:3000" autocomplete="off" spellcheck="false"><button type="submit" class="secondary-button">Go</button></form>
+          <div class="browser-options"><button type="button" class="secondary-button" id="browser-localhost">localhost:3000</button><label><span class="sr-only">Browser viewport</span><select id="browser-viewport" aria-label="Browser viewport"><option value="320x640">xxs · 320 × 640</option><option value="390x844">xs · 390 × 844</option><option value="640x960">sm · 640 × 960</option><option value="834x1112">md · 834 × 1112</option><option value="1280x800" selected>lg · 1280 × 800</option><option value="1920x1080">xlg · 1920 × 1080</option><option value="custom">Custom dimensions…</option></select></label><button type="button" class="secondary-button" id="browser-stop">Stop Chrome</button></div>
+          <div class="browser-options browser-direct-links"><a id="browser-open-direct" class="secondary-button" target="_blank" rel="noopener noreferrer" aria-disabled="true">Open directly ↗</a><button type="button" class="secondary-button" id="browser-copy-link" disabled>Copy URL</button></div>
+          <form id="browser-size-form" class="browser-options" hidden><label>Width <input id="browser-width" type="number" min="320" max="2560" value="1280" required aria-label="Browser viewport width"></label><span>×</span><label>Height <input id="browser-height" type="number" min="240" max="1600" value="800" required aria-label="Browser viewport height"></label><button class="secondary-button" type="submit">Apply size</button></form>
+          <p id="browser-status" class="muted" role="status">Chrome starts when you connect. Website content runs in the worker, not in this app.</p>
+          <div class="browser-surface" id="browser-surface"><canvas id="browser-canvas" width="1280" height="800" tabindex="0" aria-label="Shared Chrome page. Click to interact, then type. Press Escape to leave browser input."></canvas><button type="button" class="primary-button" id="browser-connect">Connect to Chrome</button></div>
+          <div id="browser-dialog" class="browser-dialog" hidden><p id="browser-dialog-text"></p><input id="browser-dialog-input" aria-label="Website prompt answer" autocomplete="off"><button type="button" id="browser-dialog-accept">OK</button><button type="button" id="browser-dialog-dismiss">Cancel</button></div>
+          <p class="browser-footnote muted" id="browser-footnote">You and the agent share this page. Localhost reaches the chat’s worker. Your personal Chrome and its saved logins are not connected.</p>
+        </aside>
         <aside class="tools-panel" id="tools-panel" aria-label="Tool activity" hidden>
           <div class="diff-heading"><strong id="tools-title">Tools used</strong><button type="button" class="icon-button" id="close-tools" aria-label="Close tool activity">×</button></div>
           <p class="muted">Real calls and results reported by the agent. Failed or denied calls do not imply an action succeeded.</p><div id="tools-list"></div>
+        </aside>
+        <aside class="preview-panel" id="preview-panel" aria-labelledby="preview-title" hidden>
+          <div class="preview-heading"><strong id="preview-title">Document preview</strong><button type="button" class="secondary-button" id="copy-preview">Copy source</button><button type="button" class="icon-button" id="expand-preview" aria-label="Expand preview" aria-pressed="false">⤢</button><button type="button" class="icon-button" id="close-preview" aria-label="Close preview">×</button></div>
+          <p class="muted" id="preview-note"></p><div id="preview-content"></div>
         </aside>
         <aside class="diff-panel" id="diff-panel" aria-label="Changes" hidden>
           <div class="diff-heading"><strong id="diff-title">Changes</strong><button type="button" class="icon-button" id="expand-diff" aria-label="Expand changes">⤢</button><button type="button" class="icon-button" id="close-diff" aria-label="Close changes">×</button></div>
@@ -152,6 +238,17 @@
       </main>
     </div>
 
+    <dialog id="browser-connections-dialog"><div class="dialog-card browser-connections-card">
+      <div class="dialog-heading"><h2>Browser connections</h2><button type="button" class="icon-button" id="browser-connections-close" aria-label="Close browser connections">×</button></div>
+      <p class="muted">Your website logins stay in your Chrome profile. Pairing and signing in do not enable agent access.</p>
+      <form id="browser-account-form"><h3>Your private account</h3><p class="muted">A separate account protects your connections and private chats from other app users. This is not your Google password.</p><label><span>Username</span><input id="browser-username" autocomplete="username" minlength="3" maxlength="40" required></label><label><span>Account password</span><input id="browser-password" type="password" autocomplete="current-password" minlength="12" maxlength="1024" required></label><div class="browser-account-actions"><button type="submit" class="primary-button" value="login">Sign in</button><button type="submit" class="secondary-button" value="register">Create private account</button></div></form>
+      <div id="browser-account-signed-in" hidden><div class="browser-account-actions"><strong id="browser-account-name"></strong><button type="button" class="secondary-button" id="browser-account-logout">Sign out</button></div><h3>Your Chrome profiles</h3><div id="browser-connection-list"></div>
+        <details id="browser-pair-instructions"><summary>Pair a Chrome profile</summary><ol><li><a href="/api/browser-extension/download" download>Download the Chrome extension</a> and extract the ZIP.</li><li>In your personal Chrome, open <code>chrome://extensions</code>, enable Developer mode, click <strong>Load unpacked</strong>, and choose the extracted <code>agent-relay-chrome</code> folder.</li><li>Give the connection a name, generate a code below, then paste this app’s address and the code into the extension.</li><li>Sign into your websites normally in Chrome. Enable the top-right switch in a chat only when you want to share your signed-in profile.</li></ol><p class="muted">The extension requests Chrome’s debugger permission for a separate automation tab. It cannot be installed silently. Your existing tabs are not shared. Disabling access closes the automation tab, not your Chrome profile.</p>
+        <form id="browser-pair-form"><label><span>Chrome connection name</span><input id="browser-connection-name" value="My Chrome" maxlength="80" required></label><button type="submit" class="secondary-button">Generate pairing code</button></form>
+        <div id="browser-pair-result" hidden><label><span>Agent Relay address</span><input id="browser-pair-origin" readonly></label><label><span>One-time code · expires in 5 minutes</span><input id="browser-pair-code" readonly autocomplete="off"></label><button type="button" class="secondary-button" id="browser-pair-copy">Copy code</button><p class="muted">Keep this code private. It pairs only this profile with your account; sharing stays off.</p></div></details>
+      </div><p id="browser-settings-error" role="alert"></p>
+    </div></dialog>
+    <dialog id="browser-share-dialog"><form class="dialog-card" id="browser-share-form"><div class="dialog-heading"><h2>Share signed-in Chrome?</h2><button type="button" class="icon-button" id="browser-share-close" aria-label="Cancel Chrome sharing">×</button></div><p>The agent will be able to read and act on websites using this Chrome profile’s saved logins. Only enable this for work you trust.</p><label><span>Your connection</span><select id="browser-share-connection" required></select></label><p id="browser-share-privacy" class="muted"></p><p class="muted">Sharing opens a separate automation tab. Turning the switch off revokes access and closes that tab without signing you out. Actions already taken cannot be undone. Localhost in personal Chrome means your computer, not a remote worker.</p><label class="checkbox-row"><input type="checkbox" id="browser-share-confirm" required><span>I authorize signed-in browser access for this chat.</span></label><p id="browser-share-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary-button" id="browser-share-manage">Manage connections</button><button type="submit" class="primary-button" id="browser-share-enable">Enable for this chat</button></div></form></dialog>
     <dialog id="usage-dialog"><div class="dialog-card usage-card"><div class="dialog-heading"><h2>Usage</h2><button type="button" class="icon-button" id="usage-close" aria-label="Close usage">×</button></div><div class="usage-actions"><button type="button" id="usage-refresh">Refresh</button><button type="button" id="usage-copy">Copy</button></div><div id="usage-details"></div></div></dialog>
     <dialog id="new-chat-dialog">
       <!-- Conversation creation -->
@@ -187,8 +284,13 @@
 
     <dialog id="github-dialog" aria-labelledby="github-dialog-title">
       <div class="dialog-card">
-        <div class="dialog-heading"><h2 id="github-dialog-title">Connect GitHub</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close GitHub dialog">×</button></div>
+        <div class="dialog-heading"><h2 id="github-dialog-title">GitHub connections</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close GitHub dialog">×</button></div>
+        <label><span>Saved GitHub connections</span><select id="github-connections"></select></label>
+        <button type="button" class="secondary-button" id="github-new">＋ Add GitHub connection</button>
+        <label><span>Connection name</span><input id="github-connection-name" maxlength="80" placeholder="e.g. 12-apps GitHub"></label>
         <p class="muted" id="github-status"></p>
+        <div id="github-companies"></div>
+        <button type="button" class="primary-button" id="github-save-scope" hidden>Save company access</button>
         <button type="button" class="primary-button" id="github-local">Use this server’s gh login</button>
         <button type="button" class="secondary-button" id="github-oauth">Sign in on GitHub</button>
         <div class="device-code" id="github-device-code"></div>
@@ -206,8 +308,9 @@
         <div class="dialog-heading"><div><p class="eyebrow">WORKSPACE SETTINGS</p><h2 id="environments-dialog-title">Environments</h2></div><button type="button" class="icon-button" data-close-dialog aria-label="Close environments">×</button></div>
         <div class="environment-navigation"><div id="environment-tabs"></div><button type="button" class="secondary-button" id="add-environment">＋ Add environment</button></div>
         <form id="environment-form">
-          <section class="environment-mcps"><h3>MCP connections</h3><div id="environment-mcp-options"></div><p class="muted">Selected connections configure Codex and Claude on the next worker start. Add connections from the sidebar. Trust the service before enabling its tools.</p></section>
           <label><span>Environment name</span><input id="environment-name" required maxlength="80" placeholder="e.g. Acme staging"></label>
+          <div id="environment-companies"></div>
+          <section class="environment-mcps"><h3>MCP connections</h3><div id="environment-mcp-options"></div><p class="muted">Only selected connections allowed for this chat’s company reach the worker. The environment and the connection must both allow that company. Changes apply on the next worker start.</p></section>
           <p class="muted" id="environment-backend"></p>
           <label><span>Network access</span><select disabled aria-label="Network access"><option>Worker infrastructure default</option></select></label>
           <p class="muted">Custom egress restrictions are not enforced by this backend. Configure the worker network externally; agent sandbox permissions remain separate.</p>
@@ -228,14 +331,25 @@
     <dialog id="mcp-dialog" aria-labelledby="mcp-title"><div class="dialog-card mcp-card">
       <div class="dialog-heading"><h2 id="mcp-title">MCP connections</h2><button type="button" class="icon-button" id="mcp-close" aria-label="Close MCP connections">×</button></div>
       <p class="muted">Connect tools once, then select them in each environment. Only enable servers you trust: their tools can access and change data.</p>
-      <div id="mcp-list"></div><button type="button" class="secondary-button" id="mcp-new">＋ Add MCP</button>
+      <h3>Your connections</h3><div id="mcp-list"></div><button type="button" class="secondary-button" id="mcp-new">＋ Custom MCP</button>
+      <details id="mcp-catalog" open><summary>Add a development tool</summary><div id="mcp-presets" class="mcp-presets"></div></details>
       <form id="mcp-form">
         <label><span>Connection name</span><input id="mcp-name" required maxlength="64" placeholder="e.g. company-tools"></label>
+        <div id="mcp-companies"></div>
+        <p class="muted">Save separate connections and sign in separately for different company accounts. A blank company list never shares credentials across companies.</p>
         <label><span>Transport</span><select id="mcp-type"><option value="http">Streamable HTTP · protected credentials</option><option value="stdio">Stdio · process on the worker</option></select></label>
-        <div id="mcp-http"><label><span>MCP endpoint URL</span><input id="mcp-url" type="url" placeholder="https://tools.example.com/mcp"></label><label><span>Authentication headers · JSON, encrypted</span><textarea id="mcp-headers" rows="3" spellcheck="false" autocomplete="off"></textarea></label><p class="muted">Blank keeps saved headers; {} clears them. Authentication stays on the controller. The agent gets revocable access to this service, not its upstream credentials. OAuth login is not supported here yet.</p></div>
+        <div id="mcp-http">
+          <label><span>MCP endpoint URL</span><input id="mcp-url" type="url" placeholder="https://paladira.com/api/mcp"></label>
+          <label><span>Authentication</span><select id="mcp-auth"><option value="oauth">OAuth · sign in with your browser</option><option value="headers">Authentication headers / API token</option><option value="none">No authentication</option></select></label>
+          <div id="mcp-header-fields" hidden><label><span>Authentication headers · JSON, encrypted</span><textarea id="mcp-headers" rows="3" spellcheck="false" autocomplete="off"></textarea></label><p class="muted">Blank keeps saved headers for the same URL; {} clears them. Changing the endpoint clears existing credentials.</p></div>
+          <details id="mcp-oauth-fields"><summary>Advanced OAuth settings</summary><p class="muted">Normally discovered automatically. Only fill these if the provider requires a pre-registered client or specific scopes.</p><label><span>OAuth client ID</span><input id="mcp-client-id" autocomplete="off"></label><label><span>OAuth client secret · optional, encrypted</span><input id="mcp-client-secret" type="password" autocomplete="new-password"></label><label><span>OAuth scopes · space separated</span><input id="mcp-scopes" placeholder="Leave blank to use server-advertised scopes"></label><p class="muted">Callback: <code id="mcp-callback-url"></code></p></details>
+          <p class="muted">Authentication stays encrypted on the controller. The agent gets revocable access, not the service’s credentials. Only approve permissions you want the agent to use.</p>
+        </div>
         <div id="mcp-stdio" hidden><label><span>Executable</span><input id="mcp-command" placeholder="npx"></label><label><span>Arguments · JSON array</span><textarea id="mcp-args" rows="3" spellcheck="false">[]</textarea></label><p class="muted">Runs on each selected worker with that worker’s permissions. Install its runtime in the environment. Commands and arguments are agent-readable: do not include secrets. Use HTTP for protected authentication.</p></div>
         <p class="muted">Local workers share the host filesystem; isolated cloud workers provide a stronger secret boundary.</p>
         <p id="mcp-error" class="form-error" role="alert"></p><p id="mcp-save-status" class="muted" role="status"></p>
+        <section id="mcp-connection-status" aria-live="polite"></section>
+        <div class="mcp-connect-actions"><button type="button" class="secondary-button" id="mcp-connect" hidden>Connect with OAuth</button><button type="button" class="secondary-button" id="mcp-test" hidden>Test connection</button><button type="button" class="secondary-button" id="mcp-disconnect" hidden>Disconnect OAuth</button></div>
         <div class="dialog-actions"><button type="button" class="secondary-button" id="mcp-delete" hidden>Delete connection</button><button class="primary-button">Save connection</button></div>
       </form>
     </div></dialog>
@@ -260,11 +374,21 @@
         <div class="automatic-status"><span class="muted">Automatic status</span><div id="organize-status" role="status"></div><p class="muted" id="organize-status-detail"></p><div id="organize-pull-requests"></div><p id="organize-sync-warning" class="muted" role="status"></p></div>
         <p class="muted">Agent activity, questions and GitHub PR checks update automatically. GitHub is checked every minute, even while the worker sleeps.</p>
         <p id="organize-error" class="form-error" role="alert"></p>
-        <div class="dialog-actions"><button type="button" class="secondary-button" id="archive-chat-button">Archive chat</button><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button class="primary-button">Save changes</button></div>
+        <div class="dialog-actions"><button type="button" class="secondary-button danger" id="organize-delete-chat">Delete chat</button><button type="button" class="secondary-button" id="archive-chat-button">Archive chat</button><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button class="primary-button">Save changes</button></div>
       </form>
     </dialog>
 
     <dialog id="login-dialog">
+      <section class="dialog-card compact google-login-card" id="google-login-card" aria-labelledby="google-login-title" hidden>
+        <p class="eyebrow">YOUR PRIVATE WORKSPACE</p>
+        <h2 id="google-login-title">Sign in to Agent Relay</h2>
+        <p class="muted">Use your Google account to access your conversations and connections. Claude and Codex accounts are connected separately.</p>
+        <button type="button" class="secondary-button full google-sign-in" id="google-sign-in">Continue with Google</button>
+        <a id="google-canonical" class="secondary-button" hidden>Open the configured Relay address to sign in</a>
+        <div id="google-setup" class="google-setup" hidden><h3>Configure Google sign-in</h3><p class="muted">The administrator needs to set these server variables:</p><code id="google-missing"></code><p class="muted">Register this authorized redirect URI in your Google OAuth web client:</p><code id="google-callback"></code><p class="muted">Keep the client secret on the server. Do not paste it into a conversation.</p></div>
+        <p id="google-sign-in-error" class="form-error" role="alert"></p>
+        <p class="muted">Signing in does not give agents access to your personal Chrome.</p>
+      </section>
       <form method="dialog" class="dialog-card compact" id="login-form">
         <p class="eyebrow">PRIVATE CONTROL PLANE</p>
         <h2>Enter your access token</h2>
@@ -277,6 +401,7 @@
         <button class="primary-button full" value="default">Continue</button>
       </form>
     </dialog>
+    <dialog id="relay-account-dialog"><section class="dialog-card compact"><div class="dialog-heading"><h2>Your Relay account</h2><button type="button" class="icon-button" id="relay-account-close" aria-label="Close account">×</button></div><p id="relay-account-email" class="relay-account-email"></p><p class="muted">Your conversations, GitHub connections, environments and MCP connections are private to this account. Signing out revokes personal Chrome access; it does not delete conversations.</p><button type="button" class="secondary-button full" id="relay-sign-out">Sign out</button><p class="form-error" id="relay-account-error" role="alert"></p></section></dialog>
 
     <div class="toast-region" id="toasts" aria-live="assertive"></div>
     <div class="sr-only" id="sidebar-announcement" role="status"></div>

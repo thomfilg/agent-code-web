@@ -40,7 +40,8 @@ export class ModelPicker {
   renderEfforts(selected = this.effort.value) {
     const model = this.catalog?.models.find(item => item.id === (this.model.value || this.catalog.configuredDefault)) || (!this.model.value ? this.catalog?.models.find(item => item.isDefault) : null);
     const levels = model?.efforts || (this.agent === "claude" && !this.model.value ? this.catalog?.models.find(item => item.id === "opus")?.efforts : []) || [];
-    this.levels = levels;
+    // Auto is a native policy, not the lowest point on an effort scale.
+    this.levels = levels.filter(level => level !== "auto");
     const defaultEffort = levels.includes(this.catalog?.configuredDefaultEffort) ? this.catalog.configuredDefaultEffort : model?.defaultEffort;
     this.effort.replaceChildren(option("", !levels.length ? "N/A" : defaultEffort ? `Default · ${defaultEffort}` : "Default"), ...levels.map(level => option(level, level === "xhigh" ? "Extra high" : level[0].toUpperCase() + level.slice(1))));
     this.effort.value = levels.includes(selected) ? selected : "";
@@ -55,7 +56,11 @@ export class ModelPicker {
     this.effortLabel.textContent = selected.replace(/^Default · /, "");
     this.slider.max = Math.max(0, (this.levels?.length || 0) - 1);
     this.slider.value = Math.max(0, this.levels?.indexOf(value) ?? 0);
-    this.slider.disabled = this.effort.disabled;
+    this.slider.hidden = value === "auto" || !this.levels?.length;
+    this.slider.disabled = this.effort.disabled || this.slider.hidden;
+    const scale = this.root.querySelector(".effort-scale"), autoNote = this.root.querySelector(".effort-auto-note");
+    if (scale) scale.hidden = this.slider.hidden;
+    if (autoNote) autoNote.hidden = value !== "auto";
   }
   changed() {
     const value = this.value(); this.key = JSON.stringify([this.agent, value.model, value.effort]);

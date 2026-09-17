@@ -2,6 +2,9 @@ data/
 *.log
 .DS_Store
 .env
+.env.google
+.doppler*-token
 node_modules/
 test-results/
 playwright-report/
+.generated/

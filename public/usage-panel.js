@@ -39,7 +39,9 @@ export class UsagePanel {
       const parts = usage.context ? [usage.context.inputTokens, usage.context.cacheReadTokens, usage.context.cacheWriteTokens, usage.context.outputTokens] : [usage.contextTokens];
       for (const [i, value] of parts.entries()) { const segment = el("span", undefined, `segment segment-${i}`); const width = Math.min(remaining, (value || 0) / usage.contextWindow * 100); segment.style.width = `${width}%`; remaining -= width; bar.append(segment); }
     }
-    row.append(bar); return row;
+    row.append(bar);
+    if (usage.recordedAt) row.append(el("p", `${info.snapshot || this.state.active?.status === "stopped" ? "Saved snapshot" : "Last updated"} · ${new Date(usage.recordedAt).toLocaleString()}`, "muted usage-snapshot"));
+    return row;
   }
   limits(info) {
     const root = el("section", undefined, "usage-limits");
@@ -64,9 +66,13 @@ export class UsagePanel {
     $("#usage-ring").style.setProperty("--usage", `${Math.min(100, p)}%`);
     if ($("#usage-menu").open) {
       const compact = button("Compact session", async () => {
-        if (!confirm("Compact this session now? This can use model tokens.")) return;
-        try { await this.api(`/api/chats/${this.state.active.id}/compact`, { method: "POST", body: "{}" }); await this.refresh(); } catch (error) { this.toast(error.message); }
-      }); compact.disabled = !info.canCompact; compact.title = info.canCompact ? "Compact context" : "Manual compaction requires an awake, idle Codex session; Claude compacts automatically";
+        const chat = this.state.active; if (!chat) return;
+        const queued = ["starting", "running", "stopping"].includes(chat.status) || chat.queuedMessages?.length;
+        compact.disabled = true;
+        try { await this.api(`/api/chats/${chat.id}/${queued ? "queue" : "messages"}`, { method: "POST", body: JSON.stringify({ text: "/compact" }) }); this.toast(queued ? "/compact queued" : "/compact sent"); }
+        catch (error) { this.toast(error.message); }
+        finally { compact.disabled = false; }
+      }); compact.title = "Send /compact · queues behind the current work when the agent is busy";
       $("#session-usage").replaceChildren(this.context(info), compact, this.limits(info), button("See detailed breakdown ›", () => this.detailed()));
     }
     if (!$("#usage-dialog").open) return;

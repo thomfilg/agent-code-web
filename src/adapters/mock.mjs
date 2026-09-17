@@ -34,6 +34,8 @@ export class MockAdapter {
 
   async respond() {}
 
+  async interrupt() { this.stopped = true; }
+
   async stop() {
     this.stopped = true;
     this.running = false;

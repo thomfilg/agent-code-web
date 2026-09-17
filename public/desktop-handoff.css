@@ -1,0 +1,10 @@
+.desktop-handoff { display: grid; gap: 14px; min-width: 0; }
+.desktop-handoff p { margin: 0; overflow-wrap: anywhere; }
+.desktop-handoff-details, .desktop-handoff-actions { display: grid; gap: 10px; min-width: 0; }
+.desktop-handoff-details label { display: grid; gap: 4px; min-width: 0; }
+.desktop-handoff-details textarea { width: 100%; min-width: 0; resize: vertical; font: 12px/1.5 var(--mono, monospace); overflow-wrap: anywhere; }
+.desktop-handoff-confirm { display: flex; align-items: flex-start; gap: 8px; }
+.desktop-handoff-confirm input { flex: 0 0 auto; width: auto; margin-top: 3px; }
+.desktop-handoff a { overflow-wrap: anywhere; }
+.desktop-handoff a[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+.desktop-handoff-warning { padding: 10px; border: 1px solid var(--line); border-radius: 8px; }

@@ -31,6 +31,19 @@ test("uploads stay chat-scoped, bounded, and cannot overwrite or follow upload-d
   await assert.rejects(attachments.materialize(other, null, files), /Unsafe/);
   await attachments.removeChat(chat.id); await assert.rejects(attachments.resolve(chat.id, [file.id]), /not found/);
 });
+
+test("attachment previews require authentication and the attachment's owning chat", async t => {
+  const root = await temporaryDirectory(t), app = await createAgentWebServer({ config: testConfig(root, { AGENT_WEB_AUTH_TOKEN: "preview-test" }) });
+  const { url } = await app.start(); t.after(() => app.stop());
+  const chat = await app.manager.createChat({ agent: "mock" }), other = await app.manager.createChat({ agent: "mock" });
+  const headers = { Authorization: "Bearer preview-test", "content-type": "application/json" };
+  const upload = await fetch(`${url}/api/chats/${chat.id}/attachments`, { method: "POST", headers, body: JSON.stringify({ name: "notes.txt", mime: "text/plain", data: Buffer.from("Private fixture notes").toString("base64") }) });
+  const { attachment } = await upload.json(), endpoint = `${url}/api/chats/${chat.id}/attachments/${attachment.id}`;
+  assert.equal((await fetch(endpoint)).status, 401);
+  const response = await fetch(endpoint, { headers }); assert.equal(response.status, 200); assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(Buffer.from((await response.json()).attachment.data, "base64").toString(), "Private fixture notes");
+  assert.notEqual((await fetch(`${url}/api/chats/${other.id}/attachments/${attachment.id}`, { headers })).status, 200);
+});
 test("CI overview distinguishes passing, failed, pending, skipped and legacy status contexts", () => {
   assert.deepEqual(checkSummary([
     { status: "completed", conclusion: "success" }, { status: "completed", conclusion: "skipped" },
@@ -73,7 +86,7 @@ test("PR auto-merge uses only explicit GitHub auto-merge mutations and rejects f
 });
 test("setup scripts persist but protected variables remain unavailable, and network restrictions are not fabricated", async () => {
   const environments = new Environments(new MemoryRecords());
-  const env = await environments.save({ name: "Scripted", backend: "local", setupScript: "npm --version", variables: [{ key: "SECRET", value: "hidden" }, { key: "VISIBLE", value: "ok", secret: false }] });
+  const env = await environments.save({ name: "Scripted", backend: "local", allowUnassigned: true, setupScript: "npm --version", variables: [{ key: "SECRET", value: "hidden" }, { key: "VISIBLE", value: "ok", secret: false }] });
   const runtime = await environments.runtime(env.id);
   assert.equal(runtime.setupScript, "npm --version"); assert.deepEqual(runtime.variables, { VISIBLE: "ok" });
   await assert.rejects(environments.save({ ...env, networkAccess: "restricted" }, env.id), /cannot enforce/);
@@ -92,7 +105,7 @@ test("environment setup runs before each worker start with only agent-readable v
   const app = await createAgentWebServer({ config: testConfig(root), models: { creationSettings: async () => ({}), turnSettings: async () => ({}) },
     adapterFactory: () => ({ start: async () => {}, send: async () => ({ text: "ready" }), stop: async () => {} }) });
   await app.start(); t.after(() => app.stop());
-  const environment = await app.manager.environments.save({ name: "Setup isolation", backend: "local", variables: [{ key: "SECRET", value: "private" }, { key: "VISIBLE", value: "ok", secret: false }],
+  const environment = await app.manager.environments.save({ name: "Setup isolation", backend: "local", allowUnassigned: true, variables: [{ key: "SECRET", value: "private" }, { key: "VISIBLE", value: "ok", secret: false }],
     setupScript: 'test -z "${SECRET+x}" && test "$VISIBLE" = "ok" && printf "ready\\n" >> setup-check.txt' });
   const chat = await app.manager.createChat({ agent: "codex", title: "Setup fixture", environmentId: environment.id });
   await app.manager.send(chat.id, "first");
@@ -128,11 +141,15 @@ test("agent/mode/upload/auto-merge control routes require authentication and ori
   const root = await temporaryDirectory(t); const app = await createAgentWebServer({ config: testConfig(root, { AGENT_WEB_AUTH_TOKEN: "owner" }) });
   const { url } = await app.start(); t.after(() => app.stop());
   const chat = await app.manager.createChat({ agent: "mock" });
-  for (const [tail, method] of [["agent", "PATCH"], ["mode", "PATCH"], ["attachments", "POST"], ["pull-requests/auto-merge", "PATCH"]]) {
+  for (const [tail, method] of [["agent", "PATCH"], ["mode", "PATCH"], ["attachments", "POST"], ["pull-requests/auto-merge", "PATCH"], ["commands/inspect", "POST"]]) {
     assert.equal((await fetch(`${url}/api/chats/${chat.id}/${tail}`, { method, body: "{}" })).status, 401);
   }
   const login = await fetch(`${url}/api/session`, { method: "POST", body: JSON.stringify({ token: "owner" }) }); const cookie = login.headers.get("set-cookie").split(";")[0];
   assert.equal((await fetch(`${url}/api/chats/${chat.id}/agent`, { method: "PATCH", headers: { cookie, origin: "https://evil.test" }, body: '{"agent":"claude"}' })).status, 403);
+  assert.equal((await fetch(`${url}/api/chats/${chat.id}/commands/inspect?command=ps`)).status, 401);
+  assert.equal((await fetch(`${url}/api/chats/${chat.id}/commands/inspect`, { method: "POST", headers: { cookie, origin: "https://evil.test" }, body: '{"confirm":true,"terminate":"all"}' })).status, 403);
+  const unconfirmed = await fetch(`${url}/api/chats/${chat.id}/commands/inspect`, { method: "POST", headers: { cookie }, body: '{"terminate":"all"}' });
+  assert.equal(unconfirmed.status, 400); assert.match((await unconfirmed.json()).error, /Confirm/);
   const mode = await fetch(`${url}/api/chats/${chat.id}/mode`, { method: "PATCH", headers: { cookie }, body: '{"mode":"plan"}' });
   assert.equal(mode.status, 200); assert.equal((await mode.json()).chat.mode, "plan");
 });

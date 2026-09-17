@@ -4,6 +4,18 @@ const fields = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTok
 const counts = usage => ({ inputTokens: number(usage?.input_tokens), outputTokens: number(usage?.output_tokens), cacheReadTokens: number(usage?.cache_read_input_tokens), cacheWriteTokens: number(usage?.cache_creation_input_tokens) });
 const add = (a = {}, b = {}) => Object.fromEntries(fields.map(key => [key, sum([a?.[key], b?.[key]])]));
 
+export function cliVersionFromUserAgent(value) {
+  // initialize's userAgent includes the caller name, version and platform.
+  // Keep only the version, never the host/platform string or arbitrary text.
+  return typeof value === "string" ? /^[\w.-]+\/(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)(?:\s|$)/.exec(value)?.[1] || null : null;
+}
+export function safeSessionDetails(agent, value = {}) {
+  const plain = (value, max) => typeof value === "string" && value.trim() && !/[\u0000-\u001f\u007f]/.test(value) ? value.trim().slice(0, max) : null;
+  return { agent, cwd: plain(value.cwd, 4096), model: plain(value.model, 150),
+    cliVersion: typeof value.cliVersion === "string" && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(value.cliVersion) ? value.cliVersion.slice(0, 100) : null,
+    recordedAt: new Date().toISOString() };
+}
+
 // Codex input already includes cache hits. Never add cached input to it again.
 export function codexUsage(value) {
   const convert = raw => ({ inputTokens: number(raw?.inputTokens) === null ? null : Math.max(0, raw.inputTokens - (number(raw.cachedInputTokens) ?? 0)),
