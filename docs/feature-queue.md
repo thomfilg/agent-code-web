@@ -22,28 +22,49 @@ commit and push its verified changes, then move to the next. Keep the original
 scope and order; a checkpoint saves progress but does not close an unfinished
 feature or turn an external verification gate into a passing result.
 
+Delivery correction (2026-09-17, latest user priority): finish the **18 previously
+reported verified/answered items first**: 01–14 and 16–19. Pause item 20's doctor
+work and preserve its unfinished test changes. Then return to the remaining
+original queue; new requests still append at the end. The old count conflated
+implementation tests with usable delivery: item 09 is a technical answer, and
+the other **17 are reopened for delivery acceptance**, not newly discovered
+defects. Until that acceptance is recorded, the honest total is **1 answered and
+41 not fully delivered** (17 priority re-audits plus the previous 24 open items).
+
+For each reopened item, verify its full acceptance condition on current code,
+then verify the applicable deployed UI/backend/native integration. Preserve real
+messages, drafts, credentials and browser state; use disposable fixtures for
+destructive/error cases. A fixture pass is not a live-delivery pass. Record
+remaining user-only OAuth/account consent explicitly rather than counting it as
+done. Commit/push each completed item's changes before moving to the next.
+The application and database ports (8787/55438) were not listening at this audit;
+permission to start the updated application with saved data has been requested,
+not inferred. Tests run one suite at a time with inherited two-CPU affinity and
+nice 10. This correction supersedes historical completion/count statements in
+the ledger below; their test evidence remains useful but is not deployment proof.
+
 | # | Request / acceptance condition | State |
 | --- | --- | --- |
-| 01 | Render Markdown and HTML; isolate snippet CSS and malformed/unclosed tags from the chat UI | Verified: four browser checks; live isolated-preview CSP active |
-| 02 | Sidebar MCP manager; environment selection configures the chosen agent with those servers | Verified: real Codex/Claude MCP discovery plus environment and browser checks; backend activation pending |
-| 03 | Preconfigured development MCPs, including Linear and Atlassian | Verified: all seven provider endpoints and preset UI checks |
-| 04 | Custom MCPs, including browser OAuth installation of `https://paladira.com/api/mcp` | Implementation verified against live discovery and local consent flow; real user consent remains an external gate |
-| 05 | Store conversation/context usage outside disposable containers; continue viewing after stop | Verified: stop/restart, real PostgreSQL reload and stopped-chat browser checks |
-| 06 | Composer Up/Down recall at text boundaries, previous/next messages and draft restoration | Verified: boundary/draft/chat-isolation unit check and browser interaction |
-| 07 | Hover/touch message rail shows sent-message list; selection jumps to the original message | Verified: hover/mobile open, focused jump, visible target and Escape dismissal |
-| 08 | Desktop HTML and other document previews occupy a third column, like workspace changes | Verified: column geometry, independent scrolling, HTML/Markdown/SVG/text and mobile overlay |
+| 01 | Render Markdown and HTML; isolate snippet CSS and malformed/unclosed tags from the chat UI | Priority delivery audit: five current browser checks pass, including real HTTP/SSE/storage/reload without intercepted chat responses; saved-data application activation/acceptance still pending |
+| 02 | Sidebar MCP manager; environment selection configures the chosen agent with those servers | Reopened for delivery: prior real Codex/Claude MCP discovery and environment/browser checks; backend activation and deployed acceptance pending |
+| 03 | Preconfigured development MCPs, including Linear and Atlassian | Reopened for delivery: prior seven-provider endpoint and preset UI checks; current deployed acceptance pending |
+| 04 | Custom MCPs, including browser OAuth installation of `https://paladira.com/api/mcp` | Reopened for delivery: prior live discovery and local consent fixture; actual user authorization/authenticated acceptance pending |
+| 05 | Store conversation/context usage outside disposable containers; continue viewing after stop | Reopened for delivery: prior stop/restart, real PostgreSQL reload and stopped-chat browser checks; current saved-data acceptance pending |
+| 06 | Composer Up/Down recall at text boundaries, previous/next messages and draft restoration | Reopened for delivery: prior boundary/draft/chat-isolation unit and browser checks; current deployed acceptance pending |
+| 07 | Hover/touch message rail shows sent-message list; selection jumps to the original message | Reopened for delivery: prior hover/mobile open, focused jump, visible target and Escape checks; current deployed acceptance pending |
+| 08 | Desktop HTML and other document previews occupy a third column, like workspace changes | Reopened for delivery: prior geometry, scrolling, document-type and mobile checks; current deployed acceptance pending |
 | 09 | Answer whether pages use WebSockets, distinguishing chat updates from browser streaming | Answered: Chrome uses WebSocket; chat/sidebar use SSE; commands/settings use HTTP |
-| 10 | Independent per-organization MCP accounts, e.g. two Linear workspaces | Verified: same-name records, primary-company filtering and credential/revocation isolation |
-| 11 | Delete chats from Organize; confirm target and preserve other chats | Verified: confirmation/cancel, target-only deletion, errors, last-chat cleanup and other-tab update |
-| 12 | Compact single-line sidebar chats, without the Idle/age sub-row | Verified: single-line geometry below 40px, inline actions, accessible status icon |
-| 13 | Reasonable default styling for unstyled HTML | Verified: typography, table spacing/headers/alignment, document CSS overrides |
-| 14 | Improve composer / command UI | Verified: responsive controls, agent switching and command-picker keyboard/loading/error behavior |
+| 10 | Independent per-organization MCP accounts, e.g. two Linear workspaces | Reopened for delivery: prior same-name, company filtering and credential/revocation checks; deployed scope/account acceptance pending |
+| 11 | Delete chats from Organize; confirm target and preserve other chats | Reopened for delivery: prior confirmation/cancel, target-only deletion, errors and other-tab checks; deployed disposable-chat acceptance pending |
+| 12 | Compact single-line sidebar chats, without the Idle/age sub-row | Reopened for delivery: prior row geometry, inline actions and accessible status checks; current deployed acceptance pending |
+| 13 | Reasonable default styling for unstyled HTML | Reopened for delivery: prior typography, table alignment and author-CSS override checks; current deployed acceptance pending |
+| 14 | Improve composer / command UI | Reopened for delivery: prior responsive controls, agent switching and command-picker interaction checks; current deployed acceptance pending |
 | 15 | Make the specified chat itself a real long-chat rendering example, not a personal-folder copy or invented messages | Awaiting real source chat/transcript; 254 real and 241 synthetic records audited in target; cleanup needs backend activation |
-| 16 | Private, persisted Chrome connections per user; authenticate separately, anonymous browser by default, top-right opt-in for agent access | Verified with a real Chrome extension, private profiles, consent/revocation/restarts and cross-user tests |
-| 17 | Queued follow-up questions must be clickable and answerable | Fixed and verified: clickable options, text/skip, retained drafts and stale-reply protection |
-| 18 | `/plan` works from the web composer | Verified: task/read-only mode, busy queueing and command preservation on errors; backend activation pending |
-| 19 | Send now on individual queued messages, retaining the rest | Verified: selected item, interruption/FIFO, stop race, failed retry, attachments and draft retention |
-| 20 | `/goal` and every available native/installed slash command work, without unsupported-terminal placeholders | In progress: core native commands and web aliases verified; remaining gaps in `command-support.md`; backend activation pending |
+| 16 | Private, persisted Chrome connections per user; authenticate separately, anonymous browser by default, top-right opt-in for agent access | Reopened for delivery: prior real-extension, private-profile, consent/revocation/restart and cross-user checks; current deployed setup acceptance pending |
+| 17 | Queued follow-up questions must be clickable and answerable | Reopened for delivery: prior options/text/skip, retained-draft and stale-reply checks; current deployed acceptance pending |
+| 18 | `/plan` works from the web composer | Reopened for delivery: prior task/read-only, busy-queue and failure-preservation checks; backend activation and deployed acceptance pending |
+| 19 | Send now on individual queued messages, retaining the rest | Reopened for delivery: prior interruption/FIFO, Stop race, retry, attachment and draft checks; current deployed acceptance pending |
+| 20 | `/goal` and every available native/installed slash command work, without unsupported-terminal placeholders | Paused for the user's priority delivery re-audit of 01–14/16–19; preserve doctor MCP work, then resume remaining gaps in `command-support.md`; backend activation pending |
 | 21 | GitHub, environments and MCPs have explicit multi-company availability; no credential fallback/crossover, including secondary repos | Relay scope tests pass; audit inherited host-CLI credentials/config too; live migration/scope choice pending |
 | 22 | Resize sidebar, chat and third-column panels | Existing source; dedicated interaction verification pending |
 | 23 | Shared Chrome viewport presets: xxs, xs, sm, md, lg, xlg | Existing source; pending ordered verification |
@@ -69,6 +90,25 @@ feature or turn an external verification gate into a passing result.
 
 ## Verification ledger
 
+- Priority delivery re-audit, 01 (2026-09-17): added
+  `test/browser/delivery-preview.spec.mjs`. Unlike the previous rendering
+  fixtures, it sends through the actual composer, receives the server's SSE,
+  verifies stored user/assistant messages through HTTP, sends a second turn and
+  reloads that same conversation. The mock provider and in-memory database are
+  explicit test dependencies; no chat API/event response is intercepted.
+  Malformed HTML, Markdown tables, CSS isolation, opaque sandbox, stripped
+  scripts/frames and 1600/900/320px layouts pass. A separate loopback HTTP
+  receiver confirms zero escaped preview requests; iframe load completion is
+  awaited, rather than confusing browser-reported blocked attempts with network
+  delivery. Desktop/mobile screenshots were inspected. The new test and four
+  existing document checks pass **5/5**, syntax and diff checks pass, with one
+  worker/two CPUs/nice 10. Two initial test-authoring assertions were corrected:
+  the mock prefix required a separate heading paragraph, and request events
+  needed the actual receiver check. No product fix or deployment is claimed.
+  Only disposable fixture conversations were created/deleted; real chats,
+  accounts, saved profiles and application/database processes were not changed.
+  Item 01 remains open for the saved-data application startup/acceptance;
+  permission to start it has been requested. Item 20 stays paused.
 - 20: actual **2.1.222** reproduced a plugin still executing after `/doctor`
   saved its disablement. Diagnostic readback now compares an opaque fingerprint
   of the effective native plugin settings and reloads that same owner before
