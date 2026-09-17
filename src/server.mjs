@@ -423,6 +423,16 @@ export async function createAgentWebServer(options = {}) {
           await check(); const result = await manager.desktopHandoff(chatId, request.guardChat); await check();
           return json(response, 200, { ...result, accountScope: user?.id || "shared" }, { "cache-control": "private, no-store" });
         }
+        if (["workspace-trust/inspect", "workspace-trust/confirm"].includes(tail) && request.method === "POST") {
+          const input = await bodyJson(request, 2000);
+          const check = async () => {
+            request.guardChat();
+            if ((await browserUsers.session(request))?.id !== user?.id || !auth.authenticated(request)) throw Object.assign(Error("The account changed. Reopen workspace trust. If you submitted confirmation, trust may already have been saved."), { statusCode: 409 });
+          };
+          await check();
+          const result = await manager.nativeWorkspaceTrust(chatId, tail.split("/")[1], { reviewId: input.reviewId, confirm: input.confirm }, check, user?.id || "shared");
+          await check(); return json(response, 200, result, { "cache-control": "private, no-store" });
+        }
         if (tail === "logout" && request.method === "GET") {
           const result = await manager.nativeLogout(chatId, "status", {}, request.guardChat); request.guardChat(); return json(response, 200, result);
         }

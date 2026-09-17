@@ -336,6 +336,33 @@ export class RuntimeManager extends EventEmitter {
     return desktopInfo(chat, snapshot, { awake: checkedNow, busy: this.isBusy(chatId) || this.sideChats.busy(chatId) || Boolean(runtime?.adapter.nativeSettingsBusy?.()) });
   }
 
+  async nativeWorkspaceTrust(chatId, action, input = {}, guard = () => {}, actor = "shared") {
+    await guard(); const chat = this.store.get(chatId);
+    if (!chat) throw Object.assign(Error("Chat not found"), { statusCode: 404 });
+    if (chat.agent !== "claude" || chat.archived || !["inspect", "confirm"].includes(action)) throw Error("Workspace trust requires an unarchived Claude chat and a valid action.");
+    if (this.config.claude.authMode !== "gateway") throw Object.assign(Error("Workspace trust requires this chat's private Claude profile. Shared host profiles remain locked; no worker was started."), { statusCode: 409 });
+    if (["starting", "stopping"].includes(chat.status) || this.isBusy(chatId) || this.sideChats.busy(chatId)) throw Object.assign(Error("Wait for this chat and its agents to be idle before reviewing workspace trust."), { statusCode: 409 });
+    this.#switching.add(chatId);
+    const version = this.#lifecycleVersions.get(chatId) || 0;
+    const scope = value => JSON.stringify([value.ownerId, value.environmentId, value.workspace, value.repositories, companyForChat(value)]), initialScope = scope(chat);
+    const check = async () => {
+      await guard(); const current = this.store.get(chatId);
+      if (!current || current.archived || current.agent !== "claude" || this.config.claude.authMode !== "gateway" || scope(current) !== initialScope || version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(Error("Workspace trust review is no longer current because the chat changed or stopped. If you submitted confirmation, trust may already have been saved; inspect again."), { statusCode: 409 });
+    };
+    let reviewedRuntime;
+    try {
+      await check(); let runtime = this.#runtimes.get(chatId);
+      if (!runtime && action === "inspect") runtime = await this.#start(chatId);
+      await check();
+      if (!runtime) throw Object.assign(Error("The reviewed worker stopped. Inspect the workspace again."), { statusCode: 409 });
+      if (!runtime.adapter.workspaceTrust) throw Error("Update this Claude worker to support workspace trust review.");
+      reviewedRuntime = runtime; runtime.trustReviewing = true;
+      clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
+      const binding = JSON.stringify([actor, version, initialScope, runtime.executor?.workspace || chat.workspace, runtime.executor?.runtimeHome || this.store.runtimeHome(chatId)]);
+      const result = await runtime.adapter.workspaceTrust(action, input, binding, check); await check(); return result;
+    } finally { if (reviewedRuntime) reviewedRuntime.trustReviewing = false; this.#switching.delete(chatId); await this.refreshActivity(chatId); void this.#drainQueue(chatId); }
+  }
+
   async nativeLogout(chatId, action = "status", input = {}, guard = () => {}) {
     guard(); const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
@@ -1532,7 +1559,7 @@ export class RuntimeManager extends EventEmitter {
 
   async #scheduleIdleStop(chatId, runtime) {
     clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
-    if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.adapter.isBackgroundBusy?.()) return;
+    if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.trustReviewing || runtime.adapter.isBackgroundBusy?.()) return;
     const reason = this.#importPending(chatId) ? "import" : this.#forking.has(chatId) ? "fork" : runtime.adapter.hasScheduledWork?.() ? "schedule" : runtime.adapter.agents?.busy() ? "agents" : this.sideChats.busy(chatId) ? "side" : this.browsers?.hasViewers(chatId) ? "browser" : this.workspacePresence.has(chatId) ? "workspace" : this.presence.has(chatId) ? "tab" : null;
     const chat = this.store.get(chatId);
     if (reason) {
@@ -1546,7 +1573,7 @@ export class RuntimeManager extends EventEmitter {
     await this.#setStatus(chatId, "idle", "Waiting for another message", deadline);
     runtime.idleTimer = setTimeout(() => {
       if (this.#importPending(chatId) || this.#forking.has(chatId) || runtime.adapter.hasScheduledWork?.() || runtime.adapter.agents?.busy() || this.sideChats.busy(chatId) || this.browsers?.hasViewers(chatId) || this.workspacePresence.has(chatId) || this.presence.has(chatId)) { void this.#scheduleIdleStop(chatId, runtime); return; }
-      if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.adapter.isBackgroundBusy?.()) return;
+      if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.trustReviewing || runtime.adapter.isBackgroundBusy?.()) return;
       this.stop(chatId, "idle-timeout").catch((error) => this.#fatal(chatId, error));
     }, this.config.idleTimeoutMs);
     runtime.idleTimer.unref?.();

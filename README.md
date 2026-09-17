@@ -867,6 +867,15 @@ state.
   confirmation. [The command coverage checklist](docs/command-support.md) records
   the still-unimplemented commands; listing or hiding a command is not a fix.
   Cloud discovery uses the last worker-reported catalog without waking a worker.
+- Claude **Chat actions → Workspace trust** inspects the worker's exact path
+  before a separate, explicit confirmation. This saves native trust only in
+  the chat's private profile, without sending a prompt, moving its conversation
+  or restarting a running application. Inspection/cancellation does not grant
+  trust. Reviews expire and are invalidated by Stop, account or scope changes.
+  Shared host profiles, ambiguous linked paths and broader repository trust
+  roots remain locked. This does not disable native policy or ask/deny rules;
+  it enables Claude to apply trusted project rules such as those reviewed by
+  `/fewer-permission-prompts`.
 - Usage has a compact context/limits popover and a detailed session breakdown.
   Current context is distinct from cumulative tokens. Claude context includes
   the last main request's cache reads and writes; Codex cached input is already

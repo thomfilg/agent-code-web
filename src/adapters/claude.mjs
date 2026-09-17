@@ -12,6 +12,7 @@ import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR, ClaudeControlChannel, runCl
 import { ClaudeSession, claudeCallResult, CLAUDE_SCHEDULE_DIAGNOSTICS } from "../claude-session.mjs";
 import { claudePluginReloadRequest, reloadClaudePlugins, CLAUDE_PLUGIN_PRIVATE_ERROR } from "../claude-plugins.mjs";
 import { claudeDebugRequest, CLAUDE_DEBUG_PRIVATE_ERROR } from "../claude-debug.mjs";
+import { ClaudeWorkspaceTrust, claudeTrustProbe } from "../claude-workspace-trust.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch, now = Date.now }) {
@@ -59,6 +60,35 @@ export class ClaudeAdapter {
     }
   }
 
+  async workspaceTrust(action, input, binding, guard) {
+    if (this.config.claude.authMode !== "gateway") throw Error("Workspace trust requires this chat's private Claude profile. Shared host profiles remain locked.");
+    if (this.stopped || this.child || this.turnSession?.pending || this.isBackgroundBusy() || this.hasScheduledWork()) throw Object.assign(Error("Wait for native Claude work and schedules to finish before reviewing workspace trust."), { statusCode: 409 });
+    this.assertCapability();
+    if (!this.trustControls || this.trustControls.closed) this.trustControls = new ClaudeWorkspaceTrust({ workspace: this.workspace, now: this.now, open: async signal => {
+      const check = () => { signal.throwIfAborted(); this.assertCapability(); if (this.stopped) throw Error("Workspace trust inspection stopped"); };
+      const ensureDirectory = directory => this.executor ? this.executor.mkdir(directory) : mkdir(directory, { recursive: true, mode: 0o700 });
+      const neutral = path.join(this.runtimeHome, "claude-trust");
+      if (neutral === this.workspace || neutral.startsWith(`${this.workspace}/`)) throw Error("Workspace trust inspection requires a private directory outside the workspace.");
+      check(); await ensureDirectory(this.runtimeHome);
+      for (const filename of ["settings.json", ".claude.json"]) {
+        await inspectClaudeSettings({ runtimeHome: this.runtimeHome, executor: this.executor, isolation: this.config.processIsolation, signal, filename }); check();
+      }
+      await ensureDirectory(neutral);
+      await inspectClaudeSettings({ runtimeHome: neutral, executor: this.executor, isolation: this.config.processIsolation, signal }); check();
+      const env = await buildWorkerEnvironment({ chat: this.chat, store: this.store, runtimeHome: this.runtimeHome, provider: "anthropic", authMode: "gateway",
+        capability: this.capability, gatewayOrigin: this.gatewayOrigin, ensureDirectory, environmentVariables: this.executor?.environmentVariables, environmentPath: this.executor?.environmentPath });
+      await ensureDirectory(env.CLAUDE_CONFIG_DIR); check();
+      // Use the existing chat capability. Issuing another would revoke a
+      // retained application's owner. No user turn, hooks or MCP startup here.
+      const child = (this.executor?.spawn?.bind(this.executor) || spawnWorker)(this.config.claude.bin,
+        ["--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json", "--permission-mode", "default", "--permission-prompt-tool", "stdio",
+          "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--settings", '{"disableAllHooks":true}'],
+        { cwd: neutral, env, isolation: this.config.processIsolation, stdio: ["pipe", "pipe", "pipe"] });
+      return claudeTrustProbe(child, signal);
+    } });
+    return this.trustControls.run(action, input, binding, async () => { await guard(); this.assertCapability(); });
+  }
+
   async disableFast(version) {
     this.assertCapability();
     // A retained CLI can still service background notifications between web
@@ -87,7 +117,7 @@ export class ClaudeAdapter {
     if (configuration?.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
     const nativeMode = Object.keys(CLAUDE_PERMISSION_MODES).find(key => CLAUDE_PERMISSION_MODES[key] === mode);
     if (!nativeMode) throw new Error("Unsupported Claude permission mode");
-    if (this.child || this.settingsInspection || this.fastInspection || this.debugInspection) throw new Error("A Claude turn is already running for this chat");
+    if (this.child || this.settingsInspection || this.fastInspection || this.debugInspection || this.trustControls?.pending) throw new Error("A Claude turn is already running for this chat");
     if (this.stopped || (this.config.claude.authMode === "gateway" && !this.capability)) await this.start();
     this.assertCapability();
 
@@ -578,7 +608,7 @@ export class ClaudeAdapter {
   backgroundEvent(event) {
     this.permissionMode(event);
     if (!this.stopped && event.type === "workspace_trust_notice") {
-      this.hooks.onEvent?.({ type: "notice", text: "Claude is ignoring project permission grants because this workspace has not been trusted. Saving allow rules does not enable them. Review and explicitly trust the workspace in this chat's private Claude profile; existing approval requirements remain in force." });
+      this.hooks.onEvent?.({ type: "notice", text: "Claude is ignoring project permission grants because this workspace has not been trusted. Saving allow rules does not enable them. Open Chat actions → Workspace trust to review and explicitly trust this chat's private workspace; existing approval requirements remain in force." });
       return;
     }
     if (!this.stopped && event.type === "background_turn") { this.hooks.onEvent?.(event); return; }
@@ -628,6 +658,7 @@ export class ClaudeAdapter {
     this.settingsInspection?.abort();
     this.debugInspection?.abort();
     this.fastInspection?.abort();
+    const trustStopped = this.trustControls?.close();
     this.providerObservation?.(); this.providerObservation = null;
     this.stopped = true;
     // Revoke synchronously, before any slow process/SDK shutdown. A stale
@@ -641,5 +672,6 @@ export class ClaudeAdapter {
     if (child) await terminateWorker(child);
     await this.turnSession?.stop(); this.turnSession = null;
     await this.applicationSession?.stop(); this.applicationSession = null;
+    await trustStopped;
   }
 }

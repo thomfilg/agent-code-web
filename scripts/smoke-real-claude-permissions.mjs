@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import readline from "node:readline";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
@@ -11,14 +10,13 @@ import { ClaudeAdapter } from "../src/adapters/claude.mjs";
 import { ChatStore } from "../src/store.mjs";
 import { CapabilityBroker } from "../src/capabilities.mjs";
 import { ProviderGateway } from "../src/provider-gateway.mjs";
-import { buildWorkerEnvironment, spawnWorker, terminateWorker } from "../src/worker-process.mjs";
-import { ClaudeControlChannel } from "../src/claude-mcp.mjs";
+import { spawnWorker } from "../src/worker-process.mjs";
 
 // Actual native /fewer-permission-prompts and permission enforcement. Seeded
 // history and model replies are authored fixture data, never real user history.
 // No personal profiles, real credentials, public network or live data.
 const exec = promisify(execFile);
-for (const option of process.argv.slice(2)) assert(["--network-isolated", "--trace", "--deny", "--application", "--untrusted"].includes(option));
+for (const option of process.argv.slice(2)) assert(["--network-isolated", "--trace", "--deny", "--application", "--untrusted", "--trust-running"].includes(option));
 if (!process.argv.includes("--network-isolated")) {
   const result = await exec("/usr/bin/unshare", ["--user", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", "--", process.execPath, process.argv[1], ...process.argv.slice(2), "--network-isolated"], { timeout: 120000, killSignal: "SIGKILL", maxBuffer: 40000 }).catch(error => {
     process.stdout.write(error.stdout || ""); process.stderr.write(error.stderr || error.message); process.exit(1);
@@ -31,6 +29,8 @@ if (!process.argv.includes("--network-isolated")) {
   const root = await mkdtemp("/tmp/relay-claude-permissions-"), requests = [], decisions = [], owners = [];
   const trace = process.argv.includes("--trace"), deny = process.argv.includes("--deny"), application = process.argv.includes("--application");
   const untrusted = process.argv.includes("--untrusted"), mustAsk = deny || untrusted;
+  const trustRunning = process.argv.includes("--trust-running"), startsUntrusted = untrusted || trustRunning;
+  assert(!trustRunning || application && !untrusted);
   const readCommand = "relay-fixture-read list", rule = `Bash(${readCommand})`;
   const extraCommand = `${readCommand} --extra`, askCommand = "relay-fixture-read inspect", deniedCommand = "relay-fixture-remove fixture.txt";
   const initial = { env: { RELAY_PERMISSION_KEEP: "ação" }, permissions: { allow: ["Bash(relay-fixture-read version)"], deny: ["Bash(relay-fixture-remove *)"], ask: ["Bash(relay-fixture-read inspect)"] } };
@@ -58,8 +58,8 @@ if (!process.argv.includes("--network-isolated")) {
       else {
         if (step === -2) content = tool("Bash", { command: "relay-fixture-read version", description: "Verify the pre-existing exact project rule" });
         else if (step === -1) {
-          if (untrusted) assert.equal(result?.is_error, true); else check(/fixture 1/);
-          content = done(untrusted ? "The untrusted project's allow rule is not enabled." : "The pre-existing project rule is enforced without approval.");
+          if (startsUntrusted) assert.equal(result?.is_error, true); else check(/fixture 1/);
+          content = done(startsUntrusted ? "The untrusted project's allow rule is not enabled." : "The pre-existing project rule is enforced without approval.");
         }
         else if (step === 0) content = tool("Bash", { command: readCommand, description: "Probe the exact read command before adding a rule" });
         else if (step === 1) { assert.equal(result?.is_error, true); content = done("The initial read command was denied; there is no allowlist entry yet."); }
@@ -125,7 +125,7 @@ if (!process.argv.includes("--network-isolated")) {
       spawn(command, args, options) {
         assert(!JSON.stringify([args, options.env]).includes(config.claude.providerKey));
         const child = spawnWorker(command, args, options);
-        if (command === config.claude.bin && args.includes("--print")) {
+        if (command === config.claude.bin && args.includes("--print") && options.cwd === current.workspace) {
           owners.push(child);
           if (trace) {
             console.log("NATIVE_OWNER", JSON.stringify({ stage, count: owners.length, args }));
@@ -149,29 +149,22 @@ if (!process.argv.includes("--network-isolated")) {
     await mkdir(`${chat.workspace}/.claude`, { recursive: true, mode: 0o700 }); await mkdir(profile, { recursive: true, mode: 0o700 });
     settingsFile = `${chat.workspace}/.claude/settings.json`;
     await writeFile(settingsFile, JSON.stringify(initial)); await writeFile(`${profile}/settings.json`, JSON.stringify(userSettings)); await writeFile(`${chat.workspace}/.claude/settings.local.json`, JSON.stringify(localSettings));
-    // Exercise the native consent protocol with an authored user decision,
-    // never seed its private trust latch or disable the trust gate. A separate
-    // idle consent session starts outside the target; set_cwd is a no-op when
-    // already inside it. It receives no prompt or inference and is then closed.
-    // Relay itself does not attest consent on the user's behalf.
-    const consentDirectory = `${root}/consent`; await mkdir(consentDirectory, { mode: 0o700 });
-    const consentCapability = broker.issue({ chatId: chat.id, provider: "anthropic" });
-    const consentEnv = await buildWorkerEnvironment({ chat, store, provider: "anthropic", authMode: "gateway", capability: consentCapability, gatewayOrigin });
-    const consentChild = spawnWorker(config.claude.bin, ["--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json", "--permission-mode", "default"],
-      { cwd: consentDirectory, env: consentEnv, stdio: ["pipe", "pipe", "pipe"] });
-    const consentControl = new ClaudeControlChannel(consentChild, 15000), consentLines = readline.createInterface({ input: consentChild.stdout });
-    consentLines.on("line", line => { try { consentControl.accept(JSON.parse(line)); } catch {} }); consentChild.stderr.resume();
-    try {
-      await consentControl.request("initialize");
-      const offered = await consentControl.request("set_cwd", { path: chat.workspace });
-      assert.deepEqual(offered, { status: "needs_trust", directory: chat.workspace });
-      if (!untrusted) {
-        const displayedConsent = { directory: offered.directory, decision: "accept" };
-        const accepted = await consentControl.request("set_cwd", { path: chat.workspace, trust_accepted: displayedConsent.decision === "accept", trusted_directory: displayedConsent.directory });
-        assert.deepEqual(accepted, { status: "ok", cwd: chat.workspace, changed: true, transcript_relocated: true });
+    // The product flow inspects without granting, then attests only this
+    // authored user's explicit confirmation. No trust-latch edits or model.
+    const trustWorkspace = async (accept) => {
+      const before = [requests.length, titles, store.get(chat.id).messages.length, store.get(chat.id).agentSessionId];
+      const offered = await manager.nativeWorkspaceTrust(chat.id, "inspect");
+      assert.equal(offered.state, "needs_trust"); assert.equal(offered.directory, chat.workspace); assert(offered.reviewId);
+      await assert.rejects(manager.nativeWorkspaceTrust(chat.id, "confirm", { reviewId: offered.reviewId }), /stale/);
+      await assert.rejects(manager.nativeWorkspaceTrust(chat.id, "confirm", { reviewId: "unreviewed", confirm: true }), /stale/);
+      if (accept) {
+        const accepted = await manager.nativeWorkspaceTrust(chat.id, "confirm", { reviewId: offered.reviewId, confirm: true });
+        assert.equal(accepted.state, "trusted"); assert.equal(accepted.directory, chat.workspace);
+        assert.equal((await manager.nativeWorkspaceTrust(chat.id, "inspect")).state, "trusted");
       }
-      assert.equal(requests.length, 0, "Workspace consent must not request inference");
-    } finally { consentControl.close(); consentLines.close(); await terminateWorker(consentChild); broker.revoke(consentCapability); }
+      assert.deepEqual([requests.length, titles, store.get(chat.id).messages.length, store.get(chat.id).agentSessionId], before, "Trust must not request inference or change the conversation");
+    };
+    await trustWorkspace(!startsUntrusted);
     const histories = [];
     for (let index = 0; index < 2; index++) {
       const directory = `${profile}/projects/authored-project-${index}`; await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -193,7 +186,7 @@ if (!process.argv.includes("--network-isolated")) {
           assert(expectedApproval && ["Bash", "Write"].includes(expectedApproval.name));
           if (expectedApproval.name === "Write") { assert.deepEqual(input, expectedApproval.input); assert.equal(input.file_path, settingsFile); }
           else assert.equal(input.command, expectedApproval.input.command);
-          if (input.command === "relay-fixture-read version") assert(untrusted, "The pre-existing trusted project allowlist must already apply");
+          if (input.command === "relay-fixture-read version") assert(startsUntrusted, "The pre-existing trusted project allowlist must already apply");
           assert.notEqual(input.command, deniedCommand, "The existing deny rule must block without offering approval");
           if (input.command === readCommand) assert(stage === "before" || mustAsk, "The native allowlist must authorize the exact command without another approval");
           const decline = [readCommand, "relay-fixture-read version", extraCommand, askCommand].includes(input.command) || deny && expectedApproval.name === "Write";
@@ -218,6 +211,7 @@ if (!process.argv.includes("--network-isolated")) {
     stage = "review"; await submit("/fewer-permission-prompts Review only this private profile's history. Preserve existing settings and narrow read-only rules.\nKeep ação; no shared profiles."); assert.equal(step, 6);
     assert.deepEqual(JSON.parse(await readFile(settingsFile, "utf8")), deny ? initial : updated); await checkApp();
     const session = store.get(chat.id).agentSessionId;
+    if (trustRunning) { stage = "trust-running"; await trustWorkspace(true); await checkApp(); }
     stage = "after"; await submit("Verify the exact read command after the permission review."); assert.equal(step, 8); await checkApp();
     if (application) assert.equal(owners.length, 1, "Permission changes must not replace a retained application's native owner");
     await manager.stop(chat.id); if (application) await assert.rejects(fetch(appUrl, { signal: AbortSignal.timeout(1000) }));
@@ -235,7 +229,7 @@ if (!process.argv.includes("--network-isolated")) {
     const trust = JSON.parse(await readFile(`${profile}/.claude.json`, "utf8"));
     assert.equal(trust.projects?.[chat.workspace]?.hasTrustDialogAccepted === true, !untrusted);
     const notices = store.get(chat.id).messages.filter(message => message.kind === "notice" && /workspace has not been trusted/.test(message.text));
-    if (untrusted) assert(notices.length > 0, "The actual native trust warning must be visible in the chat, including startup");
+    if (startsUntrusted) assert(notices.length > 0, "The actual native trust warning must be visible in the chat, including startup");
     else assert.equal(notices.length, 0);
     assert(!notices.some(message => /hasTrustDialogAccepted|\.claude\.json|\/tmp\//.test(message.text)), "The notice must not publish raw private config paths or trust-latch edits");
     console.log(`PASS: native fewer-permission-prompts ${untrusted ? "untrusted workspace never gains implicit permission from saved rules" : deny ? "write refusal, unchanged rules and continued native approval requirements" : "private cross-project fixture-history scan, exact project-only allowlist merge, actual approval reduction and Stop/resume persistence"}${application ? "; existing HTTP app/PID/data retained until explicit Stop" : ""}; native workspace consent, deny/ask, user/local settings, original history and unrelated chat preserved; ${requests.length} authored replies, ${titles} titles, ${decisions.length} exact fixture tool decisions.`);

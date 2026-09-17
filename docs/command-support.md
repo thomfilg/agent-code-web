@@ -51,7 +51,7 @@ and remain at the beginning of native stream-json input.
 | `/deep-research` (Claude) | Native private-SDK workflow orchestration, owner lifetime through the final report, FIFO, Stop/resume and targeted Send now. Actual native phase/dedup/voting execution with authored structured replies is verified; this is not a claim about public-source retrieval or research quality. Running apps remain intact until explicit Stop; account/shared-host/live gates remain. |
 | `/batch` (Claude) | Native plan approval/refusal, foreground research, five background worktrees and their separate reports. Actual local edits, tests, CLI effects, FIFO, Send now and Stop/resume are verified with authored inference. Running HTTP apps/PIDs/data survive until explicit Stop. Native launch errors remain visible for agent-driven recovery; Relay does not replay tools. Remote commits/PR publication and account/company/live gates remain unverified. |
 | `/config key=value`, `/settings key=value` (Claude) | Native private-profile settings, with verified model/mode readback into Relay and subsequent-turn/Stop persistence. Partial native results remain visible; newer web selections win over late readback. Shared host mutations stay locked on item 21. Attachments are rejected before accepting/queueing the command. |
-| `/fewer-permission-prompts` (Claude) | Private native history review and exact project-rule merge verified, including native enforcement, denial, retained apps and Stop/resume. Shared-host history/settings are blocked. Untrusted-project warnings are visible; explicit web workspace-trust setup remains unfinished, so new private workspaces are not claimed fully supported yet. |
+| `/fewer-permission-prompts` (Claude) | Private native history review, exact project-rule merge and explicit web workspace-trust setup verified, including actual enforcement, denial, retained apps and Stop/resume. Chat actions → Workspace trust requires an exact-path review and separate confirmation. Shared-host profiles and broader/linked trust roots remain locked. |
 | `/autocompact [auto/tokens]` (Claude) | Native current-window inspection, private-profile threshold persistence and reset. Actual automatic summary/compact-boundary and same-session Stop/resume verified; disabled state and native environment precedence retained. Shared host mutation and linked files fail closed; attached input is rejected before sending/queueing. Live activation pending. |
 | `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. Installed-CLI acceptance verifies effort changes inside a retained application session and explicit worker-environment precedence. |
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
@@ -127,7 +127,51 @@ Do not treat removing entries from autocomplete as implementing them.
   account/company isolation and live activation remain external gates; they
   are not enabled by these private fixture results.
 
-### Claude private permission review and workspace-trust checkpoint
+### Claude explicit private workspace-trust consent
+
+**Chat actions → Workspace trust** now provides inspection and a separate,
+unchecked confirmation. Opening the dialog does not wake the worker; explicit
+inspection may connect it without sending a user turn. The server pins each
+five-minute review to the authenticated actor, chat owner/company/environment,
+workspace and worker lifecycle. Confirmation rechecks native canonical scope,
+private profile, authentication and expiry before attesting consent. Stop,
+scope changes, missing reviews and failed/uncertain outcomes require another
+inspection, never an automatic retry. Shared-host profiles, unsafe/linked paths
+and native trust roots broader than the exact workspace fail closed.
+
+The separate control-only native CLI uses the existing private capability,
+starts outside the chat workspace and disables hooks, tools and MCP startup.
+It sends only SDK controls, never a prompt or raw trust-latch edit. This avoids
+the existing-cwd no-op without moving the chat's native owner. Raw profile
+contents/errors are not exposed; an uncertain post-attestation result warns
+that trust may already have been saved instead of falsely claiming rollback.
+Active turns/background agent work and native schedules block this operation.
+
+The actual installed **2.1.222** fixture now exercises the product's
+`nativeWorkspaceTrust` path rather than performing consent directly in the
+test. Inspection, missing/foreign confirmation IDs and cancellation grant
+nothing. Explicit acceptance persists, with no model request, new conversation
+message, session ID replacement, permission-mode change or application restart.
+`--application --trust-running` starts untrusted, reviews rules, then grants
+explicit trust while the original application is alive: the following real
+native command is allowed without another approval on the same owner, HTTP
+app, PID and data. Extra arguments and original ask/deny rules still hold.
+`--untrusted --application`, `--deny` and ordinary trusted cases also pass;
+all use disposable profiles, authored model replies and loopback-only namespaces.
+
+Eight unit/transport/adapter/HTTP tests and five browser tests cover exact scope,
+stale/expired/replayed confirmation, late cancellation/revocation, shared host
+refusal, untrusted native output, privacy, desktop/mobile, unchanged drafts and
+attachments, idle-timeout protection, queued input and the distinction between
+closing a dialog and undoing a submitted confirmation. Syntax/unit **572/572**
+pass. The broad browser run had **212 passing / 4 failed**, all four traces
+showing `ERR_NETWORK_CHANGED` while loading local UI resources. A loopback-only
+namespace rerun of all four affected suites plus the five new trust cases is
+**36/36 passing**; this is not a claim of a fresh all-green full-suite run.
+This completes private-workspace consent for this command; item 20's remaining
+command effects, shared-host/company isolation and live activation remain open.
+
+### Earlier private permission-review checkpoint (consent completed above)
 
 `/fewer-permission-prompts` is a native mutating prompt, including its bare/help
 forms. It scans native history and writes project permission rules; it is not
@@ -176,14 +220,12 @@ Native retained-project `/update-config` and retained `/debug` regressions
 pass (**7** and **5** authored main replies). Other browser suites were not
 rerun for this checkpoint; their older results are not a new full-suite claim.
 
-**Still open in item 20:** web workspace-trust consent/setup. A newly created
-private workspace must not be called fully working for this command merely
-because the pre-trusted fixture passes. The SDK's `set_cwd` on the existing
-directory returns a no-op, not a trust request; do not move an active chat to
-another directory to force consent. Implement/review the actual explicit
-private-workspace consent path before advancing to the next unfinished command.
-Shared-host/company isolation and live activation also remain gated. Queue
-count/order is unchanged; this checkpoint does not close item 20.
+At that earlier checkpoint, web workspace-trust consent/setup remained open:
+a pre-trusted fixture alone did not establish new-workspace support. The
+explicit private consent path above now covers it. The SDK's `set_cwd` on the
+existing directory is still a no-op, not a trust request; an active chat is
+never moved elsewhere to force consent. Shared-host/company isolation and live
+activation remain gated. Neither checkpoint closes all of item 20.
 
 ### Claude native batch lifetime and report checkpoint
 

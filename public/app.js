@@ -37,6 +37,7 @@ import { TabTitleControls } from "./tab-title-controls.js";
 import { SyntaxThemeControls } from "./syntax-theme-controls.js";
 import { PetControls } from "./pet-controls.js";
 import { DesktopHandoff } from "./desktop-handoff.js";
+import { ClaudeWorkspaceTrustControls } from "./claude-workspace-trust.js";
 
 const state = {
   config: null,
@@ -208,6 +209,7 @@ function renderActive() {
   tabTitle.render();
   pets.render();
   desktopHandoff.render();
+  workspaceTrust.render();
   vimComposer.select();
   sideChat.setChat(chat);
   agentThreads.setChat(chat);
@@ -799,6 +801,7 @@ const browserConnectionSettings = new BrowserConnectionSettings({ api, state, to
     syntaxTheme.resetIdentity();
     pets.resetIdentity();
     desktopHandoff.resetIdentity();
+    workspaceTrust.resetIdentity();
     keymap.resetIdentity(); await keymap.load().catch(error => toast(error.message));
     await sidebar.refresh();
     if (state.active && !state.chats.some(chat => chat.id === state.active.id)) { state.eventSource?.close(); state.active = null; state.stream = null; }
@@ -837,6 +840,8 @@ $("#syntax-theme-button").addEventListener("click", () => void syntaxTheme.open(
 const pets = new PetControls({ api, controls: chatControls, getChat: () => state.active, root: $("#chat-pet"), notify: message => toast(message, { outsideDialog: true }) });
 $("#pets-button").addEventListener("click", () => void pets.open().catch(error => toast(error.message)));
 const desktopHandoff = new DesktopHandoff({ state, api, controls: chatControls });
+const workspaceTrust = new ClaudeWorkspaceTrustControls({ state, api, controls: chatControls });
+$("#workspace-trust-button").addEventListener("click", () => void workspaceTrust.open().catch(error => toast(error.message)));
 $("#desktop-app-button").addEventListener("click", () => void desktopHandoff.open().catch(error => toast(error.message)));
 const vimComposer = new VimComposer({ input: elements.input, getChatId: () => state.active?.id, notify: toast, keydown: composerKeydown,
   changed: () => { resizeInput(); renderKeyboardHints(); },

@@ -65,9 +65,30 @@ feature or turn an external verification gate into a passing result.
 | 39 | Add a saved-prompts composer dropdown: truncated prompt rows with per-row (…) edit/delete menus, + Prompt and edit popups, drag-to-reorder, and availability for selected projects or all projects. Clicking a prompt inserts it into the composer without sending | New feature appended after item 38; panel sketch and interactions captured; implementation not started |
 | 40 | Search across messages the user wrote and the AI's final answers, with conversation/result navigation. Do not store or index reasoning/chain-of-thought for this feature; exclude tool activity and intermediate responses from results | New feature appended after saved prompts; search-screen reference received; not started |
 | 41 | Deleting a worker/container must preserve the chat and its messages outside disposable storage; only explicit chat deletion removes the conversation. Reproduce actual container deletion independently of stop/restart, using disposable fixtures | New data-loss report appended; item 05 stop/restart verification does not establish container-deletion safety; not started |
+| 42 | Explore and implement a third-column panel showing the main agent's active secondary agents, with native status and supported conversation details. Selecting a secondary agent opens a popup/composer for prompts addressed to that agent, including while it is working; retain accessible keyboard navigation and keep the main agent/conversation independent. Investigate actual Claude Code/Claude web and Codex capabilities, reusing item 20's Codex descendant-navigation work where applicable. Do not invent child sessions or claim unsupported native messaging/steering | New feature and screenshot appended after item 41; both-provider investigation and the requested panel/popup UX are queued, not started |
 
 ## Verification ledger
 
+- 20: explicit private Claude workspace trust now has an exact-path inspection,
+  unchecked confirmation and five-minute actor/chat/scope/worker-bound review.
+  Shared host profiles, unsafe/linked paths and broader native trust roots stay
+  locked. Stop, expiry, scope/account revocation and uncertain replies cannot
+  automatically retry a grant. The separate control-only native CLI reuses the
+  current capability without moving the conversation or restarting its app.
+  Actual **2.1.222** verifies the product consent flow, no inference/history
+  changes, saved trust, and approval reduction after granting trust to an
+  already-running untrusted application's owner; HTTP app/PID/data survive.
+  Untrusted, refused-write and ordinary trusted cases also pass, preserving
+  exact argument boundaries and native ask/deny rules (**16/18** authored
+  replies). Eight unit/HTTP/adapter/transport additions (including idle-timeout
+  protection and queue retention) and five desktop/mobile browser checks pass:
+  syntax/unit **572/572**. The broad browser run was **212 passing / 4 failed**
+  with `ERR_NETWORK_CHANGED` in each failure trace. Re-running all four affected
+  suites plus the five new trust checks in a loopback-only namespace passes
+  **36/36**; no new all-green full-suite result is claimed.
+  This closes the private consent subtask below, not item 20's remaining command
+  effects or company/account/live gates. The requested both-provider subagent
+  panel is appended as item **42**, making **24 open items**; no queue reorder.
 - 20: classified `/fewer-permission-prompts` as a private mutating prompt,
   blocking shared-host history/settings access before startup, accepted input
   or queue writes. Literal arguments/files, FIFO and native settings readback
@@ -83,8 +104,8 @@ feature or turn an external verification gate into a passing result.
   acceptance, never a seeded latch or bypass. Five unit/session/controller and
   two responsive browser additions: syntax/unit **564/564**, command browser
   **46/46**; native app/config and app/debug regressions **7/5** replies.
-  Explicit web workspace-trust consent remains unfinished and is next before
-  another command; a pre-trusted fixture is not full new-workspace support.
+  At this earlier checkpoint, explicit web workspace-trust consent was still
+  unfinished; the next ledger entry above completes that private setup.
   Item 20/count/order and account/company/live gates remain open. Save this
   verified checkpoint to PR #2; no deployment or live-account/data changes.
 - 20: reproduced `/batch` cancelling its five native worktree agents when the
