@@ -65,10 +65,29 @@ feature or turn an external verification gate into a passing result.
 | 39 | Add a saved-prompts composer dropdown: truncated prompt rows with per-row (…) edit/delete menus, + Prompt and edit popups, drag-to-reorder, and availability for selected projects or all projects. Clicking a prompt inserts it into the composer without sending | New feature appended after item 38; panel sketch and interactions captured; implementation not started |
 | 40 | Search across messages the user wrote and the AI's final answers, with conversation/result navigation. Do not store or index reasoning/chain-of-thought for this feature; exclude tool activity and intermediate responses from results | New feature appended after saved prompts; search-screen reference received; not started |
 | 41 | Deleting a worker/container must preserve the chat and its messages outside disposable storage; only explicit chat deletion removes the conversation. Reproduce actual container deletion independently of stop/restart, using disposable fixtures | New data-loss report appended; item 05 stop/restart verification does not establish container-deletion safety; not started |
-| 42 | Explore and implement a third-column panel showing the main agent's active secondary agents, with native status and supported conversation details. Selecting a secondary agent opens a popup/composer for prompts addressed to that agent, including while it is working; retain accessible keyboard navigation and keep the main agent/conversation independent. Investigate actual Claude Code/Claude web and Codex capabilities, reusing item 20's Codex descendant-navigation work where applicable. Do not invent child sessions or claim unsupported native messaging/steering | New feature and screenshot appended after item 41; both-provider investigation and the requested panel/popup UX are queued, not started |
+| 42 | Explore and implement a third-column panel showing the main agent's active secondary agents, with native status and supported conversation details. Selecting a secondary agent opens a popup/composer for prompts addressed to that agent, including while it is working; retain accessible keyboard navigation and keep the main agent/conversation independent. Investigate actual Claude Code/Claude web and Codex capabilities, reusing item 20's Codex descendant-navigation work where applicable. Do not invent child sessions or claim unsupported native messaging/steering | Codex feasibility confirmed read-only: descendant listing, status and direct input/steering are available, with experimental API caveats. Claude capability investigation and the requested both-provider panel/popup remain queued, not implemented |
 
 ## Verification ledger
 
+- 20: actual **2.1.222** reproduced a plugin still executing after `/doctor`
+  saved its disablement. Diagnostic readback now compares an opaque fingerprint
+  of the effective native plugin settings and reloads that same owner before
+  completion/FIFO. Unchanged, declined and policy-overridden settings do not
+  reload. Errors, Stop, Send now and revoked capabilities retain receipt/stale
+  publication guards; partial reloads cannot authorize Send now. Six added
+  unit/transport checks pass; syntax/unit **587/587**, targeted **131/131** and
+  Claude command browser **48/48**. Real local-marketplace/user/project skill
+  fixtures verify disabled model invocation, retained skills and source files,
+  immediate native/web catalogs, consent/refusal and Stop/resume. The retained
+  app keeps its PID/data; other-chat catalogs remain unchanged. Native success,
+  cleanup refusal and pending-question Stop cases pass with **33/27/13** authored
+  replies. The **23**-reply one-shot skip scenario also passes; its eleven cold
+  query startups exceeded the original aggregate fixture timeout, so only this
+  extended harness budget increased, not per-query or production timeouts.
+  The explicit plugin reload/app regression passes **15** main replies and
+  **2** titles. Broader doctor checks, including MCP cleanup, still need
+  acceptance; this is a checkpoint, not completion of item 20. **24 open items**,
+  same order; no live service, user profile or installation changed.
 - 20: private `/doctor` and `/checkup` now have shared-host admission guards,
   literal FIFO/attachments and diagnostic-safe file checks. Actual **2.1.222**
   diagnoses malformed user/project JSON without repairing it, deduplicates local

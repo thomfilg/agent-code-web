@@ -97,6 +97,27 @@ export class ClaudeAdapter {
     if (version !== this.sendVersion) throw Error("Claude turn interrupted");
   }
 
+  async reloadPlugins(session, version) {
+    const check = () => { if (version !== this.sendVersion) throw Error("Claude turn interrupted"); this.assertCapability(); };
+    check();
+    const settled = Promise.withResolvers(); this.pluginReload = settled.promise;
+    let verified = false;
+    try {
+      const outcome = await reloadClaudePlugins(session.control);
+      verified = outcome.errorCount === 0;
+      check();
+      await this.hooks.onEvent?.({ type: "command_catalog", commands: outcome.commands });
+      check();
+      await this.hooks.onEvent?.({ type: "session_capabilities", connectors: outcome.connectors });
+      check();
+      if (outcome.errorCount) throw Error(`${outcome.text} ${outcome.errorCount} component load error(s); review the private plugin configuration and retry /reload-plugins.`);
+      return outcome;
+    } finally {
+      if (this.pluginReload === settled.promise) this.pluginReload = null;
+      settled.resolve(verified);
+    }
+  }
+
   async send(text, { model, effort, resetEffort, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, onPermissionMode, mode = "accept_edits", systemPrompt } = {}) {
     const version = this.sendVersion;
     const configuration = claudeConfigRequest(text);
@@ -118,7 +139,7 @@ export class ClaudeAdapter {
     if (configuration?.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
     const nativeMode = Object.keys(CLAUDE_PERMISSION_MODES).find(key => CLAUDE_PERMISSION_MODES[key] === mode);
     if (!nativeMode) throw new Error("Unsupported Claude permission mode");
-    if (this.child || this.settingsInspection || this.fastInspection || this.debugInspection || this.trustControls?.pending) throw new Error("A Claude turn is already running for this chat");
+    if (this.child || this.pluginReload || this.settingsInspection || this.fastInspection || this.debugInspection || this.trustControls?.pending) throw new Error("A Claude turn is already running for this chat");
     if (this.stopped || (this.config.claude.authMode === "gateway" && !this.capability)) await this.start();
     this.assertCapability();
 
@@ -358,28 +379,14 @@ export class ClaudeAdapter {
       // private initialized owner for the next input, but publish no resume ID
       // until actual input has started. Stop before that input stays a new chat.
       this.applicationSession = managed;
-      const settled = Promise.withResolvers(); this.pluginReload = settled.promise;
-      let verified = false;
       try {
-        const outcome = await reloadClaudePlugins(managed.control);
-        verified = true;
-        if (version !== this.sendVersion) throw Error("Claude turn interrupted");
-        this.assertCapability();
-        await this.hooks.onEvent?.({ type: "command_catalog", commands: outcome.commands });
-        if (version !== this.sendVersion) throw Error("Claude turn interrupted");
-        this.assertCapability();
-        await this.hooks.onEvent?.({ type: "session_capabilities", connectors: outcome.connectors });
-        if (version !== this.sendVersion) throw Error("Claude turn interrupted");
-        this.assertCapability();
-        if (outcome.errorCount) throw Error(`${outcome.text} ${outcome.errorCount} component load error(s); review the private plugin configuration and retry /reload-plugins.`);
+        const outcome = await this.reloadPlugins(managed, version);
         return { text: outcome.text, status: "completed" };
       } finally {
         finishObservation();
         if (managed.active === child) managed.finish(child, 0, null);
         if (this.child === child) this.child = null;
         if (this.turnSession === managed) this.turnSession = null;
-        if (this.pluginReload === settled.promise) this.pluginReload = null;
-        settled.resolve(verified);
       }
     }
     if (provisionalSession) this.sessionId = sessionId;
@@ -517,11 +524,16 @@ export class ClaudeAdapter {
             await inspect(); if (diagnostic) await inspect(".claude.json");
             afterNativeSettings = await inspectNative(managed);
             if (afterNativeSettings.hasErrors) {
-              if (!beforeNativeSettings.hasErrors || beforeNativeSettings.model !== afterNativeSettings.model || beforeNativeSettings.permissionMode !== afterNativeSettings.permissionMode) {
+              if (!beforeNativeSettings.hasErrors || beforeNativeSettings.model !== afterNativeSettings.model || beforeNativeSettings.permissionMode !== afterNativeSettings.permissionMode
+                || beforeNativeSettings.pluginsFingerprint !== afterNativeSettings.pluginsFingerprint) {
                 throw Error("Cannot safely verify settings after the native diagnostic. The command queue is paused; check the private configuration before retrying.");
               }
               this.hooks.onEvent?.({ type: "notice", text: "Claude's existing configuration errors are still present. No model or permission-mode changes were synchronized. Review the diagnostic before requesting a repair." });
             }
+            // A saved enabledPlugins change does not invalidate the native
+            // owner's plugin/skill cache. Reconcile before FIFO can release,
+            // without restarting its app or replaying the diagnostic prompt.
+            if (diagnostic && beforeNativeSettings.pluginsFingerprint !== afterNativeSettings.pluginsFingerprint) await this.reloadPlugins(managed, version);
           }
           catch (error) { settingsError = error; }
         }

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { spawnWorker, terminateWorker } from "./worker-process.mjs";
 
 export const CLAUDE_PERMISSION_MODES = Object.freeze({ auto: "auto", acceptEdits: "accept_edits", plan: "plan", default: "default", dontAsk: "dont_ask" });
@@ -52,8 +53,9 @@ export function claudeSettingsChanges(before, after, request) {
 }
 
 // SDK get_settings performs the native user/project/local/flag/policy merge.
-// Keep only the two picker fields; raw source settings can contain credentials,
-// hooks and environment variables and must never reach events or persistence.
+// Keep only the picker fields and an opaque diagnostic plugin fingerprint;
+// raw source settings can contain credentials, hooks and environment variables
+// and must never reach events or persistence.
 export function claudeSettingsSnapshot(snapshot, { diagnostic = false } = {}) {
   const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
   if (!object(snapshot) || !object(snapshot.effective) || !Array.isArray(snapshot.sources)
@@ -66,7 +68,20 @@ export function claudeSettingsSnapshot(snapshot, { diagnostic = false } = {}) {
   const model = effective.model ?? "default", permissionMode = effective.permissions?.defaultMode ?? "default";
   if (typeof model !== "string" || model.length > 150 || !/^[\w.\[\]-]+$/.test(model)
     || typeof permissionMode !== "string" || !Object.hasOwn(CLAUDE_PERMISSION_MODES, permissionMode)) throw Error("Cannot verify native Claude settings");
-  return { model, permissionMode, ...(diagnostic ? { hasErrors: Boolean(snapshot.errors?.length) } : {}) };
+  let pluginsFingerprint;
+  if (diagnostic) {
+    const plugins = effective.enabledPlugins === undefined ? {} : effective.enabledPlugins;
+    // Native 2.1.222 accepts booleans or arrays of version constraints. Compare
+    // its effective merge, not individual sources or a guessed scope order.
+    if (!object(plugins)) throw Error("Cannot verify native Claude settings");
+    const entries = Object.entries(plugins).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+    if (entries.length > 5000 || entries.some(([name, value]) => name.length > 512
+      || typeof value !== "boolean" && !(Array.isArray(value) && value.length <= 100 && value.every(part => typeof part === "string" && part.length <= 512)))) {
+      throw Error("Cannot verify native Claude settings");
+    }
+    pluginsFingerprint = createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+  }
+  return { model, permissionMode, ...(diagnostic ? { hasErrors: Boolean(snapshot.errors?.length), pluginsFingerprint } : {}) };
 }
 
 export async function inspectNativeClaudeSettings(control, signal, options) {

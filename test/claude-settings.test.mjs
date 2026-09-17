@@ -76,11 +76,25 @@ test("doctor and checkup remain literal private diagnostic prompts, including he
 
 test("diagnostics accept reported parse errors but never unsafe native mode/schema or private source data", () => {
   const value = { effective: { model: "sonnet", permissions: { defaultMode: "default" } }, sources: [], errors: [{ message: "secret-invalid-source" }] };
-  assert.deepEqual(claudeSettingsSnapshot(value, { diagnostic: true }), { model: "sonnet", permissionMode: "default", hasErrors: true });
+  const { pluginsFingerprint, ...settings } = claudeSettingsSnapshot(value, { diagnostic: true });
+  assert.deepEqual(settings, { model: "sonnet", permissionMode: "default", hasErrors: true });
+  assert.match(pluginsFingerprint, /^[a-f0-9]{64}$/);
   assert.throws(() => claudeSettingsSnapshot(value), /Cannot verify/);
   for (const invalid of [{ ...value, sources: null }, { ...value, errors: "secret" }, { ...value, effective: { permissions: { defaultMode: "bypassPermissions" } } }]) {
     assert.throws(() => claudeSettingsSnapshot(invalid, { diagnostic: true }), /Cannot verify/);
   }
+});
+
+test("diagnostic plugin fingerprints use only the bounded effective native merge and never publish plugin settings", () => {
+  const snapshot = plugins => claudeSettingsSnapshot({ effective: plugins === undefined ? {} : { enabledPlugins: plugins }, sources: [], errors: [] }, { diagnostic: true });
+  const a = snapshot({ "private@market": true, "versioned@market": [">=1", "<3"] });
+  assert.deepEqual(a, snapshot({ "versioned@market": [">=1", "<3"], "private@market": true }));
+  assert.notEqual(a.pluginsFingerprint, snapshot({ "private@market": false, "versioned@market": [">=1", "<3"] }).pluginsFingerprint);
+  assert.deepEqual(snapshot(), snapshot({}));
+  assert.deepEqual(claudeSettingsChanges(a, snapshot({}), claudeConfigRequest("/doctor")), {});
+  assert.doesNotMatch(JSON.stringify(a), /private|market|versioned|>=1/);
+  for (const plugins of [null, [], true, { x: "false" }, { x: null }, { x: [false] }, { x: ["a".repeat(513)] }, { x: Array(101).fill("1") },
+    { ["a".repeat(513)]: true }, Object.fromEntries(Array.from({ length: 5001 }, (_, i) => [`p${i}`, true]))]) assert.throws(() => snapshot(plugins), /Cannot verify/);
 });
 
 test("diagnostic path checks tolerate malformed JSON locally/remotely without claiming settings values", async t => {

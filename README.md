@@ -881,6 +881,9 @@ state.
   malformed settings without repairing them automatically. Unsafe profile
   files and shared-host profiles stay locked; verified native model/mode changes
   reconcile without replacing a running application or newer web choices.
+  Confirmed plugin changes reload the owning native session before the next
+  queued input, refreshing its commands without restarting the application.
+  Declined or unchanged plugin settings do not trigger a reload.
   Installation/account operations and broader native check coverage are not
   established by the private diagnostic fixtures; see the coverage checklist.
 - Usage has a compact context/limits popover and a detailed session breakdown.

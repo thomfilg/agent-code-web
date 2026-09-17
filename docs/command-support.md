@@ -52,7 +52,7 @@ and remain at the beginning of native stream-json input.
 | `/batch` (Claude) | Native plan approval/refusal, foreground research, five background worktrees and their separate reports. Actual local edits, tests, CLI effects, FIFO, Send now and Stop/resume are verified with authored inference. Running HTTP apps/PIDs/data survive until explicit Stop. Native launch errors remain visible for agent-driven recovery; Relay does not replay tools. Remote commits/PR publication and account/company/live gates remain unverified. |
 | `/config key=value`, `/settings key=value` (Claude) | Native private-profile settings, with verified model/mode readback into Relay and subsequent-turn/Stop persistence. Partial native results remain visible; newer web selections win over late readback. Shared host mutations stay locked on item 21. Attachments are rejected before accepting/queueing the command. |
 | `/fewer-permission-prompts` (Claude) | Private native history review, exact project-rule merge and explicit web workspace-trust setup verified, including actual enforcement, denial, retained apps and Stop/resume. Chat actions → Workspace trust requires an exact-path review and separate confirmation. Shared-host profiles and broader/linked trust roots remain locked. |
-| `/doctor`, `/checkup` (Claude) | Private diagnostic integration verified: actual native expansion, broken-JSON diagnosis without implicit repair, local memory deduplication and separate consent for an exact project-local read rule. Native readback, refusal/skip, retained apps and Stop/resume pass. Shared-host profiles remain locked; broader check coverage and installation/account effects remain unverified below. |
+| `/doctor`, `/checkup` (Claude) | Private diagnostic integration verified: actual native expansion, broken-JSON diagnosis without implicit repair, local memory deduplication, selected skill/plugin cleanup and separate consent for an exact project-local read rule. Changed plugins reload on the same native owner before FIFO; readback, refusal/skip, retained apps and Stop/resume pass. Shared-host profiles remain locked; broader check coverage and installation/account effects remain unverified below. |
 | `/autocompact [auto/tokens]` (Claude) | Native current-window inspection, private-profile threshold persistence and reset. Actual automatic summary/compact-boundary and same-session Stop/resume verified; disabled state and native environment precedence retained. Shared host mutation and linked files fail closed; attached input is rejected before sending/queueing. Live activation pending. |
 | `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. Installed-CLI acceptance verifies effort changes inside a retained application session and explicit worker-environment precedence. |
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
@@ -145,10 +145,12 @@ Diagnostic preflight still verifies bounded, regular, unlinked private files
 and the owning worker/profile, but does not reject malformed JSON before the
 native diagnostic can examine it. This path returns a file-safety attestation,
 not guessed settings. Native SDK before/after snapshots retain only model,
-permission mode and an error-present flag; raw errors/settings never reach the
-UI. Existing parse errors with unchanged effective selectors can be reported
-without an implicit repair or selector change. New errors or changed unverified
-selectors pause the queue. Other configuration commands remain strict.
+permission mode, an error-present flag and an opaque plugin-settings fingerprint.
+The fingerprint is used only during reconciliation, never published or persisted;
+raw errors/settings never reach the UI. Existing parse errors with unchanged
+effective selectors/plugin settings can be reported without an implicit repair
+or selector change. New errors or changed unverified settings pause the queue.
+Other configuration commands remain strict.
 Readback, newer UI choices, owner changes and retained-app lifetime reuse the
 existing settings guards. Neither cleanup consent nor a saved rule grants
 workspace trust or disables native permissions.
@@ -185,8 +187,53 @@ unchanged assertions. Chromium's sandbox was not disabled.
 The retained-project `/update-config` regression also passes with **7** authored
 replies, preserving model/mode/environment effects and the running application.
 
+#### Skill and plugin cleanup effects
+
+The real `--extensions --application` fixture reproduced a stale native cache:
+the plugin's effective local override was `false`, but its skill still executed
+in the retained owner. Relay now reloads plugins through that owner's native SDK
+only after a verified effective plugin change, before completion/FIFO releases.
+The same validated receipt updates the web command/connector catalogs. No
+process restart, repeated diagnostic prompt or raw configuration publication is
+needed. Refused/unchanged/policy-overridden changes do not trigger a reload.
+Failure or partial reload pauses completion; Send now waits for a clean receipt,
+and Stop/revocation reject stale publication while retaining existing guards.
+
+The fixture creates actual project/user skills and installs one authored local
+marketplace plugin into a disposable private profile. After separate cleanup
+consent, the local override defeats the project's plugin enablement, and each
+project/user `skillOverrides: off` prevents **model** invocation. Native skills
+may still appear for explicit user invocation; the web catalog follows the
+actual native catalog rather than hiding them to simulate a fix. A kept skill
+still expands; project settings, source files, marketplace metadata, unrelated
+environment/permission entries and other-chat catalogs are preserved.
+
+Confirmed real CLI cases, including probes again after Stop/resume:
+
+- `--extensions --application`: **33** authored replies, one native reload;
+  disabled skills/plugin cannot execute, and app/PID/data survive until Stop.
+- `--extensions --application --alias --deny-cleanup`: **27** replies, no reload;
+  all extensions still execute, while separately approved permissions take effect.
+- `--extensions --application --stop-cleanup`: **13** replies, no reload;
+  pending cleanup is cancelled, files/queued input remain, and extensions still
+  execute after the same journal resumes.
+- `--extensions --skip`: **23** replies, no reload; unanswered cleanup and
+  permission questions leave settings unchanged and every extension executable.
+  The extra ordinary-turn probes require eleven separate native query startups:
+  the original two-minute aggregate fixture limit expired, while a traced run
+  completed all unchanged assertions. Extended one-shot fixtures now allow five
+  minutes overall; individual queries retain their forty-second deadline. No
+  production timeout or permission setting was changed.
+
+Six added fingerprint/transport tests cover native boolean/version-array settings,
+effective policy precedence, unchanged state, failed/partial reloads, no overtaking,
+Send now, Stop and revoked capabilities. Syntax/unit **587/587**, focused settings
+and session tests **131/131**, existing command browser tests **48/48**. Actual
+`smoke-real-claude-plugins.mjs --application` also passes **15** main replies and
+**2** titles with the same app, FIFO, explicit disable/enable and Stop/resume.
+
 These fixtures establish selected effects, not autonomous diagnosis quality or
-all ten native checks. Installation repair/uninstall/update, extension cleanup,
+all ten native checks. Installation repair/uninstall/update, MCP cleanup,
 checked-in instruction migration, hook/context/history analysis and a native
 auto-default grant still lack doctor-specific effect acceptance. Do not alter
 the user's installation/account to test them. Shared-host company isolation and

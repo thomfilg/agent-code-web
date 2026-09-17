@@ -281,6 +281,91 @@ test("doctor rejects unsafe private metadata before launching even though parse 
   assert.equal(f.launches.length, 0); assert.equal(f.adapter.sessionId, null);
 });
 
+async function pendingDoctorPluginReload(t) {
+  const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Keep this app alive");
+  f.settingsSnapshot = { effective: { enabledPlugins: { "private@market": true } }, sources: [] }; f.block = true; f.hold = "reload_plugins";
+  f.running = f.adapter.send("/doctor Inspect the private plugins"); f.running.catch(() => {});
+  await waitFor(() => f.inputs.length === 2 && f.adapter.turnSession?.active?.started);
+  f.settingsSnapshot = { effective: { enabledPlugins: { "private@market": false } }, sources: [] }; f.complete("Doctor cleanup report");
+  await waitFor(() => f.controls.some(packet => packet.request.subtype === "reload_plugins"));
+  f.reload = f.controls.find(packet => packet.request.subtype === "reload_plugins");
+  return f;
+}
+
+test("doctor reconciles changed native plugins before completion without replacing the app or exposing settings", async t => {
+  const f = await pendingDoctorPluginReload(t);
+  let finished = false; void f.running.then(() => { finished = true; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(finished, false);
+  await assert.rejects(f.adapter.send("Cannot overtake plugin reconciliation"), /already running/);
+  f.pluginSnapshot = { commands: [{ name: "kept", description: "Native kept skill" }], plugins: [], agents: [], mcpServers: [{ name: "kept-mcp", status: "connected" }], error_count: 0 };
+  f.respond(f.reload); const result = await f.running;
+  assert.deepEqual(result.nativeSettings, {}); assert.equal(result.text, "Doctor cleanup report");
+  assert(f.events.some(event => event.type === "command_catalog" && event.commands[0]?.name === "kept"));
+  assert(f.events.some(event => event.type === "session_capabilities" && event.connectors[0]?.name === "kept-mcp"));
+  assert.doesNotMatch(JSON.stringify([result, f.events]), /private@market|pluginsFingerprint|enabledPlugins/);
+  assert.equal(f.launches.length, 1); assert.equal(f.child.exitCode, null); assert.deepEqual(f.signals, []);
+  assert.deepEqual(f.inputs.map(packet => packet.message.content), ["/run Keep this app alive", "/doctor Inspect the private plugins"]);
+});
+
+test("doctor leaves unchanged or policy-overridden plugins alone and refuses changed plugins with remaining parse errors", async t => {
+  for (const variant of ["unchanged", "policy", "unverified"]) {
+    const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Keep this app alive");
+    const enabled = { enabledPlugins: { "private@market": true } };
+    f.settingsSnapshot = { effective: enabled, sources: [], errors: variant === "unverified" ? [{}] : [] }; f.block = true;
+    const running = f.adapter.send("/checkup Inspect plugins"); running.catch(() => {});
+    await waitFor(() => f.inputs.length === 2 && f.adapter.turnSession?.active?.started);
+    if (variant === "policy") f.settingsSnapshot = { effective: enabled, sources: [{ source: "localSettings", settings: { enabledPlugins: { "private@market": false } } }, { source: "policySettings", settings: enabled }] };
+    if (variant === "unverified") f.settingsSnapshot = { effective: { enabledPlugins: {} }, sources: [], errors: [{ message: "secret" }] };
+    f.complete();
+    if (variant === "unverified") await assert.rejects(running, /Cannot safely verify settings after/); else await running;
+    assert(!f.controls.some(packet => packet.request.subtype === "reload_plugins"));
+    assert.equal(f.launches.length, 1); assert.equal(f.child.exitCode, null);
+  }
+});
+
+test("doctor reload refusal, invalid and partial inventories fail without killing the app or claiming settings success", async t => {
+  for (const variant of ["refused", "invalid", "partial"]) {
+    const f = await pendingDoctorPluginReload(t);
+    if (variant === "refused") f.refuse = "reload_plugins";
+    if (variant === "invalid") f.pluginSnapshot = { secret: "must-not-leak" };
+    if (variant === "partial") f.pluginSnapshot = { commands: [], plugins: [], agents: [], mcpServers: [], error_count: 1 };
+    f.respond(f.reload);
+    await assert.rejects(f.running, error => /plugin reload|component load error/.test(error.message) && !error.nativeSettings && !error.message.includes("must-not-leak"));
+    assert.equal(f.events.some(event => event.type === "command_catalog"), variant === "partial");
+    assert.equal(f.child.exitCode, null); assert.equal(f.launches.length, 1); assert.deepEqual(f.signals, []);
+  }
+});
+
+test("Send now waits for doctor reload, rejects uncertain/partial receipts and never publishes late inventories", async t => {
+  for (const variant of ["ok", "refused", "partial"]) {
+    const f = await pendingDoctorPluginReload(t);
+    const rejected = assert.rejects(f.running, /interrupted/);
+    let finished = false; const interrupting = f.adapter.interrupt(); interrupting.catch(() => {});
+    void interrupting.then(() => { finished = true; }, () => { finished = true; });
+    await new Promise(resolve => setImmediate(resolve)); assert.equal(finished, false);
+    if (variant === "refused") f.refuse = "reload_plugins";
+    if (variant === "partial") f.pluginSnapshot = { commands: [], plugins: [], agents: [], mcpServers: [], error_count: 1 };
+    f.respond(f.reload);
+    if (variant === "ok") await interrupting; else await assert.rejects(interrupting, /selected input was not sent/);
+    await rejected; assert(!f.events.some(event => event.type === "command_catalog"));
+    assert.equal(f.child.exitCode, null); assert.equal(f.launches.length, 1); assert.deepEqual(f.signals, []);
+    if (variant === "ok") { f.hold = null; f.block = false; await f.adapter.send("Selected follow-up"); assert.equal(f.inputs.length, 3); }
+    else assert.equal(f.inputs.length, 2);
+  }
+});
+
+test("Stop and revoked chat capabilities cannot publish doctor plugin inventories or reconcile settings", async t => {
+  for (const variant of ["stop", "capability"]) {
+    const f = await pendingDoctorPluginReload(t);
+    const rejected = assert.rejects(f.running, /interrupted|gateway access expired/);
+    if (variant === "stop") await f.adapter.stop();
+    else { f.broker.revoke(f.adapter.capability); f.respond(f.reload); }
+    await rejected;
+    assert(!f.events.some(event => event.type === "command_catalog")); assert.equal(f.inputs.length, 2);
+    if (variant === "capability") assert.equal(f.child.exitCode, null);
+  }
+});
+
 test("interrupting settings inspection before or after input rejects late results and retains the owning application", async t => {
   for (const after of [false, true]) {
     const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Start the fixture");
