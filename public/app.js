@@ -484,6 +484,9 @@ async function sendMessage(event) {
   let text = elements.input.value.trim() || (files.length ? "Please inspect the attached files." : "");
   if (!text || !state.active) return;
   const chatId = state.active.id;
+  if (text === "/personality" && state.active.agent === "codex") {
+    chatControls.personality(); elements.input.value = ""; resizeInput(); slashComposer.close(); return;
+  }
   if (/^\/app(?:\s|$)/.test(text) && state.active.agent === "codex") {
     if (text !== "/app") { toast("Use /app without arguments to open the saved session's desktop handoff."); return; }
     try { if (await desktopHandoff.open() && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); slashComposer.close(); workspaceContext.closeMenu(); } }
@@ -593,8 +596,9 @@ async function sendMessage(event) {
     await api(`/api/chats/${chatId}/${queued ? "queue" : "messages"}`, { method: "POST", body: JSON.stringify({ text, attachments: files.map(file => file.id) }) });
     chatControls.clearAttachments(chatId, files.map(file => file.id));
   } catch (error) {
-    elements.input.value = text;
-    resizeInput();
+    // A delayed failure belongs to the original submission, not a newer draft
+    // or whichever conversation the user has opened in the meantime.
+    if (state.active?.id === chatId && !elements.input.value) { elements.input.value = text; resizeInput(); }
     toast(error.message);
   }
 }
@@ -610,7 +614,6 @@ async function runWebCommand(text) {
   if (text === "/model") { $("#composer-model-controls .model-select").focus(); return true; }
   if (["/effort", "/reasoning"].includes(text)) { $("#composer-model-controls .effort-menu").open = true; return true; }
   if (["/permissions", "/mode"].includes(text)) { $("#mode-menu").open = true; $("#mode-menu [data-agent-mode]").focus(); return true; }
-  if (text === "/personality" && state.active.agent === "codex") { chatControls.personality(); return true; }
   if (["/ps", "/debug-config", "/clean"].includes(text) && state.active.agent === "codex") { await chatControls.inspectCommand(text === "/debug-config" ? "debug-config" : "ps", text === "/clean" ? "all" : null); return true; }
   if (text === "/diff") { void chatControls.showChanges(); return true; }
   if (text === "/mcp") { void mcpSettings.open(); return true; }

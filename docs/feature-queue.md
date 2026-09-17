@@ -62,6 +62,23 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: `/fast` and `/personality` now have browser/controller and installed-native
+  parameter acceptance. Settings persist per chat, honor FIFO, use real model
+  capabilities, never become prompts, and clear unsupported native overrides.
+  Fixed late writes after Stop or a newer model/Fast-off choice; the personality
+  picker prevents duplicate pending selections, retains attachments and ignores
+  stale dialog/chat responses. Delayed send failures no longer overwrite newer
+  or other-chat drafts. OpenAI Docs supplied the native command contract.
+  Eight new controller cases and eight browser scenarios pass; the final normal
+  `npm test` passes **370/370**, and related browser regressions pass **22/22**.
+  Actual Codex 0.154.0 acknowledges all three personalities and catalog Fast
+  tiers, including clearing after same-session resume. Four disposable loopback
+  responses, no external inference or personal credentials. Syntax/whitespace
+  checks pass; the 320px picker was visually inspected. Initial reproduced
+  races and smoke-fixture corrections are retained in `command-support.md`;
+  earlier full-browser history/network failures remain open. No deployment or
+  live chat/account changes. Save to PR #2 without merge. Keep item 20 active;
+  next is `/init` document acceptance, then installed Claude-command acceptance.
 - 20: `/app` now opens a scoped same-session desktop handoff panel. An awake
   worker supplies native metadata through read-only `thread/read`; a bound
   controller locator survives stop/restart without waking it. Local host-profile

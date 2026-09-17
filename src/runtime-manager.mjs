@@ -652,13 +652,15 @@ export class RuntimeManager extends EventEmitter {
     } finally { this.#switching.delete(chatId); }
   }
 
-  async setModel(chatId, input) {
+  async setModel(chatId, input, guard = () => {}) {
+    guard();
     if (this.#switching.has(chatId)) throw Object.assign(new Error("Wait for the agent switch to finish"), { statusCode: 409 });
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     const settings = await this.models.validate(chat.agent, input);
+    guard();
     if (this.#switching.has(chatId) || this.store.get(chatId)?.agent !== chat.agent) throw Object.assign(new Error("The agent changed; select its model again"), { statusCode: 409 });
-    const updated = await this.store.update(chatId, { ...settings, modelSelectionSet: true });
+    const updated = await this.store.update(chatId, () => { guard(); return { ...settings, modelSelectionSet: true }; });
     this.publishChat(updated); return updated;
   }
 
@@ -1015,10 +1017,18 @@ export class RuntimeManager extends EventEmitter {
       if (commandAction?.type === "plan") this.publishChat(await this.store.update(chatId, { mode: "plan" }));
       if (["settings", "fast"].includes(commandAction?.type)) {
         const current = this.store.get(chatId);
+        const selection = chat => JSON.stringify(chat && { agent: chat.agent, model: chat.model, effort: chat.effort, serviceTier: chat.serviceTier, personality: chat.personality });
+        const before = selection(current);
+        const check = () => {
+          if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) throw Object.assign(new Error("Settings command cancelled"), { name: "AbortError" });
+          if (selection(this.store.get(chatId)) !== before) throw new Error("The model settings changed while this command was being checked. Run the command again.");
+        };
         const fastContext = Object.hasOwn(current, "serviceTier") ? current : { ...current, serviceTier: runtime.adapter.settings?.serviceTier };
         const settings = commandAction.type === "fast" ? await this.models.fastSettings(fastContext, commandAction.action) : commandAction.settings;
+        check();
         if (Object.hasOwn(settings, "mode")) await this.setMode(chatId, settings.mode);
-        else await this.setModel(chatId, { model: current.model || null, effort: Object.hasOwn(settings, "model") ? null : current.effort || null, ...settings });
+        else await this.setModel(chatId, { model: current.model || null, effort: Object.hasOwn(settings, "model") ? null : current.effort || null, ...settings }, check);
+        if (turn.cancelled || runtime.generation !== generation) return;
         const message = await this.store.appendMessage(chatId, { role: "system", kind: "notice", text: Object.entries(settings).map(([key, value]) => `${key}: ${value || "default"}`).join(" · ") });
         this.#emit(chatId, { type: "turn_completed", message }); return;
       }

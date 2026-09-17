@@ -813,7 +813,10 @@ state.
   instructions. `/init` asks the agent to create or improve repository instructions.
   `/model <id>`, `/effort <level>` and `/permissions <auto|edits|read-only>` queue
   validated settings behind running work. `/fast` and `/personality` are offered
-  only when the selected model advertises support. Web actions also cover usage,
+  only when the selected model advertises support. Their per-chat choices persist
+  and apply to later turns in queue order; the personality picker keeps unsent
+  attachments. Stopped or superseded setting changes cannot apply late.
+  Web actions also cover usage,
   diff, MCPs, attachments, copying, transcript display and chat organization.
   `/stop`, `/quit` and `/exit` stop Relay's agent and pause the queue; they are not
   limited to native background terminals. Destructive chat deletion asks for

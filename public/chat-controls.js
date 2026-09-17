@@ -112,14 +112,28 @@ export class ChatControls {
     search.addEventListener("input", render); render(); this.dialog("Resume conversation", search, list); search.focus();
   }
   personality() {
-    const chatId = this.state.active.id;
-    const choices = ["friendly", "pragmatic", "none"].map(value => button(value[0].toUpperCase() + value.slice(1), async event => {
-      event.currentTarget.disabled = true;
-      try { await this.submitCommand(chatId, `/personality ${value}`); $("#controls-dialog").close(); }
-      catch (error) { this.toast(error.message); }
-      finally { event.target.disabled = false; }
-    }, "secondary-button"));
-    this.dialog("Codex personality", el("p", "Applied to later turns in this chat, when supported by its model. Queues behind running work."), ...choices);
+    const chat = this.state.active, chatId = chat.id, dialog = $("#controls-dialog");
+    const scope = item => JSON.stringify(item && [item.id, item.ownerId, item.agent, item.model]);
+    const original = scope(chat), error = el("p", "", "form-error"); error.setAttribute("role", "alert");
+    let pending = false;
+    const current = () => dialog.open && this.dialogVersion === version && scope(this.state.active) === original;
+    const choices = ["friendly", "pragmatic", "none"].map(value => {
+      const choice = button(value[0].toUpperCase() + value.slice(1), async () => {
+        if (pending) return;
+        if (!current()) { error.textContent = "The chat or model changed. Reopen the personality picker."; choices.forEach(item => item.disabled = true); return; }
+        pending = true; error.textContent = ""; choices.forEach(item => item.disabled = true);
+        try { await this.submitCommand(chatId, `/personality ${value}`); if (current()) dialog.close(); }
+        catch (failure) { if (current()) error.textContent = failure.message; }
+        finally {
+          pending = false;
+          if (current()) choices.forEach(item => item.disabled = false);
+          else if (dialog.open && this.dialogVersion === version) error.textContent = "The chat or model changed. Reopen the personality picker.";
+        }
+      }, "secondary-button");
+      choice.setAttribute("aria-pressed", String(chat.personality === value)); return choice;
+    });
+    this.dialog("Codex personality", el("p", "Applied to later turns in this chat, when supported by its model. Queues behind running work."), ...choices, error);
+    const version = this.dialogVersion;
   }
   async inspectCommand(command, terminate = null) {
     const chatId = this.state.active.id;

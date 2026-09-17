@@ -43,7 +43,7 @@ and remain at the beginning of native stream-json input.
 | Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI `/reload-skills`, `/autocompact 200k` and `/config` return visible native results without any model call; full installed-command acceptance still pending. |
 | `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. |
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
-| `/fast [on/off]`, `/personality [friendly/pragmatic/none]` | Only offered for supporting models; validate catalog capabilities and pass native turn settings. Source/unit checks passed; browser/native parameter acceptance pending. |
+| `/fast [on/off]`, `/personality [friendly/pragmatic/none]` | Catalog-driven, persisted per-chat settings, applied in FIFO order to later turns. Stop/model-change guards, retryable personality picker and draft/attachment protection. Controller/browser checks and actual installed-CLI parameter/resume verification pass; live activation remains pending. |
 | `/usage`, `/status`, `/context` | Existing session/usage inspection. |
 | `/diff`, `/mcp`, `/skills`, `/help` | Workspace diff, connection manager, installed-command picker. |
 | `/new`, `/clear`, `/resume` | New-chat flow or searchable saved-chat picker; never implicitly delete the old conversation. |
@@ -82,6 +82,44 @@ Do not treat removing entries from autocomplete as implementing them.
 - Windows-only sandbox setup and read-directory commands do not apply to the
   current Linux worker. Native APIs still need capability/version checks if a
   Windows worker is introduced.
+
+### Fast and personality
+
+OpenAI Docs' [developer commands](https://learn.chatgpt.com/docs/developer-commands)
+defines Fast as a catalog-advertised tier toggle and personality as a supported
+model's communication style for later responses. Relay keeps both choices in
+the chat record instead of editing a shared host profile. Commands produce
+visible confirmations without becoming model prompts. Busy changes run in FIFO
+order; unsupported models do not receive stale Fast/personality overrides.
+
+Slow capability lookups and validation recheck turn cancellation and the original
+model selection before saving. A newer model choice or explicit Fast-off wins
+over an older in-flight command. The personality picker allows only one pending
+selection, retains unsent attachments, reports retryable errors, and cannot
+submit into another chat or close a newer dialog. A delayed send failure restores
+the failed command only if its original composer is still empty; it never
+overwrites a newer draft or another conversation's input.
+
+Verification: eight controller/unit cases and eight browser scenarios pass.
+The normal default-concurrency `npm test` passes **370/370**; the related browser
+run passes **22/22**, including desktop handoff and existing command controls.
+The installed Codex **0.154.0** smoke uses real advertised model metadata and
+asserts a new native settings acknowledgement for each turn, all three
+personality values, the actual Responses service tier, and Fast-off after
+same-session resume. Native clearing normalizes the tier to `default`. This
+uses four loopback fixture responses, not external inference or user accounts;
+real account entitlement, pricing and paid-service latency are not tested.
+Repository JavaScript syntax/whitespace checks and 320px visual inspection pass.
+
+Initial regressions reproduced post-stop setting writes, duplicate-enabled
+picker choices, late modal dismissal, the attachment barrier and draft overwrite;
+these are fixed. The smoke initially used the wrong acknowledgement field and
+expected a literal null instead of the CLI's normalized default; the generated
+protocol and actual native reply corrected those fixture assumptions. No
+timeouts or assertions were relaxed to conceal a product failure. This focused
+browser run does not close older full-suite history/network failures. Nothing
+was deployed. Item 20 remains open; next is `/init` repository-document
+acceptance, then remaining installed Claude-command acceptance.
 
 ### Desktop handoff
 
@@ -140,8 +178,8 @@ failures found an overridden cache header (fixed) and two test-fixture mistakes
 (busy Stop versus Queue, and assuming a hash router); the tests now exercise the
 real controls without weakened assertions or longer timeouts. This targeted
 browser result does not erase the earlier full-suite history/network failures.
-Next safe item-20 work is `/fast` and `/personality` browser/native parameter
-acceptance, then `/init` and the remaining installed Claude-command checks.
+Fast/personality browser/native parameter acceptance is recorded above. The
+remaining `/init` and installed Claude-command checks still keep item 20 open.
 
 ### Pets
 
