@@ -14,12 +14,12 @@ export function claudePermissionMode(event, sessionId) {
 // Only identify requested keys here. The native CLI still parses and executes
 // the original command, including validation and partial-success reporting.
 export function claudeConfigRequest(text) {
-  const match = /^\/(config|settings|autocompact|update-config)(?:\s+([\s\S]*))?$/.exec(text.trim());
+  const match = /^\/(config|settings|autocompact|update-config|fewer-permission-prompts)(?:\s+([\s\S]*))?$/.exec(text.trim());
   if (!match) return null;
   // This is an agent-executed settings skill, not a local key=value command.
   // Even --help/no arguments expand its prompt; never infer read-only access
   // or requested settings from free-form text. It can take reference files.
-  if (match[1] === "update-config") return { mutate: true, values: {}, kind: "prompt" };
+  if (["update-config", "fewer-permission-prompts"].includes(match[1])) return { mutate: true, values: {}, kind: "prompt" };
   const argument = (match[2] || "").trim();
   if (!argument || argument === "--help") return { mutate: false, values: {} };
   // This native control writes the same private settings file. Leave its

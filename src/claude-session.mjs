@@ -69,6 +69,17 @@ export class ClaudeSession {
     const decoder = new StringDecoder("utf8"); let stderr = "", dropping = false;
     const stderrLine = line => {
       this.debugLog?.append(line);
+      // Native startup precedes the logical turn. Do not lose this actual
+      // warning there, or imply that disk settings are applied permissions.
+      // Publish fixed text, never the private profile path or an instruction to
+      // edit the trust latch. This is a notice, not consent or a permission grant.
+      if (/^Ignoring \d+ permissions\.(?:allow|additionalDirectories) entr(?:y|ies) from \.claude\/settings(?:\.local)?\.json(?: and \.claude\/settings(?:\.local)?\.json)?: this workspace has not been trusted\./.test(line)) {
+        if (!this.workspaceTrustNotified) {
+          this.workspaceTrustNotified = true;
+          this.onBackgroundEvent({ type: "workspace_trust_notice" });
+        }
+        return;
+      }
       if (/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z \[(?:DEBUG|INFO|WARN|ERROR|VERBOSE)\] /.test(line)) this.trackScheduleDiagnostic(line);
       else this.active?.stderr.write(`${line}\n`);
     };

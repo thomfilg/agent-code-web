@@ -68,6 +68,25 @@ feature or turn an external verification gate into a passing result.
 
 ## Verification ledger
 
+- 20: classified `/fewer-permission-prompts` as a private mutating prompt,
+  blocking shared-host history/settings access before startup, accepted input
+  or queue writes. Literal arguments/files, FIFO and native settings readback
+  are retained. Actual **2.1.222** testing found project allow rules ignored
+  before workspace trust, including pre-existing rules; a saved/effective
+  settings entry does not prove it is authorized. The lost startup warning is
+  now visible without raw private paths or trust-latch editing instructions.
+  Native private history scan, exact project merge, real approval reduction,
+  extra-argument refusal, original ask/deny rules and Stop/resume pass; refusal
+  and untrusted cases preserve the native gate (**16** authored replies).
+  Retained app/PID/data cases pass for trusted and untrusted workspaces (**18**).
+  Trusted fixtures use the actual native consent handshake with an authored
+  acceptance, never a seeded latch or bypass. Five unit/session/controller and
+  two responsive browser additions: syntax/unit **564/564**, command browser
+  **46/46**; native app/config and app/debug regressions **7/5** replies.
+  Explicit web workspace-trust consent remains unfinished and is next before
+  another command; a pre-trusted fixture is not full new-workspace support.
+  Item 20/count/order and account/company/live gates remain open. Save this
+  verified checkpoint to PR #2; no deployment or live-account/data changes.
 - 20: reproduced `/batch` cancelling its five native worktree agents when the
   launching reply ended, then reproduced FIFO releasing after the first of
   five reports. Bound background Agent/default-async lifecycle now retains the

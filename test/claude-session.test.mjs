@@ -86,6 +86,37 @@ async function fixture(t, { interactive = false } = {}) {
   return Object.assign(f, { adapter, config, broker, chat, store });
 }
 
+test("untrusted-workspace warnings survive native startup without leaking private paths or granting trust", async t => {
+  const f = await fixture(t, { interactive: true }); f.hold = "initialize";
+  const sending = f.adapter.send("Review this workspace");
+  sending.catch(() => {});
+  await waitFor(() => f.controls?.some(packet => packet.request.subtype === "initialize"));
+  const warning = "Ignoring 1 permissions.allow entry from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects[\"/private/project\"].hasTrustDialogAccepted: true in /private/profile/.claude.json.\n";
+  f.child.stderr.write(warning.slice(0, 90)); f.child.stderr.write(warning.slice(90));
+  await waitFor(() => f.events.some(event => event.type === "notice"));
+  assert.match(f.events.find(event => event.type === "notice").text, /workspace has not been trusted/);
+  assert.doesNotMatch(JSON.stringify(f.events), /\/private|hasTrustDialogAccepted/);
+  f.child.stderr.write(warning);
+  f.child.stderr.write(warning.replace("permissions.allow entry", "permissions.additionalDirectories entry"));
+  assert.equal(f.events.filter(event => event.type === "notice").length, 1);
+  assert.equal(f.inputs.length, 0); assert.equal(f.requests.length, 0);
+  f.respond(f.controls.find(packet => packet.request.subtype === "initialize")); await sending;
+  assert.deepEqual(f.controls.map(packet => packet.request.subtype), ["initialize"]);
+  assert.equal(f.inputs.length, 1); assert.equal(f.inputs[0].message.content, "Review this workspace");
+});
+
+test("native diagnostic text is not reinterpreted as trust or permission to run tools", async t => {
+  const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Start the fixture");
+  const before = f.events.length, controls = f.controls.length;
+  for (const text of [
+    "2026-09-17T13:00:00.000Z [DEBUG] workspace not yet trusted",
+    'Quoted: Ignoring 1 permissions.allow entry from .claude/settings.json: this workspace has not been trusted.',
+    'Ignoring 1 permissions.allow entry from /unrelated/settings.json: this workspace has not been trusted.',
+    'Ignoring 1 permissions.deny entry from .claude/settings.json: this workspace has not been trusted.',
+  ]) f.child.stderr.write(`${text}\n`);
+  assert.equal(f.events.length, before); assert.equal(f.controls.length, controls); assert.equal(f.requests.length, 0);
+});
+
 test("debug captures only opted-in native diagnostics and retains the native owner for reproduction until Stop", async t => {
   for (const interactive of [false, true]) {
     const f = await fixture(t, { interactive }); f.block = true;

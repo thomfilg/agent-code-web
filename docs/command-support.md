@@ -51,6 +51,7 @@ and remain at the beginning of native stream-json input.
 | `/deep-research` (Claude) | Native private-SDK workflow orchestration, owner lifetime through the final report, FIFO, Stop/resume and targeted Send now. Actual native phase/dedup/voting execution with authored structured replies is verified; this is not a claim about public-source retrieval or research quality. Running apps remain intact until explicit Stop; account/shared-host/live gates remain. |
 | `/batch` (Claude) | Native plan approval/refusal, foreground research, five background worktrees and their separate reports. Actual local edits, tests, CLI effects, FIFO, Send now and Stop/resume are verified with authored inference. Running HTTP apps/PIDs/data survive until explicit Stop. Native launch errors remain visible for agent-driven recovery; Relay does not replay tools. Remote commits/PR publication and account/company/live gates remain unverified. |
 | `/config key=value`, `/settings key=value` (Claude) | Native private-profile settings, with verified model/mode readback into Relay and subsequent-turn/Stop persistence. Partial native results remain visible; newer web selections win over late readback. Shared host mutations stay locked on item 21. Attachments are rejected before accepting/queueing the command. |
+| `/fewer-permission-prompts` (Claude) | Private native history review and exact project-rule merge verified, including native enforcement, denial, retained apps and Stop/resume. Shared-host history/settings are blocked. Untrusted-project warnings are visible; explicit web workspace-trust setup remains unfinished, so new private workspaces are not claimed fully supported yet. |
 | `/autocompact [auto/tokens]` (Claude) | Native current-window inspection, private-profile threshold persistence and reset. Actual automatic summary/compact-boundary and same-session Stop/resume verified; disabled state and native environment precedence retained. Shared host mutation and linked files fail closed; attached input is rejected before sending/queueing. Live activation pending. |
 | `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. Installed-CLI acceptance verifies effort changes inside a retained application session and explicit worker-environment precedence. |
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
@@ -110,8 +111,8 @@ Do not treat removing entries from autocomplete as implementing them.
   added only in newer documentation.
 
 - The fresh installed **2.1.222** SDK catalog also advertises these entries
-  without effect-level evidence in this ledger: `/fewer-permission-prompts`,
-  `/doctor`, `/claude-api`, `/agents`, `/color`, `/heapdump`,
+  without effect-level evidence in this ledger: `/doctor`, `/claude-api`,
+  `/agents`, `/color`, `/heapdump`,
   `/workflow-launch-exec`, `/security-review`, `/insights`, `/recap`, `/design`,
   `/design-consent`, `/design-revoke` and `/team-onboarding`. Next classify their
   installed behavior and verify/implement each applicable action, starting with
@@ -125,6 +126,64 @@ Do not treat removing entries from autocomplete as implementing them.
   precedence and retained-owner integration are accepted below. Shared-host
   account/company isolation and live activation remain external gates; they
   are not enabled by these private fixture results.
+
+### Claude private permission review and workspace-trust checkpoint
+
+`/fewer-permission-prompts` is a native mutating prompt, including its bare/help
+forms. It scans native history and writes project permission rules; it is not
+a read-only local settings query. Relay now routes the literal prompt and
+reference files through private settings reconciliation and blocks shared-host
+profiles before startup, accepted history, or queue writes. No free-form
+permission/model assignments are inferred from its text.
+
+Installed **2.1.222** reproduced an important distinction: `get_settings` shows
+saved project allow rules even when the native engine drops them because the
+workspace is not trusted. This also affects pre-existing rules, not just the
+newly written entry. Relay was losing the native warning before its logical
+turn began. That warning now persists as a bounded, fixed-text chat notice;
+raw private profile paths and instructions to edit a trust latch are not
+published. No grant, settings write, mode change or consent is inferred from
+diagnostic output.
+
+`scripts/smoke-real-claude-permissions.mjs` uses actual native tools, private
+profiles, authored history/model replies and loopback-only network namespaces:
+
+- Baseline existing exact rule, a refused non-allowlisted command, actual
+  cross-project history scan, project-only merge and the following command's
+  real approval reduction, including same-history Stop/resume.
+- Additional arguments still require approval; original ask/deny rules remain
+  enforced. User/local settings, unrelated env values, original fixture
+  histories and another chat remain unchanged.
+- `--deny` verifies refused protected-file writes and continued approvals.
+- `--untrusted` verifies saved rules do not silently grant trust and the actual
+  native warning is visible in chat, including startup.
+- `--application` verifies hot-loaded rules on the same native owner, HTTP app,
+  PID and data, with the application terminated only by explicit Stop.
+
+Trusted fixtures obtain an actual `set_cwd` `needs_trust` response in a separate
+idle native consent session, then simulate an explicit user acceptance pinned
+to that exact canonical directory. There is no seeded trust latch, policy
+override, permission-mode bypass, inference or automatic acceptance in Relay.
+The untrusted fixture declines that setup. Final cases use **16** authored main
+replies, or **18** with an existing application; approvals are asserted by
+operation, not automatically accepted to make the tests pass.
+
+Five new unit/controller/session cases and two responsive browser cases cover
+classification, all shared-host input paths, literal FIFO, startup warning
+delivery, non-authoritative diagnostics, queued files and refusal/draft
+retention. Syntax/unit suite **564/564**; command browser suite **46/46**.
+Native retained-project `/update-config` and retained `/debug` regressions
+pass (**7** and **5** authored main replies). Other browser suites were not
+rerun for this checkpoint; their older results are not a new full-suite claim.
+
+**Still open in item 20:** web workspace-trust consent/setup. A newly created
+private workspace must not be called fully working for this command merely
+because the pre-trusted fixture passes. The SDK's `set_cwd` on the existing
+directory returns a no-op, not a trust request; do not move an active chat to
+another directory to force consent. Implement/review the actual explicit
+private-workspace consent path before advancing to the next unfinished command.
+Shared-host/company isolation and live activation also remain gated. Queue
+count/order is unchanged; this checkpoint does not close item 20.
 
 ### Claude native batch lifetime and report checkpoint
 

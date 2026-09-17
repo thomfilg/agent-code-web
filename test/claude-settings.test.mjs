@@ -50,6 +50,18 @@ test("update-config is an unchanged native prompt, never inferred read-only or p
   for (const text of ["Explain /update-config", "/plugin:update-config model=sonnet", "/update-config-extra"]) assert.equal(claudeConfigRequest(text), null);
 });
 
+test("fewer-permission-prompts requires a private profile even for empty/help input and never parses quoted settings", () => {
+  for (const text of ["/fewer-permission-prompts", "/fewer-permission-prompts --help", '/fewer-permission-prompts Keep permissionMode="auto" as an example only.\nPreserve ação.']) {
+    const request = claudeConfigRequest(text);
+    assert.deepEqual(request, { mutate: true, values: {}, kind: "prompt" });
+    const settings = { model: "sonnet", permissionMode: "default" };
+    assert.deepEqual(claudeSettingsChanges(settings, settings, request), {});
+    assert.deepEqual(messageCommand("claude", text), { type: "claudeConfig", prompt: text });
+    assert.equal(messageCommand("codex", text), null);
+  }
+  for (const text of ["Explain /fewer-permission-prompts", "/plugin:fewer-permission-prompts", "/fewer-permission-prompts-extra"]) assert.equal(claudeConfigRequest(text), null);
+});
+
 test("native settings inspection uses the effective merge and returns no private source data", () => {
   const snapshot = { effective: { model: "haiku", permissions: { defaultMode: "plan" }, env: { SECRET: "never-return" } },
     sources: [{ source: "userSettings", settings: { model: "opus" } }, { source: "localSettings", settings: { model: "sonnet" } },
@@ -277,6 +289,28 @@ test("update-config refuses shared-host changes before startup, including empty/
   assert.equal(f.starts, 0); assert.equal(f.calls.length, 0);
   assert.equal(f.store.get(f.chat.id).messages.length, 0);
   assert.deepEqual(f.store.get(f.chat.id).queuedMessages || [], []);
+});
+
+test("fewer-permission-prompts cannot read shared-host history or change its allowlist through any input path", async t => {
+  const f = await fixture(t, { fake: true, host: true });
+  for (const text of ["/fewer-permission-prompts", "/fewer-permission-prompts --help", "/fewer-permission-prompts Review recent tool calls"]) {
+    for (const method of ["submit", "enqueue", "send"]) await assert.rejects(f.manager[method](f.chat.id, text), /shared host profile/);
+  }
+  await assert.rejects(f.manager.enqueue(f.chat.id, "/fewer-permission-prompts Review this reference", ["reference-file"]), /shared host profile/);
+  const adapter = new ClaudeAdapter({ chat: f.chat, store: f.store, config: f.config, broker: f.broker, gatewayOrigin: "http://127.0.0.1:9", hooks: {} });
+  await assert.rejects(adapter.send("/fewer-permission-prompts"), /shared host profile/);
+  assert.equal(adapter.child, null); assert.equal(f.starts, 0); assert.equal(f.calls.length, 0);
+  assert.equal(f.store.get(f.chat.id).messages.length, 0); assert.deepEqual(f.store.get(f.chat.id).queuedMessages || [], []);
+});
+
+test("private allowlist prompts preserve FIFO, literal arguments and the selected model/mode", async t => {
+  const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+  const original = f.store.get(f.chat.id), text = "/fewer-permission-prompts Review my private history only.\nKeep ação; do not change the model or mode.";
+  const running = f.manager.send(f.chat.id, "Current task"); await waitFor(() => f.calls.length === 1);
+  await f.manager.enqueue(f.chat.id, text); await f.manager.enqueue(f.chat.id, "After the permission review"); f.gate.resolve(); await running;
+  await waitFor(() => f.calls.length === 3 && !f.manager.isBusy(f.chat.id));
+  assert.deepEqual(f.calls.map(call => call.text), ["Current task", text, "After the permission review"]);
+  assert.equal(f.store.get(f.chat.id).model, original.model); assert.equal(f.store.get(f.chat.id).mode, original.mode);
 });
 
 test("debug rejects host-log access before startup or queue writes while private prompts keep normal FIFO", async t => {

@@ -3,7 +3,7 @@ export function messageCommand(agent, text) {
   const match = /^\/([\w:.-]+)(?:\s+([\s\S]*))?$/.exec(text.trim());
   if (!match) return null;
   const argument = (match[2] || "").trim();
-  if (agent === "claude" && ["config", "settings", "autocompact", "update-config"].includes(match[1])) return { type: "claudeConfig", prompt: text };
+  if (agent === "claude" && ["config", "settings", "autocompact", "update-config", "fewer-permission-prompts"].includes(match[1])) return { type: "claudeConfig", prompt: text };
   if (agent === "claude" && match[1] === "fast") {
     if (argument && !["on", "off"].includes(argument)) throw new Error("Use /fast, /fast on, or /fast off");
     return { type: "claudeFast", prompt: text };

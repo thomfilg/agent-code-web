@@ -577,6 +577,10 @@ export class ClaudeAdapter {
 
   backgroundEvent(event) {
     this.permissionMode(event);
+    if (!this.stopped && event.type === "workspace_trust_notice") {
+      this.hooks.onEvent?.({ type: "notice", text: "Claude is ignoring project permission grants because this workspace has not been trusted. Saving allow rules does not enable them. Review and explicitly trust the workspace in this chat's private Claude profile; existing approval requirements remain in force." });
+      return;
+    }
     if (!this.stopped && event.type === "background_turn") { this.hooks.onEvent?.(event); return; }
     if (this.stopped || !["assistant", "stream_event", "result"].includes(event.type)) return;
     this.backgroundOutput ||= new ClaudeTextStream(() => {});

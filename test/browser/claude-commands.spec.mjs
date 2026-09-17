@@ -38,6 +38,32 @@ test("native debug is selectable, queues intact while busy, and keeps the draft 
   expect(f.calls[1]).toEqual({ tail: "queue", text, attachments: [] }); await expect(input).toHaveValue(""); expect(f.errors).toEqual([]);
 });
 
+for (const width of [1280, 320]) test(`native permission review at ${width}px keeps queued input/files and exposes trust without granting it`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input");
+  f.catalog = [{ name: "fewer-permission-prompts", description: "Review frequent read-only commands and saved permission rules" }];
+  f.snapshot = { ...f.snapshot, status: "running", model: "sonnet", mode: "default" }; await f.emit();
+  await input.fill("/fewer-perm"); await page.locator("#slash-options [role=option]").filter({ hasText: "/fewer-permission-prompts" }).click();
+  await expect(input).toHaveValue("/fewer-permission-prompts "); expect(f.calls).toEqual([]);
+  const text = "/fewer-permission-prompts Review private fixture history\nPreserve ação and existing deny rules.";
+  await input.fill(text); await input.press("Escape");
+  await page.locator("#attachment-input").setInputFiles({ name: "permission-context.txt", mimeType: "text/plain", buffer: Buffer.from("Read-only context") });
+  await expect(page.locator("#attachment-chips")).toContainText("permission-context.txt");
+  f.responseStatus = 400; f.responseError = "Native settings changes require a private Claude profile. Shared host settings writes are locked.";
+  await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect(page.locator("#toasts")).toContainText("private Claude profile");
+  await expect(input).toHaveValue(text); await expect(page.locator("#attachment-chips")).toContainText("permission-context.txt");
+  f.responseStatus = 202; await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect.poll(() => f.calls.length).toBe(2); expect(f.calls[1]).toEqual(f.calls[0]);
+  expect(f.calls[1].tail).toBe("queue"); expect(f.calls[1].text).toBe(text); expect(f.calls[1].attachments).toHaveLength(1);
+  await expect(input).toHaveValue("");
+  f.snapshot = { ...f.snapshot, status: "idle", messages: [{ id: "trust-warning", role: "system", kind: "notice",
+    text: "Claude is ignoring project permission grants because this workspace has not been trusted. Saving allow rules does not enable them. Review and explicitly trust the workspace in this chat's private Claude profile; existing approval requirements remain in force." }] }; await f.emit();
+  await expect(page.locator("#messages")).toContainText("Saving allow rules does not enable them");
+  await input.fill("Keep my next draft"); await f.emit(); await expect(input).toHaveValue("Keep my next draft");
+  expect(f.calls).toHaveLength(2); expect(f.snapshot.model).toBe("sonnet"); expect(f.snapshot.mode).toBe("default"); expect(f.errors).toEqual([]);
+});
+
 for (const width of [1280, 320]) test(`native batch at ${width}px keeps its queue and draft through all partial reports`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page), input = page.locator("#message-input");
