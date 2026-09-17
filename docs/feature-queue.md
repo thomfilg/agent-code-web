@@ -62,6 +62,20 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: fixed native MCP reconnect leaving stale tools available after disable
+  in a retained application session. Reconnect now uses ordered native toggles
+  and verified status, without restarting the app, editing credentials or
+  replaying writes. Installed-CLI acceptance verifies HTTP/stdio, real tool
+  removal and refusal, re-enable/recovery, independent chats and Stop during
+  reconnect, with the same HTTP app/data (**9** main loopback replies). Native
+  retained-session review now has actual diff/findings/edit/CLI-effect evidence
+  for read-only, empty, fix, Plan refusal, Send now and Stop (**8/8/10/9/6/5**
+  main replies, plus native titles). Four unit/adapter additions; syntax/unit
+  **480/480**, combined browser **59/59**. Existing native MCP normal/error
+  regressions pass (**3/0** replies). Fixture metadata/cleanup corrections are
+  recorded separately. Item 20/order/count unchanged; remaining gates include
+  retained Fast/cooldown, shell classifier, bundled workflows and plugin
+  namespaces. Save to PR #2 without merge, deploy or live-data/account changes.
 - 20: reproduced and fixed retained Claude sessions losing gateway access at
   their initial capability deadline. Controller-owned renewal now keeps the
   original scoped session alive; expiry, changed owner/company/profile/account

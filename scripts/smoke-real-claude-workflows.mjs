@@ -23,9 +23,11 @@ if (!process.argv.includes("--network-isolated")) {
   await exec("/usr/bin/ip", ["link", "set", "lo", "up"]);
   assert.deepEqual(JSON.parse((await exec("/usr/bin/ip", ["-j", "link", "show"])).stdout).map(item => item.ifname), ["lo"]);
   assert.equal((await exec("/usr/bin/ip", ["route", "show"])).stdout.trim(), "");
-  const root = await mkdtemp("/tmp/relay-claude-workflows-"), requests = [], nativeResults = [];
+  const root = await mkdtemp("/tmp/relay-claude-workflows-"), requests = [], mainRequests = [], nativeResults = [], launches = [];
   let manager, gatewayServer, chat, fixtureError, firstSession, step = 0;
   const fix = process.argv.includes("--fix");
+  const application = process.argv.includes("--application");
+  let applicationStep = application ? 0 : null, applicationUrl, applicationState;
   const plan = process.argv.includes("--plan"), empty = process.argv.includes("--empty");
   const sendNow = process.argv.includes("--send-now");
   const interrupt = process.argv.includes("--interrupt") || sendNow, held = Promise.withResolvers(), release = Promise.withResolvers();
@@ -38,9 +40,20 @@ if (!process.argv.includes("--network-isolated")) {
     let raw = ""; for await (const chunk of request) raw += chunk;
     assert.equal(request.headers["x-api-key"], "controller-only-workflow-fixture");
     const body = JSON.parse(raw), index = requests.push(body);
-    assert(index <= 15, "Unexpected native workflow inference loop");
+    assert(index <= 20, "Unexpected native workflow inference loop");
+    const title = !body.tools?.length && JSON.stringify(body.messages.at(-1)).includes("Write the title in the predominant language");
+    if (!title) mainRequests.push(body);
     let content;
-    if (resuming) {
+    if (title) content = [{ type: "text", text: "Review fixture with running application" }];
+    else if (applicationStep === 0) {
+      assert.match(JSON.stringify(body.messages), /Running means launching the actual app/);
+      content = [{ type: "tool_use", id: `app_${index}`, name: "Bash", input: { command: "node application.mjs", description: "Start the disposable HTTP app", run_in_background: true } }];
+      applicationStep++;
+    } else if (applicationStep === 1) {
+      const results = body.messages.flatMap(message => Array.isArray(message.content) ? message.content : []).filter(block => block.type === "tool_result");
+      assert(results.length); assert(!results.at(-1).is_error, JSON.stringify(results.at(-1)));
+      content = [{ type: "text", text: "The actual application is running." }]; applicationStep = null;
+    } else if (resuming) {
       assert.match(JSON.stringify(body.messages), interrupt ? /code-review/ : empty ? /No findings were reported/ : fix && !plan ? /Actual invocation returned total 5/ : /CLI subtracts instead of adding/);
       content = [{ type: "text", text: "Saved review context retained." }];
     } else {
@@ -107,6 +120,7 @@ if (!process.argv.includes("--network-isolated")) {
       mkdir: directory => mkdir(directory, { recursive: true, mode: 0o700 }),
       spawn(command, args, options) {
         assert(!JSON.stringify([args, options.env]).includes(config.claude.providerKey));
+        if (command === config.claude.bin && args.includes("--print")) launches.push(args);
         if (args.includes("--session-id") && !firstSession) firstSession = args[args.indexOf("--session-id") + 1];
         const child = spawnWorker(command, args, options);
         let buffer = "";
@@ -119,20 +133,43 @@ if (!process.argv.includes("--network-isolated")) {
     }) };
     manager = new RuntimeManager({ store, config, broker, gatewayOrigin, workerBackend, adapterFactory: params => new ClaudeAdapter({ ...params, store, config, broker, gatewayOrigin }) });
     chat = await manager.createChat({ agent: "claude", title: "Native workflow fixture" });
-    await manager.setMode(chat.id, plan ? "plan" : "accept_edits");
+    await manager.setMode(chat.id, plan && !application ? "plan" : "accept_edits");
     const env = { HOME: root, PATH: process.env.PATH, LANG: "C.UTF-8", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
     await writeFile(`${chat.workspace}/total.mjs`, original);
     await exec("git", ["-C", chat.workspace, "add", "total.mjs"], { env });
     await exec("git", ["-C", chat.workspace, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", "commit", "-m", "Fixture CLI baseline"], { env });
     await writeFile(`${chat.workspace}/total.mjs`, empty ? original : broken);
     await mkdir(`${store.runtimeHome(chat.id)}/claude`, { recursive: true });
-    await writeFile(`${store.runtimeHome(chat.id)}/claude/settings.json`, JSON.stringify({ permissions: { allow: ["Bash(node total.mjs 2 3)"] } }));
+    await writeFile(`${store.runtimeHome(chat.id)}/claude/settings.json`, JSON.stringify({ permissions: { allow: ["Bash(node total.mjs 2 3)", ...(application ? ["Bash(node application.mjs)"] : [])] } }));
+    const checkApplication = async () => {
+      assert.deepEqual(await (await fetch(applicationUrl, { signal: AbortSignal.timeout(2000) })).json(), applicationState);
+      assert.equal(launches.length, 1, "Review must not replace the native process owning the app");
+      assert.equal(store.get(chat.id).agentSessionId, firstSession);
+    };
+    if (application) {
+      await writeFile(`${chat.workspace}/application.mjs`, `import http from 'node:http';
+import {writeFile} from 'node:fs/promises';
+let value = 'initial';
+const server = http.createServer(async (req,res) => {
+  if (req.method === 'POST') { value = ''; for await (const part of req) value += part; }
+  res.setHeader('content-type','application/json'); res.end(JSON.stringify({pid:process.pid,value}));
+});
+server.listen(0,'127.0.0.1',async()=>{ await writeFile('.application.json',JSON.stringify({port:server.address().port})); console.log('Fixture application ready'); });
+`);
+      await manager.send(chat.id, "/run Start the actual HTTP application before reviewing the CLI."); if (fixtureError) throw fixtureError;
+      let port; const deadline = Date.now() + 10000;
+      while (!port && Date.now() < deadline) { try { port = JSON.parse(await readFile(`${chat.workspace}/.application.json`, "utf8")).port; } catch { await delay(25); } }
+      assert(port, "The application must actually be running"); applicationUrl = `http://127.0.0.1:${port}`;
+      applicationState = await (await fetch(applicationUrl, { method: "POST", body: "preserve ação" })).json();
+      await checkApplication(); if (plan) await manager.setMode(chat.id, "plan");
+    }
     const command = `/code-review high ${fix ? "--fix " : ""}total.mjs`;
     if (interrupt) {
       const running = manager.send(chat.id, command); let timer;
       try {
         await Promise.race([held.promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("The actual review turn was not reached")), 15000); })]);
-        assert.equal(store.get(chat.id).agentSessionId, null, "The first review has not checkpointed its journal yet");
+        assert.equal(store.get(chat.id).agentSessionId, application ? firstSession : null, "Keep an existing application journal; do not invent a first-review checkpoint");
+        if (application) await checkApplication();
         await manager.enqueue(chat.id, "Retain the queued follow-up");
         if (sendNow) {
           await store.update(chat.id, { queuePaused: true });
@@ -144,7 +181,7 @@ if (!process.argv.includes("--network-isolated")) {
       } finally { clearTimeout(timer); release.resolve(); }
       if (!sendNow) assert.equal(store.get(chat.id).status, "stopped");
       assert.equal(store.get(chat.id).queuedMessages[0].text, "Retain the queued follow-up");
-      assert.equal(nativeResults[0], "success", "The cancelled native handler still checkpoints its journal");
+      assert.equal(nativeResults.at(-1), "success", "The cancelled native handler still checkpoints its journal");
       assert.equal(store.get(chat.id).agentSessionId, firstSession);
       resuming = true;
       if (!sendNow) await manager.send(chat.id, "Continue after the interrupted review.");
@@ -155,22 +192,39 @@ if (!process.argv.includes("--network-isolated")) {
       assert.match(store.get(chat.id).messages.at(-1).text, /Saved review context retained/);
       assert.equal(await readFile(`${chat.workspace}/total.mjs`, "utf8"), broken);
       assert.deepEqual(store.get(chat.id).queuedMessages.map(item => item.text), ["Retain the queued follow-up"]);
-      assert.equal(requests.length, 3);
-      console.log(`PASS: actual first-command code review ${sendNow ? "Send now" : "Stop"} interruption, queued-input preservation and same-session continuation; three loopback requests.`);
+      assert.equal(mainRequests.length, application ? 5 : 3);
+      if (application) {
+        if (sendNow) {
+          await checkApplication(); await manager.stop(chat.id);
+          await manager.send(chat.id, "Continue from the saved review after explicitly stopping the app."); if (fixtureError) throw fixtureError;
+        }
+        await assert.rejects(fetch(applicationUrl, { signal: AbortSignal.timeout(2000) }));
+        assert.equal(launches.length, 2); assert.equal(store.get(chat.id).agentSessionId, firstSession);
+      }
+      console.log(`PASS: actual ${application ? "retained-application" : "first-command"} code review ${sendNow ? "Send now" : "Stop"} interruption, queued-input preservation and same-session continuation${application ? "; the same HTTP app/data survived until explicit Stop" : ""}; ${mainRequests.length} main and ${requests.length - mainRequests.length} title loopback requests.`);
     } else {
       await manager.send(chat.id, command);
       if (fixtureError) throw fixtureError;
       assert.deepEqual(store.get(chat.id).messages.filter(message => message.kind === "error").map(message => message.text), []);
-      assert.equal(requests.length, fix ? plan ? 5 : 6 : 4);
+      assert.equal(mainRequests.length, (fix ? plan ? 5 : 6 : 4) + (application ? 2 : 0));
       assert.equal(await readFile(`${chat.workspace}/total.mjs`, "utf8"), empty || fix && !plan ? original : broken, fix && !plan ? "Explicit --fix must actually change the file" : "Read-only review must not apply fixes");
       assert.match(store.get(chat.id).messages.at(-1).text, empty ? /No findings were reported/ : fix && !plan ? /Actual invocation returned total 5/ : /CLI subtracts instead of adding/);
       {
-        const session = store.get(chat.id).agentSessionId; await manager.stop(chat.id); resuming = true;
+        const session = store.get(chat.id).agentSessionId; resuming = true;
+        if (application) {
+          await checkApplication();
+          await manager.send(chat.id, "Continue from this review without restarting the app."); if (fixtureError) throw fixtureError;
+          await checkApplication();
+        }
+        await manager.stop(chat.id);
         await manager.send(chat.id, "Continue from the saved review."); if (fixtureError) throw fixtureError;
         assert.equal(store.get(chat.id).agentSessionId, session);
         assert.match(store.get(chat.id).messages.at(-1).text, /Saved review context retained/);
+        if (application) {
+          await assert.rejects(fetch(applicationUrl, { signal: AbortSignal.timeout(2000) })); assert.equal(launches.length, 2);
+        }
       }
-      console.log(`PASS: native code-review instructions, actual diff/read/report tools, final findings, same-session Stop/resume and ${fix ? plan ? "native Plan-mode edit refusal" : "applied/observed fixes" : empty ? "empty findings" : "read-only review"} verified; ${requests.length} loopback replies.`);
+      console.log(`PASS: native code-review instructions, actual diff/read/report tools, final findings, same-session Stop/resume and ${fix ? plan ? "native Plan-mode edit refusal" : "applied/observed fixes" : empty ? "empty findings" : "read-only review"} verified${application ? "; review/follow-up retained the same real HTTP app/data until explicit Stop" : ""}; ${mainRequests.length} main and ${requests.length - mainRequests.length} title loopback replies.`);
     }
   } finally {
     await manager?.shutdown(); server.closeAllConnections(); gatewayServer?.closeAllConnections();

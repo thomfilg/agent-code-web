@@ -81,7 +81,14 @@ export async function runClaudeMcpCommand(channel, command, { settleMs = 10000, 
     if (command.action === "reconnect" && all && ["connected", "cached"].includes(server.status)) return { name: server.name, text: `${name} is already connected or cached.` };
     if (command.action === "disable" && server.status === "disabled" || command.action === "enable" && server.status !== "disabled") return { name: server.name, text: `${name} is already ${command.action === "enable" ? "enabled" : "disabled"}${server.status === "failed" || server.status === "needs-auth" ? " but not connected; use /mcp reconnect to retry" : ""}.` };
     try {
-      await channel.request(command.action === "reconnect" ? "mcp_reconnect" : "mcp_toggle", { serverName: server.name, ...(command.action === "reconnect" ? {} : { enabled: command.action === "enable" }) });
+      if (command.action === "reconnect") {
+        // 2.1.222's reconnect control copies tools into a second cache that
+        // native disable does not clear in a retained session. Reconnect via
+        // the native toggle pair instead, so later disable actually removes
+        // the tools from the next query. Never retry either write implicitly.
+        await channel.request("mcp_toggle", { serverName: server.name, enabled: false });
+        await channel.request("mcp_toggle", { serverName: server.name, enabled: true });
+      } else await channel.request("mcp_toggle", { serverName: server.name, enabled: command.action === "enable" });
       return { name: server.name, changed: true };
     } catch (error) { return { name: server.name, error: `${name}: ${error.message}. Review MCP connections and retry.` }; }
   }));

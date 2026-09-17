@@ -32,8 +32,13 @@ function transport(f) {
       modelUsage: { fixture: { inputTokens: f.total * 100, outputTokens: f.total * 10, costUSD: f.total / 10, contextWindow: 200000 } } });
   };
   f.respond = packet => {
+    let response = {};
+    if (f.mcp && packet.request.subtype === "mcp_toggle" && f.refuse !== "mcp_toggle") {
+      f.mcp.find(server => server.name === packet.request.serverName).status = packet.request.enabled ? "connected" : "disabled";
+    }
+    if (f.mcp && packet.request.subtype === "mcp_status") response = { mcpServers: f.mcp.map(server => ({ ...server })) };
     f.emit({ type: "control_response", response: { request_id: packet.request_id,
-      subtype: f.refuse === packet.request.subtype ? "error" : "success", response: {}, error: "Fixture control rejected" } });
+      subtype: f.refuse === packet.request.subtype ? "error" : "success", response, error: "Fixture control rejected" } });
     if (packet.request.subtype === "interrupt" && !f.refuse) f.complete("Interrupted at native checkpoint.", f.failInterrupt);
   };
   let buffer = "";
@@ -62,7 +67,7 @@ async function fixture(t, { interactive = false } = {}) {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const chat = await store.create({ agent: "claude", title: "Application transport" }), config = testConfig(root);
   const f = { launches: [], events: [], sessions: [], requests: [] }, broker = new CapabilityBroker({ ttlMs: 60000 });
-  const executor = { workspace: chat.workspace, runtimeHome: store.runtimeHome(chat.id), mkdir: directory => mkdir(directory, { recursive: true }),
+  const executor = { workspace: chat.workspace, runtimeHome: store.runtimeHome(chat.id), metadata: { backend: "local" }, mkdir: directory => mkdir(directory, { recursive: true }),
     spawn(command, args, options) {
       if (f.spawnFailure) throw Error("Fixture spawn failure");
       f.launches.push({ command, args, env: options.env }); f.nativeSession = args[args.indexOf("--session-id") + 1]; return transport(f);
@@ -151,6 +156,25 @@ test("application replies retain one CLI and apply next-turn mode/model/effort w
   assert(!JSON.stringify(f.launches).includes(f.config.claude.providerKey));
   await f.adapter.stop(); assert.equal(f.broker.validate(capability, "anthropic"), null);
   assert.notEqual(f.child.exitCode ?? f.child.signalCode, null);
+});
+
+test("native MCP controls preserve a retained application's CLI, session, capability and next user input", async t => {
+  const f = await fixture(t); f.mcp = [{ name: "relay_one", status: "connected" }];
+  await f.adapter.send("/run Keep this app"); const token = f.adapter.capability, session = f.adapter.sessionId;
+  assert.equal((await f.adapter.send("/mcp reconnect relay_one")).text, 'Reconnected "relay_one".');
+  assert.equal((await f.adapter.send("/mcp disable relay_one")).text, 'Disabled "relay_one".');
+  assert.equal(f.mcp[0].status, "disabled");
+  f.refuse = "mcp_toggle";
+  await assert.rejects(f.adapter.send("/mcp enable relay_one"), /Native MCP control failed/);
+  assert.equal(f.mcp[0].status, "disabled");
+  f.refuse = null;
+  assert.equal((await f.adapter.send("/mcp enable relay_one")).text, 'Enabled "relay_one".');
+  await f.adapter.send("Continue with this literal prompt");
+  assert.equal(f.inputs.at(-1).message.content, "Continue with this literal prompt");
+  assert.equal(f.controls.filter(packet => packet.request.subtype === "initialize").length, 1);
+  assert(!f.controls.some(packet => packet.request.subtype === "mcp_reconnect"));
+  assert.equal(f.launches.length, 1); assert.equal(f.child.exitCode, null);
+  assert.equal(f.adapter.sessionId, session); assert.equal(f.adapter.capability, token);
 });
 
 test("a retained application keeps gateway access past its initial capability lifetime without replacing the CLI", async t => {

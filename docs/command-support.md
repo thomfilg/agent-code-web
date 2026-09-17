@@ -309,9 +309,60 @@ The scope-change test covers nine account/profile/workspace/owner/company
 variants. Syntax/unit suite: **476/476**; combined Claude-command/conversation
 browser suite: **59/59**. Native regressions pass for first-run Send now (**8**
 replies), first-review Stop/resume (**3**), and explicit recipe approvals plus
-questions (**13**). Other retained-session account/Fast cooldown, MCP/review
-and shell-classifier workflow gates remain open; this is not blanket acceptance
-of every command or a deployment.
+questions (**13**). MCP/review interop is accepted below. Retained-session
+account/Fast cooldown and shell-classifier workflow gates remain open; this is
+not blanket acceptance of every command or a deployment.
+
+### Claude MCP and review inside a running application
+
+The retained-session MCP fixture reproduced a real disconnect between native
+status and effective tools in **2.1.222**: after `/mcp reconnect relay_http`,
+`/mcp disable relay_http` reported disabled and persisted that preference, but
+the next model request still included the HTTP tool. The native reconnect
+handler copied tools into a second runtime cache that toggle-disable did not
+clear. Fresh one-shot CLI tests could not expose that stale cache.
+
+Reconnect now uses an ordered native disable/enable pair for the selected
+server, then verifies native status. It does not restart Claude or the app,
+edit native JSON itself, bypass managed policy or change saved Relay accounts.
+Neither stage is retried automatically. If Stop wins between stages, no late
+enable is sent; the native server may remain disabled until explicit retry.
+Partial failures remain errors with the actual resulting inventory.
+
+`node scripts/smoke-real-claude-mcps.mjs --application` starts an actual HTTP
+app through native `/run` and verifies HTTP/stdio reconnect, single/all toggles,
+next-query tool removal, and an explicit attempt to invoke a disabled tool
+that must fail **without reaching the MCP server**. Re-enable and recovery
+execute authenticated echo calls. Status/controls make no model calls. The
+same CLI, session, app PID and in-memory data survive; a second chat remains
+independent. Stop during actual MCP initialization cancels the connection,
+retains queued input and saved context, and closes the app. Nine main model
+replies plus native title calls; ordinary and `--errors` regressions retain
+their three/zero model replies. No real accounts or inference are used.
+
+`node scripts/smoke-real-claude-workflows.mjs --application` also verifies
+native review in that retained-session context, using a real Git diff, Read,
+ReportFindings, Edit and CLI execution where appropriate:
+
+- Default/read-only and `--empty`: findings/no findings, unchanged source,
+  same-process follow-up and explicit Stop/resume (**8** main replies each).
+- `--fix`: actual source repair and observed `total: 5`, preserving the app
+  through review and follow-up (**10** main replies).
+- `--fix --plan`: actual native edit refusal and unchanged source, with the
+  running app retained (**9** main replies).
+- `--send-now`: interrupt the real review, retain the app/data and unselected
+  queued input, then explicitly Stop and resume (**6** main replies).
+- `--interrupt`: Stop interrupts the real review and closes the app, while
+  preserving the native context and queued input (**5** main replies).
+
+Four added unit/adapter tests cover ordered toggles, failed stages, cancellation
+between writes and retained transport recovery. Syntax/unit suite **480/480**;
+combined Claude-command/conversation browser suite **59/59**. The unit fixture's
+local executor metadata was corrected so private-file checks actually use its
+local files; native fixture failures now shut down and clean their disposable
+resources. Those harness corrections are separate from the reproduced native
+cache defect. Other command/workflow, shared-host/company, Fast and activation
+gates remain open; item 20 and the original feature order are unchanged.
 
 ### Claude application sessions and native usage
 
@@ -374,9 +425,9 @@ Remaining gates are explicit:
   with an explicit Stop/retry notice; running apps are not silently terminated.
   Native effort changes and environment precedence are now accepted above.
   Long-lived capability renewal and account-change rejection are accepted
-  above. Native Fast entitlement/cooldown and MCP/review interop *within* a
-  retained app session still need acceptance. Missed capability deadlines and
-  revocation remain enforced.
+  above, as are retained-session MCP/review controls and effects. Native Fast
+  entitlement/cooldown interop still needs acceptance. Missed capability
+  deadlines and revocation remain enforced.
 
 Fixture corrections: wait for the actual server's readiness; distinguish native
 title generation from the main query; Haiku does not accept an effort picker
@@ -442,7 +493,8 @@ remain open. Keep item 20 active; no merge/deploy/live-data changes.
 Installed Claude **2.1.222** exposes `/mcp reconnect`, `enable` and `disable`,
 but executing their slash handlers in print mode reproduced the native
 terminal-callback-unavailable response. Discovery alone was not working control.
-Relay now invokes the installed stream-json `mcp_reconnect`/`mcp_toggle` controls,
+Relay now invokes installed stream-json `mcp_toggle` controls (an ordered
+disable/enable pair for reconnect, as explained in the retained-session fix),
 checks the resulting `mcp_status`, and uses a local native `/mcp` status command
 to checkpoint the same session journal. These actions never become model tasks.
 Bare `/mcp` still opens Relay's saved connection manager; `/mcp verbose` shows

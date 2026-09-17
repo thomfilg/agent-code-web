@@ -93,6 +93,45 @@ test("MCP bulk partial errors and false acknowledgements cannot report verified 
   await assert.rejects(runClaudeMcpCommand(f, {}), /Invalid native MCP action/);
 });
 
+test("MCP reconnect disconnects and reconnects only the selected server through ordered native toggles", async () => {
+  const initial = [{ name: "relay_one", status: "connected" }, { name: "relay_other", status: "connected" }];
+  const f = inventoryFixture(initial);
+  const result = await runClaudeMcpCommand(f, claudeMcpRequest("/mcp reconnect relay_one"));
+  assert.equal(result.text, 'Reconnected "relay_one".'); assert.equal(result.failed, false);
+  assert.deepEqual(result.connectors, initial);
+  assert.deepEqual(f.calls, [{ subtype: "initialize" }, { subtype: "mcp_status" },
+    { subtype: "mcp_toggle", serverName: "relay_one", enabled: false },
+    { subtype: "mcp_toggle", serverName: "relay_one", enabled: true }, { subtype: "mcp_status" }]);
+});
+
+test("a failed reconnect stage never retries writes or hides a partially disabled native server", async () => {
+  for (const rejectedStage of [false, true]) {
+    const f = inventoryFixture([{ name: "relay_one", status: "connected" }]), request = f.request;
+    f.request = async (subtype, fields) => {
+      if (subtype === "mcp_toggle" && fields.enabled === rejectedStage) {
+        f.calls.push({ subtype, ...fields }); throw Error("Native MCP control failed");
+      }
+      return request(subtype, fields);
+    };
+    const result = await runClaudeMcpCommand(f, claudeMcpRequest("/mcp reconnect relay_one"));
+    assert.equal(result.failed, true); assert.match(result.text, /Native MCP control failed/);
+    assert.equal(result.connectors[0].status, rejectedStage ? "disabled" : "connected");
+    assert.deepEqual(f.calls.filter(call => call.subtype === "mcp_toggle").map(call => call.enabled), rejectedStage ? [false, true] : [false]);
+  }
+});
+
+test("Stop between reconnect toggles cannot send a late enable or replay the disconnect", async t => {
+  const { channel, writes } = controlFixture(t, 1000);
+  const pending = runClaudeMcpCommand(channel, claudeMcpRequest("/mcp reconnect relay_one"), { initialize: false });
+  const rejected = assert.rejects(pending, /stopped/);
+  const reply = response => channel.accept({ type: "control_response", response: { subtype: "success", request_id: writes.at(-1).request_id, response } });
+  reply({ mcpServers: [{ name: "relay_one", status: "connected" }] });
+  await waitFor(() => writes.length === 2);
+  assert.deepEqual(writes[1].request, { subtype: "mcp_toggle", serverName: "relay_one", enabled: false });
+  reply({}); channel.close(); await rejected;
+  assert.equal(writes.length, 2); assert.equal(channel.pending.size, 0);
+});
+
 test("MCP private-file preflight rejects linked/account files without returning account metadata", async t => {
   const root = await temporaryDirectory(t), outside = `${root}/outside.json`;
   await writeFile(outside, JSON.stringify({ oauthAccount: { emailAddress: "private@example.test" }, projects: { private: {} } }));
