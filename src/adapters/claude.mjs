@@ -6,9 +6,10 @@ import { buildWorkerEnvironment, spawnWorker, terminateWorker } from "../worker-
 import { errorMessage, redact } from "../utils.mjs";
 import { claudeUsage, claudeContext, claudeRateLimits, safeSessionDetails } from "../session-info.mjs";
 import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings } from "../claude-settings.mjs";
+import { claudeFastRequest, claudeFastState, claudeFastCredential, checkClaudeFastAvailability, claudeFastUnavailable } from "../claude-fast.mjs";
 
 export class ClaudeAdapter {
-  constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks }) {
+  constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch }) {
     this.chat = chat;
     this.store = store;
     this.config = config;
@@ -23,6 +24,7 @@ export class ClaudeAdapter {
     this.capability = "";
     this.stopped = false;
     this.sendVersion = 0;
+    this.fetchImpl = fetchImpl;
   }
 
   async start() {
@@ -36,14 +38,44 @@ export class ClaudeAdapter {
     this.stopped = false;
   }
 
-  async send(text, { model, effort, resetEffort, mode = "accept_edits", systemPrompt } = {}) {
+  async send(text, { model, effort, resetEffort, fastMode, fastCredential, fastState, mode = "accept_edits", systemPrompt } = {}) {
     const version = this.sendVersion;
     const configuration = claudeConfigRequest(text);
+    const fastRequest = claudeFastRequest(text);
+    if (fastRequest && this.config.claude.authMode !== "gateway") throw new Error("Fast changes require a private Claude profile; shared host profiles remain locked until company/profile isolation is complete.");
     if (configuration?.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
     const nativeMode = Object.keys(CLAUDE_PERMISSION_MODES).find(key => CLAUDE_PERMISSION_MODES[key] === mode);
     if (!nativeMode) throw new Error("Unsupported Claude permission mode");
-    if (this.child || this.settingsInspection) throw new Error("A Claude turn is already running for this chat");
+    if (this.child || this.settingsInspection || this.fastInspection) throw new Error("A Claude turn is already running for this chat");
     if (this.stopped || (this.config.claude.authMode === "gateway" && !this.capability)) await this.start();
+
+    const credential = claudeFastCredential(this.config.claude);
+    const sameAccount = fastCredential === credential;
+    const requestedModel = model || this.config.claude.model;
+    const activeFast = fastMode === true && sameAccount && (fastState ? fastState !== "off" : /^opus(?:\[1m\])?$/.test(requestedModel || ""));
+    const enableFast = fastRequest === "on" || (fastRequest === "toggle" && !activeFast);
+    // Turning it off must always work, including after account access is lost.
+    // The following turn explicitly starts with fastMode:false; no inference,
+    // account lookup or global Claude settings write is needed for this action.
+    if (fastRequest && !enableFast) return { text: "Fast mode OFF (this chat only).", status: "completed", nativeFast: { state: "off" }, fastPreference: false };
+    let availability, fastFallback = null;
+    if (fastMode === true && !sameAccount && !enableFast) {
+      fastMode = false; fastFallback = { state: "off", disabledReason: "unknown" };
+      this.hooks.onEvent?.({ type: "notice", text: "Claude credentials changed. Fast is off for this chat; use /fast on to authorize it for the current account." });
+    }
+    if (enableFast || fastMode === true) {
+      const controller = new AbortController(); this.fastInspection = controller;
+      try {
+        availability = await checkClaudeFastAvailability(this.config.claude, { signal: controller.signal, fetchImpl: this.fetchImpl });
+        if (version !== this.sendVersion) throw new Error("Claude turn interrupted");
+        if (!availability.enabled) throw Object.assign(new Error(claudeFastUnavailable(availability.disabledReason)), { nativeFast: { state: "off", disabledReason: availability.disabledReason } });
+      } catch (error) {
+        if (!controller.signal.aborted && version === this.sendVersion && !error.nativeFast) error.nativeFast = { state: "off", disabledReason: "network_error" };
+        if (enableFast || controller.signal.aborted || version !== this.sendVersion) throw error;
+        fastMode = false; fastFallback = error.nativeFast;
+        this.hooks.onEvent?.({ type: "notice", text: `${error.message} Continuing at standard speed; use /fast on to retry.` });
+      } finally { if (this.fastInspection === controller) this.fastInspection = null; }
+    }
 
     const isNew = !this.sessionId;
     if (isNew) {
@@ -71,6 +103,14 @@ export class ClaudeAdapter {
     const uploads = path.join(this.runtimeHome, "uploads");
     await ensureDirectory(uploads);
     if (resetEffort) env.CLAUDE_CODE_EFFORT_LEVEL = "auto";
+    // Documented bearer-gateway compatibility, gated by the fresh authoritative
+    // controller lookup above. Never guess permission or bypass a denial/error.
+    // Model allowlists, native policy and API-side entitlement still apply.
+    if (this.config.claude.authMode === "gateway") {
+      delete env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK;
+      delete env.CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS;
+      if (availability?.enabled) env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK = "1";
+    }
     const inspect = async () => {
       const controller = new AbortController(); this.settingsInspection = controller;
       try {
@@ -81,6 +121,11 @@ export class ClaudeAdapter {
       finally { if (this.settingsInspection === controller) this.settingsInspection = null; }
     };
     const beforeSettings = configuration?.mutate ? await inspect() : null;
+    // /fast on promotes non-Opus aliases by native contract. Apply that model
+    // at startup too: print-mode 2.1.222 otherwise reports the PRE-command
+    // Sonnet model's Fast state as off even after saying it switched to Opus.
+    // Native model/organization policy still validates the selected Opus.
+    const launchModel = enableFast && !/^opus(?:\[1m\])?$/.test(requestedModel || "") ? "opus" : requestedModel;
 
     const args = [
       "--print",
@@ -93,11 +138,13 @@ export class ClaudeAdapter {
       ...(systemPrompt ? ["--append-system-prompt", systemPrompt] : []),
       ...(this.executor?.mcpServers && Object.keys(this.executor.mcpServers).length ? ["--mcp-config", JSON.stringify({ mcpServers: this.executor.mcpServers })] : []),
       ...(isNew ? ["--session-id", this.sessionId] : ["--resume", this.sessionId]),
-      ...(model || this.config.claude.model ? ["--model", model || this.config.claude.model] : []),
+      ...(launchModel ? ["--model", launchModel] : []),
       ...(effort ? ["--effort", effort] : []),
+      ...(enableFast || typeof fastMode === "boolean" ? ["--settings", JSON.stringify({ fastMode: enableFast || fastMode })] : []),
     ];
 
     if (version !== this.sendVersion) throw new Error("Claude turn interrupted");
+    if (availability?.enabled && credential !== claudeFastCredential(this.config.claude)) throw new Error("Claude credentials changed during the Fast availability check. Retry with the current account.");
 
     const child = this.executor
       ? this.executor.spawn(this.config.claude.bin, args, {
@@ -112,11 +159,12 @@ export class ClaudeAdapter {
           stdio: ["pipe", "pipe", "pipe"],
         });
     this.child = child;
-    child.stdin.end(text);
+    child.stdin.end(fastRequest ? "/fast on" : text);
 
     let streamed = "";
     let fallback = "";
     let resultMessage = null;
+    let nativeFast = null;
     let compacted = false;
     let lastRequest = null;
     const sampleId = randomUUID();
@@ -176,6 +224,7 @@ export class ClaudeAdapter {
         }
       } else if (event.type === "result") {
         resultMessage = event;
+        nativeFast = claudeFastState(event);
         this.hooks.onEvent?.({ type: "usage", usage: claudeUsage(event, lastRequest, sampleId) });
         for (const itemId of activeTools.keys()) completeTool(itemId, "", false, true);
         if (!streamed && !fallback && typeof event.result === "string") fallback = event.result;
@@ -203,9 +252,11 @@ export class ClaudeAdapter {
           (resultMessage.subtype && resultMessage.subtype !== "success")
         );
         if (code === 0 && !resultFailed) {
-          resolve({ text: streamed || fallback, status: "completed", compacted, ...(nativeSettings ? { nativeSettings } : {}) });
+          if (enableFast && (!nativeFast || nativeFast.state === "off" || nativeFast.disabledReason)) throw Object.assign(new Error(claudeFastUnavailable(nativeFast?.disabledReason)), { nativeFast });
+          resolve({ text: streamed || fallback, status: "completed", compacted, ...(nativeSettings ? { nativeSettings } : {}), ...(nativeFast || fastFallback ? { nativeFast: fastFallback || nativeFast } : {}),
+            ...(enableFast ? { fastPreference: true, fastModel: launchModel, fastCredential: credential } : fastFallback ? { fastPreference: false } : {}) });
         } else {
-          reject(Object.assign(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`), { nativeSettings }));
+          reject(Object.assign(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`), { nativeSettings, nativeFast }));
         }
       })().catch(reject); });
     });
@@ -218,6 +269,7 @@ export class ClaudeAdapter {
   async interrupt() {
     this.sendVersion += 1;
     this.settingsInspection?.abort();
+    this.fastInspection?.abort();
     // Claude print mode is one child per turn. Keep its resume ID, capability,
     // worker lease and browser; only terminate this turn's CLI process.
     const child = this.child;
@@ -227,6 +279,7 @@ export class ClaudeAdapter {
   async stop() {
     this.sendVersion += 1;
     this.settingsInspection?.abort();
+    this.fastInspection?.abort();
     this.stopped = true;
     const child = this.child;
     this.child = null;

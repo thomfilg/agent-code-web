@@ -476,6 +476,16 @@ fresh session. The target provider's default model/effort are selected.
   Auto/Accept edits retain on-request approvals, not an approval bypass.
 - **Effort:** a compact label opens a discrete slider and accessible selector
   for the chosen model's available levels.
+- **Claude Fast:** `/fast`, `/fast on` and `/fast off` control this chat's
+  preference in a private Anthropic gateway profile, including the busy queue
+  and Stop/resume. Fast can increase usage costs. The controller checks account
+  availability before enabling it; the worker never receives the provider key.
+  Turning it off does not need account access. A later failed availability check
+  continues at standard speed with a notice; changed credentials require a new
+  opt-in. Shared host profiles and custom upstreams remain gated. Native CLI
+  2.1.222 request/state acceptance is covered by
+  `node scripts/smoke-real-claude-fast.mjs`; live activation and further native
+  rate-limit/configuration acceptance are tracked in `docs/command-support.md`.
 - **Files/photos:** upload up to 10 files, 5 MB each and 20 MB total per message.
   Upload records are encrypted; files sent to an agent are deliberately readable
   in that chat's worker home. Codex receives supported images as local-image

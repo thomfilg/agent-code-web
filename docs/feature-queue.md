@@ -62,6 +62,23 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: Claude `/fast` now has private-gateway per-chat opt-in/state, native
+  request-level acceptance and same-session Stop/resume. Fresh controller-side
+  account checks keep provider keys out of workers; the documented bearer-token
+  compatibility flag is used only after a positive check. Account errors do not
+  grant Fast; ordinary tasks fall back visibly to standard mode. Credential and
+  profile changes require fresh opt-in; native disable/model policies, FIFO,
+  attachments, Stop and newer picker choices are protected. Reproduced the
+  native Sonnet-to-Opus stale-state result and fixed startup/persistence without
+  lowering effort or loosening assertions. Thirteen unit/controller cases,
+  three browser additions; related browser regressions **22/22**. Final normal
+  unit suite **407/407**; installed Claude smoke passed with seven loopback model
+  replies and twelve allowed/denied account checks, plus native disable/model
+  policies. Changed JavaScript syntax and whitespace checks pass.
+  Next safe work remains within item 20: native Fast rejection/cooldown and
+  configuration interop, then Claude goals and remaining installed commands.
+  Host/custom-gateway/account/activation gates and the original queue order/count
+  remain open. Save to PR #2 without merge, deployment or live-data changes.
 - 20: `/autocompact` now has effect-level native acceptance and private-profile
   mutation protection. Verified real automatic summary/compact-boundary after
   changing 200k to 100k and Stop/resume, reset, retained disabled state, invalid

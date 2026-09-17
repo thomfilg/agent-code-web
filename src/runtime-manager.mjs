@@ -29,6 +29,7 @@ import { CodexFeedback } from "./codex-feedback.mjs";
 import { CodexLogout } from "./codex-logout.mjs";
 import { desktopBinding, desktopInfo } from "./desktop-handoff.mjs";
 import { CLAUDE_PERMISSION_MODES, claudeConfigRequest } from "./claude-settings.mjs";
+import { claudeFastRequest, claudeFastScope } from "./claude-fast.mjs";
 
 const ADAPTERS = {
   codex: CodexAdapter,
@@ -643,7 +644,7 @@ export class RuntimeManager extends EventEmitter {
       await this.stop(chatId, "agent-switch");
       const updated = await this.store.update(chatId, current => ({ agent, ...settings, modelSelectionSet: true,
         ...(agent !== "claude" && ["default", "dont_ask"].includes(current.mode) ? { mode: "plan" } : {}),
-        agentSessionId: null, needsAgentHandoff: true, pendingRequest: null, awaitingUser: false,
+        agentSessionId: null, needsAgentHandoff: true, pendingRequest: null, awaitingUser: false, claudeFastMode: false, claudeFastStatus: null,
         nativeForkSessionId: null, forkGoalPending: false, forkContextPending: false, goal: null,
         usage: null, usageAccount: null, rateLimits: null, sessionDetails: null, taskProgress: null, connectors: null, slashCommands: [], commandCatalog: [],
         messages: current.messages.map(message => ["assistant", "tool"].includes(message.role) ? { ...message, agent: message.agent || current.agent } : message),
@@ -680,6 +681,10 @@ export class RuntimeManager extends EventEmitter {
 
   #checkClaudeConfiguration(chat, text, attachments) {
     if (chat.agent !== "claude") return;
+    if (claudeFastRequest(text)) {
+      if (attachments.length) throw new Error("/fast does not accept attachments. Remove them or send them in a separate message.");
+      if (this.config.claude.authMode !== "gateway") throw new Error("Fast changes require a private Claude profile; shared host profiles remain locked until company/profile isolation is complete.");
+    }
     const request = claudeConfigRequest(text);
     if (/^\/effort\s+status$/.test(text.trim()) && attachments.length) throw new Error("/effort status does not accept attachments. Remove them or send them in a separate message.");
     if (!request) return;
@@ -716,6 +721,34 @@ export class RuntimeManager extends EventEmitter {
     guard(); this.publishChat(updated);
     if (conflicts.length) {
       const message = await this.store.appendMessage(chatId, { role: "system", kind: "notice", text: `The native command saved its profile settings, but newer web choices for ${conflicts.join(" and ")} were kept for subsequent turns.` });
+      this.#emit(chatId, { type: "message", message });
+    }
+  }
+
+  async #syncClaudeFast(chatId, result, original, guard) {
+    if (!result.nativeFast) return;
+    guard();
+    let conflict = false;
+    const updated = await this.store.update(chatId, current => {
+      guard();
+      if (claudeFastScope(current) !== claudeFastScope(original)) throw new Error("The chat's profile changed while Fast was being checked. Retry in the current profile.");
+      if (current.modelSettingsRevision !== original.modelSettingsRevision || current.claudeFastMode !== original.claudeFastMode) { conflict = true; return {}; }
+      const patch = { claudeFastStatus: { ...result.nativeFast, checkedAt: new Date().toISOString() } };
+      if (typeof result.fastPreference === "boolean") {
+        patch.claudeFastMode = result.fastPreference;
+        patch.claudeFastScope = claudeFastScope(current);
+        patch.claudeFastCredential = result.fastPreference ? result.fastCredential : null;
+        patch.modelSettingsRevision = (current.modelSettingsRevision || 0) + 1;
+        // Native /fast on promotes unsupported aliases to Opus. Keep that
+        // choice on the next print-mode process, without lowering effort.
+        if (result.fastPreference && /^opus(?:\[1m\])?$/.test(result.fastModel || "")) { patch.model = result.fastModel; patch.modelSelectionSet = true; }
+      }
+      patch.claudeFastStatus.selectionRevision = patch.modelSettingsRevision ?? current.modelSettingsRevision ?? 0;
+      return patch;
+    });
+    guard(); this.publishChat(updated);
+    if (conflict && typeof result.fastPreference === "boolean") {
+      const message = await this.store.appendMessage(chatId, { role: "system", kind: "notice", text: "Newer model/Fast choices were kept; the completed Fast command did not replace them for subsequent turns." });
       this.#emit(chatId, { type: "message", message });
     }
   }
@@ -1097,7 +1130,8 @@ export class RuntimeManager extends EventEmitter {
       runtime.titleStream = metadata ? new ResponseStream(event => {
         runtime.eventQueue = runtime.eventQueue.then(() => this.#agentEvent(chatId, event));
       }, automaticTitle) : null;
-      const settings = this.models ? await this.models.turnSettings(this.store.get(chatId)) : {};
+      const settingsChat = this.store.get(chatId);
+      const settings = this.models ? await this.models.turnSettings(settingsChat) : {};
       const materialized = files.length ? await this.attachments.materialize(this.store.get(chatId), runtime.executor, files) : [];
       if (materialized.length) await this.store.update(chatId, current => ({ messages: current.messages.map(message => message.id === userMessageId ? { ...message, attachments: materialized } : message) }));
       const workspace = runtime.executor?.workspace || this.store.get(chatId).workspace;
@@ -1124,6 +1158,7 @@ export class RuntimeManager extends EventEmitter {
         try { return await send(); }
         catch (error) {
           if (commandAction?.type === "claudeConfig") await this.#syncClaudeConfiguration(chatId, error.nativeSettings, currentChat, checkConfiguration);
+          if (claude) await this.#syncClaudeFast(chatId, error, settingsChat, checkConfiguration);
           throw error;
         }
       };
@@ -1135,6 +1170,7 @@ export class RuntimeManager extends EventEmitter {
       runtime.titleStream?.flush();
       await runtime.eventQueue;
       if (commandAction?.type === "claudeConfig") await this.#syncClaudeConfiguration(chatId, result.nativeSettings, currentChat, checkConfiguration);
+      if (claude) await this.#syncClaudeFast(chatId, result, settingsChat, checkConfiguration);
       if (claude && /^\/reload-(?:skills|plugins)(?:\s|$)/.test(text)) await this.#refreshCommandCatalog(chatId);
       if (!result.turnsHandled) {
       const output = metadata ? extractResponse(result.text || "", automaticTitle) : { text: result.text || "", title: null, awaitingUser: false };

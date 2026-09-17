@@ -31,7 +31,7 @@ test("Fast and personality command values stay native and preserve Claude comman
   for (const text of ["/fast", "/fast on", "/fast off"]) assert.equal(messageCommand("codex", text).type, "fast");
   assert.throws(() => messageCommand("codex", "/fast turbo"), /Use \/fast/);
   for (const personality of ["friendly", "pragmatic", "none"]) assert.deepEqual(messageCommand("codex", `/personality ${personality}`), { type: "settings", settings: { personality } });
-  assert.equal(messageCommand("claude", "/fast"), null); assert.equal(messageCommand("claude", "/personality friendly"), null);
+  assert.deepEqual(messageCommand("claude", "/fast"), { type: "claudeFast", prompt: "/fast" }); assert.equal(messageCommand("claude", "/personality friendly"), null);
 });
 
 test("settings commands persist, emit visible confirmation, and never become model prompts", async t => {

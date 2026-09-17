@@ -6,9 +6,13 @@ let prompt = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { prompt += chunk; });
 process.stdin.on("end", async () => {
-  const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
+  const flag = name => { const i = process.argv.indexOf(name); return i < 0 ? null : process.argv[i + 1]; };
+  const fast = JSON.parse(flag("--settings") || "{}").fastMode;
+  const fastAllowed = process.env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK === "1" && process.env.CLAUDE_CODE_DISABLE_FAST_MODE !== "1";
+  const send = (message) => process.stdout.write(`${JSON.stringify({ ...message, ...(message.type === "result" && typeof fast === "boolean" && !process.env.CLAUDE_FIXTURE_OMIT_FAST_STATE ? { fast_mode_state: fast && fastAllowed ? "on" : "off", ...(!fastAllowed && fast ? { fast_mode_disabled_reason: "disabled_by_env" } : {}) } : {}) })}\n`);
   send({ type: "system", subtype: "init", session_id: "fixture", model: "fixture-claude", claude_code_version: "2.1.0-fixture" });
   if (prompt === "wait for interruption") { setInterval(() => {}, 1000); return; }
+  if (prompt === "/fast on") { send({ type: "result", subtype: "success", result: fastAllowed ? "Fast mode ON (this session only)" : "Fast mode unavailable" }); return; }
   if (/^\/autocompact(?:\s|$)/.test(prompt)) {
     const filename = path.join(process.env.CLAUDE_CONFIG_DIR, "settings.json");
     const settings = await readFile(filename, "utf8").then(JSON.parse).catch(() => ({}));
@@ -37,7 +41,7 @@ process.stdin.on("end", async () => {
   }
   if (prompt === "inspect-settings") {
     const flag = name => { const i = process.argv.indexOf(name); return i < 0 ? null : process.argv[i + 1]; };
-    send({ type: "result", subtype: "success", result: JSON.stringify({ model: flag("--model"), effort: flag("--effort"), mode: flag("--permission-mode"), environmentEffort: process.env.CLAUDE_CODE_EFFORT_LEVEL || null }) }); return;
+    send({ type: "result", subtype: "success", result: JSON.stringify({ model: flag("--model"), effort: flag("--effort"), mode: flag("--permission-mode"), environmentEffort: process.env.CLAUDE_CODE_EFFORT_LEVEL || null, fast }) }); return;
   }
   if (prompt === "force failure") {
     send({ type: "result", subtype: "error_during_execution", is_error: true, result: "fixture failed" });

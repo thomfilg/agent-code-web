@@ -4,6 +4,10 @@ export function messageCommand(agent, text) {
   if (!match) return null;
   const argument = (match[2] || "").trim();
   if (agent === "claude" && ["config", "settings", "autocompact"].includes(match[1])) return { type: "claudeConfig", prompt: text };
+  if (agent === "claude" && match[1] === "fast") {
+    if (argument && !["on", "off"].includes(argument)) throw new Error("Use /fast, /fast on, or /fast off");
+    return { type: "claudeFast", prompt: text };
+  }
   if (agent === "claude" && match[1] === "effort" && argument === "status") return null;
   if (match[1] === "keymap") throw new Error("Open /keymap without arguments to remap Relay keyboard shortcuts. This is a web control, not agent input.");
   if (match[1] === "vim") throw new Error("Use /vim in the web composer to toggle Vim editing, not as agent input.");

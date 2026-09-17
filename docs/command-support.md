@@ -45,7 +45,8 @@ and remain at the beginning of native stream-json input.
 | `/autocompact [auto/tokens]` (Claude) | Native current-window inspection, private-profile threshold persistence and reset. Actual automatic summary/compact-boundary and same-session Stop/resume verified; disabled state and native environment precedence retained. Shared host mutation and linked files fail closed; attached input is rejected before sending/queueing. Live activation pending. |
 | `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. |
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
-| `/fast [on/off]`, `/personality [friendly/pragmatic/none]` | Catalog-driven, persisted per-chat settings, applied in FIFO order to later turns. Stop/model-change guards, retryable personality picker and draft/attachment protection. Controller/browser checks and actual installed-CLI parameter/resume verification pass; live activation remains pending. |
+| `/fast [on/off]`, `/personality [friendly/pragmatic/none]` (Codex) | Catalog-driven, persisted per-chat settings, applied in FIFO order to later turns. Stop/model-change guards, retryable personality picker and draft/attachment protection. Controller/browser checks and actual installed-CLI parameter/resume verification pass; live activation remains pending. |
+| `/fast [on/off]` (Claude) | Per-chat private-gateway opt-in, fresh authenticated account checks, structured native status, FIFO and same-session Stop/resume. Actual native Fast/standard requests, model changes and account/native-policy denials verified. No provider key in workers. Host profiles, custom upstreams, live activation and additional native rate-limit/configuration cases remain gated below. |
 | `/usage`, `/status`, `/context` | Existing session/usage inspection. |
 | `/diff`, `/mcp`, `/skills`, `/help` | Workspace diff, connection manager, installed-command picker. |
 | `/new`, `/clear`, `/resume` | New-chat flow or searchable saved-chat picker; never implicitly delete the old conversation. |
@@ -86,15 +87,73 @@ Do not treat removing entries from autocomplete as implementing them.
   Windows worker is introduced.
 - Claude acceptance below covers the command transport, native local results,
   custom expansion, configuration readback, reload and resume, not every command's effect. Next verify
-  stateful `/fast` and `/goal` across actual
-  Relay turn settings and worker restarts, plus native MCP actions, bundled
+  further `/fast` rate-limit/configuration cases and stateful `/goal` across
+  actual Relay turn settings and worker restarts, plus native MCP actions, bundled
   workflows and installed plugin namespaces. Account-backed commands and shared
   host-profile writes also need the company-isolation gate in item 21. Do not
   infer support from a catalog entry or treat a native removal notice as a
   working replacement. Use the installed version's capabilities, not commands
   added only in newer documentation.
 
-### Claude automatic compaction and Fast-mode findings
+### Claude private-gateway Fast checkpoint
+
+`/fast`, `/fast on` and `/fast off` now have per-chat preferences and scoped
+state, rather than failing at the native print-mode opt-in gate. Controls retain
+FIFO ordering, reject attached files before acceptance, survive Stop/reload and
+cannot overwrite newer picker choices, including same-value choices made during
+asynchronous settings resolution. Owner/company/environment/profile changes
+invalidate the opt-in; a changed credential requires explicit opt-in again.
+Only a hash binds the saved preference to its credential, never the key itself.
+
+The [native Fast contract](https://code.claude.com/docs/en/fast-mode) distinguishes
+startup opt-in, account entitlement and model eligibility. Its bearer-only
+gateway transport cannot authenticate the organization lookup. Relay therefore
+performs the installed CLI's authenticated availability GET in the controller,
+with a five-second bound, strict JSON/size validation, no redirect or positive
+cache, and no key transfer to workers. Custom upstream keys are not sent to
+Anthropic. Only a fresh positive decision enables the documented
+`CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1` **gateway compatibility flag** in that
+one worker launch. This relocates the availability check; it does not assume
+authorization or ignore a denial. Native model/disable policy and API entitlement
+remain in force. No org-cache file is fabricated. A denied explicit activation
+fails visibly; a later failed check continues an ordinary task at standard speed
+with a notice and resets the chat preference. Off needs no lookup or inference.
+
+Installed **Claude 2.1.222** has an observed print-mode inconsistency: `/fast on`
+from Sonnet reports a switch to Opus in prose but returns the prior model's
+structured Fast state as off. Relay starts that explicit activation with the
+native-contract Opus choice and preserves effort; native policy still validates
+the choice. It requires the actual structured on/cooldown state, not just the
+success prose. Later explicit model changes win; toggling from inactive Sonnet
+enables Opus Fast again instead of mistakenly turning off the saved preference.
+
+`node scripts/smoke-real-claude-fast.mjs` uses a loopback-only network/PID
+namespace, dummy controller credentials and private profiles. The installed
+catalog exposes Fast; actual model request bodies prove Fast versus standard
+speed, unchanged native identity after Stop, model promotion and subsequent
+model switching. Native disable and model-allowlist policies reject activation
+without inference. Fresh allowed/denied controller responses are checked; the
+fixture asserts that the worker environment never contains the controller key.
+No public API, real account, personal profile or live chat is used.
+
+Thirteen new unit/controller cases cover these paths plus malformed/oversized
+responses, credential rotation, interruption, missing native state and selection
+races. Three browser cases cover discovery, 1280px/320px idle/busy dispatch and
+draft/attachment retry; related browser regression suite **22/22**. The first
+full unit run found the old Claude-dispatch expectation (`null`); it now asserts
+the exact new typed command, retaining the unrelated native dispatch assertion.
+The native Sonnet inconsistency was reproduced before the launch-model fix; no
+success assertion was relaxed. Final test totals are recorded in the queue.
+
+Remaining Fast acceptance: native API rejection/cooldown/credit-exhaustion
+behavior across print-process boundaries, `/config`/`/settings` Fast preference
+interop, and managed per-session-opt-in behavior. Shared host profiles still
+need item 21 isolation; custom gateways need their own authenticated availability
+integration. Live backend activation is not performed by this checkpoint.
+Keep item 20 open and continue these cases before Claude goals and remaining
+installed commands; this is not a claim that every command is complete.
+
+### Claude automatic compaction and earlier Fast-mode findings
 
 Installed Claude **2.1.222** already persists `/autocompact` values correctly;
 acceptance now verifies its effects, not just the command acknowledgement.
@@ -132,18 +191,17 @@ dispatch and draft/attachment retention. Final unit/controller suite **394/394**
 related browser cases **19/19**. The earlier configuration native smoke still
 passes; no live service/account/profile or approval was changed.
 
-Fast mode remains an implementation/acceptance gap, not a completed feature.
-A separate disposable-profile probe in a loopback-only network/PID namespace
-confirmed that `/fast`, `/fast off` and `/fast on` currently return the native
+At the preceding checkpoint, a disposable-profile probe in a loopback-only
+network/PID namespace confirmed that `/fast`, `/fast off` and `/fast on` returned the native
 Agent-SDK-unavailable result with Relay's ordinary launch. The documented
 [non-interactive opt-in](https://code.claude.com/docs/en/fast-mode#toggle-fast-mode)
 requires startup settings; adding `--settings '{"fastMode":true}'` to that
 isolated probe clears the SDK gate but then reports organization-disabled with
 the dummy account. No organization/network checks were bypassed, no personal
 credentials were supplied, and the probe could not reach external services.
-Next work must implement actual per-chat opt-in/persistence and verify native
-request behavior under allowed and denied account conditions. A native denial,
-an opt-in flag alone or a lower effort setting is not Fast-mode completion.
+That evidence led to the private-gateway implementation and request-level
+acceptance above. A native denial, an opt-in flag alone or a lower effort setting
+is not Fast-mode completion; remaining cases stay explicitly open.
 
 ### Claude configuration effects and persistence
 

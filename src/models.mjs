@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { JsonRpcProcess } from "./json-rpc-process.mjs";
+import { claudeFastScope } from "./claude-fast.mjs";
 const exec = promisify(execFile);
 const fail = message => Object.assign(new Error(message), { statusCode: 400 });
 
@@ -98,6 +99,8 @@ export class ModelCatalog {
     if (target && !selected) throw fail(`Model ${target} is not available. Choose another model before sending a message.`);
     const effort = chat.agent === "claude" && chat.effort === "auto" ? null : chat.effort || (selected?.efforts.includes(catalog.configuredDefaultEffort) ? catalog.configuredDefaultEffort : selected?.defaultEffort) || null;
     return { model: chat.model || catalog.configuredDefault || selected?.id || (chat.agent === "claude" ? "default" : null), effort, resetEffort: !effort,
+      ...(chat.agent === "claude" && typeof chat.claudeFastMode === "boolean" ? { fastMode: chat.claudeFastMode && chat.claudeFastScope === claudeFastScope(chat), fastCredential: chat.claudeFastCredential,
+        ...(chat.claudeFastStatus?.selectionRevision === chat.modelSettingsRevision ? { fastState: chat.claudeFastStatus?.state } : {}) } : {}),
       ...(chat.agent === "codex" && Object.hasOwn(chat, "serviceTier") ? { serviceTier: selected?.serviceTiers?.some(tier => tier.id === chat.serviceTier) ? chat.serviceTier : null } : {}),
       ...(chat.agent === "codex" && chat.personality ? { personality: selected?.supportsPersonality ? chat.personality : "none" } : {}) };
   }

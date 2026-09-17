@@ -32,6 +32,35 @@ test("native skill reload refreshes an open slash menu immediately without chang
   expect(f.reads).toBe(2); expect(f.calls).toHaveLength(1); expect(f.errors).toEqual([]);
 });
 
+for (const width of [1280, 320]) test(`Claude Fast commands at ${width}px are discoverable, literal and queued while busy`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input");
+  f.catalog = [{ name: "fast", description: "Toggle Fast for this chat; may increase usage costs" }]; await f.emit();
+  await input.fill("/fas"); await expect(page.locator("#slash-options")).toContainText("/fast");
+  await page.locator("#slash-options [role=option]").click(); await expect(input).toHaveValue("/fast "); expect(f.calls).toEqual([]);
+  for (const text of ["/fast", "/fast on", "/fast off"]) {
+    await input.fill(text); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+    await expect.poll(() => f.calls.length).toBe(["/fast", "/fast on", "/fast off"].indexOf(text) + 1);
+    expect(f.calls.at(-1)).toEqual({ tail: text === "/fast" ? "messages" : "queue", text, attachments: [] });
+    f.snapshot.status = "running"; await f.emit();
+  }
+  expect(f.errors).toEqual([]);
+});
+
+test("rejected Claude Fast input retains its draft and attachment for an explicit retry", async ({ page }) => {
+  const f = await fixture(page), input = page.locator("#message-input");
+  f.responseStatus = 400; f.responseError = "/fast does not accept attachments. Remove them or send them in a separate message.";
+  await page.locator("#attachment-input").setInputFiles({ name: "keep-fast.txt", mimeType: "text/plain", buffer: Buffer.from("Private unsent content") });
+  await expect(page.locator("#attachment-chips")).toContainText("keep-fast.txt");
+  await input.fill("/fast on"); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect(page.locator("#toasts")).toContainText("does not accept attachments"); await expect(input).toHaveValue("/fast on");
+  await expect(page.locator("#attachment-chips")).toContainText("keep-fast.txt");
+  await page.locator("#attachment-chips button").filter({ hasText: "×" }).click();
+  f.responseStatus = 202;
+  await page.locator("#composer").evaluate(form => form.requestSubmit()); await expect.poll(() => f.calls.length).toBe(2);
+  expect(f.calls.at(-1)).toEqual({ tail: "messages", text: "/fast on", attachments: [] }); expect(f.errors).toEqual([]);
+});
+
 test("a stale pending discovery cannot replace commands fetched after the native catalog changes", async ({ page }) => {
   const f = await fixture(page), input = page.locator("#message-input");
   let release; f.gate = new Promise(resolve => { release = resolve; });
