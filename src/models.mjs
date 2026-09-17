@@ -9,19 +9,32 @@ const exec = promisify(execFile);
 const fail = message => Object.assign(new Error(message), { statusCode: 400 });
 
 export class ModelCatalog {
-  constructor(config) { this.config = config; this.cache = new Map(); this.pending = new Map(); }
+  constructor(config, accounts = null) { this.config = config; this.accounts = accounts; this.cache = new Map(); this.pending = new Map(); }
   defaults(agent) { return { model: this.config[agent]?.model || null, effort: this.config[agent]?.effort || null }; }
   async creationSettings(agent, input = {}) {
     if (agent === "mock") return this.validate(agent, input);
-    const defaults = this.defaults(agent);
-    const catalog = await this.list(agent);
+    const catalog = await this.list(agent, input);
+    const defaults = catalog.defaults || this.defaults(agent);
     const model = input.model || defaults.model;
     const selected = catalog.models.find(item => item.id === model);
-    return this.validate(agent, { model, effort: input.effort || (selected?.efforts.includes(defaults.effort) ? defaults.effort : selected?.defaultEffort) || null });
+    return this.validate(agent, { model, effort: input.effort || (selected?.efforts.includes(defaults.effort) ? defaults.effort : selected?.defaultEffort) || null }, input);
   }
-  async list(agent) {
+  async list(agent, context = {}) {
     if (agent === "mock") return { models: [], source: "mock", note: "Mock mode does not use a model or effort level." };
     if (!["codex", "claude"].includes(agent)) throw fail("Invalid agent");
+    if (context.agentAccountId && agent === "codex") {
+      // Never consult a shared/host catalog for a named account. Validate
+      // ownership on every request, including when the browser cached a list.
+      const models = await this.accounts.models(context.ownerId, context.agentAccountId);
+      const configured = this.defaults(agent);
+      const chosen = models.find(model => model.model === configured.model) || models.find(model => model.isDefault) || models[0];
+      const defaults = { model: chosen?.model || null, effort: chosen?.supportedReasoningEfforts?.some(e => e.reasoningEffort === configured.effort) ? configured.effort : chosen?.defaultReasoningEffort || null };
+      return { models: models.map(model => ({ id: model.model, label: model.displayName || model.model, description: model.description || "", isDefault: model.isDefault,
+        defaultEffort: model.defaultReasoningEffort, efforts: (model.supportedReasoningEfforts || []).map(e => e.reasoningEffort), supportsPersonality: model.supportsPersonality === true,
+        serviceTiers: (model.serviceTiers || []).map(tier => ({ id: tier.id, name: tier.name, description: tier.description })) })),
+        source: "codex-account", note: "Models reported for the selected Codex account.", configuredDefault: defaults.model, configuredDefaultEffort: defaults.effort, defaults };
+    }
+    if (this.config.google?.enabled) throw fail("Connect and select an agent account for this user");
     const cached = this.cache.get(agent);
     if (cached?.expires > Date.now()) return cached.value;
     if (this.pending.has(agent)) return this.pending.get(agent);
@@ -59,12 +72,12 @@ export class ModelCatalog {
     if (stdout.includes("fable")) aliases.unshift("fable");
     return { models: aliases.map(id => ({ id, label: id === "default" ? "Claude account default" : id[0].toUpperCase() + id.slice(1), efforts: id === "haiku" ? ["auto"] : ["auto", ...efforts], defaultEffort: null })), source: "claude-cli-aliases", configuredDefault: this.config.claude.model || null, note: "CLI aliases; Claude checks account availability when you send and may use a different planning model in Plan mode. Auto effort uses Claude's native default; Fable may require usage credits." };
   }
-  async validate(agent, input) {
+  async validate(agent, input, context = input) {
     const model = input.model || null; const effort = input.effort || null;
     if (model !== null && (typeof model !== "string" || model.length > 150 || !/^[a-zA-Z0-9_.\[\]-]+$/.test(model))) throw fail("Invalid model name");
     if (effort !== null && typeof effort !== "string") throw fail("Invalid effort level");
     if (!model && !effort && !Object.hasOwn(input, "serviceTier") && !Object.hasOwn(input, "personality")) return { model: null, effort: null };
-    const catalog = await this.list(agent);
+    const catalog = await this.list(agent, context);
     const selected = catalog.models.find(item => item.id === (model || catalog.configuredDefault)) || (!model ? catalog.models.find(item => item.isDefault) : null);
     if (agent === "mock" || (model && !selected)) throw fail("Choose a model from the available models list");
     const allowed = selected?.efforts || (agent === "claude" ? catalog.models.find(item => item.id === "opus")?.efforts : []);
@@ -81,7 +94,7 @@ export class ModelCatalog {
     return { model, effort, ...extra };
   }
   async selected(chat) {
-    const catalog = await this.list(chat.agent);
+    const catalog = await this.list(chat.agent, chat);
     const model = chat.model || catalog.configuredDefault;
     return catalog.models.find(item => item.id === model) || (!model ? catalog.models.find(item => item.isDefault) : null);
   }
@@ -93,7 +106,7 @@ export class ModelCatalog {
   }
   async turnSettings(chat) {
     if (chat.agent === "mock") return {};
-    const catalog = await this.list(chat.agent);
+    const catalog = await this.list(chat.agent, chat);
     const target = chat.model || catalog.configuredDefault;
     const selected = catalog.models.find(item => item.id === target) || (!target ? catalog.models.find(item => item.isDefault) : null);
     if (target && !selected) throw fail(`Model ${target} is not available. Choose another model before sending a message.`);

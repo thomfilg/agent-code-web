@@ -76,7 +76,10 @@ export class ChatSidebar {
   connect() {
     this.events?.close();
     this.events = new EventSource("/api/sidebar/events");
-    this.events.onmessage = () => this.scheduleRefresh();
+    this.events.onmessage = event => {
+      this.scheduleRefresh();
+      try { if (JSON.parse(event.data).type === "agent_accounts_changed") window.dispatchEvent(new Event("relay-agent-accounts-changed")); } catch { /* Ignore malformed invalidations. */ }
+    };
     this.events.onerror = () => { $("#sidebar-sync").textContent = "Reconnecting…"; };
   }
   scheduleRefresh() {

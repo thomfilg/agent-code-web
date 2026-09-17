@@ -7,6 +7,7 @@ let pendingTurn = null;
 let turnCount = 0;
 let goal = null;
 let lastMode = "default";
+let externalAccount, refreshRequest;
 let backgroundTerminals = [{ processId: "100", command: "npm run dev TOKEN=fixture-secret", cwd: "/fixture/workspace" }, { processId: "200", command: "npm run test:watch", cwd: "/fixture/workspace" }];
 function goalChanged() { send({ method: "thread/goal/updated", params: { threadId: "thr_fixture", goal } }); }
 function continueGoal() {
@@ -22,6 +23,18 @@ rl.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
     send({ id: message.id, result: { userAgent: `${message.params.clientInfo.name}/0.154.0-fixture (private-host-never-expose)`, platformFamily: "unix", platformOs: "linux" } });
+  } else if (message.method === "account/login/start") {
+    if (message.params.type !== "chatgptAuthTokens" || !message.params.accessToken || message.params.refreshToken) return send({ id: message.id, error: { code: -32602, message: "Fixture requires only an external access token" } });
+    externalAccount = message.params;
+    send({ id: message.id, result: { type: "chatgptAuthTokens" } });
+  } else if (message.method === "fixture/accountRefresh") {
+    refreshRequest = message.id;
+    send({ id: 901, method: "account/chatgptAuthTokens/refresh", params: { reason: "unauthorized", previousAccountId: message.params.previousAccountId } });
+  } else if (message.id === 901 && !message.method) {
+    send({ id: refreshRequest, ...(message.error ? { error: message.error } : { result: { fields: Object.keys(message.result).sort(), accountId: message.result.chatgptAccountId, hasAccess: Boolean(message.result.accessToken) } }) });
+  } else if (message.method === "fixture/accountEcho") {
+    send({ method: "error", params: { message: `Fixture echo: ${externalAccount.accessToken}` } });
+    send({ id: message.id, result: externalAccount });
   } else if (message.method === "thread/start") {
     send({ id: message.id, result: { model: "fixture-gpt", thread: { id: "thr_fixture" } } });
   } else if (message.method === "thread/list") {

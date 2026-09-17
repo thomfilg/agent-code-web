@@ -1,5 +1,6 @@
 import { ChatSidebar } from "./chat-sidebar.js";
 import { GoogleLogin } from "./google-login.js";
+import { AgentAccountSettings } from "./agent-accounts.js";
 import { closeSidePanel } from "./side-panels.js";
 import { WorkspaceSettings } from "./workspace-settings.js";
 import { ModelPicker } from "./model-picker.js";
@@ -233,7 +234,8 @@ function renderActive() {
   elements.title.textContent = chat.title;
   $("#organize-chat-button").textContent = "Rename / organize";
   const runtimeLabel = chat.runtimeMetadata?.instanceId ? ` · ${chat.runtimeMetadata.instanceId}` : "";
-  elements.meta.textContent = `${agentLabel(chat.agent)}${runtimeLabel} · ${chat.workspace}`;
+  const account = workspaceSettings.accounts?.find(item => item.id === chat.agentAccountId);
+  elements.meta.textContent = `${agentLabel(chat.agent)}${account ? ` · ${account.name}` : ""}${runtimeLabel} · ${chat.workspace}`;
   elements.status.textContent = chat.status === "idle" && chat.idleKeepAwakeReason ? "Ready" : chat.status;
   elements.detail.textContent = chat.statusDetail || "";
   elements.statusDot.className = `status-dot ${chat.status}`;
@@ -252,10 +254,18 @@ function renderActive() {
   if (!elements.agentPicker.options.length) for (const agent of state.config.agents.filter(item => item.enabled)) {
     const option = node("option", "", agent.id === "claude" ? "Claude" : agent.label); option.value = agent.id; elements.agentPicker.append(option);
   }
+  if (![...elements.agentPicker.options].some(option => option.value === chat.agent)) {
+    const option = node("option", "", agentLabel(chat.agent)); option.value = chat.agent; option.disabled = true; elements.agentPicker.append(option);
+  }
   elements.agentPicker.value = chat.agent;
-  elements.agentPicker.disabled = switching || ["running", "starting", "stopping"].includes(chat.status);
-  elements.agentPicker.title = elements.agentPicker.disabled ? "Stop the working agent before switching" : "Switch agent · conversation and workspace are retained";
-  activeModelPicker.setAgent(chat.agent, chat);
+  const noAgent = [...elements.agentPicker.options].every(option => option.disabled);
+  elements.agentPicker.disabled = noAgent || switching || ["running", "starting", "stopping"].includes(chat.status);
+  elements.agentPicker.title = noAgent ? "Connect an agent in Agent accounts" : elements.agentPicker.disabled ? "Stop the working agent before switching" : "Switch agent · conversation and workspace are retained";
+  const accountButton = $("#chat-agent-account");
+  accountButton.hidden = !state.config.features?.agentAccounts || chat.agent === "mock";
+  accountButton.textContent = account ? `${account.name}${account.status !== "connected" ? " · reconnect" : ""}` : "Choose account";
+  accountButton.disabled = switching;
+  activeModelPicker.setAgent(state.config.features?.agentAccounts && chat.agent === "codex" && (!account || account.status !== "connected") ? null : chat.agent, chat);
   if (switching) { activeModelPicker.model.disabled = true; activeModelPicker.effort.disabled = true; }
   renderMessages();
   renderApproval();
@@ -424,6 +434,8 @@ function renderSecurityHint() {
     elements.dialogSecurity.append(strong, document.createTextNode("The long-lived provider key remains in the control plane; this worker receives a short-lived chat capability."));
   } else if (agent.authMode === "host") {
     elements.dialogSecurity.append(node("strong", "", "Local login mode. "), document.createTextNode("This reuses the CLI credential store and is intended for a local POC, not a hardened deployment."));
+  } else if (agent.authMode === "account") {
+    elements.dialogSecurity.textContent = "Only the selected account is used. Refresh credentials remain encrypted on the controller; the worker receives an access token for this account. Local workers still share the host filesystem.";
   } else {
     elements.dialogSecurity.textContent = "Mock mode makes no provider request and is safe for testing the interface and autosleep lifecycle.";
   }
@@ -670,6 +682,7 @@ async function boot() {
     return;
   }
   state.config = await api("/api/config");
+  $("#agent-accounts-button").hidden = !state.config.features?.agentAccounts;
   // Cosmetic preferences must not hold the conversation/composer behind a
   // slow settings response. The tab stays neutral until its settings arrive.
   void tabTitle.load().catch(error => toast(`Tab title stays neutral: ${error.message}`));
@@ -788,6 +801,20 @@ const sidebar = new ChatSidebar({ state, api, select: selectChat, remove: delete
   },
 });
 const workspaceSettings = new WorkspaceSettings({ state, api, toast });
+const agentAccountSettings = new AgentAccountSettings({ api, state, toast, changed: async () => {
+  state.config = await api("/api/config");
+  const selected = elements.agentSelect.value;
+  elements.agentSelect.replaceChildren();
+  for (const agent of state.config.agents.filter(item => item.enabled)) {
+    const option = node("option", "", agent.label); option.value = agent.id; elements.agentSelect.append(option);
+  }
+  if ([...elements.agentSelect.options].some(option => option.value === selected)) elements.agentSelect.value = selected;
+  await workspaceSettings.load(); renderSecurityHint();
+  elements.agentPicker.replaceChildren(); ModelPicker.clearCatalogs(); activeModelPicker.key = null; renderActive();
+}, chatUpdated: chat => {
+  updateChatSummary(chat);
+  if (state.active?.id === chat.id) { state.active = chat; activeModelPicker.key = null; renderActive(); }
+} });
 const googleLogin = new GoogleLogin({ api, beforeSignOut: () => !(elements.input.value.trim() || chatControls.attachments().length) || confirm("Sign out? Your unsent draft and attachment selection will be cleared. Saved conversations and files will remain.") });
 const mcpSettings = new McpSettings({ api, toast, state });
 const toolActivity = new ToolActivity();
@@ -891,6 +918,9 @@ const activeModelPicker = new ModelPicker({ root: $("#composer-model-controls"),
 elements.agentPicker.addEventListener("change", async () => {
   const chat = state.active; if (!chat) return;
   const agent = elements.agentPicker.value;
+  if (agent === "codex" && state.config.features?.agentAccounts && chat.agent !== agent) {
+    renderActive(); await agentAccountSettings.open(); return;
+  }
   state.switchingChat = chat.id; renderActive();
   try {
     await activeModelPicker.saving;

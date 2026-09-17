@@ -5,6 +5,19 @@ import test from "node:test";
 import { ModelCatalog } from "../src/models.mjs";
 import { Environments, SOFTWARE_CATALOG } from "../src/environments.mjs";
 import { MemoryRecords } from "../src/database.mjs";
+
+test("named Codex catalogs use only models available to that account, with no host fallback in Google mode", async () => {
+  const config = { google: { enabled: true }, codex: { model: "unavailable-global-default", effort: "high", authMode: "host" } };
+  const calls = [], catalog = new ModelCatalog(config, { models: async (owner, id) => {
+    calls.push({ owner, id });
+    return [{ model: "account-default", isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] }];
+  } });
+  const context = { ownerId: "fixture-user", agentAccountId: "fixture-account" };
+  assert.deepEqual(await catalog.creationSettings("codex", context), { model: "account-default", effort: "medium" });
+  assert.ok(calls.every(call => call.owner === context.ownerId && call.id === context.agentAccountId));
+  await assert.rejects(() => catalog.list("codex"), /select an agent account/);
+  await assert.rejects(() => catalog.list("claude"), /select an agent account/);
+});
 import { prepareSoftware } from "../src/software.mjs";
 import { testConfig } from "./helpers.mjs";
 

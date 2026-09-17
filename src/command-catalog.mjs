@@ -44,15 +44,15 @@ export class CommandCatalog {
   }
   async env(agent, chat) {
     // Never inherit API keys or the control-plane environment.
-    const host = this.config[agent]?.authMode === "host";
+    const host = !this.config.google?.enabled && !chat.agentAccountId && this.config[agent]?.authMode === "host";
     const home = host ? os.homedir() : path.join(path.dirname(chat.workspace), "runtime-home");
     const env = { HOME: home, PATH: process.env.PATH, LANG: "C.UTF-8" };
     if (!host) { const directory = path.join(home, agent); await mkdir(directory, { recursive: true, mode: 0o700 }); env[agent === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"] = directory; }
-    if (this.config[agent]?.authMode === "host") { if (agent === "codex" && process.env.CODEX_HOME) env.CODEX_HOME = process.env.CODEX_HOME; if (agent === "claude" && process.env.CLAUDE_CONFIG_DIR) env.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR; }
+    if (host) { if (agent === "codex" && process.env.CODEX_HOME) env.CODEX_HOME = process.env.CODEX_HOME; if (agent === "claude" && process.env.CLAUDE_CONFIG_DIR) env.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR; }
     return env;
   }
   async codex(chat) {
-    const rpc = new JsonRpcProcess({ command: this.config.codex.bin, args: ["app-server"], spawnOptions: { cwd: chat.workspace, env: await this.env("codex", chat) }, isolation: this.config.processIsolation, requestTimeoutMs: 15000 });
+    const rpc = new JsonRpcProcess({ command: this.config.codex.bin, args: ["app-server", ...(chat.agentAccountId || this.config.google?.enabled ? ["-c", 'cli_auth_credentials_store="ephemeral"'] : [])], spawnOptions: { cwd: chat.workspace, env: await this.env("codex", chat) }, isolation: this.config.processIsolation, requestTimeoutMs: 15000 });
     rpc.on("error", () => {});
     try {
       rpc.start(); await rpc.request("initialize", { clientInfo: { name: "agent_relay_commands", version: "1" }, capabilities: { experimentalApi: true } }); rpc.notify("initialized", {});

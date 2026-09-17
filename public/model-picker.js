@@ -1,6 +1,7 @@
 const catalogs = new Map();
 const option = (value, text) => { const el = document.createElement("option"); el.value = value; el.textContent = text; return el; };
 export class ModelPicker {
+  static clearCatalogs() { catalogs.clear(); }
   constructor({ root, api, onChange }) {
     Object.assign(this, { root, api, onChange }); this.version = 0;
     this.model = root.querySelector(".model-select"); this.effort = root.querySelector(".effort-select"); this.note = root.querySelector(".model-note");
@@ -12,18 +13,19 @@ export class ModelPicker {
   }
   value() { return { model: this.model.value || null, effort: this.effort.value || null }; }
   async setAgent(agent, selected = {}, { useDefaults = false } = {}) {
-    const key = JSON.stringify([agent, selected.model || null, selected.effort || null, useDefaults]);
+    const key = JSON.stringify([agent, selected.agentAccountId || null, selected.model || null, selected.effort || null, useDefaults]);
     if (this.key === key || this.busy) return;
-    this.key = key; this.agent = agent; const version = ++this.version;
+    this.key = key; this.agent = agent; this.agentAccountId = selected.agentAccountId || null; this.useDefaults = useDefaults; const version = ++this.version;
     this.root.dataset.status = "loading";
-    this.root.hidden = agent === "mock";
+    this.root.hidden = !agent || agent === "mock";
     this.model.replaceChildren(option("", "Loading models…")); this.model.disabled = true; this.effort.disabled = true;
     this.effort.replaceChildren(option("", "Default effort")); this.note.textContent = "";
     this.syncEffort();
-    if (agent === "mock") return;
+    if (!agent || agent === "mock") return;
     try {
-      if (!catalogs.has(agent)) catalogs.set(agent, this.api(`/api/models?agent=${agent}`).catch(error => { catalogs.delete(agent); throw error; }));
-      const catalog = await catalogs.get(agent); if (version !== this.version) return;
+      const catalogKey = `${agent}:${selected.agentAccountId || "legacy"}`;
+      if (!catalogs.has(catalogKey)) catalogs.set(catalogKey, this.api(`/api/models?agent=${agent}${selected.agentAccountId ? `&account=${encodeURIComponent(selected.agentAccountId)}` : ""}`).catch(error => { catalogs.delete(catalogKey); throw error; }));
+      const catalog = await catalogs.get(catalogKey); if (version !== this.version) return;
       this.catalog = catalog;
       if (useDefaults) selected = { model: selected.model || catalog.defaults?.model, effort: selected.effort || catalog.defaults?.effort };
       const defaultModel = catalog.configuredDefault || catalog.models.find(model => model.isDefault)?.label;
@@ -63,7 +65,7 @@ export class ModelPicker {
     if (autoNote) autoNote.hidden = value !== "auto";
   }
   changed() {
-    const value = this.value(); this.key = JSON.stringify([this.agent, value.model, value.effort]);
+    const value = this.value(); this.key = JSON.stringify([this.agent, this.agentAccountId, value.model, value.effort, this.useDefaults]);
     this.busy = true; this.model.disabled = true; this.effort.disabled = true;
     this.syncEffort();
     this.saving = Promise.resolve(this.onChange(value)).then(() => { this.root.dataset.status = "ready"; this.model.title = `Model · ${value.model || "Default"}`; this.effort.title = `Effort · ${value.effort || "Default"}`; }).catch(error => { this.note.textContent = `Not saved: ${error.message}`; this.root.dataset.status = "error"; this.key = null; throw error; }).finally(() => { this.busy = false; this.model.disabled = false; this.effort.disabled = this.effort.options.length <= 1; this.syncEffort(); });

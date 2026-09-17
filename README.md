@@ -115,6 +115,14 @@ client and owner email in Doppler, not in committed files. The check reports
 presence only and does not open the saved database. See the setup guide for
 the project-scoped token/CLI login and optional manual environment launch.
 
+In Google mode, agent credentials must belong to the signed-in Relay user,
+including the administrator. **Agent accounts** provides named Codex sign-in by
+browser URL/device code and explicit personal/company account selection per
+chat. There is no host-login or shared-key fallback. See
+[Codex accounts](docs/codex-accounts.md) for native CLI requirements, storage,
+isolation and the remaining real-account acceptance gate. Claude account login
+is still a separate unfinished MVP item; Google login alone does not enable it.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `AGENT_WEB_HOST` | `127.0.0.1` | HTTP bind address |
@@ -134,8 +142,8 @@ the project-scoped token/CLI login and optional manual environment launch.
 | `AGENT_WORKER_BACKEND` | `local` | `local` process workers or per-chat `ec2` workers |
 | `AGENT_PROCESS_ISOLATION` | `namespace` on Linux | `namespace` or `none` for local workers |
 | `AGENT_CHROME_BIN` | `google-chrome` | Chrome executable in the worker; never a personal profile path |
-| `CODEX_AUTH_MODE` | `gateway` | `gateway` or `host` |
-| `CLAUDE_AUTH_MODE` | `gateway` | `gateway` or `host` |
+| `CODEX_AUTH_MODE` | `gateway` | Legacy local/test mode (`gateway` or `host`); Google users require named accounts instead |
+| `CLAUDE_AUTH_MODE` | `gateway` | Legacy local/test mode (`gateway` or `host`); not a multi-user account-login substitute |
 
 ## Shared Chrome
 

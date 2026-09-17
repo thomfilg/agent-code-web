@@ -37,7 +37,7 @@
 
         <div class="sidebar-footer">
           <button type="button" class="secondary-button relay-account-button" id="relay-account-button" aria-label="Your Relay account" hidden></button>
-          <div class="settings-buttons"><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button><button class="secondary-button" id="mcps-button">MCP connections</button><button class="secondary-button" id="browser-connections-button">Browser connections</button></div>
+          <div class="settings-buttons"><button class="secondary-button" id="agent-accounts-button" hidden>Agent accounts</button><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button><button class="secondary-button" id="mcps-button">MCP connections</button><button class="secondary-button" id="browser-connections-button">Browser connections</button></div>
           <div class="system-state">
             <span class="live-dot"></span>
             <div>
@@ -149,6 +149,7 @@
                     <p class="muted" id="mode-provider-note"></p>
                   </div></details>
                   <select id="chat-agent-select" aria-label="Chat agent" title="Switch agent · conversation and workspace are retained"></select>
+                  <button type="button" class="secondary-button" id="chat-agent-account" hidden title="Choose or manage this chat's agent account">Choose account</button>
                   <div class="model-controls compact-model-controls" id="composer-model-controls">
                     <select class="model-select" aria-label="Chat model" title="Model"></select>
                     <details class="control-menu upward effort-menu"><summary aria-label="Choose effort" class="effort-label">High</summary><div class="control-popover">
@@ -264,6 +265,8 @@
           <span>Agent</span>
           <select id="agent-select" required></select>
         </label>
+        <div id="agent-account-requirement" class="dialog-security" hidden><p id="agent-account-hint">Connect an agent account before creating a conversation.</p><button type="button" class="secondary-button" id="connect-codex-button">Connect Codex / manage accounts</button></div>
+        <label id="new-agent-account-field" hidden><span>Codex account</span><select id="new-agent-account" aria-label="Codex account"><option value="">Select an account</option></select></label>
         <div class="model-controls" id="new-model-controls"><label><span>Model</span><select class="model-select" aria-label="New chat model"></select></label><label><span>Effort</span><select class="effort-select" aria-label="New chat effort"></select></label><p class="model-note" role="status"></p></div>
         <label><span>What would you like to work on?</span><textarea id="initial-prompt" rows="3" maxlength="100000" placeholder="Describe the task. Your agent will name this conversation."></textarea></label>
         <div class="environment-choice"><label><span>Environment</span><select id="environment-select" required></select></label><button type="button" class="icon-button" id="environment-settings" aria-label="Manage selected environment">⚙</button></div>
@@ -280,6 +283,23 @@
           <button class="primary-button" id="create-chat-button" value="default">Create chat</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="agent-accounts-dialog" aria-labelledby="agent-accounts-title">
+      <section class="dialog-card">
+        <div class="dialog-heading"><h2 id="agent-accounts-title">Your agent accounts</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close agent accounts">×</button></div>
+        <p class="muted">Connect your own accounts. Google sign-in does not sign you in to Codex or Claude. Server logins are never imported.</p>
+        <div id="agent-account-list"></div>
+        <button type="button" class="secondary-button" id="agent-account-new">＋ Add Codex account</button>
+        <form id="agent-account-form">
+          <label><span>Account name</span><input id="agent-account-name" required maxlength="80" placeholder="Personal Codex or company Codex" autocomplete="off"></label>
+          <div id="agent-account-companies"></div>
+          <button type="submit" class="primary-button" id="agent-account-submit">Sign in to Codex</button>
+        </form>
+        <div id="agent-account-login" class="agent-account-login" role="status"></div>
+        <p id="agent-account-error" class="form-error" role="alert"></p>
+        <p class="muted">Claude account sign-in is not available yet. Credentials are encrypted on the controller. Local workers share the host filesystem; use isolated cloud workers for untrusted multi-user workloads.</p>
+      </section>
     </dialog>
 
     <dialog id="github-dialog" aria-labelledby="github-dialog-title">

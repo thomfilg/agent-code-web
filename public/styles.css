@@ -740,3 +740,10 @@ dialog { max-height: calc(100dvh - 28px); }
 .google-setup code { display: block; white-space: normal; user-select: all; font-size: 12px; }
 .relay-account-button { width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .relay-account-email { overflow-wrap: anywhere; }
+/* Account onboarding reuses the existing dialog and company picker controls. */
+.agent-account-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 12px; overflow-wrap: anywhere; }
+.agent-account-card p { margin: 8px 0; }
+.agent-account-login { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; overflow-wrap: anywhere; }
+.agent-account-login p { flex-basis: 100%; }
+.agent-account-login code { padding: 10px; font-size: 1.2rem; user-select: all; }
+#agent-account-form { display: grid; gap: 16px; margin-top: 16px; }

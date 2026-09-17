@@ -1,13 +1,16 @@
 # Feature queue — original request order
 
-Active objective: implement **all** features requested in this conversation,
+Active objective: implement **all MVP** features requested in this conversation,
 one at a time, in original order unless an explicit priority update below says
-otherwise. New reports append without interrupting the current item. Repeated
+otherwise. New reports append without interrupting the current item and stay
+outside the MVP unless the user explicitly includes them or clarifies an
+existing MVP requirement. Repeated
 reports remain evidence that an earlier fix needs verification, not permission
 to skip it. Queued work proceeds under the existing implementation authorization;
 adding an item does not require another request to resume in-scope work.
-The latest request is to update this document with the MVP release gate below;
-this documentation change does not implement or deploy those items.
+The documentation-only MVP checkpoint was merged in PR #3. Implementation has
+resumed under the persistent MVP goal: finish one feature, test it (request
+user-only consent where necessary), commit/push, then take the next feature.
 
 This queue supersedes the narrower gap list in `remaining-goal.md`. Existing
 source changes are retained, but are not treated as deployed merely because
@@ -72,14 +75,19 @@ mock or unauthenticated MCP handshake does not satisfy this gate.
 
 | Required integration | End-to-end acceptance | Queue items / current gap |
 | --- | --- | --- |
-| Codex | Detect missing authentication; show a working Connect action and the supported native browser authorization URL/code. Complete sign-in from the user's browser, select a named account for the chat, run a consented real turn and resume that account after restart. Surface expired/revoked access and reconnect without falling back to the host CLI | 43/44: provider-login UI, account-bound flow and real acceptance unfinished |
+| Codex | Detect missing authentication; show a working Connect action and the supported native browser authorization URL/code. Complete sign-in from the user's browser, select a named account for the chat, run a consented real turn and resume that account after restart. Surface expired/revoked access and reconnect without falling back to the host CLI | 43/44: named-account implementation and automated checks pass on `feat/codex-account-login`; real browser consent, real turn and live restart acceptance still open |
 | Claude | The same complete onboarding and reconnect path, using Claude's supported native authentication flow. The selected named personal/company account must actually be used for a consented real turn and restored after restart | 43/44: provider-login UI, account-bound flow and real acceptance unfinished |
-| GitHub | Authenticate from Relay; identify the connected account and explicitly allowed companies/repositories; list, select and clone an authorized repository and read its PR/check status. Handle denied/revoked access without borrowing another connection or the host's `gh` identity | 21: a saved legacy connection exists; current onboarding, company scope and live runtime acceptance remain open |
+| GitHub | A simple Relay sign-in action runs `gh auth login` in a private account profile and gives the user the authorization URL/code. Remove token-entry and “Use this server's gh login” options; never import the global CLI identity. After authentication, identify the account and explicitly allowed companies/repositories; list, select and clone an authorized repository and read its PR/check status. Handle denied/revoked access without borrowing another connection | 21: latest UX clarification queued within this existing MVP gate, after the current Codex feature; current native onboarding, scope and runtime acceptance remain open |
 | Linear | Complete real browser OAuth, discover tools and perform a non-mutating authenticated workspace read through the selected agent/environment. Support independent g2i and 12-apps connections, including the same MCP name, with no cross-company credential fallback | 02/03/04/10/21: configuration/discovery evidence is not completed OAuth or runtime acceptance |
 | AWS deployment | A documented, repeatable script deploys the complete application at a stable HTTPS URL, validates readiness, preserves data across updates and supports rollback; verify all four integrations on the deployed application | 45: reference review and requirements only; no complete controller deployment or live AWS acceptance |
 
 Common authentication acceptance:
 
+- Product clarification (2026-09-17): Relay is a multi-user product, not a
+  personal terminal wrapper. All four login flows must be user-owned, including
+  the administrator's; host-credential import and other single-user-only options
+  must not appear in the product onboarding. Keep local development fixtures
+  separate from the deployed multi-user interface.
 - Keep multiple named Codex and Claude accounts per Relay user, including
   personal and company accounts. Make the selected account and availability
   explicit; enforce user/company boundaries in the backend, not only the UI.
@@ -90,6 +98,13 @@ Common authentication acceptance:
   successful connection. Configure the provider's client ID/secret and allowed
   callback where required; do not assume dynamic registration is supported or
   show “Saved” as proof of authenticated access.
+- GitHub onboarding clarification (2026-09-17): request only the inputs needed
+  for native `gh auth login`, then display the authorization URL and code.
+  Keep the first screen simple; account naming and explicit company availability
+  can follow successful authentication. Remove both personal-access-token entry
+  and the host-login import button. Use a separate private `gh` profile for each
+  Relay account; do not switch or reuse the developer's active global account.
+  This refines the already-required GitHub MVP login, not a new parallel feature.
 - Keep controller-managed secrets encrypted at rest and out of browser
   responses, logs, source control and build artifacts. Describe the actual
   native CLI credential delivery boundary: local workers share the host
@@ -207,11 +222,30 @@ References inspected for this request:
 | 40 | Search across messages the user wrote and the AI's final answers, with conversation/result navigation. Do not store or index reasoning/chain-of-thought for this feature; exclude tool activity and intermediate responses from results | New feature appended after saved prompts; search-screen reference received; not started |
 | 41 | Deleting a worker/container must preserve the chat and its messages outside disposable storage; only explicit chat deletion removes the conversation. Reproduce actual container deletion independently of stop/restart, using disposable fixtures | New data-loss report appended; item 05 stop/restart verification does not establish container-deletion safety; not started |
 | 42 | Explore and implement a third-column panel showing the main agent's active secondary agents, with native status and supported conversation details. Selecting a secondary agent opens a popup/composer for prompts addressed to that agent, including while it is working; retain accessible keyboard navigation and keep the main agent/conversation independent. Investigate actual Claude Code/Claude web and Codex capabilities, reusing item 20's Codex descendant-navigation work where applicable. Do not invent child sessions or claim unsupported native messaging/steering | Codex feasibility confirmed read-only: descendant listing, status and direct input/steering are available, with experimental API caveats. Claude capability investigation and the requested both-provider panel/popup remain queued, not implemented |
-| 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | MVP blocker: native CLI commands/documentation investigated; no live authorization and no finished provider-login UI. Global prototype was not activated; implement account-bound flows under the Relay user |
-| 44 | Authenticate Relay users with Google using `@12-apps/auth`; persist data privately per user and support multiple named Claude/Codex accounts (personal/company), explicitly selected per chat with no credential fallback | Partially implemented, not delivered: Google/shared-package integration and per-user boundary tests pass; real Google sign-in completed by the user. Multiple native provider accounts, token/profile synchronization and selection remain MVP blockers |
+| 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | Codex account-bound device-code UI and automated checks pass; real consent/turn acceptance remains open. Claude native login is next, not implemented. No global profile is imported |
+| 44 | Authenticate Relay users with Google using `@12-apps/auth`; persist data privately per user and support multiple named Claude/Codex accounts (personal/company), explicitly selected per chat with no credential fallback | Google login is live. Codex named accounts, encrypted persistence, explicit chat binding and access-only worker renewal pass automated checks. Real Codex account acceptance and Claude multi-account support remain open |
 | 45 | Provide a repeatable AWS deployment script for the complete Relay application, following future-pay's deployment guidance; add reusable AWS support to `12-apps/ci` and keep Relay a thin application-specific consumer | MVP blocker: references reviewed and acceptance criteria recorded above. Shared registry currently has only DigitalOcean/Cloudflare; existing Relay EC2 worker scaffolding is not a complete controller deployment. No AWS provisioning or deployment performed |
 
 ## Verification ledger
+
+- Codex named-account implementation checkpoint (2026-09-17): **621/621 full
+  backend tests** passed, with no skips. A final consent-binding audit then
+  passed **44/44 focused tests**, including one new regression preventing
+  approval/feedback/logout/desktop records from crossing named accounts.
+  **7/7 account/Google browser checks** and **8/8 existing model-controls browser
+  regressions** passed; all 30 changed JavaScript files passed syntax checks.
+  Runs used one test worker, CPU affinity 0–1 and nice 10. The account browser
+  checks exercise offline consent, two users, personal/company accounts,
+  explicit chat selection, mobile cancellation and disconnected access.
+  The installed Codex 0.154.0 accepted a fictitious external-token login and
+  completed account/read and logout without creating worker `auth.json`;
+  this transport check used no real credentials and sent zero model turns.
+  No real Codex OAuth authorization or paid-account execution is claimed.
+  The live `localhost:8787` backend has not been restarted with this feature;
+  user consent, a separately authorized minimal turn and live restart/resume
+  remain release gates. See [codex-accounts.md](codex-accounts.md) for storage
+  boundaries and the acceptance steps. The unfinished doctor changes remain
+  paused and are excluded from this feature's commit.
 
 - MVP scope update (2026-09-17): recorded Codex, Claude, GitHub and Linear
   authentication as mandatory end-to-end gates and appended AWS delivery as

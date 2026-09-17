@@ -177,7 +177,7 @@ export class RuntimeManager extends EventEmitter {
     }
   }
 
-  constructor({ store, config, broker, gatewayOrigin, workerBackend = null, adapterFactory = null, github = null, environments = null, models = null, attachments = null, mcps = null, commands = null, resources = null }) {
+  constructor({ store, config, broker, gatewayOrigin, workerBackend = null, adapterFactory = null, github = null, environments = null, models = null, attachments = null, mcps = null, commands = null, resources = null, agentAccounts = null }) {
     super();
     this.store = store;
     this.config = config;
@@ -201,6 +201,7 @@ export class RuntimeManager extends EventEmitter {
     };
     this.adapterFactory = adapterFactory;
     this.github = github;
+    this.agentAccounts = agentAccounts;
     this.environments = environments;
     this.models = models;
     this.attachments = attachments;
@@ -368,6 +369,8 @@ export class RuntimeManager extends EventEmitter {
     guard(); const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     if (chat.agent !== "codex") throw new Error("Native sign-out requires Codex");
+    if (chat.agentAccountId) return { reviews: [], threadId: chat.agentSessionId || null, privateProfile: true, canLogout: false, gateway: false, busy: false,
+      review: null, account: null, storage: "ephemeral", reason: "Disconnect this named account in Agent accounts. That stops its chats and removes the controller's saved credentials; a worker-only sign-out would reconnect on the next turn." };
     if (action === "status") { const result = await this.logout.status(chatId); guard(); return result; }
     if (!["inspect", "confirm"].includes(action) || chat.archived) throw new Error("Choose a sign-out action in an unarchived Codex chat");
     if (action === "confirm") { const prior = await this.logout.existing(chatId, input); guard(); if (prior) return prior; }
@@ -485,13 +488,13 @@ export class RuntimeManager extends EventEmitter {
       if (source.environmentId) await (await this.servicesFor(source)).environments.runtime(source.environmentId, source); guard();
       imported = await runtime.adapter.forkImportedSession(input.operationId, input.sessionId, guard); guard();
       validateSessionBundle(imported.bundle);
-      const chat = await this.store.create({ title: selected.title.slice(0, 120), ownerId: source.ownerId, agent: "codex", source: source.source, repositories: source.repositories,
+      const chat = await this.store.create({ title: selected.title.slice(0, 120), ownerId: source.ownerId, agent: "codex", agentAccountId: source.agentAccountId, source: source.source, repositories: source.repositories,
         environmentId: source.environmentId, environmentName: source.environmentName, model: source.model, effort: source.effort, modelSelectionSet: source.modelSelectionSet, autoTitle: false }, async target => {
         targetId = target.id;
         await snapshotWorkspace({ executor: runtime.executor, source: runtime.executor?.workspace || source.workspace, destination: target.workspace, signal: action.controller.signal }); guard();
         const images = await copyImportedImages(imported.messages, runtime.executor?.workspace || source.workspace, target.workspace, guard);
         const attached = await this.attachments.importTranscript(target.id, images.messages); guard();
-        await this.store.records.put("native-fork", target.id, { chatId: target.id, bundle: imported.bundle, paths: attached.paths, authMode: this.config.codex.authMode, initialized: false }); guard();
+        await this.store.records.put("native-fork", target.id, { chatId: target.id, bundle: imported.bundle, paths: attached.paths, authMode: source.agentAccountId ? "account" : this.config.codex.authMode, initialized: false }); guard();
         return { messages: attached.messages, mode: source.mode, serviceTier: source.serviceTier, personality: source.personality, workspaceReady: true,
           nativeForkSessionId: imported.bundle.threadId, agentSessionId: imported.bundle.threadId, forkContextPending: true, forkGoalPending: imported.bundle.goal?.status === "active",
           goal: imported.bundle.goal ? { ...imported.bundle.goal, status: imported.bundle.goal.status === "active" ? "paused" : imported.bundle.goal.status } : null,
@@ -566,14 +569,14 @@ export class RuntimeManager extends EventEmitter {
       {
         id: "codex",
         label: "Codex",
-        enabled: ownsServerCredentials && (this.config.codex.authMode === "host" || Boolean(this.config.codex.providerKey)),
-        authMode: this.config.codex.authMode,
+        enabled: this.config.google?.enabled ? Boolean(this.agentAccounts?.hasConnected(ownerId, "codex")) : ownsServerCredentials && (this.config.codex.authMode === "host" || Boolean(this.config.codex.providerKey)),
+        authMode: this.config.google?.enabled ? "account" : this.config.codex.authMode,
       },
       {
         id: "claude",
         label: "Claude Code",
-        enabled: ownsServerCredentials && (this.config.claude.authMode === "host" || Boolean(this.config.claude.providerKey)),
-        authMode: this.config.claude.authMode,
+        enabled: !this.config.google?.enabled && ownsServerCredentials && (this.config.claude.authMode === "host" || Boolean(this.config.claude.providerKey)),
+        authMode: this.config.google?.enabled ? "account" : this.config.claude.authMode,
       },
       ...(this.config.enableMock ? [{ id: "mock", label: "Mock agent", enabled: true, authMode: "none" }] : []),
     ];
@@ -673,17 +676,22 @@ export class RuntimeManager extends EventEmitter {
     } finally { this.#switching.delete(chatId); }
   }
 
-  async switchAgent(chatId, agent) {
+  async switchAgent(chatId, agent, input = {}) {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     if (!this.availableAgents(chat.ownerId).some(item => item.id === agent && item.enabled)) throw new Error("Choose an enabled agent for this user");
     if (this.isBusy(chatId) || chat.status === "stopping") throw Object.assign(new Error("Stop the working agent before switching"), { statusCode: 409 });
-    if (agent === chat.agent) return chat;
+    const agentAccountId = agent === "codex" ? input.agentAccountId ?? (agent === chat.agent ? chat.agentAccountId : null) : null;
+    if (agentAccountId || this.config.google?.enabled && agent === "codex") {
+      if (!agentAccountId) throw new Error("Choose a Codex account for this chat in Agent accounts");
+      await this.agentAccounts.select(chat.ownerId, agentAccountId, { ...chat, agent });
+    }
+    if (agent === chat.agent && agentAccountId === (chat.agentAccountId || null)) return chat;
     this.#switching.add(chatId);
     try {
-      const settings = this.models ? await this.models.creationSettings(agent) : { model: this.config[agent]?.model || null, effort: this.config[agent]?.effort || null };
+      const settings = this.models ? await this.models.creationSettings(agent, { ownerId: chat.ownerId, agentAccountId }) : { model: this.config[agent]?.model || null, effort: this.config[agent]?.effort || null };
       await this.stop(chatId, "agent-switch");
-      const updated = await this.store.update(chatId, current => ({ agent, ...settings, modelSelectionSet: true,
+      const updated = await this.store.update(chatId, current => ({ agent, agentAccountId, ...settings, modelSelectionSet: true,
         ...(agent !== "claude" && ["default", "dont_ask"].includes(current.mode) ? { mode: "plan" } : {}),
         agentSessionId: null, needsAgentHandoff: true, pendingRequest: null, awaitingUser: false, claudeFastMode: false, claudeFastStatus: null,
         nativeForkSessionId: null, forkGoalPending: false, forkContextPending: false, goal: null,
@@ -702,7 +710,7 @@ export class RuntimeManager extends EventEmitter {
     if (this.#switching.has(chatId)) throw Object.assign(new Error("Wait for the agent switch to finish"), { statusCode: 409 });
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
-    const settings = await this.models.validate(chat.agent, input);
+    const settings = await this.models.validate(chat.agent, input, chat);
     guard();
     if (this.#switching.has(chatId) || this.store.get(chatId)?.agent !== chat.agent) throw Object.assign(new Error("The agent changed; select its model again"), { statusCode: 409 });
     const updated = await this.store.update(chatId, current => { guard(); return { ...settings, modelSelectionSet: true, modelSettingsRevision: (current.modelSettingsRevision || 0) + 1 }; });
@@ -864,6 +872,7 @@ export class RuntimeManager extends EventEmitter {
     try {
       const [repository] = await (await this.servicesFor(chat)).github.resolveSelections([selection], { company: companyForChat(chat) || undefined });
       if (chat.repositories?.some(repo => repo.fullName.toLowerCase() === repository.fullName.toLowerCase())) throw new Error("This repository is already in the chat");
+      if (chat.agentAccountId) await this.agentAccounts.select(chat.ownerId, chat.agentAccountId, { ...chat, repositories: [...(chat.repositories || []), repository] });
       if (chat.environmentId) await (await this.servicesFor(chat)).environments.runtime(chat.environmentId, { ...chat, repositories: [...(chat.repositories || []), repository] });
       await this.stop(chatId, "repository-added");
       const updated = await this.store.update(chatId, current => ({ repositories: [...(current.repositories || []), repository], workspaceReady: false,
@@ -901,7 +910,7 @@ export class RuntimeManager extends EventEmitter {
     }
     const awake = this.#runtimes.get(chatId) === runtime && Boolean(runtime);
     return { usage: chat.usage || null, rateLimits: chat.rateLimits || null, connectors: chat.connectors || null,
-      agent: chat.agent, model: chat.model, authMode: this.config[chat.agent]?.authMode || "none", account: chat.usageAccount || null, snapshot: !awake, recordedAt: chat.usage?.recordedAt || null,
+      agent: chat.agent, model: chat.model, authMode: chat.agentAccountId ? "account" : this.config[chat.agent]?.authMode || "none", account: chat.usageAccount || null, snapshot: !awake, recordedAt: chat.usage?.recordedAt || null,
       slashCommands: chat.slashCommands || [], canCompact: !chat.archived,
       note: awake ? "Provider-reported usage only. Missing context or subscription limits are unavailable from this CLI/auth mode." : "Worker stopped. Showing the last snapshot saved outside the worker; opening this panel does not wake it." };
   }
@@ -966,12 +975,17 @@ export class RuntimeManager extends EventEmitter {
     const source = typeof input.source === "string" ? input.source.trim() : this.resources && !this.resources.isLegacy(ownerId) ? "" : this.config.workspaceSource;
     const workspaceIdentity = { ownerId, repositories: input.repositories || [], source: input.repositories?.length ? "" : source };
     const services = await this.servicesFor(workspaceIdentity);
+    const agentAccountId = agent === "codex" ? input.agentAccountId || null : null;
+    if (agentAccountId || this.config.google?.enabled && agent === "codex") {
+      if (!agentAccountId) throw new Error("Connect and select a Codex account before creating a chat");
+      await this.agentAccounts.select(ownerId, agentAccountId, { ...workspaceIdentity, agent });
+    }
     const environment = input.environmentId ? await services.environments?.runtime(input.environmentId, workspaceIdentity) : null;
     if (environment?.archived) throw new Error("Choose an environment that is not archived");
     if (environment && environment.backend !== this.config.workerBackend) throw new Error(`This server uses ${this.config.workerBackend} workers. Select an environment with that backend.`);
     const repositories = input.repositories ? await services.github.resolveSelections(input.repositories) : [];
-    const modelSettings = this.models ? await this.models.creationSettings(agent, input) : {};
-    const chat = await this.store.create({ title, agent, ownerId, ...modelSettings, modelSelectionSet: Object.hasOwn(input, "model") || Object.hasOwn(input, "effort"), source: repositories.length ? "" : source, repositories,
+    const modelSettings = this.models ? await this.models.creationSettings(agent, { ...input, ownerId, agentAccountId }) : {};
+    const chat = await this.store.create({ title, agent, ownerId, agentAccountId, ...modelSettings, modelSelectionSet: Object.hasOwn(input, "model") || Object.hasOwn(input, "effort"), source: repositories.length ? "" : source, repositories,
       environmentId: environment?.id, environmentName: environment?.name, autoTitle: !input.title });
     try {
       if (repositories.length) {
@@ -1048,7 +1062,7 @@ export class RuntimeManager extends EventEmitter {
       if (!action.workspaceOnly && !runtime.adapter.forkSession) throw new Error("This worker does not support persistent native forks");
       clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
       await this.refreshActivity(source.id);
-      const copy = await this.store.create({ title, ownerId: source.ownerId || ownerId, agent: source.agent, model: source.model, effort: source.effort, modelSelectionSet: source.modelSelectionSet,
+      const copy = await this.store.create({ title, ownerId: source.ownerId || ownerId, agent: source.agent, agentAccountId: source.agentAccountId, model: source.model, effort: source.effort, modelSelectionSet: source.modelSelectionSet,
         source: source.source, repositories: source.repositories, environmentId: source.environmentId, environmentName: source.environmentName, autoTitle: false }, async target => {
         targetId = target.id;
         try { bundle = action.workspaceOnly ? null : await runtime.adapter.forkSession(runtime.executor?.workspace || source.workspace); }
@@ -1065,7 +1079,7 @@ export class RuntimeManager extends EventEmitter {
         const messages = source.messages.filter(message => !message.meta?.renderingSample).map(message => ({ ...message, id: newId("msg"), ...(["assistant", "tool"].includes(message.role) ? { agent: message.agent || source.agent } : {}) }));
         const attached = this.attachments ? await this.attachments.forkMessages(source.id, target.id, messages) : { messages, paths: [] };
         signal.throwIfAborted();
-        await this.store.records.put("native-fork", target.id, { chatId: target.id, bundle, paths: attached.paths, authMode: this.config.codex.authMode, initialized: !bundle });
+        await this.store.records.put("native-fork", target.id, { chatId: target.id, bundle, paths: attached.paths, authMode: source.agentAccountId ? "account" : this.config.codex.authMode, initialized: !bundle });
         signal.throwIfAborted();
         return { messages: attached.messages, mode: source.mode, serviceTier: source.serviceTier, personality: source.personality, workspaceReady: true,
           forkedFromChatId: source.id, forkRequestId: action.requestId, nativeForkSessionId: bundle?.threadId || null, agentSessionId: bundle?.threadId || null,
@@ -1447,7 +1461,8 @@ export class RuntimeManager extends EventEmitter {
 
   async #start(chatId) {
     const chat = this.store.get(chatId);
-    if (this.resources && !this.resources.isLegacy(chat?.ownerId) && chat?.agent !== "mock") throw new Error("Connect an agent account for this user before starting a worker");
+    if (chat?.agentAccountId && chat.agent === "codex") await this.agentAccounts.select(chat.ownerId, chat.agentAccountId, chat);
+    else if (chat?.agent !== "mock" && (this.config.google?.enabled || this.resources && !this.resources.isLegacy(chat?.ownerId))) throw new Error("Connect and select an agent account for this user before starting a worker");
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const checkCancelled = () => { if ((this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" }); };
     await this.#setStatus(chatId, "starting", "Starting isolated agent runtime", null);
@@ -1490,6 +1505,13 @@ export class RuntimeManager extends EventEmitter {
         if (current?.forkContextPending || forkGoal && current?.forkGoalPending) await this.store.update(chatId, { forkContextPending: false, ...(forkGoal ? { forkGoalPending: false } : {}) });
       },
       onLog: (text) => this.#emit(chatId, { type: "runtime_log", text }),
+      ...(chat.agent === "codex" && chat.agentAccountId ? { accountCredentials: async options => {
+        const current = this.store.get(chatId);
+        if (!current || current.agent !== "codex" || current.ownerId !== chat.ownerId || current.agentAccountId !== chat.agentAccountId) throw new Error("The selected agent account changed");
+        checkCancelled();
+        const credentials = await this.agentAccounts.credentials(current.ownerId, current.agentAccountId, current, options);
+        checkCancelled(); return credentials;
+      } } : {}),
       onFatal: (error) => this.#fatal(chatId, error).catch((fatalError) => console.error("runtime fatal handler:", errorMessage(fatalError))),
     };
     const Adapter = ADAPTERS[chat.agent];
@@ -1499,7 +1521,7 @@ export class RuntimeManager extends EventEmitter {
       savedAgentThreads = chat.agent === "codex" ? await this.agentThreads.get(chatId) : null;
       if (chat.nativeForkSessionId || chat.forkedFromChatId && chat.forkContextPending) {
         forkRecord = await this.store.records?.get("native-fork", chatId);
-        if (!forkRecord || chat.agent !== "codex" || forkRecord.chatId !== chatId || forkRecord.authMode !== this.config.codex.authMode || chat.nativeForkSessionId && (forkRecord.bundle?.threadId !== chat.agentSessionId || chat.nativeForkSessionId !== chat.agentSessionId)) throw new Error("This fork's private native history or original authentication mode is unavailable");
+        if (!forkRecord || chat.agent !== "codex" || forkRecord.chatId !== chatId || forkRecord.authMode !== (chat.agentAccountId ? "account" : this.config.codex.authMode) || chat.nativeForkSessionId && (forkRecord.bundle?.threadId !== chat.agentSessionId || chat.nativeForkSessionId !== chat.agentSessionId)) throw new Error("This fork's private native history or original authentication mode is unavailable");
         if (chat.nativeForkSessionId) validateSessionBundle(forkRecord.bundle, chat.agentSessionId);
       }
       executor = chat.agent === "mock" ? null : await this.browserExecutor(chatId);

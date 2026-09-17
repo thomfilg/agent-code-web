@@ -99,13 +99,15 @@ export class CodexAdapter {
     this.children = new Set();
     this.sharedParent = null;
     this.sharedListeners = null;
+    this.credentialSecrets = new Set();
   }
 
   async start() {
     if (this.rpc) return;
     if (this.sharedParent) throw new Error("This temporary side chat has closed; open a new side chat");
     if (this.requireResume && !this.threadId) throw new Error("The fork's native session ID is missing; refusing to start an empty conversation");
-    const authMode = this.config.codex.authMode;
+    const authMode = this.chat.agentAccountId ? "account" : this.config.codex.authMode;
+    if (authMode === "account" && !this.hooks.accountCredentials) throw new Error("The selected Codex account is unavailable; reconnect it in Agent accounts");
     if (authMode === "gateway" && !this.config.codex.providerKey) {
       throw new Error("OPENAI_API_KEY is required when CODEX_AUTH_MODE=gateway");
     }
@@ -134,24 +136,25 @@ export class CodexAdapter {
       ...(this.executor ? { spawn: this.executor.spawn.bind(this.executor) } : { isolation: this.config.processIsolation }) });
     this.plugins = new CodexPlugins({ run: args => this.pluginCli.run(args),
       request: (method, params) => { if (!this.rpc) throw new Error("The native plugin connection stopped"); return this.rpc.request(method, params, 30000); },
-      workspace: this.workspace, thread: () => this.threadId, mutable: authMode === "gateway",
+      workspace: this.workspace, thread: () => this.threadId, mutable: authMode !== "host",
       busy: () => this.nativeSettingsBusy() || Boolean(this.hookControls?.changing || this.featureControls?.changing || this.memoryControls?.changing || this.importControls?.changing || this.importControls?.needsRefresh),
       changed: () => this.refreshSkills() });
     this.hookControls = new CodexHooks({ request: (method, params) => { if (!this.rpc) throw new Error("The native hook connection stopped"); return this.rpc.request(method, params, 30000); },
-      workspace: this.workspace, thread: () => this.threadId, mutable: authMode === "gateway",
+      workspace: this.workspace, thread: () => this.threadId, mutable: authMode !== "host",
       busy: () => this.nativeSettingsBusy() || Boolean(this.plugins?.changing || this.featureControls?.changing || this.memoryControls?.changing || this.importControls?.changing || this.importControls?.needsRefresh) });
     this.featureControls = new CodexFeatures({ request: (method, params) => { if (!this.rpc) throw new Error("The native feature connection stopped"); return this.rpc.request(method, params, 30000); },
-      workspace: this.workspace, thread: () => this.threadId, mutable: authMode === "gateway",
+      workspace: this.workspace, thread: () => this.threadId, mutable: authMode !== "host",
       busy: () => this.nativeSettingsBusy() || Boolean(this.plugins?.changing || this.hookControls?.changing || this.memoryControls?.changing || this.importControls?.changing || this.importControls?.needsRefresh) });
     this.memoryControls = new CodexMemories({ request: (method, params) => { if (!this.rpc) throw new Error("The native memory connection stopped"); return this.rpc.request(method, params, 30000); },
-      workspace: this.workspace, thread: () => this.threadId, mutable: authMode === "gateway",
+      workspace: this.workspace, thread: () => this.threadId, mutable: authMode !== "host",
       busy: () => this.nativeSettingsBusy() || Boolean(this.plugins?.changing || this.hookControls?.changing || this.featureControls?.changing || this.importControls?.changing || this.importControls?.needsRefresh) });
-    if (this.restoreFork && authMode === "gateway") {
+    if (this.restoreFork && authMode !== "host") {
       if (this.restoreFork.threadId !== this.threadId) throw new Error("Fork history does not match its native session ID");
       await workerSessionIO(this.executor, { action: "install", home: env.CODEX_HOME, bundle: this.restoreFork });
     }
 
     const args = ["app-server"];
+    if (authMode === "account") args.push("-c", 'cli_auth_credentials_store="ephemeral"', "-c", 'model_provider="openai"');
     args.push(...codexMcpArgs(this.executor?.mcpServers));
     if (authMode === "gateway") args.push(...gatewayArgs(this.gatewayOrigin));
     args.push(
@@ -167,6 +170,10 @@ export class CodexAdapter {
       isolation: this.executor ? "none" : this.config.processIsolation,
       spawnFn: this.executor ? this.executor.spawn.bind(this.executor) : null,
       spawnOptions: { cwd: this.workspace, env },
+      redactSecrets: value => {
+        for (const secret of this.credentialSecrets) value = value.replaceAll(secret, "[redacted]");
+        return value;
+      },
     });
     this.rpc = rpc;
     this.feedbackStartupPolicy = null;
@@ -182,7 +189,9 @@ export class CodexAdapter {
       publish: snapshot => this.hooks.onAgentThreads?.(snapshot), log: text => this.hooks.onLog?.(text) });
     rpc.on("notification", (message) => this.#notification(message));
     rpc.on("request", (message) => this.#serverRequest(message));
-    rpc.on("stderr", (text) => this.hooks.onLog?.(redact(text)));
+    // Native diagnostics can split a credential across stderr chunks. Named
+    // accounts expose structured, redacted errors, never raw native stderr.
+    rpc.on("stderr", (text) => { if (authMode !== "account") this.hooks.onLog?.(redact(text)); });
     rpc.on("protocolError", (error) => this.hooks.onLog?.(errorMessage(error)));
     rpc.on("error", (error) => this.hooks.onFatal?.(error));
     rpc.on("exit", ({ code, signal }) => {
@@ -201,6 +210,12 @@ export class CodexAdapter {
     });
     this.cliVersion = cliVersionFromUserAgent(initialized?.userAgent);
     rpc.notify("initialized", {});
+    if (authMode === "account") {
+      const credentials = await this.hooks.accountCredentials({});
+      this.credentialSecrets.add(credentials.accessToken);
+      try { await rpc.request("account/login/start", { type: "chatgptAuthTokens", ...credentials }); }
+      catch { throw new Error("Codex could not use the selected account. Reconnect it in Agent accounts; no server credentials were used."); }
+    }
     await this.#loadThread();
     // Native feedback retains its invocation configuration after reloads.
     // Remember its startup policy without blocking ordinary work on old CLIs.
@@ -232,8 +247,8 @@ export class CodexAdapter {
       cwd: this.workspace,
       approvalPolicy: "on-request",
       sandbox: "workspace-write",
-      ...(this.config.codex.model ? { model: this.config.codex.model } : {}),
-      ...(this.config.codex.authMode === "gateway" ? { modelProvider: "agent_gateway" } : {}),
+      ...(this.chat.model || this.nativeAuthMode !== "account" && this.config.codex.model ? { model: this.chat.model || this.config.codex.model } : {}),
+      ...(this.nativeAuthMode === "gateway" ? { modelProvider: "agent_gateway" } : {}),
     };
     let result;
     if (this.threadId) {
@@ -388,9 +403,11 @@ export class CodexAdapter {
     check(); const rpc = this.rpc, threadId = this.threadId, workerId = this.importWorkerId, accountEpoch = this.accountEpoch || 0;
     if (!rpc || !threadId || !workerId || this.intentionalStop || this.sharedParent) throw new Error("Connect this chat's native Codex worker before inspecting sign-out");
     const busy = () => this.nativeSettingsBusy() || [this.plugins, this.hookControls, this.featureControls, this.memoryControls, this.importControls].some(service => service?.changing || service?.needsRefresh);
-    const base = { threadId, workerId, gateway: this.config.codex.authMode === "gateway", privateProfile: this.config.codex.authMode === "gateway",
+    const authMode = this.nativeAuthMode || this.config.codex.authMode;
+    const base = { threadId, workerId, gateway: authMode === "gateway", privateProfile: authMode !== "host",
       busy: busy(), account: null, credentialPresent: null, storage: null, canLogout: false };
     if (!base.privateProfile) return { ...base, reason: "This shared host profile may be used by other companies. Native sign-out is locked until company/profile isolation is complete." };
+    if (authMode === "account") return { ...base, reason: "Disconnect this named account in Agent accounts to remove its saved credentials and stop its workers." };
     const guard = () => {
       check(); if (this.rpc !== rpc || this.threadId !== threadId || this.importWorkerId !== workerId || this.intentionalStop) throw new Error("The sign-out worker changed or stopped");
       if ((this.accountEpoch || 0) !== accountEpoch) throw new Error("The native account changed during inspection. Refresh /logout.");
@@ -436,7 +453,7 @@ export class CodexAdapter {
     if (!rpc || !threadId || this.intentionalStop || this.sharedParent) throw new Error("Connect this chat's native Codex worker before reviewing feedback");
     const guard = () => { check(); if (this.rpc !== rpc || this.threadId !== threadId || this.importWorkerId !== workerId || this.intentionalStop) throw new Error("The feedback worker changed or stopped"); };
     const result = await codexFeedbackPolicy({ request: (method, params) => rpc.request(method, params, startup ? 5000 : 20000), workspace: this.workspace,
-      nativeHome: this.nativeHome, privateProfile: this.config.codex.authMode === "gateway", threadId, workerId }, guard);
+      nativeHome: this.nativeHome, privateProfile: (this.nativeAuthMode || this.config.codex.authMode) !== "host", threadId, workerId }, guard);
     guard(); if (startup) return result;
     const initial = this.feedbackStartupPolicy;
     const enabled = result.enabled && initial?.enabled !== false;
@@ -650,6 +667,7 @@ export class CodexAdapter {
     this.createdForks.clear();
     this.rpc = null;
     if (rpc) await rpc.stop();
+    this.credentialSecrets.clear();
     await this.importStop;
     this.broker.revokeChat(this.chat.id);
   }
@@ -745,6 +763,14 @@ export class CodexAdapter {
   }
 
   #serverRequest(message) {
+    if (message.method === "account/chatgptAuthTokens/refresh" && this.hooks.accountCredentials && this.nativeAuthMode === "account") {
+      const rpc = this.rpc;
+      void this.hooks.accountCredentials({ refresh: true, previousAccountId: message.params?.previousAccountId }).then(credentials => {
+        this.credentialSecrets.add(credentials.accessToken);
+        if (this.rpc === rpc) rpc.respond(message.id, credentials);
+      }, () => { if (this.rpc === rpc) rpc.respondError(message.id, -32000, "Reconnect the selected Codex account in Relay"); }).catch(() => {});
+      return;
+    }
     if (message.params?.threadId && message.params.threadId !== this.threadId) return;
     const supported = new Set([
       "item/commandExecution/requestApproval",

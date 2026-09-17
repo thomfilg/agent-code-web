@@ -32,6 +32,7 @@ import { WebSocketServer } from "ws";
 import { BrowserUsers } from "./browser-users.mjs";
 import { GoogleAuth } from "./google-auth.mjs";
 import { UserServices } from "./user-services.mjs";
+import { AgentAccounts } from "./agent-accounts.mjs";
 import { BrowserConnections } from "./browser-connections.mjs";
 import { zipSync } from "fflate";
 
@@ -114,13 +115,20 @@ export async function createAgentWebServer(options = {}) {
   const gateway = new ProviderGateway({ config, broker });
   const sseClients = new Set();
   const sidebarClients = new Set();
+  let stopping;
   const sidebarChanged = () => { for (const response of sidebarClients) response.write('data: {"type":"sidebar_changed"}\n\n'); };
+  const agentAccounts = new AgentAccounts({ records, config, ...options.agentAccountsOptions,
+    onChange: ownerId => { for (const response of sidebarClients) if (response.ownerId === ownerId) response.write('data: {"type":"agent_accounts_changed"}\n\n'); },
+    onRevoke: async (ownerId, id) => {
+      for (const chat of store.list()) if (chat.ownerId === ownerId && chat.agentAccountId === id) await manager?.stop(chat.id, "account-disconnected");
+    } });
+  await agentAccounts.initialize();
   const organization = new ChatOrganization({ records, store, changed: sidebarChanged });
   const github = options.github || new GitHubConnection({ records, config: config.github });
   const mcps = new McpConnections(records, { ttlMs: config.sessionCapabilityTtlMs });
   const publicOrigin = config.publicOrigin ? safeMcpUrl(config.publicOrigin).origin : null;
   const environments = new Environments(records, config.workerBackend, mcps);
-  const models = options.models || new ModelCatalog(config);
+  const models = options.models || new ModelCatalog(config, agentAccounts);
   const attachments = new Attachments(records, store);
   const commands = options.commands || new CommandCatalog(config, models);
   const resources = new UserServices({ records, config, identity: googleAuth, store, legacy: { records, github, mcps, environments, organization }, changed: sidebarChanged });
@@ -138,6 +146,7 @@ export async function createAgentWebServer(options = {}) {
   await googleAuth.initialize();
 
   const server = http.createServer(async (request, response) => {
+    if (stopping) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
     securityHeaders(response);
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
     try {
@@ -280,9 +289,18 @@ export async function createAgentWebServer(options = {}) {
           agents: manager.availableAgents(user?.id),
           workspaceSource: resources.isLegacy(user?.id) ? config.workspaceSource : "",
           database: records.kind,
-          features: { companyScopes: true, googleLogin: googleAuth.enabled },
+          features: { companyScopes: true, googleLogin: googleAuth.enabled, agentAccounts: googleAuth.enabled },
           ...(googleAuth.enabled ? { user: googleAuth.public(user) } : {}),
         });
+      }
+      if (url.pathname === "/api/agent-accounts" || url.pathname.startsWith("/api/agent-accounts/")) {
+        if (!googleAuth.enabled || !user) return json(response, 401, { error: "Sign in with Google to connect agent accounts" });
+        if (url.pathname === "/api/agent-accounts" && request.method === "GET") return json(response, 200, { accounts: agentAccounts.list(user.id), providers: [{ id: "codex", label: "Codex", loginAvailable: true }, { id: "claude", label: "Claude Code", loginAvailable: false }] });
+        if (url.pathname === "/api/agent-accounts" && request.method === "POST") return json(response, 201, await agentAccounts.begin(user.id, await bodyJson(request, config.maxBodyBytes)));
+        const accountRoute = /^\/api\/agent-accounts\/(account_[a-f0-9-]{36})(?:\/(cancel|disconnect))?$/.exec(url.pathname);
+        if (accountRoute && request.method === "GET" && !accountRoute[2]) return json(response, 200, await agentAccounts.status(user.id, accountRoute[1]));
+        if (accountRoute && request.method === "POST" && accountRoute[2]) return json(response, 200, await agentAccounts[accountRoute[2]](user.id, accountRoute[1]));
+        return json(response, 404, { error: "Agent account action not found" });
       }
       if (url.pathname === "/api/github" && request.method === "GET") return json(response, 200, await github.status());
       if (url.pathname === "/api/mcps" && request.method === "GET") return json(response, 200, { connections: await mcps.list() });
@@ -307,8 +325,10 @@ export async function createAgentWebServer(options = {}) {
       }
       if (url.pathname === "/api/models" && request.method === "GET") {
         const agent = url.searchParams.get("agent");
-        if (googleAuth.enabled && agent !== "mock" && !resources.isLegacy(user.id)) return json(response, 403, { error: "No agent account is connected for this user" });
-        return json(response, 200, await models.list(agent));
+        const agentAccountId = url.searchParams.get("account") || null;
+        if (googleAuth.enabled && agent === "codex" && !agentAccountId) return json(response, 409, { error: "Connect and select a Codex account first" });
+        if (googleAuth.enabled && agent !== "mock" && agent !== "codex") return json(response, 403, { error: "No agent account is connected for this user" });
+        return json(response, 200, await models.list(agent, { ownerId: user?.id, agentAccountId }));
       }
       if (url.pathname === "/api/github" && request.method === "POST") return json(response, 200, await github.connect(await bodyJson(request, config.maxBodyBytes)));
       if (url.pathname === "/api/github" && request.method === "DELETE") return json(response, 200, await github.disconnect());
@@ -335,12 +355,15 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/preferences" && request.method === "GET") return json(response, 200, { preferences: await records.get("preferences", "new-chat") || {} });
       if (url.pathname === "/api/preferences" && request.method === "PATCH") {
         const body = await bodyJson(request, config.maxBodyBytes);
-        if (googleAuth.enabled && body.agent !== "mock" && !resources.isLegacy(user.id)) return json(response, 403, { error: "No agent account is connected for this user" });
+        if (googleAuth.enabled && body.agent === "codex") await agentAccounts.select(user.id, body.agentAccountId, body);
+        if (googleAuth.enabled && body.agent !== "mock" && body.agent !== "codex") return json(response, 403, { error: "No agent account is connected for this user" });
         await environments.get(body.environmentId);
         if (!Array.isArray(body.repositories) || body.repositories.length > 100 || body.repositories.some(repo => typeof repo.fullName !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(repo.fullName) || typeof repo.branch !== "string" || repo.branch.length > 250)) throw new Error("Invalid repository preferences");
-        const modelSettings = await models.validate(body.agent, body);
+        const modelSettings = await models.validate(body.agent, body, { ...body, ownerId: user?.id });
         if (body.repositories.some(repo => repo.githubConnectionId && !/^github(?:_[a-f0-9-]{36})?$/.test(repo.githubConnectionId))) throw new Error("Invalid GitHub connection preference");
-        const preferences = { environmentId: body.environmentId, agent: ["codex", "claude", "mock"].includes(body.agent) ? body.agent : null, ...modelSettings, repositories: body.repositories.map(({ fullName, branch, githubConnectionId }) => ({ fullName, branch, ...(githubConnectionId ? { githubConnectionId } : {}) })) };
+        const preferences = { environmentId: body.environmentId, agent: ["codex", "claude", "mock"].includes(body.agent) ? body.agent : null,
+          ...(body.agent === "codex" && body.agentAccountId ? { agentAccountId: body.agentAccountId } : {}),
+          ...modelSettings, repositories: body.repositories.map(({ fullName, branch, githubConnectionId }) => ({ fullName, branch, ...(githubConnectionId ? { githubConnectionId } : {}) })) };
         await records.put("preferences", "new-chat", preferences);
         return json(response, 200, { preferences });
       }
@@ -542,7 +565,8 @@ export async function createAgentWebServer(options = {}) {
           return json(response, 200, { chat: await manager.setMode(chatId, (await bodyJson(request, config.maxBodyBytes)).mode) });
         }
         if (tail === "agent" && request.method === "PATCH") {
-          return json(response, 200, { chat: await manager.switchAgent(chatId, (await bodyJson(request, config.maxBodyBytes)).agent) });
+          const input = await bodyJson(request, config.maxBodyBytes);
+          return json(response, 200, { chat: await manager.switchAgent(chatId, input.agent, input) });
         }
         if (tail === "model" && request.method === "PATCH") {
           return json(response, 200, { chat: await manager.setModel(chatId, await bodyJson(request, config.maxBodyBytes)) });
@@ -700,6 +724,7 @@ export async function createAgentWebServer(options = {}) {
       mcps,
       commands,
       resources,
+      agentAccounts,
       adapterFactory: options.adapterFactory || null,
     });
     manager.browsers = new SharedBrowsers({ store, config, acquire: chatId => manager.browserExecutor(chatId), onIdle: chatId => manager.browserIdle(chatId), isActive: chatId => manager.presence.has(chatId), onViewers: chatId => manager.refreshActivity(chatId), ...options.browserOptions });
@@ -714,8 +739,15 @@ export async function createAgentWebServer(options = {}) {
     return { host: config.host, port, url: `http://${config.host.includes(":") ? `[${config.host}]` : config.host}:${port}` };
   }
 
-  async function stop() {
+  function stop() {
+    return stopping ||= shutdown();
+  }
+  async function shutdown() {
+    // Stop accepting connections before closing SSE. Otherwise a browser may
+    // reconnect while workers shut down and keep server.close() waiting forever.
+    const closed = new Promise(resolve => server.close(resolve));
     if (manager) await manager.shutdown();
+    await agentAccounts.close();
     for (const client of sseClients) client.close();
     sseClients.clear();
     for (const response of sidebarClients) response.end();
@@ -724,11 +756,11 @@ export async function createAgentWebServer(options = {}) {
     await new Promise(resolve => browserSockets.close(resolve));
     for (const socket of personalSockets.clients) socket.terminate();
     await new Promise(resolve => personalSockets.close(resolve));
-    await new Promise((resolve) => server.close(resolve));
+    await closed;
     if (!options.records) await records.close();
   }
 
-  return { server, store, records, organization, broker, config, browserUsers, googleAuth, resources, start, stop, get manager() { return manager; } };
+  return { server, store, records, organization, broker, config, browserUsers, googleAuth, resources, agentAccounts, start, stop, get manager() { return manager; } };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

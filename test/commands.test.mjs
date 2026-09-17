@@ -59,6 +59,17 @@ test("command discovery gates model-specific commands and refreshes them when th
   result = await catalog.list({ ...chat, model: "capable" }); assert.ok(["personality", "fast"].every(name => result.commands.some(command => command.name === name)));
 });
 
+test("Google and named-account command discovery cannot inherit host CLI profiles", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const chat = await store.create({ title: "Private commands", agent: "codex", agentAccountId: "chosen-account" });
+  const catalog = new CommandCatalog({ google: { enabled: true }, codex: { authMode: "host" }, claude: { authMode: "host" } });
+  for (const provider of ["codex", "claude"]) {
+    const env = await catalog.env(provider, chat);
+    assert.notEqual(env.HOME, process.env.HOME);
+    assert.equal(env[provider === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"], `${store.runtimeHome(chat.id)}/${provider}`);
+  }
+});
+
 test("installed Claude namespaces keep same-name commands and aliases distinct from web controls", async () => {
   const catalog = new CommandCatalog({ workerBackend: "ec2" });
   const names = ["one:goal", "two:goal", "one:config", "two:plan", "one:reload-plugins"];
