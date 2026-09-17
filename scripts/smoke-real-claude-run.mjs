@@ -16,7 +16,7 @@ import { ModelCatalog } from "../src/models.mjs";
 // Installed Claude and a disposable HTTP application. The model is authored;
 // the native tools, application process and requests are real and loopback-only.
 const exec = promisify(execFile);
-const options = new Set(["--network-isolated", "--trace", "--background-exit", "--send-now", "--first-send-now", "--approve-recipe", "--questions", "--skip-questions", "--stop-approval", "--plan-workflow", "--plan-reject", "--plan-stop", "--plan-web-choice"]);
+const options = new Set(["--network-isolated", "--trace", "--background-exit", "--send-now", "--first-send-now", "--approve-recipe", "--questions", "--skip-questions", "--stop-approval", "--plan-workflow", "--plan-reject", "--plan-stop", "--plan-web-choice", "--effort-settings", "--effort-environment"]);
 for (const argument of process.argv.slice(2)) assert(options.has(argument), `Unsupported fixture option: ${argument}`);
 if (!process.argv.includes("--network-isolated")) {
   const result = await exec("/usr/bin/unshare", ["--user", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", "--", process.execPath, process.argv[1], ...process.argv.slice(2), "--network-isolated"], { timeout: 90000, maxBuffer: 60000 }).catch(error => {
@@ -36,6 +36,9 @@ if (!process.argv.includes("--network-isolated")) {
   const planReject = process.argv.includes("--plan-reject"), planStop = process.argv.includes("--plan-stop"), planChoice = process.argv.includes("--plan-web-choice");
   assert([planReject, planStop, planChoice].filter(Boolean).length <= 1, "Select one plan variant");
   const planWorkflow = planReject || planStop || planChoice || process.argv.includes("--plan-workflow"), nativeModes = [];
+  const effortEnvironment = process.argv.includes("--effort-environment");
+  const effortSettings = effortEnvironment || process.argv.includes("--effort-settings"), launches = [], mainRequests = [];
+  const environmentVariables = effortEnvironment ? { CLAUDE_CODE_EFFORT_LEVEL: "medium" } : {};
   const held = Promise.withResolvers(), release = Promise.withResolvers();
   const recipe = "---\nname: verify\ndescription: Drive the fixture HTTP app\ndisable-model-invocation: true\n---\nRELAY_HTTP_RECIPE_CANARY\nRead package.json. Start node server.mjs in the background if .runtime.json is not reachable. Run node verify.mjs to probe the actual HTTP route. Report response statuses and bodies.\n";
   let manager, gatewayServer, chat, fixtureError, failureStop, nativeSession, phase = "run", step = 0, titleRequests = 0;
@@ -45,8 +48,9 @@ if (!process.argv.includes("--network-isolated")) {
     assert.equal(request.headers["x-api-key"], "controller-only-run-fixture");
     let raw = ""; for await (const chunk of request) raw += chunk;
     const body = JSON.parse(raw), index = requests.push(body);
-    assert(index <= 20, "Unexpected native workflow request loop");
+    assert(index <= (effortSettings ? 24 : 20), "Unexpected native workflow request loop");
     const titleRequest = !body.tools?.length && JSON.stringify(body.messages.at(-1)).includes("Write the title in the predominant language");
+    if (!titleRequest) mainRequests.push(body);
     if (phase === "held" && !titleRequest || firstSendNow && phase === "run" && step === 3) { held.resolve(); await release.promise; if (!response.destroyed) response.end(); return; }
     let content;
     if (titleRequest) {
@@ -74,6 +78,8 @@ if (!process.argv.includes("--network-isolated")) {
           }
           content = [{ type: "text", text: "Saved application context retained after Stop; the server has not been restarted." }];
         }
+      } else if (phase === "effort") {
+        content = [{ type: "text", text: "Effort fixture completed without restarting the application." }];
       } else if (phase === "plan") {
         if (step === 0) content = tool("EnterPlanMode", {});
         else if (step === 1) {
@@ -177,9 +183,11 @@ if (!process.argv.includes("--network-isolated")) {
     const gatewayOrigin = `http://127.0.0.1:${gatewayServer.address().port}`;
     const workerBackend = { sleep: async () => {}, shutdown: async () => {}, acquire: async current => ({
       workspace: current.workspace, runtimeHome: store.runtimeHome(current.id), metadata: { backend: "local" },
+      environmentVariables,
       mkdir: directory => mkdir(directory, { recursive: true, mode: 0o700 }),
       spawn(command, args, options) {
         assert(!JSON.stringify([args, options.env]).includes(config.claude.providerKey));
+        if (command === config.claude.bin && args.includes("--print")) launches.push({ args, effort: options.env.CLAUDE_CODE_EFFORT_LEVEL });
         if (args.includes("--session-id")) nativeSession = args[args.indexOf("--session-id") + 1];
         const child = spawnWorker(command, args, options);
         {
@@ -201,7 +209,7 @@ if (!process.argv.includes("--network-isolated")) {
     manager = new RuntimeManager({ store, config, broker, gatewayOrigin, workerBackend, models: new ModelCatalog(config), adapterFactory: params => new ClaudeAdapter({ ...params, store, config, broker, gatewayOrigin }) });
     chat = await manager.createChat({ agent: "claude", title: "Native run and verify fixture" });
     await manager.setMode(chat.id, "accept_edits");
-    await manager.setModel(chat.id, { model: "sonnet", effort: "high" });
+    await manager.setModel(chat.id, { model: "sonnet", effort: effortSettings ? "auto" : "high" });
     await writeFile(`${chat.workspace}/package.json`, JSON.stringify({ name: "relay-run-fixture", type: "module", scripts: { start: "node server.mjs" } }));
     const original = `import http from 'node:http';
 import {writeFile} from 'node:fs/promises';
@@ -241,7 +249,7 @@ responses.push({items:await (await fetch(origin+'/items')).json()}); console.log
 `);
     await mkdir(`${chat.workspace}/.claude/skills`, { recursive: true });
     await mkdir(`${store.runtimeHome(chat.id)}/claude`, { recursive: true });
-    await writeFile(`${store.runtimeHome(chat.id)}/claude/settings.json`, JSON.stringify({ permissions: { allow: ["Bash(node server.mjs)", "Bash(node drive.mjs)", "Bash(node verify.mjs)"] } }));
+    await writeFile(`${store.runtimeHome(chat.id)}/claude/settings.json`, JSON.stringify({ ...(effortSettings ? { effortLevel: "low" } : {}), permissions: { allow: ["Bash(node server.mjs)", "Bash(node drive.mjs)", "Bash(node verify.mjs)"] } }));
     const firstRun = manager.send(chat.id, "/run Start the HTTP app and create an item titled ação.");
     if (firstSendNow) {
       let timer;
@@ -256,7 +264,40 @@ responses.push({items:await (await fetch(origin+'/items')).json()}); console.log
       const items = await (await fetch(`http://127.0.0.1:${port}/items`, { signal: AbortSignal.timeout(3000) })).json();
       assert.deepEqual(items, [{ title: "ação" }]);
       if (!firstSendNow) assert.match(store.get(chat.id).messages.at(-1).text, /actual HTTP application/);
-    if (sendNow) {
+    if (effortSettings) {
+      phase = "effort"; step = 0;
+      const autoEffort = mainRequests.at(-1).output_config?.effort;
+      assert.notEqual(autoEffort, "low", "Auto must clear the saved profile's Low selection without editing that profile");
+      if (effortEnvironment) assert.equal(autoEffort, "medium", "An explicit worker effort environment retains native precedence over Auto");
+      for (const effort of ["high", "low", "auto", "medium", "low", "auto", "high"]) {
+        const before = mainRequests.length;
+        await manager.send(chat.id, `/effort ${effort}`);
+        assert.equal(mainRequests.length, before, "Changing effort must not request inference");
+        await manager.send(chat.id, `Verify the selected effort ${effort} without changing the app.`);
+        if (fixtureError) throw fixtureError;
+        assert.equal(mainRequests.length, before + 1);
+        assert.equal(mainRequests.at(-1).output_config?.effort, effortEnvironment ? "medium" : effort === "auto" ? autoEffort : effort, "The actual native request must use the selected effort, native Auto default or explicit worker override");
+        assert.equal(store.get(chat.id).effort, effort);
+        assert.equal(store.get(chat.id).agentSessionId, session);
+        assert.equal(launches.length, 1, "Changing effort must not replace the CLI that owns the running application");
+        assert.deepEqual(await (await fetch(`http://127.0.0.1:${port}/items`)).json(), items);
+      }
+      assert.equal(JSON.parse(await readFile(`${store.runtimeHome(chat.id)}/claude/settings.json`, "utf8")).effortLevel, "low", "Web selection must not rewrite native profile defaults");
+      if (effortEnvironment) {
+        assert.equal(launches[0].effort, "medium");
+        assert.equal(store.get(chat.id).messages.filter(message => message.kind === "notice" && /CLAUDE_CODE_EFFORT_LEVEL/.test(message.text)).length, 1);
+        const before = mainRequests.length;
+        await manager.send(chat.id, "/effort status");
+        assert.equal(mainRequests.length, before, "Inspecting native effort must not request inference");
+        assert.match(store.get(chat.id).messages.at(-1).text, /medium/i);
+        environmentVariables.CLAUDE_CODE_EFFORT_LEVEL = "high";
+        await manager.send(chat.id, "Do not run this input with stale effort environment.");
+        assert.equal(mainRequests.length, before); assert.equal(launches.length, 1);
+        assert.match(store.get(chat.id).messages.at(-1).text, /effort environment changed/);
+        assert.deepEqual(await (await fetch(`http://127.0.0.1:${port}/items`)).json(), items);
+      }
+      await manager.stop(chat.id);
+    } else if (sendNow) {
       phase = "held";
       const running = firstSendNow ? firstRun : manager.send(chat.id, "Wait while I choose which message to send now."); let timer;
       try {
@@ -397,12 +438,13 @@ responses.push({items:await (await fetch(origin+'/items')).json()}); console.log
     }
     await resumed; if (fixtureError) throw fixtureError;
     assert.equal(store.get(chat.id).agentSessionId, session);
+    if (effortSettings) assert.equal(mainRequests.at(-1).output_config?.effort, "high", "Stop/resume must retain the selected effort");
     if (planWorkflow) assert.equal(store.get(chat.id).mode, planReject || planStop || planChoice ? "plan" : "accept_edits", "Stop/resume must keep the selected mode");
     assert.match(store.get(chat.id).messages.at(-1).text, /Saved application context retained after Stop/);
     assert.equal(store.get(chat.id).usage.totals.inputTokens, (requests.length - (sendNow ? 1 : 0)) * 100);
     await assert.rejects(fetch(`http://127.0.0.1:${port}/items`, { signal: AbortSignal.timeout(3000) }));
     if (stopApproval) await assert.rejects(readFile(`${chat.workspace}/.claude/skills/verify/SKILL.md`, "utf8"), { code: "ENOENT" });
-    console.log(`PASS: ${sendNow ? `native ${firstSendNow ? "first-command " : ""}Send now retained the running app/data and unselected queue entry` : backgroundExit ? "native background completion saved one independent answer, without synthetic user input" : planWorkflow ? `native Enter/ExitPlanMode ${planStop ? "was canceled by Stop without a plan-exit grant" : planReject ? "honored denial and kept Plan for the following turn" : planChoice ? "retained a newer same-value web selection for the following turn" : "synchronized the selector and next turn"}, with actual file/policy effects` : stopApproval ? "Stop canceled the native approval without creating its recipe or consuming queued input" : `native run/verify drove the actual HTTP app across replies, changed model and ${approveRecipe ? "created/reused its recipe only after explicit approval" : "honored denial and reused a separately supplied recipe"}`}; Stop closed the app and restored the same native context without restarting it.${askQuestions ? ` Native questions ${skipQuestions ? "were skipped without invented answers" : "returned selected options and literal text"}.` : ""} ${requests.length} loopback requests; usage counted once.`);
+    console.log(`PASS: ${effortSettings ? effortEnvironment ? "native effort environment precedence stayed visible and unchanged; changed startup environment rejected input without stopping the app" : "native effort changes affected actual requests without replacing the CLI or running HTTP app/data" : sendNow ? `native ${firstSendNow ? "first-command " : ""}Send now retained the running app/data and unselected queue entry` : backgroundExit ? "native background completion saved one independent answer, without synthetic user input" : planWorkflow ? `native Enter/ExitPlanMode ${planStop ? "was canceled by Stop without a plan-exit grant" : planReject ? "honored denial and kept Plan for the following turn" : planChoice ? "retained a newer same-value web selection for the following turn" : "synchronized the selector and next turn"}, with actual file/policy effects` : stopApproval ? "Stop canceled the native approval without creating its recipe or consuming queued input" : `native run/verify drove the actual HTTP app across replies, changed model and ${approveRecipe ? "created/reused its recipe only after explicit approval" : "honored denial and reused a separately supplied recipe"}`}; Stop closed the app and restored the same native context without restarting it.${askQuestions ? ` Native questions ${skipQuestions ? "were skipped without invented answers" : "returned selected options and literal text"}.` : ""} ${requests.length} loopback requests; usage counted once.`);
   } finally {
     release.resolve(); await failureStop; await manager?.shutdown(); server.closeAllConnections(); gatewayServer?.closeAllConnections();
     await Promise.all([new Promise(resolve => server.close(resolve)), ...(gatewayServer ? [new Promise(resolve => gatewayServer.close(resolve))] : [])]);

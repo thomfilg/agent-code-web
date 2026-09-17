@@ -62,6 +62,23 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: reproduced and fixed native Claude Auto pinning the process environment
+  so later High/Low choices changed the web selector but not actual requests.
+  SDK sessions now reset effort natively before input and apply later choices
+  without replacing the CLI or its running app. Explicit worker overrides keep
+  native precedence and surface a bounded notice; changed startup environments
+  reject input without stopping the app. Failed/canceled first SDK reset leaves
+  no unusable resume ID and explicit retry starts fresh. Installed-CLI variants
+  verify actual effort, seven changes, unchanged profile defaults, HTTP app/data,
+  native status and Stop/resume (**19/19** loopback requests). Four adapter and
+  two responsive browser additions; syntax/unit **469/469**, combined browser
+  **57/57**. Native settings, approvals/questions and Plan regressions pass
+  (**3/13/14** replies), plus first-command Send now (**8**) and Fast/settings
+  interop (**3**). Fixture title/launch accounting and an overall settings
+  deadline were corrected separately, without loosening effect assertions.
+  Item 20/order/count unchanged. Next: long-lived capabilities and remaining
+  retained-session interop; classifier and other bundled workflows remain open.
+  Save to PR #2 without merge, deployment, live-data or account changes.
 - 20: reproduced and fixed Claude's native Enter/ExitPlanMode leaving Relay's
   selector and subsequent-turn mode stale. Only allowlisted structured status
   from the current main session is reconciled; stale/foreign/child events and

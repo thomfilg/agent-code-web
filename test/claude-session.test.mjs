@@ -168,6 +168,62 @@ test("background output is independent of a turn waiting for native controls and
   assert.equal(f.inputs.length, 2); assert.equal(f.launches.length, 1);
 });
 
+test("Auto uses the native effort reset before input and never pins later choices through the process environment", async t => {
+  const f = await fixture(t);
+  await f.adapter.send("/run Launch app", { model: "sonnet", resetEffort: true });
+  assert.deepEqual(f.controls.map(packet => packet.request), [{ subtype: "initialize" }, { subtype: "apply_flag_settings", settings: { effortLevel: null } }]);
+  assert.equal(f.launches[0].env.CLAUDE_CODE_EFFORT_LEVEL, undefined);
+  for (const effort of ["high", "low", null, "medium"]) {
+    await f.adapter.send(`Continue with ${effort || "Auto"}`, { model: "sonnet", effort, resetEffort: !effort });
+    assert.deepEqual(f.controls.at(-1).request, { subtype: "apply_flag_settings", settings: { effortLevel: effort } });
+  }
+  assert.equal(f.launches.length, 1); assert.equal(f.child.exitCode, null); assert.equal(f.inputs.length, 5);
+});
+
+test("ordinary private Auto turns reset effort through the SDK rather than overriding the worker environment", async t => {
+  const f = await fixture(t, { interactive: true });
+  f.adapter.executor.environmentVariables = { CLAUDE_CODE_EFFORT_LEVEL: "medium" };
+  await f.adapter.send("Use native Auto", { resetEffort: true });
+  assert.equal(f.launches[0].env.CLAUDE_CODE_EFFORT_LEVEL, "medium");
+  assert.deepEqual(f.controls.at(-1).request, { subtype: "apply_flag_settings", settings: { effortLevel: null } });
+  assert.equal(f.events.filter(event => event.type === "notice" && /CLAUDE_CODE_EFFORT_LEVEL/.test(event.text)).length, 1);
+  assert.notEqual(f.child.exitCode ?? f.child.signalCode, null);
+});
+
+test("changed effort environment requires explicit Stop without mutating controls, replaying input or killing the app", async t => {
+  for (const initial of [undefined, "medium"]) {
+    const f = await fixture(t);
+    f.adapter.executor.environmentVariables = initial ? { CLAUDE_CODE_EFFORT_LEVEL: initial } : {};
+    await f.adapter.send("/run Launch app", { resetEffort: true });
+    assert.equal(f.launches[0].env.CLAUDE_CODE_EFFORT_LEVEL, initial);
+    const controls = f.controls.length;
+    f.adapter.executor.environmentVariables = { CLAUDE_CODE_EFFORT_LEVEL: "high" };
+    await assert.rejects(f.adapter.send("Do not send with stale effort", { effort: "high" }), /effort environment changed/);
+    assert.equal(f.controls.length, controls); assert.equal(f.inputs.length, 1); assert.equal(f.child.exitCode, null);
+    f.adapter.executor.environmentVariables = initial ? { CLAUDE_CODE_EFFORT_LEVEL: initial } : {};
+    await f.adapter.send("Explicit retry with original environment", { resetEffort: true });
+    assert.equal(f.launches.length, 1); assert.equal(f.inputs.length, 2);
+    if (initial) assert.equal(f.events.filter(event => event.type === "notice" && /CLAUDE_CODE_EFFORT_LEVEL/.test(event.text)).length, 1);
+  }
+});
+
+test("Stop or rejection during the first native effort reset leaves no input, application process or resume ID", async t => {
+  for (const stop of [false, true]) for (const ordinary of [false, true]) {
+    const f = await fixture(t, { interactive: ordinary });
+    if (stop) f.hold = "apply_flag_settings"; else f.refuse = "apply_flag_settings";
+    const running = f.adapter.send(ordinary ? "Do not start yet" : "/run Do not start yet", { resetEffort: true });
+    const rejected = assert.rejects(running, /control failed|closed|stopped|interrupted/);
+    if (stop) { await waitFor(() => f.controls?.some(packet => packet.request.subtype === "apply_flag_settings")); await f.adapter.stop(); }
+    await rejected;
+    assert.deepEqual(f.inputs, []); assert.equal(f.adapter.sessionId, null); assert.deepEqual(f.sessions, []);
+    assert.notEqual(f.child.exitCode ?? f.child.signalCode, null);
+    f.hold = null; f.refuse = null;
+    await f.adapter.send(ordinary ? "Explicit retry" : "/run Explicit retry", { resetEffort: true });
+    assert.equal(f.inputs.length, 1); assert.equal(f.sessions.length, 1);
+    assert(f.launches.at(-1).args.includes("--session-id")); assert(!f.launches.at(-1).args.includes("--resume"));
+  }
+});
+
 test("Send now interruption checkpoints the first application turn and retains its CLI and capability", async t => {
   const f = await fixture(t); f.block = true; f.failInterrupt = true;
   const running = f.adapter.send("/run Launch app"), rejected = assert.rejects(running, /interrupted/);

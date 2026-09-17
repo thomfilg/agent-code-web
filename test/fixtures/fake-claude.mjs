@@ -4,6 +4,7 @@ import path from "node:path";
 
 let prompt = "";
 let timer;
+const controlSettings = {};
 const streaming = process.argv[process.argv.indexOf("--input-format") + 1] === "stream-json";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", chunk => {
@@ -13,6 +14,7 @@ process.stdin.on("data", chunk => {
   for (const line of lines) {
     const packet = JSON.parse(line);
     if (packet.type === "control_request") {
+      if (packet.request.subtype === "apply_flag_settings") Object.assign(controlSettings, packet.request.settings);
       process.stdout.write(`${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: packet.request_id, response: {} } })}\n`);
       if (packet.request.subtype === "interrupt") {
         clearInterval(timer);
@@ -65,7 +67,7 @@ async function run(prompt) {
   }
   if (prompt === "inspect-settings") {
     const flag = name => { const i = process.argv.indexOf(name); return i < 0 ? null : process.argv[i + 1]; };
-    send({ type: "result", subtype: "success", result: JSON.stringify({ model: flag("--model"), effort: flag("--effort"), mode: flag("--permission-mode"), environmentEffort: process.env.CLAUDE_CODE_EFFORT_LEVEL || null, fast }) }); return;
+    send({ type: "result", subtype: "success", result: JSON.stringify({ model: flag("--model"), effort: flag("--effort"), mode: flag("--permission-mode"), environmentEffort: process.env.CLAUDE_CODE_EFFORT_LEVEL || null, sdkEffortReset: controlSettings.effortLevel === null, fast }) }); return;
   }
   if (prompt === "force failure") {
     send({ type: "result", subtype: "error_during_execution", is_error: true, result: "fixture failed" });

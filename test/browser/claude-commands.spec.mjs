@@ -23,6 +23,37 @@ async function fixture(page) {
 const requestEvent = (page, id, event) => page.evaluate(({ id, event }) => window.fixtureSources.find(source => source.url.includes(`/chats/${id}/events`))
   .dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) })), { id, event });
 
+for (const width of [1280, 320]) test(`Claude effort changes at ${width}px preserve the running chat, draft and files and display native override errors`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input"), changes = [], stops = [];
+  f.snapshot = { ...f.snapshot, status: "running", model: "sonnet", effort: "auto" }; await f.emit();
+  await page.route(`**/api/chats/${f.snapshot.id}/model`, async route => {
+    const selected = route.request().postDataJSON(); changes.push(selected);
+    f.snapshot = { ...f.snapshot, ...selected, revision: f.snapshot.revision + 1 };
+    await route.fulfill({ json: { chat: f.snapshot } });
+  });
+  await page.route(`**/api/chats/${f.snapshot.id}/stop`, route => { stops.push(true); return route.fulfill({ json: {} }); });
+  await input.fill("Keep my next task unsent");
+  await page.locator("#attachment-input").setInputFiles({ name: "effort-context.txt", mimeType: "text/plain", buffer: Buffer.from("Unsent context") });
+  const controls = page.locator("#composer-model-controls");
+  for (const effort of ["high", "low", "auto"]) {
+    if (!await controls.locator(".effort-menu").evaluate(element => element.open)) await controls.locator(".effort-label").click();
+    await page.getByRole("combobox", { name: "Chat effort", exact: true }).selectOption(effort);
+    await expect(controls).toHaveAttribute("data-status", "ready");
+    await expect(controls.locator(".effort-label")).toHaveText(effort[0].toUpperCase() + effort.slice(1));
+  }
+  await page.keyboard.press("Escape");
+  f.snapshot = { ...f.snapshot, status: "error", messages: [
+    { id: "effort-notice", role: "system", kind: "notice", text: "Claude's worker environment sets CLAUDE_CODE_EFFORT_LEVEL. It may override the web effort selection; use /effort status to check the effective native level." },
+    { id: "effort-error", role: "system", kind: "error", text: "The worker's Claude effort environment changed. Stop the application session before retrying to apply it; its running applications have not been stopped." },
+  ] }; await f.emit();
+  await expect(page.locator("#messages")).toContainText("/effort status");
+  await expect(page.locator("#messages")).toContainText("its running applications have not been stopped");
+  await expect(input).toHaveValue("Keep my next task unsent"); await expect(page.locator("#attachment-chips")).toContainText("effort-context.txt");
+  expect(changes).toEqual(["high", "low", "auto"].map(effort => ({ model: "sonnet", effort })));
+  expect(stops).toEqual([]); expect(f.calls).toEqual([]); expect(f.errors).toEqual([]);
+});
+
 for (const width of [1280, 320]) test(`native Plan transitions at ${width}px update the selector without guessing approval results or losing drafts`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page), input = page.locator("#message-input"), card = page.locator("#approval-card");

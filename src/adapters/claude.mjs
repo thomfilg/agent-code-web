@@ -41,6 +41,7 @@ export class ClaudeAdapter {
       this.capability = this.broker.issue({ chatId: this.chat.id, provider: "anthropic" });
     }
     this.stopped = false;
+    this.effortEnvironmentNotified = false;
   }
 
   async send(text, { model, effort, resetEffort, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, onPermissionMode, mode = "accept_edits", systemPrompt } = {}) {
@@ -102,7 +103,7 @@ export class ClaudeAdapter {
     // These native handlers create a resumable journal only on completion.
     // Preflight, startup and forced-stop failures must not retain a missing ID.
     const provisionalSession = isNew && (mcpRequest?.action || reviewRequest || applicationRequest);
-    if (isNew && !provisionalSession) {
+    if (isNew && !provisionalSession && !interactive) {
       this.sessionId = sessionId;
       await this.hooks.onSessionId?.(sessionId);
     }
@@ -126,7 +127,14 @@ export class ClaudeAdapter {
     // Do not grant access to the controller or other chats' runtime homes.
     const uploads = path.join(this.runtimeHome, "uploads");
     await ensureDirectory(uploads);
-    if (resetEffort) env.CLAUDE_CODE_EFFORT_LEVEL = "auto";
+    // SDK sessions can clear effort natively. A startup environment override
+    // would otherwise pin Auto and silently defeat all later picker changes.
+    const usesSession = interactive || applicationRequest || this.applicationSession && !this.applicationSession.ended;
+    if (resetEffort && !usesSession) env.CLAUDE_CODE_EFFORT_LEVEL = "auto";
+    if (usesSession && env.CLAUDE_CODE_EFFORT_LEVEL && !this.effortEnvironmentNotified) {
+      this.hooks.onEvent?.({ type: "notice", text: "Claude's worker environment sets CLAUDE_CODE_EFFORT_LEVEL. It may override the web effort selection; use /effort status to check the effective native level." });
+      this.effortEnvironmentNotified = true;
+    }
     // Documented bearer-gateway compatibility, gated by the fresh authoritative
     // controller lookup above. Never guess permission or bypass a denial/error.
     // Model allowlists, native policy and API-side entitlement still apply.
@@ -213,8 +221,15 @@ export class ClaudeAdapter {
       }
       managed = this.applicationSession || (interactive ? manage(args) : null);
       this.turnSession = managed;
-      child = managed ? await managed.open(args, env) : spawn(args);
+      child = managed ? await managed.open(args, env, { resetEffort }) : spawn(args);
       if (version !== this.sendVersion) throw Error("Claude turn interrupted");
+      // No user input exists during SDK initialization/reset. Do not publish
+      // a resume ID for a first turn that fails before those controls finish.
+      if (isNew && !provisionalSession && interactive) {
+        await this.hooks.onSessionId?.(sessionId);
+        this.sessionId = sessionId;
+        if (version !== this.sendVersion) throw Error("Claude turn interrupted");
+      }
     } catch (error) {
       finishObservation();
       if (this.modeObserver === modeObserver) this.modeObserver = previousModeObserver;

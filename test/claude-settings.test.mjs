@@ -187,7 +187,7 @@ test("partial native failures keep applied values, invalid assignments keep web 
   await f.manager.send(f.chat.id, "/effort auto");
   await f.manager.send(f.chat.id, "inspect-settings");
   const result = JSON.parse(f.store.get(f.chat.id).messages.at(-1).text);
-  assert.equal(result.effort, null); assert.equal(result.environmentEffort, "auto");
+  assert.equal(result.effort, null); assert.equal(result.environmentEffort, null); assert.equal(result.sdkEffortReset, true);
 });
 
 test("busy config commands use FIFO and newer web choices win over a late native response", async t => {

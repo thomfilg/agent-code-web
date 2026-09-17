@@ -50,12 +50,16 @@ export class ClaudeSession {
     });
   }
 
-  async open(args, env) {
+  async open(args, env, { resetEffort = false } = {}) {
     if (this.ended || this.error) throw this.error || Error("Claude application session ended; retry to resume it");
     if (this.pending || this.active) throw Error("A Claude application turn is already running");
     this.pending = true;
     try {
-      if (!this.initialized) { await this.control.request("initialize"); this.initialized = true; }
+      if (!this.initialized) {
+        await this.control.request("initialize");
+        if (resetEffort) await this.control.request("apply_flag_settings", { settings: { effortLevel: null } });
+        this.initialized = true;
+      }
       else {
         // The native controls cannot replace an appended system prompt. Never
         // keep using stale handoff/security instructions or replace Claude's
@@ -65,6 +69,9 @@ export class ClaudeSession {
         }
         if (env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK === "1" && this.env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK !== "1") {
           throw Error("Fast needs a Claude startup setting. Stop this application session before enabling Fast; its running applications have not been stopped.");
+        }
+        if (env.CLAUDE_CODE_EFFORT_LEVEL !== this.env.CLAUDE_CODE_EFFORT_LEVEL) {
+          throw Error("The worker's Claude effort environment changed. Stop the application session before retrying to apply it; its running applications have not been stopped.");
         }
         await this.control.request("set_permission_mode", { mode: flag(args, "--permission-mode") });
         await this.control.request("set_model", { model: flag(args, "--model") || "default" });

@@ -16,11 +16,15 @@ import { spawnWorker } from "../src/worker-process.mjs";
 const directory = await mkdtemp("/tmp/relay-claude-commands-");
 const requests = [];
 const settingsOnly = process.argv.includes("--settings");
+const trace = process.argv.includes("--trace");
 const autocompactOnly = process.argv.includes("--autocompact");
 const autocompactDisabled = process.argv.includes("--autocompact-disabled");
 const adapters = new Map();
 let inputTokens = 100;
-let manager, timer;
+let manager, timer, timedOut = false;
+// The full settings matrix starts more than a dozen real CLI processes. Keep
+// an overall bound without canceling its final commands after healthy replies.
+const deadlineMs = settingsOnly ? 120000 : 60000;
 const server = http.createServer(async (request, response) => {
   let raw = ""; for await (const chunk of request) raw += chunk;
   if (request.url.includes("count_tokens")) { response.writeHead(200, { "content-type": "application/json" }); response.end('{"input_tokens":100}'); return; }
@@ -51,12 +55,16 @@ try {
     const executor = autocompactDisabled ? { workspace: params.chat.workspace, runtimeHome: store.runtimeHome(params.chat.id), metadata: { backend: "local" }, environmentVariables: {}, mkdir: directory => mkdir(directory, { recursive: true, mode: 0o700 }), spawn: spawnWorker } : params.executor;
     const adapter = new ClaudeAdapter({ ...params, store, config, broker, gatewayOrigin, executor }); adapters.set(params.chat.id, adapter); return adapter;
   } });
-  timer = setTimeout(() => { void manager.shutdown(); server.closeAllConnections(); }, 60000);
+  timer = setTimeout(() => { timedOut = true; if (trace) console.log("Fixture deadline reached"); void manager.shutdown(); server.closeAllConnections(); }, deadlineMs);
   const chat = await manager.createChat({ agent: "claude", title: "Disposable native commands" });
   const submit = async text => {
+    const started = performance.now();
+    if (trace) console.log(JSON.stringify({ command: text, state: "start" }));
     const before = store.get(chat.id).messages.length;
     await manager.send(chat.id, text);
+    assert(!timedOut, `Native command fixture exceeded its ${deadlineMs / 1000}s overall deadline`);
     const added = store.get(chat.id).messages.slice(before);
+    if (trace) console.log(JSON.stringify({ command: text, state: store.get(chat.id).status, durationMs: Math.round(performance.now() - started), messages: added.map(message => ({ role: message.role, kind: message.kind, text: message.text?.slice(0, 800) })) }));
     assert.deepEqual(added.filter(message => message.kind === "error").map(message => message.text), [], text);
     const result = added.filter(message => message.role === "assistant" || message.kind === "notice").at(-1)?.text;
     assert(result?.trim(), `${text} must have a visible native result`);

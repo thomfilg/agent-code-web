@@ -46,7 +46,7 @@ and remain at the beginning of native stream-json input.
 | Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI verifies command-first continuation, custom-command/skill expansion, local aliases and same-session resume. Native catalog changes and successful skill reloads refresh both menu caches immediately. Remaining stateful commands, bundled workflows and account-backed acceptance are listed below. |
 | `/config key=value`, `/settings key=value` (Claude) | Native private-profile settings, with verified model/mode readback into Relay and subsequent-turn/Stop persistence. Partial native results remain visible; newer web selections win over late readback. Shared host mutations stay locked on item 21. Attachments are rejected before accepting/queueing the command. |
 | `/autocompact [auto/tokens]` (Claude) | Native current-window inspection, private-profile threshold persistence and reset. Actual automatic summary/compact-boundary and same-session Stop/resume verified; disabled state and native environment precedence retained. Shared host mutation and linked files fail closed; attached input is rejected before sending/queueing. Live activation pending. |
-| `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. |
+| `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. Installed-CLI acceptance verifies effort changes inside a retained application session and explicit worker-environment precedence. |
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
 | `/fast [on/off]`, `/personality [friendly/pragmatic/none]` (Codex) | Catalog-driven, persisted per-chat settings, applied in FIFO order to later turns. Stop/model-change guards, retryable personality picker and draft/attachment protection. Controller/browser checks and actual installed-CLI parameter/resume verification pass; live activation remains pending. |
 | `/fast [on/off]` (Claude) | Per-chat private-gateway opt-in, fresh authenticated account checks, structured native status, FIFO and same-session Stop/resume. Native Fast/standard requests, credits, API denials, persisted cooldowns, configuration/model interop and managed-policy enforcement verified. No provider key in workers. Host profiles, custom upstreams, native managed-policy limitations and live activation remain gated below. |
@@ -210,12 +210,68 @@ file-permission effects, not the separate shell classifier contract.
 
 Seven new unit/controller/adapter cases and two desktop/320px browser cases
 cover the above guards, settings ordering, failure handling and unsent
-draft/files. Current syntax/unit suite: **465/465**; combined Claude-command
+draft/files. Plan checkpoint syntax/unit suite: **465/465**; combined Claude-command
 and conversation browser suite: **55/55**. Installed native settings and
 approval/question regressions also pass (**3** and **13** local replies).
 Item 20 remains active; the remaining application-session gates below and
 other bundled workflows/plugin namespaces are not marked complete. No merge,
 deployment, live approval or shared-host/company credential changes.
+
+### Claude effort in retained application sessions
+
+The installed **2.1.222** CLI reproduced a real mismatch: after launching in
+Auto, `/effort high` updated Relay but the subsequent native API request still
+omitted High. Relay had set `CLAUDE_CODE_EFFORT_LEVEL=auto` in the process
+environment, which continued to override later SDK effort changes.
+
+SDK sessions now reset Auto with native `apply_flag_settings` and
+`effortLevel:null` before the first input, instead of pinning the environment.
+Later explicit choices and Auto use the same native control. Auto follows the
+native model default, not the previous Low/High selection or a rewritten
+profile default. Ordinary private SDK turns use this reset too. A failed or
+interrupted first initialization/reset publishes no unusable resume ID; an
+explicit retry starts a fresh native session without replaying the failed input.
+
+An explicit worker effort environment remains untouched, following native
+[effort precedence](https://code.claude.com/docs/en/model-config#adjust-effort-level).
+A once-per-runtime notice identifies the override and points to `/effort status`
+without dumping environment values. If that startup environment changes while
+an application session is retained, Relay refuses input before changing native
+controls and explains that explicit Stop/retry is required. The running app is
+not silently killed. Ordinary effort-picker changes need no restart.
+
+Two `smoke-real-claude-run.mjs` variants use actual native tools, gateway requests
+and a retained HTTP app/data in disposable loopback/PID namespaces:
+
+- `--effort-settings`: a saved Low profile starts in Auto; seven High/Low/Auto/
+  Medium selections are checked against actual request effort, without model
+  inference for the settings commands or replacement of the owning CLI. The
+  saved profile remains Low, and Stop/resume retains the last choice: **19**
+  local requests, including native title generation.
+- `--effort-environment`: an explicit Medium worker override remains effective
+  across the same web choices. Its notice appears once, native `/effort status`
+  reports Medium without inference, and changing the startup value rejects
+  input while the same HTTP app stays available. Explicit Stop/resume applies
+  the new High environment in the same saved conversation: **19** requests.
+
+Four new adapter cases cover controls, ordinary turns, unchanged environments,
+startup failure/cancellation and fresh retry. Two desktop/320px browser cases
+exercise actual picker interactions, visible override/error messages and
+retained drafts/files without automatic Stop or submission. Syntax/unit suite:
+**469/469**; combined Claude-command/conversation browser suite: **57/57**.
+Native settings, approval/questions and Plan regressions pass (**3/13/14**
+local replies), as do first-command Send now (**8**) and native Fast/settings
+interop (**3**). Model responses are authored locally; no real inference or
+personal accounts were used.
+
+Fixture corrections are separate from the product fix: count only actual CLI
+launches, distinguish title calls from task calls, and allow the full settings
+matrix 120 seconds rather than canceling its final command at 60 seconds after
+healthy six-second CLI replies. `--trace` now makes that overall timeout explicit;
+the command/effect assertions are unchanged. Item 20 stays active; long-lived
+capabilities, other retained-session interop, shell-classifier acceptance and
+remaining bundled workflows are still open. No merge, deployment or live data
+changes.
 
 ### Claude application sessions and native usage
 
@@ -276,9 +332,10 @@ Remaining gates are explicit:
 - Appended system instructions and initial Fast compatibility environment
   cannot be replaced by these native controls. Such changes fail before input,
   with an explicit Stop/retry notice; running apps are not silently terminated.
-  Native effort environment precedence, expired capabilities/long-lived renewal,
-  account/cooldown and MCP/review interop *within* a retained app session still
-  need acceptance. Existing capability expiration/revocation is not relaxed.
+  Native effort changes and environment precedence are now accepted above.
+  Expired capabilities/long-lived renewal, account/cooldown and MCP/review interop
+  *within* a retained app session still need acceptance. Existing capability
+  expiration/revocation is not relaxed.
 
 Fixture corrections: wait for the actual server's readiness; distinguish native
 title generation from the main query; Haiku does not accept an effort picker
