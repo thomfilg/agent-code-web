@@ -31,6 +31,7 @@ import { desktopBinding, desktopInfo } from "./desktop-handoff.mjs";
 import { CLAUDE_PERMISSION_MODES, claudeConfigRequest } from "./claude-settings.mjs";
 import { claudeFastRequest, claudeFastScope, claudeFastCredential } from "./claude-fast.mjs";
 import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR } from "./claude-mcp.mjs";
+import { claudePluginReloadRequest, CLAUDE_PLUGIN_PRIVATE_ERROR } from "./claude-plugins.mjs";
 
 const ADAPTERS = {
   codex: CodexAdapter,
@@ -689,6 +690,10 @@ export class RuntimeManager extends EventEmitter {
 
   #checkClaudeConfiguration(chat, text, attachments) {
     if (chat.agent !== "claude") return;
+    if (claudePluginReloadRequest(text)) {
+      if (attachments.length) throw Error("/reload-plugins does not accept attachments. Remove them or send them in a separate message.");
+      if (this.config.claude.authMode !== "gateway") throw Error(CLAUDE_PLUGIN_PRIVATE_ERROR);
+    }
     const mcp = claudeMcpRequest(text);
     if (mcp) {
       if (attachments.length) throw new Error("/mcp does not accept attachments. Remove them or send them in a separate message.");

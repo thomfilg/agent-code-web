@@ -229,6 +229,31 @@ for (const width of [1280, 320]) test(`bundled review discovery at ${width}px re
   expect(f.errors).toEqual([]);
 });
 
+for (const width of [1280, 320]) test(`plugin namespaces at ${width}px remain distinct, insert without sending and preserve queued arguments/files`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input"), options = page.locator("#slash-options [role=option]");
+  f.catalog = [{ name: "fixture-alpha:stamp", description: "Alpha stamp" }, { name: "fixture-beta:stamp", description: "Beta stamp" }, { name: "reload-plugins", kind: "SDK control" }]; await f.emit();
+  await input.fill("/fixture-"); await expect(options).toHaveCount(2);
+  await options.filter({ hasText: "/fixture-beta:stamp" }).click(); await expect(input).toHaveValue("/fixture-beta:stamp "); expect(f.calls).toEqual([]);
+  const uploaded = page.waitForResponse(response => response.request().method() === "POST" && response.url().endsWith(`/api/chats/${f.snapshot.id}/attachments`));
+  await page.locator("#attachment-input").setInputFiles({ name: "plugin-context.txt", mimeType: "text/plain", buffer: Buffer.from("Literal plugin context") });
+  const { attachment } = await (await uploaded).json(); expect(attachment.name).toBe("plugin-context.txt");
+  await expect(page.locator("#attachment-chips")).toContainText("plugin-context.txt");
+  const command = "/fixture-beta:stamp Preserve ação\nand this exact line";
+  f.snapshot.status = "running"; await f.emit(); await input.fill(command); await input.press("Escape");
+  await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect.poll(() => f.calls.length).toBe(1); expect(f.calls[0].tail).toBe("queue"); expect(f.calls[0].text).toBe(command);
+  expect(f.calls[0].attachments).toEqual([attachment.id]);
+  await input.fill("/fixture-"); await expect(options).toHaveCount(2);
+  f.catalog = f.catalog.filter(command => command.name !== "fixture-beta:stamp"); await f.emit(); await expect(options).toHaveCount(1); await expect(options).toContainText("/fixture-alpha:stamp");
+  await expect(input).toHaveValue("/fixture-"); expect(f.calls).toHaveLength(1);
+  await input.fill("/reload-p"); await expect(options).toContainText("/reload-plugins"); await options.click();
+  await expect(input).toHaveValue("/reload-plugins "); expect(f.calls).toHaveLength(1);
+  await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect.poll(() => f.calls.length).toBe(2); expect(f.calls[1]).toEqual({ tail: "queue", text: "/reload-plugins", attachments: [] });
+  expect(f.errors).toEqual([]);
+});
+
 test("review findings stay readable after stop, and a rejected send keeps the command and file for retry", async ({ page }) => {
   const f = await fixture(page), input = page.locator("#message-input");
   await page.locator("#attachment-input").setInputFiles({ name: "review-context.txt", mimeType: "text/plain", buffer: Buffer.from("Unsent review context") });

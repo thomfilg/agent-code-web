@@ -235,6 +235,19 @@ test("Claude-only permission modes are rejected for Codex and switching back def
   await assert.rejects(f.models.validate("codex", { model: "gpt-5.6-sol", effort: "auto" }), /not supported/);
 });
 
+test("plugin reload rejects attachments, invalid arguments and shared-host changes before accepting or queueing", async t => {
+  const f = await fixture(t, { fake: true }), host = await fixture(t, { fake: true, host: true });
+  for (const candidate of [f, host]) {
+    for (const method of ["submit", "enqueue"]) {
+      await assert.rejects(candidate.manager[method](candidate.chat.id, "/reload-plugins", ["file"]), /does not accept attachments/);
+      await assert.rejects(candidate.manager[method](candidate.chat.id, "/reload-plugins --invented"), /Use \/reload-plugins/);
+    }
+  }
+  await assert.rejects(host.manager.submit(host.chat.id, "/reload-plugins"), /private Claude profile/);
+  await assert.rejects(host.manager.enqueue(host.chat.id, "/reload-plugins --force"), /private Claude profile/);
+  for (const candidate of [f, host]) { assert.equal(candidate.starts, 0); assert.equal(candidate.store.get(candidate.chat.id).messages.length, 0); }
+});
+
 test("reselecting the same web values is still newer than an in-flight native command", async t => {
   const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
   const pending = f.manager.send(f.chat.id, "/config model=sonnet permissionMode=plan"); await waitFor(() => f.calls.length === 1);

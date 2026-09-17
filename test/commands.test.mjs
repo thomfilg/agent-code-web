@@ -59,6 +59,22 @@ test("command discovery gates model-specific commands and refreshes them when th
   result = await catalog.list({ ...chat, model: "capable" }); assert.ok(["personality", "fast"].every(name => result.commands.some(command => command.name === name)));
 });
 
+test("installed Claude namespaces keep same-name commands and aliases distinct from web controls", async () => {
+  const catalog = new CommandCatalog({ workerBackend: "ec2" });
+  const names = ["one:goal", "two:goal", "one:config", "two:plan", "one:reload-plugins"];
+  const commandCatalog = names.map(name => ({ name, description: name, aliases: name === "one:goal" ? ["one:target"] : [] }));
+  const { commands } = await catalog.list({ id: "plugin-fixture", agent: "claude", commandCatalog });
+  for (const name of [...names, "one:target"]) {
+    assert.equal(commands.find(command => command.name === name).web, false);
+    assert.equal(messageCommand("claude", `/${name} Keep ação\nand the next line`), null);
+  }
+  assert.equal(commands.find(command => command.name === "one:target").aliasFor, "one:goal");
+  assert.equal(commands.find(command => command.name === "plan").web, true);
+  assert.equal(commands.find(command => command.name === "reload-plugins").kind, "SDK control");
+  assert.equal(commands.find(command => command.name === "reload-plugins").web, false);
+  assert.equal(commandCatalog.length, names.length, "Web/SDK controls must not mutate the worker-reported native inventory");
+});
+
 test("plan plus task uses read-only mode; goals persist and stream each native continuation separately", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const config = testConfig(root, { CODEX_BIN: fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url)), AGENT_IDLE_TIMEOUT_MS: "10000" });

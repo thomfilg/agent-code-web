@@ -10,6 +10,7 @@ import { claudeFastRequest, claudeFastState, claudeFastCredential, claudeFastSco
 import { ClaudeTextStream } from "../claude-text-stream.mjs";
 import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR, ClaudeControlChannel, runClaudeMcpCommand } from "../claude-mcp.mjs";
 import { ClaudeSession, claudeCallResult, CLAUDE_SCHEDULE_DIAGNOSTICS } from "../claude-session.mjs";
+import { claudePluginReloadRequest, reloadClaudePlugins, CLAUDE_PLUGIN_PRIVATE_ERROR } from "../claude-plugins.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch, now = Date.now }) {
@@ -70,12 +71,14 @@ export class ClaudeAdapter {
     const configuration = claudeConfigRequest(text);
     const fastRequest = claudeFastRequest(text);
     const mcpRequest = claudeMcpRequest(text);
+    const pluginReload = claudePluginReloadRequest(text);
     // The native review handler checkpoints its journal only when it returns.
     // Keep its SDK input open so Stop can cancel the query and let it flush.
     const reviewRequest = /^\/code-review(?:\s|$)/.test(text.trimStart());
     const applicationRequest = /^\/(?:run|verify)(?:\s|$)/.test(text.trimStart());
     const interactive = this.config.claude.authMode === "gateway" && Boolean(this.hooks.onRequest);
     if (mcpRequest?.action && this.config.claude.authMode !== "gateway") throw new Error(CLAUDE_MCP_PRIVATE_ERROR);
+    if (pluginReload && this.config.claude.authMode !== "gateway") throw Error(CLAUDE_PLUGIN_PRIVATE_ERROR);
     if (fastRequest && this.config.claude.authMode !== "gateway") throw new Error("Fast changes require a private Claude profile; shared host profiles remain locked until company/profile isolation is complete.");
     if (configuration?.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
     const nativeMode = Object.keys(CLAUDE_PERMISSION_MODES).find(key => CLAUDE_PERMISSION_MODES[key] === mode);
@@ -103,7 +106,7 @@ export class ClaudeAdapter {
       fastMode = false; fastFallback = { state: "off", disabledReason: "unknown" };
       this.hooks.onEvent?.({ type: "notice", text: "Claude credentials changed. Fast is off for this chat; use /fast on to authorize it for the current account." });
     }
-    if (enableFast || fastMode === true && !heldCooldown) {
+    if (!pluginReload && (enableFast || fastMode === true && !heldCooldown)) {
       const controller = new AbortController(); this.fastInspection = controller;
       try {
         availability = await checkClaudeFastAvailability(this.config.claude, { signal: controller.signal, fetchImpl: this.fetchImpl });
@@ -122,10 +125,10 @@ export class ClaudeAdapter {
     }
 
     const isNew = !this.sessionId;
-    const sessionId = this.sessionId || randomUUID();
+    const sessionId = this.sessionId || this.applicationSession?.sessionId || randomUUID();
     // These native handlers create a resumable journal only on completion.
     // Preflight, startup and forced-stop failures must not retain a missing ID.
-    const provisionalSession = isNew && (mcpRequest?.action || reviewRequest || applicationRequest);
+    const provisionalSession = isNew && (mcpRequest?.action || reviewRequest || applicationRequest || pluginReload);
     if (isNew && !provisionalSession && !interactive) {
       this.sessionId = sessionId;
       await this.hooks.onSessionId?.(sessionId);
@@ -152,7 +155,7 @@ export class ClaudeAdapter {
     await ensureDirectory(uploads);
     // SDK sessions can clear effort natively. A startup environment override
     // would otherwise pin Auto and silently defeat all later picker changes.
-    const usesSession = interactive || applicationRequest || this.applicationSession && !this.applicationSession.ended;
+    const usesSession = interactive || applicationRequest || pluginReload || this.applicationSession && !this.applicationSession.ended;
     if (resetEffort && !usesSession) env.CLAUDE_CODE_EFFORT_LEVEL = "auto";
     if (usesSession && env.CLAUDE_CODE_EFFORT_LEVEL && !this.effortEnvironmentNotified) {
       this.hooks.onEvent?.({ type: "notice", text: "Claude's worker environment sets CLAUDE_CODE_EFFORT_LEVEL. It may override the web effort selection; use /effort status to check the effective native level." });
@@ -177,6 +180,7 @@ export class ClaudeAdapter {
     };
     const beforeSettings = configuration?.mutate ? await inspect() : null;
     if (mcpRequest?.action) await inspect(".claude.json");
+    if (pluginReload) { await inspect(".claude.json"); await inspect(); }
     // /fast on promotes non-Opus aliases by native contract. Apply that model
     // at startup too: print-mode 2.1.222 otherwise reports the PRE-command
     // Sonnet model's Fast state as off even after saying it switched to Opus.
@@ -187,7 +191,7 @@ export class ClaudeAdapter {
       "--print",
       "--verbose",
       "--output-format", "stream-json",
-      ...(mcpRequest?.action || reviewRequest || interactive ? ["--input-format", "stream-json"] : []),
+      ...(mcpRequest?.action || reviewRequest || interactive || pluginReload ? ["--input-format", "stream-json"] : []),
       ...(interactive ? ["--permission-prompt-tool", "stdio"] : []),
       ...(interactive ? CLAUDE_SCHEDULE_DIAGNOSTICS : []),
       "--include-partial-messages",
@@ -253,7 +257,7 @@ export class ClaudeAdapter {
         const launchArgs = args.includes("--input-format") ? args : [...args, "--input-format", "stream-json"];
         this.applicationSession = manage(launchArgs);
       }
-      managed = this.applicationSession || (interactive ? manage(args) : null);
+      managed = this.applicationSession || (interactive || pluginReload ? manage(args) : null);
       this.turnSession = managed;
       child = managed ? await managed.open(args, env, { resetEffort }) : spawn(args);
       if (version !== this.sendVersion) throw Error("Claude turn interrupted");
@@ -281,6 +285,35 @@ export class ClaudeAdapter {
       throw error;
     }
     this.child = child;
+    if (pluginReload) {
+      // A control-only first command creates no native journal. Retain this
+      // private initialized owner for the next input, but publish no resume ID
+      // until actual input has started. Stop before that input stays a new chat.
+      this.applicationSession = managed;
+      const settled = Promise.withResolvers(); this.pluginReload = settled.promise;
+      let verified = false;
+      try {
+        const outcome = await reloadClaudePlugins(managed.control);
+        verified = true;
+        if (version !== this.sendVersion) throw Error("Claude turn interrupted");
+        this.assertCapability();
+        await this.hooks.onEvent?.({ type: "command_catalog", commands: outcome.commands });
+        if (version !== this.sendVersion) throw Error("Claude turn interrupted");
+        this.assertCapability();
+        await this.hooks.onEvent?.({ type: "session_capabilities", connectors: outcome.connectors });
+        if (version !== this.sendVersion) throw Error("Claude turn interrupted");
+        this.assertCapability();
+        if (outcome.errorCount) throw Error(`${outcome.text} ${outcome.errorCount} component load error(s); review the private plugin configuration and retry /reload-plugins.`);
+        return { text: outcome.text, status: "completed" };
+      } finally {
+        finishObservation();
+        if (managed.active === child) managed.finish(child, 0, null);
+        if (this.child === child) this.child = null;
+        if (this.turnSession === managed) this.turnSession = null;
+        if (this.pluginReload === settled.promise) this.pluginReload = null;
+        settled.resolve(verified);
+      }
+    }
     if (provisionalSession) this.sessionId = sessionId;
     const mcpControl = mcpRequest?.action ? new ClaudeControlChannel(child) : null;
     const reviewControl = reviewRequest ? new ClaudeControlChannel(child, 2000) : null;
@@ -522,6 +555,13 @@ export class ClaudeAdapter {
     // Application turns are logical children: interrupt their native query,
     // retaining the CLI and its background servers. Other turns are one-shot.
     const child = this.child;
+    // Native plugin reload has no cancellation control. Wait for its bounded
+    // receipt before Send now; the version guard rejects late publication and
+    // the owning app remains alive. Explicit Stop still terminates the owner.
+    if (this.pluginReload) {
+      if (!await this.pluginReload) throw Error("Could not verify native plugin reload before Send now. The selected input was not sent; retry reload or explicitly Stop the worker.");
+      return;
+    }
     await this.reviewInterruption?.();
     if (child) await terminateWorker(child);
     else if (this.turnSession?.pending) await this.turnSession.stop();

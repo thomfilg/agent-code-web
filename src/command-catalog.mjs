@@ -23,7 +23,7 @@ export class CommandCatalog {
     let items = [], note = "";
     if (chat.agent === "mock") items = [];
     else if (this.config.workerBackend === "ec2") {
-      items = chat.commandCatalog || (chat.slashCommands || []).map(name => ({ name }));
+      items = [...(chat.commandCatalog || (chat.slashCommands || []).map(name => ({ name })))];
       note = "Last worker-reported commands. Sleeping cloud workers are not started to refresh this list.";
     } else {
       try { items = chat.agent === "codex" ? await this.codex(chat) : await this.claude(chat); }
@@ -32,6 +32,9 @@ export class CommandCatalog {
     // skills/list gives executable Codex skills, not terminal UI settings. Old
     // cached terminal placeholders must not return as broken menu entries.
     if (chat.agent === "codex") items = items.filter(item => item.kind === "Skill" && item.path);
+    // The installed Claude omits its terminal-only reload callback from SDK
+    // discovery. Relay implements this action through reload_plugins instead.
+    if (chat.agent === "claude") items.push({ name: "reload-plugins", description: "Reload installed plugins and refresh this session's commands through the native SDK", kind: "SDK control" });
     let model;
     if (chat.agent === "codex" && this.models) try { model = await this.models.selected(chat); } catch { /* Model-only controls wait for successful catalog discovery. */ }
     items.push(...webCommands(chat.agent, { personality: model?.supportsPersonality, fast: model?.serviceTiers?.some(tier => /^fast$/i.test(tier.name || "") || ["fast", "priority"].includes(tier.id)) }));

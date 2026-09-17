@@ -46,7 +46,8 @@ and remain at the beginning of native stream-json input.
 | `/app` (Codex) | Explicit same-session desktop link for verified local host profiles, with native locator inspection, stopped-session cache, computer/profile confirmation and no prompt/credential/history transfer. Remote/private profiles show their actual connection limits. Controller/browser and installed-CLI inspection checks; OS launch acceptance and private/remote handoff remain open. |
 | `/init [instructions]` | Repository-instruction creation task with multiline instructions and attachments, retaining the same chat, queue and permission mode. Six controller/unit and three browser cases pass; installed CLI verifies actual AGENTS.md creation, preservation on resume and no writes in Plan. Generated prose still needs repository-owner review; live activation pending. |
 | Installed Codex skills | `skills/list` plus structured skill input. No fake terminal entries substituted for skills. |
-| Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI verifies command-first continuation, custom-command/skill expansion, local aliases and same-session resume. Native catalog changes and successful skill reloads refresh both menu caches immediately. Remaining stateful commands, bundled workflows and account-backed acceptance are listed below. |
+| Installed Claude commands / plugin aliases | Native prefixes and arguments remain intact. Installed legacy commands and skills with the same basename execute distinct file effects, retain Unicode/multiline FIFO and resume history. Native Plan refusals and private-chat isolation pass. `/reload-skills` refreshes both menu caches; actual plugin reload is covered below. Other advertised commands and account-backed acceptance remain open. |
+| `/reload-plugins [--force]` (Claude) | Actual native `reload_plugins` SDK control, verified component counts and sanitized catalog/connector refresh; no inference or fake native input. First-command Stop/retry works without a missing journal. Same live CLI and HTTP app/state survive reload; explicit Stop ends the app. Failed/partial/late results, bounded cancellation, files and shared-host gates are covered. |
 | `/config key=value`, `/settings key=value` (Claude) | Native private-profile settings, with verified model/mode readback into Relay and subsequent-turn/Stop persistence. Partial native results remain visible; newer web selections win over late readback. Shared host mutations stay locked on item 21. Attachments are rejected before accepting/queueing the command. |
 | `/autocompact [auto/tokens]` (Claude) | Native current-window inspection, private-profile threshold persistence and reset. Actual automatic summary/compact-boundary and same-session Stop/resume verified; disabled state and native environment precedence retained. Shared host mutation and linked files fail closed; attached input is rejected before sending/queueing. Live activation pending. |
 | `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. Installed-CLI acceptance verifies effort changes inside a retained application session and explicit worker-environment precedence. |
@@ -97,13 +98,73 @@ Do not treat removing entries from autocomplete as implementing them.
   actions, bundled `/code-review`, retained applications, shell classification
   and resume, not every command's effect. `/simplify` integration and active
   `/loop` scheduling now have effect-level acceptance below, including dynamic
-  wakeups with the installed SDK's limitations. Next verify installed plugin
-  namespaces. `/code-review --comment`, account-backed
+  wakeups with the installed SDK's limitations. Installed plugin namespaces
+  and actual SDK reload are accepted below. `/code-review --comment`, account-backed
   commands and shared
   host-profile writes also need the company-isolation gate in item 21. Do not
   infer support from a catalog entry or treat a native removal notice as a
   working replacement. Use the installed version's capabilities, not commands
   added only in newer documentation.
+
+- The fresh installed **2.1.222** SDK catalog also advertises these entries
+  without effect-level evidence in this ledger: `/deep-research`, `/design-sync`,
+  `/dataviz`, `/update-config`, `/debug`, `/batch`, `/fewer-permission-prompts`,
+  `/doctor`, `/claude-api`, `/agents`, `/color`, `/heapdump`,
+  `/workflow-launch-exec`, `/security-review`, `/insights`, `/recap`, `/design`,
+  `/design-consent`, `/design-revoke` and `/team-onboarding`. Next classify their
+  installed behavior and verify/implement each applicable action, starting with
+  the first entries. This is explicit inventory within item 20, not new feature
+  requests or an increased queue count. Discovery is not effect acceptance.
+
+### Claude installed plugin namespaces and SDK reload checkpoint
+
+Installed **2.1.222** returned successful local-command transport with
+`/reload-plugins isn't available in this environment.` Its SDK command catalog
+omits that terminal callback. Relay now exposes the implemented action and
+uses the actual `reload_plugins` control on the owning private session. Native
+component counts and validated command/connector metadata update immediately;
+plugin paths, source credentials and MCP configuration are not copied into
+the response. Composing the remote menu no longer mutates its saved native
+inventory with web/SDK entries.
+
+A first control-only reload creates no journal: the initialized CLI accepts
+the next real input without publishing a premature resume ID. Stop/retry does
+not resume missing history. Send now waits for the bounded native receipt,
+rejects unverified completion and ignores late publication. Invalid snapshots
+and partial load errors cannot claim success. Argument/attachment/shared-host
+checks run before accepting or queueing, and local reload does not perform a
+paid-feature account lookup when Fast is enabled.
+
+`node scripts/smoke-real-claude-plugins.mjs` installs two newly authored local
+plugins using the actual CLI, one legacy command and one skill with the same
+basename `stamp`, while the native owner is alive. SDK reload makes both
+namespaces execute actual Write effects with exact multiline/Unicode arguments.
+FIFO and same-journal Stop/resume pass. Native disable/enable plus reload
+changes the menu; re-enabled commands execute on that same owner. Another
+private chat has neither the plugins nor their messages.
+
+- Default: **13** authored main replies and **1** title.
+- `--plan`: **13** main replies and **1** title; native Write exceptions are
+  explicitly declined and every target file remains absent.
+- `--application`: **15** main replies and **2** titles; the same HTTP process
+  and state survive installation/reload/queued work. Stop closes its endpoint;
+  later plugin commands do not restart it.
+
+Twelve unit/controller additions and two responsive browser cases cover
+namespace/alias separation, the reload menu entry, exact queued arguments and
+attachment IDs, native reply validation, private-field stripping, first-use
+lifecycle, partial/failing controls, cancellation, expiry and preflight guards.
+Syntax/unit **521/521**; browser **63/63**. Native first-app Send-now (**8**
+requests), dynamic cancellation (**7** main replies) and retained MCP/app
+(**9** main replies) regressions pass.
+
+Native tests use disposable profiles/local marketplaces, dummy controller keys,
+authored inference and loopback-only network/PID namespaces. No real account,
+external plugin, personal configuration or live service was changed. The
+installed control and actual effects provide acceptance; the official
+[marketplace reference](https://code.claude.com/docs/en/plugin-marketplaces)
+describes the packaging format. Other advertised native commands and existing
+company/account/live gates keep item 20 open.
 
 ### Claude dynamic scheduling checkpoint
 

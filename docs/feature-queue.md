@@ -62,6 +62,21 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: installed Claude plugin namespaces now have real legacy-command/skill
+  effects, same-basename isolation, Unicode/multiline FIFO, Stop/resume and
+  private-chat isolation acceptance. Reproduced `/reload-plugins` returning
+  “isn't available in this environment” despite successful transport. It now
+  uses the actual `reload_plugins` SDK control, updates the menu and reports
+  verified counts without a model prompt, fake native input or exposed config.
+  First control-only sessions retain their owner without publishing a missing
+  journal. Failed/partial/late reloads, cancellation and private-profile guards
+  are covered. Installed **2.1.222** cases pass: normal **13**, Plan refusals
+  **13**, retained HTTP app/state **15** authored main replies. Syntax/unit
+  **521/521**, browser **63/63**; native app Send-now, dynamic cancellation and
+  retained MCP/app regressions pass. Other unverified entries from the fresh
+  native catalog are now explicit in `command-support.md`. Item 20/order/count
+  and company/account/live gates remain unchanged. Save to PR #2 without
+  merge, deployment or personal-profile changes.
 - 20: fixed dynamic `/loop` lifetime: a successful native `ScheduleWakeup`
   receipt retains its SDK process before the scheduler reports an ID. Native
   replacement, firing and cancellation reconcile that pending job without

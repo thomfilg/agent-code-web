@@ -40,6 +40,7 @@ function transport(f) {
     }
     if (f.mcp && packet.request.subtype === "mcp_status") response = { mcpServers: f.mcp.map(server => ({ ...server })) };
     if (packet.request.subtype === "get_settings") response = f.settingsSnapshot || { sources: [{ source: "flagSettings", settings: f.flagSettings || {} }] };
+    if (packet.request.subtype === "reload_plugins") response = f.pluginSnapshot || { commands: [{ name: "fixture:stamp", description: "Native plugin stamp" }], plugins: [{ name: "fixture" }], agents: [], mcpServers: [], error_count: 0 };
     if (packet.request.subtype === "apply_flag_settings" && f.fastState && f.refuse !== "apply_flag_settings" && typeof packet.request.settings.fastMode === "boolean") {
       f.fastState = !f.fastPolicyDenied && packet.request.settings.fastMode ? "on" : "off";
     }
@@ -114,6 +115,87 @@ test("Stop during private ordinary SDK initialization sends no user input and re
   await f.adapter.stop(); await rejected;
   assert.deepEqual(f.inputs, []); assert.deepEqual(f.requests, []); assert.equal(f.adapter.turnSession, null);
   assert.equal(f.broker.validate(capability, "anthropic"), null);
+});
+
+test("control-only plugin reload uses its native owner without model input or an unjournaled resume ID", async t => {
+  for (const interactive of [false, true]) {
+    const f = await fixture(t, { interactive });
+    const result = await f.adapter.send("/reload-plugins");
+    assert.match(result.text, /^Reloaded 1 plugin/); assert.deepEqual(f.inputs, []); assert.deepEqual(f.sessions, []);
+    assert(!f.adapter.sessionId); assert.equal(f.launches.length, 1); assert.equal(f.child.exitCode, null);
+    assert.equal(f.controls.filter(packet => packet.request.subtype === "reload_plugins").length, 1);
+    assert(f.events.some(event => event.type === "command_catalog" && event.commands[0].name === "fixture:stamp"));
+    const session = f.nativeSession;
+    await f.adapter.send("/fixture:stamp Preserve ação\nand this line");
+    assert.equal(f.launches.length, 1); assert.equal(f.adapter.sessionId, session);
+    assert.deepEqual(f.inputs.map(packet => packet.message.content), ["/fixture:stamp Preserve ação\nand this line"]);
+    assert.equal(f.adapter.hasScheduledWork(), false);
+  }
+});
+
+test("Stop after only plugin reload leaves no missing native journal to resume", async t => {
+  const f = await fixture(t, { interactive: true });
+  await f.adapter.send("/reload-plugins"); await f.adapter.stop(); assert(!f.adapter.sessionId);
+  await f.adapter.send("/reload-plugins --force");
+  assert.equal(f.launches.length, 2); assert(f.launches[1].args.includes("--session-id")); assert(!f.launches[1].args.includes("--resume"));
+  assert.deepEqual(f.sessions, []); assert.deepEqual(f.inputs, []);
+  await f.adapter.send("Continue from the initialized worker"); assert.equal(f.sessions.length, 1); assert.equal(f.launches.length, 2);
+});
+
+test("failed and partially loaded plugins do not fake success, send a fallback prompt or kill an existing application", async t => {
+  const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Keep this app alive");
+  const session = f.adapter.sessionId, capability = f.adapter.capability;
+  f.refuse = "reload_plugins"; await assert.rejects(f.adapter.send("/reload-plugins"), /Native plugin reload failed/);
+  assert(!f.events.some(event => event.type === "command_catalog"));
+  f.refuse = null; f.pluginSnapshot = { commands: [], plugins: [], agents: [], mcpServers: [], error_count: 1 };
+  await assert.rejects(f.adapter.send("/reload-plugins"), /1 component load error/);
+  assert(f.events.some(event => event.type === "command_catalog" && event.commands.length === 0), "A verified partial inventory is still authoritative");
+  assert.equal(f.child.exitCode, null); assert.deepEqual(f.signals, []); assert.equal(f.adapter.sessionId, session); assert.equal(f.adapter.capability, capability);
+  assert.deepEqual(f.inputs.map(packet => packet.message.content), ["/run Keep this app alive"]);
+  f.pluginSnapshot = null; await f.adapter.send("/reload-plugins"); assert.equal(f.launches.length, 1);
+});
+
+test("Send now during plugin reload waits for the native receipt and ignores late publication without killing the app", async t => {
+  const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Keep this app alive"); f.hold = "reload_plugins";
+  const running = f.adapter.send("/reload-plugins"), rejected = assert.rejects(running, /interrupted/);
+  await waitFor(() => f.controls.some(packet => packet.request.subtype === "reload_plugins"));
+  const interrupting = f.adapter.interrupt(); let finished = false; void interrupting.then(() => { finished = true; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(finished, false); assert.deepEqual(f.signals, []);
+  f.respond(f.controls.find(packet => packet.request.subtype === "reload_plugins")); await interrupting; await rejected;
+  assert(!f.events.some(event => event.type === "command_catalog")); assert.equal(f.child.exitCode, null); assert.equal(f.launches.length, 1);
+  f.hold = null; await f.adapter.send("Selected follow-up");
+  assert.deepEqual(f.inputs.map(packet => packet.message.content), ["/run Keep this app alive", "Selected follow-up"]);
+});
+
+test("Stop, expired capabilities and shared host profiles cannot publish late plugin reload results", async t => {
+  for (const variant of ["stop", "capability", "host"]) {
+    const f = await fixture(t, { interactive: true }); f.hold = "reload_plugins";
+    if (variant === "host") {
+      f.config.claude.authMode = "host"; await assert.rejects(f.adapter.send("/reload-plugins"), /private Claude profile/); assert.equal(f.launches.length, 0); continue;
+    }
+    const running = f.adapter.send("/reload-plugins"), rejected = assert.rejects(running, /reload failed|gateway access expired/);
+    await waitFor(() => f.controls?.some(packet => packet.request.subtype === "reload_plugins"));
+    if (variant === "stop") await f.adapter.stop();
+    else { f.broker.revoke(f.adapter.capability); f.respond(f.controls.find(packet => packet.request.subtype === "reload_plugins")); }
+    await rejected; assert(!f.events.some(event => event.type === "command_catalog")); assert.deepEqual(f.inputs, []); assert.deepEqual(f.sessions, []);
+  }
+});
+
+test("local plugin reload does not contact the account API when the chat has Fast enabled", async t => {
+  const f = await fixture(t, { interactive: true }); let calls = 0;
+  f.adapter.fetchImpl = async () => { calls++; throw Error("A local reload must not inspect a paid inference feature"); };
+  await f.adapter.send("/reload-plugins", { fastMode: true, fastCredential: claudeFastCredential(f.config.claude), fastState: "on" });
+  assert.equal(calls, 0); assert.deepEqual(f.inputs, []);
+});
+
+test("Send now cannot proceed after an unverified plugin reload receipt", async t => {
+  const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Keep this app alive"); f.hold = "reload_plugins";
+  const running = f.adapter.send("/reload-plugins"), rejected = assert.rejects(running, /Native plugin reload failed/);
+  await waitFor(() => f.controls.some(packet => packet.request.subtype === "reload_plugins"));
+  const interrupting = assert.rejects(f.adapter.interrupt(), /selected input was not sent/);
+  f.refuse = "reload_plugins"; f.respond(f.controls.find(packet => packet.request.subtype === "reload_plugins"));
+  await interrupting; await rejected; assert.equal(f.child.exitCode, null);
+  assert.deepEqual(f.inputs.map(packet => packet.message.content), ["/run Keep this app alive"]);
 });
 
 test("native mode observations follow the current main session, survive retained replies and stop with interruption", async t => {
