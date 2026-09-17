@@ -38,6 +38,18 @@ test("config parsing leaves native text intact and only reconciles applied or ex
   assert.deepEqual(messageCommand("codex", "/model default"), { type: "settings", settings: { model: null } });
 });
 
+test("update-config is an unchanged native prompt, never inferred read-only or parsed as settings assignments", () => {
+  for (const text of ["/update-config", "/update-config --help", '/update-config Keep model="sonnet" as an example, not a setting.\nPreserve ação.']) {
+    const request = claudeConfigRequest(text);
+    assert.deepEqual(request, { mutate: true, values: {}, kind: "prompt" });
+    const settings = { model: "sonnet", permissionMode: "plan" };
+    assert.deepEqual(claudeSettingsChanges(settings, settings, request), {}, "Quoted examples do not claim that settings were applied");
+    assert.deepEqual(messageCommand("claude", text), { type: "claudeConfig", prompt: text });
+    assert.equal(messageCommand("codex", text), null);
+  }
+  for (const text of ["Explain /update-config", "/plugin:update-config model=sonnet", "/update-config-extra"]) assert.equal(claudeConfigRequest(text), null);
+});
+
 test("private settings reader exposes only model and default mode, locally and through the owning executor", async t => {
   const root = await temporaryDirectory(t);
   assert.deepEqual(await readPrivateClaudeSettings(root), { model: "default", permissionMode: "default" });
@@ -90,7 +102,7 @@ async function fixture(t, { fake = false, host = false } = {}) {
   const f = { calls, starts: 0 };
   const manager = new RuntimeManager({ store, config, models, broker, gatewayOrigin: "http://127.0.0.1:9", adapterFactory: params => {
     if (!fake) return new ClaudeAdapter({ ...params, store, config, broker, gatewayOrigin: "http://127.0.0.1:9" });
-    return { start: async () => { f.starts++; }, send: async (text, settings) => { calls.push({ text, settings }); await f.gate?.promise; return { text: "Native fixture response", nativeSettings: text.startsWith("/config") ? { model: "sonnet", mode: "plan" } : undefined }; }, stop: async () => f.gate?.resolve() };
+    return { start: async () => { f.starts++; }, send: async (text, settings) => { calls.push({ text, settings }); await f.gate?.promise; return { text: "Native fixture response", nativeSettings: /^\/(?:config|update-config)(?:\s|$)/.test(text) ? { model: "sonnet", mode: "plan" } : undefined }; }, stop: async () => f.gate?.resolve() };
   } });
   t.after(() => manager.shutdown());
   const chat = await manager.createChat({ agent: "claude", title: "Private configuration test" });
@@ -226,6 +238,46 @@ test("config controls reject attachments and shared-host mutation before accepti
   await assert.rejects(host.manager.enqueue(host.chat.id, "/settings permissionMode=auto"), /shared host profile/);
   assert.equal(host.starts, 0); assert.equal(host.store.get(host.chat.id).messages.length, 0);
   await host.manager.send(host.chat.id, "/config --help"); assert.equal(host.calls[0].text, "/config --help");
+});
+
+test("update-config refuses shared-host changes before startup, including empty/help requests and queued attachments", async t => {
+  const f = await fixture(t, { fake: true, host: true });
+  for (const text of ["/update-config", "/update-config --help", "/update-config Change the default model to Sonnet"]) {
+    await assert.rejects(f.manager.submit(f.chat.id, text), /shared host profile/);
+    await assert.rejects(f.manager.enqueue(f.chat.id, text, ["reference-file"]), /shared host profile/);
+    await assert.rejects(f.manager.send(f.chat.id, text), /shared host profile/);
+  }
+  assert.equal(f.starts, 0); assert.equal(f.calls.length, 0);
+  assert.equal(f.store.get(f.chat.id).messages.length, 0);
+  assert.deepEqual(f.store.get(f.chat.id).queuedMessages || [], []);
+});
+
+test("update-config readback reaches FIFO without losing the prompt and newer web choices still win", async t => {
+  const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+  const text = "/update-config Change only my private model to Sonnet and default mode to Plan.\nPreserve ação.";
+  const running = f.manager.send(f.chat.id, "Keep working"); await waitFor(() => f.calls.length === 1);
+  await f.manager.enqueue(f.chat.id, text); await f.manager.enqueue(f.chat.id, "Continue after the configuration");
+  f.gate.resolve(); await running;
+  await waitFor(() => f.calls.length === 3 && !f.manager.isBusy(f.chat.id));
+  assert.equal(f.calls[1].text, text);
+  assert.equal(f.calls[2].settings.model, "sonnet"); assert.equal(f.calls[2].settings.mode, "plan");
+  await f.manager.setModel(f.chat.id, { model: "opus", effort: "high" }); await f.manager.setMode(f.chat.id, "accept_edits");
+  f.gate = Promise.withResolvers();
+  const updating = f.manager.send(f.chat.id, text); await waitFor(() => f.calls.length === 4);
+  await f.manager.setModel(f.chat.id, { model: "haiku", effort: "auto" }); await f.manager.setMode(f.chat.id, "default");
+  f.gate.resolve(); await updating;
+  assert.equal(f.store.get(f.chat.id).model, "haiku"); assert.equal(f.store.get(f.chat.id).mode, "default");
+  assert(f.store.get(f.chat.id).messages.some(message => message.kind === "notice" && /newer web choices/.test(message.text)));
+});
+
+test("update-config cannot publish native settings after Stop or an ownership change", async t => {
+  for (const action of ["stop", "owner"]) {
+    const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+    const running = f.manager.send(f.chat.id, "/update-config Use Sonnet and Plan"); await waitFor(() => f.calls.length === 1);
+    if (action === "stop") await f.manager.stop(f.chat.id); else await f.store.update(f.chat.id, { ownerId: "other-owner" });
+    f.gate.resolve(); await running;
+    assert.equal(f.store.get(f.chat.id).model, "opus"); assert.equal(f.store.get(f.chat.id).mode, f.chat.mode);
+  }
 });
 
 test("Claude-only permission modes are rejected for Codex and switching back defaults safely to Plan", async t => {

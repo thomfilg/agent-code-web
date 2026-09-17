@@ -109,14 +109,63 @@ Do not treat removing entries from autocomplete as implementing them.
   added only in newer documentation.
 
 - The fresh installed **2.1.222** SDK catalog also advertises these entries
-  without effect-level evidence in this ledger: `/design-sync`,
-  `/dataviz`, `/update-config`, `/debug`, `/batch`, `/fewer-permission-prompts`,
+  without effect-level evidence in this ledger: `/debug`, `/batch`, `/fewer-permission-prompts`,
   `/doctor`, `/claude-api`, `/agents`, `/color`, `/heapdump`,
   `/workflow-launch-exec`, `/security-review`, `/insights`, `/recap`, `/design`,
   `/design-consent`, `/design-revoke` and `/team-onboarding`. Next classify their
   installed behavior and verify/implement each applicable action, starting with
   the first entries. This is explicit inventory within item 20, not new feature
   requests or an increased queue count. Discovery is not effect acceptance.
+
+- `/dataviz` resource/tool integration is accepted below. `/design-sync` has
+  only private unauthenticated refusal acceptance: upload/account authorization
+  remains an item-21 gate. `/update-config` private user-profile changes are
+  accepted below; finish project/local settings precedence and retained-owner
+  verification before considering the command complete or starting a new
+  feature.
+
+### Claude bundled resources and settings skill checkpoint
+
+Installed **2.1.222** reproduced `/update-config` writing Sonnet into its private
+settings while Relay retained the old web selection. The unchanged native
+prompt now participates in guarded before/after settings inspection and model/
+mode reconciliation. Free-form prose, quoted examples and `--help` are not
+parsed as confirmed assignments or a read-only native control. Shared-host
+mutations are rejected before startup/queueing, including empty/help variants.
+Unlike local `/config`, the agent-executed skill can still take reference files.
+Native approval/denial, newer web choices, Stop and ownership guards remain in
+force; the controller reads only model and mode, not raw hooks/env/credentials.
+
+`node scripts/smoke-real-claude-bundled.mjs` uses real installed prompts,
+resource extraction and native tools inside a private loopback-only network/PID
+namespace. Model replies, chart data and picker inventory are authored fixtures,
+not actual inference or a model-quality claim. It does not override feature
+flags, use existing chats/accounts, upload repositories or touch live services.
+
+- Default `/dataviz`: **7** main replies, native reads of the extracted palette
+  and validator, actual light/dark validation, nonzero invalid-palette rejection
+  and HTML/SVG file creation with exact fixture data.
+- `--deny`: **4** replies; native validator denial leaves no chart file.
+- `--resume`: **14** replies; same native history, new private resource paths,
+  repeated validation/writes and an unchanged second chat.
+- `--design-sync`: **3** replies; real resource read and read-only project-list
+  attempt yield the native missing-authorization error. No project list or
+  upload is fabricated, and no design consent is granted. This does not supply
+  the still-needed company-scoped authenticated Design connection.
+- `--update-config`, `--update-config --deny`, and
+  `--update-config --resume`: **5** replies each. Actual native Write success or
+  denial, saved model/default mode, preserved fixture env, next-turn native
+  model and real Bash env values, persisted Relay state and Stop/resume pass.
+  The harmless two-variable inspection has a narrowly preconfigured private
+  allow rule; this is not another permission-classifier acceptance test.
+
+Four unit/controller additions cover prompt classification, shared-host guards,
+FIFO, newer selections and late-publication protection. Two responsive browser
+cases cover literal discovery/submission, attachments, failed-save retry,
+queueing, updated selectors and visible authorization guidance. Syntax/unit
+**534/534** and browser **67/67** pass. Project/local configuration precedence,
+retained-owner reload, remaining commands and account/company/live activation
+gates remain open; the overall queue is not complete.
 
 ### Claude native research workflow checkpoint
 

@@ -16,6 +16,12 @@ Preserve unrelated changes; do not treat this as permission to merge, deploy,
 restart live services or alter live user data/accounts. This delivery step does
 not reorder the feature queue.
 
+Priority clarification (2026-09-17): finish and test already-started work before
+starting an unimplemented feature. Work on one complete feature at a time,
+commit and push its verified changes, then move to the next. Keep the original
+scope and order; a checkpoint saves progress but does not close an unfinished
+feature or turn an external verification gate into a passing result.
+
 | # | Request / acceptance condition | State |
 | --- | --- | --- |
 | 01 | Render Markdown and HTML; isolate snippet CSS and malformed/unclosed tags from the chat UI | Verified: four browser checks; live isolated-preview CSP active |
@@ -62,6 +68,24 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: reproduced `/update-config` saving a private native model while Relay
+  kept the previous web selection. It now participates in guarded native
+  settings readback, FIFO and newer-choice reconciliation without parsing
+  free-form prose as assignments. Empty/help variants cannot evade the
+  shared-host mutation guard; reference attachments remain supported.
+  Installed **2.1.222** verifies actual private settings writes, native denial,
+  next-turn model/environment effects and same-history Stop/resume (**5/5/5**
+  authored main replies). `/dataviz` verifies native resource extraction,
+  Read/Bash/Write effects, valid light/dark and invalid palettes, HTML/SVG
+  creation, denial and fresh private assets after Stop/resume (**7/4/14**
+  replies). `/design-sync` verifies resources and the real unauthenticated
+  authorization refusal (**3** replies); it does not upload or authorize an
+  account. Four unit additions; syntax/unit **534/534**, browser **67/67**.
+  Project/local configuration precedence and retained-owner checks remain
+  before closing that command. Other commands and account/company/live gates
+  remain in `command-support.md`; no queue item is newly closed. All native
+  fixtures are disposable and loopback-only; no real inference, personal
+  profiles or live services were used. Save to PR #2 without merge/deployment.
 - 20: reproduced and fixed `/deep-research` losing its native Workflow owner
   at the launching reply. Bound native task events now retain the private SDK
   process; busy/idle/FIFO wait for the actual final report, including an early

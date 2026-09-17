@@ -496,6 +496,42 @@ test("rejected configuration preserves its draft and files and can be retried af
   await expect(input).toHaveValue(""); expect(f.errors).toEqual([]);
 });
 
+for (const width of [1280, 320]) test(`bundled native prompts at ${width}px retain files, queue literally and display confirmed settings`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input");
+  f.catalog = ["dataviz", "design-sync", "update-config"].map(name => ({ name, description: "Installed native bundled command" }));
+  f.snapshot.status = "idle"; await f.emit();
+  await input.fill("/datav"); await page.locator("#slash-options [role=option]").filter({ hasText: "/dataviz" }).click();
+  await expect(input).toHaveValue("/dataviz "); expect(f.calls).toEqual([]);
+  await page.locator("#attachment-input").setInputFiles({ name: "values.csv", mimeType: "text/csv", buffer: Buffer.from("Label,Value\nAção,7\nBeta,12") });
+  await expect(page.locator("#attachment-chips")).toContainText("values.csv");
+  const chart = "/dataviz Chart the attached fixture values.\nPreserve ação.";
+  await input.fill(chart); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect.poll(() => f.calls.length).toBe(1);
+  expect(f.calls[0]).toMatchObject({ tail: "messages", text: chart }); expect(f.calls[0].attachments).toHaveLength(1);
+  await expect(input).toHaveValue("");
+  f.snapshot.status = "running"; await f.emit();
+  await page.locator("#attachment-input").setInputFiles({ name: "settings-example.json", mimeType: "application/json", buffer: Buffer.from('{"model":"sonnet"}') });
+  await expect(page.locator("#attachment-chips")).toContainText("settings-example.json");
+  const update = "/update-config Use the attached example in this private profile.\nKeep Plan mode.";
+  f.responseStatus = 400; f.responseError = "Native settings changes require a private Claude profile. This worker uses a shared host profile.";
+  await input.fill(update); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect(page.locator("#toasts")).toContainText("shared host profile");
+  await expect(input).toHaveValue(update); await expect(page.locator("#attachment-chips")).toContainText("settings-example.json");
+  f.responseStatus = 202; await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect.poll(() => f.calls.length).toBe(3);
+  expect(f.calls[1]).toEqual(f.calls[2]); expect(f.calls[2]).toMatchObject({ tail: "queue", text: update }); expect(f.calls[2].attachments).toHaveLength(1);
+  f.snapshot = { ...f.snapshot, status: "idle", model: "sonnet", mode: "plan" }; await f.emit();
+  await expect(page.getByRole("combobox", { name: "Chat model", exact: true })).toHaveValue("sonnet");
+  await expect(page.locator("#mode-label")).toHaveText("Plan");
+  await input.fill("/design-sync Inspect the fixture components without uploading."); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect.poll(() => f.calls.length).toBe(4);
+  expect(f.calls[3]).toEqual({ tail: "messages", text: "/design-sync Inspect the fixture components without uploading.", attachments: [] });
+  f.snapshot.messages = [{ id: "native-design-authorization", role: "assistant", kind: "message", text: "DesignSync requires a separately authorized account. No projects were read and no files were uploaded." }]; await f.emit();
+  await expect(page.locator("#messages")).toContainText("separately authorized account");
+  expect(f.errors).toEqual([]);
+});
+
 test("Claude Manual and Deny prompts controls save through the real API without starting a worker", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 800 });
   const { chat } = await (await page.request.post("/api/chats", { data: { agent: "claude", title: "Native permission controls" } })).json(); created.set(page, [chat.id]);
