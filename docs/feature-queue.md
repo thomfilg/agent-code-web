@@ -228,6 +228,16 @@ References inspected for this request:
 
 ## Verification ledger
 
+- Codex native follow-up (2026-09-17): the production controller client and
+  installed Codex 0.154.0 successfully requested a real device-code URL/code
+  from the native service, then cancelled the flow. Both account reads stayed
+  unsigned-in, no credential file was created, and the private temporary
+  profile was removed. No consent was granted and no model turn was sent.
+  PR #4 is saved remotely as a draft; its GitGuardian check passed, with no
+  GitHub Actions test runs configured/reported. The original live Relay
+  process on `localhost:8787` is still running unchanged; restart permission
+  and the real consent/turn/resume acceptance remain pending.
+
 - Codex named-account implementation checkpoint (2026-09-17): **621/621 full
   backend tests** passed, with no skips. A final consent-binding audit then
   passed **44/44 focused tests**, including one new regression preventing

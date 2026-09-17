@@ -70,6 +70,13 @@ reported the account, and logged out without creating `auth.json`. This was a
 protocol/storage check with zero real credentials and zero model turns, not
 evidence that a user's paid account can execute a request.
 
+An additional network-connected check used that same installed CLI and the
+production controller client to request a real device-code URL/code in an empty
+private profile, then cancel it immediately. `account/read` remained unsigned-in,
+no `auth.json` was created, and the temporary profile was removed. This verifies
+native code issuance and cancellation, not successful user consent or a model
+turn.
+
 Before marking Codex delivered, the user must complete real sign-in, explicitly
 authorize a minimal real prompt, confirm which named account ran it, and verify
 that the same chat/account resumes after a controlled restart. Claude, GitHub,
