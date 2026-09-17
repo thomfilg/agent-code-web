@@ -27,9 +27,10 @@ reported verified/answered items first**: 01–14 and 16–19. Pause item 20's d
 work and preserve its unfinished test changes. Then return to the remaining
 original queue; new requests still append at the end. The old count conflated
 implementation tests with usable delivery: item 09 is a technical answer, and
-the other **17 are reopened for delivery acceptance**, not newly discovered
-defects. Until that acceptance is recorded, the honest total is **1 answered and
-41 not fully delivered** (17 priority re-audits plus the previous 24 open items).
+the other **17 were reopened for delivery acceptance**, not newly discovered
+defects. After the saved-data acceptance of item 01 below, the current total is
+**1 delivered, 1 answered and 40 not fully delivered** (16 priority re-audits
+plus the previous 24 open items).
 
 For each reopened item, verify its full acceptance condition on current code,
 then verify the applicable deployed UI/backend/native integration. Preserve real
@@ -37,16 +38,22 @@ messages, drafts, credentials and browser state; use disposable fixtures for
 destructive/error cases. A fixture pass is not a live-delivery pass. Record
 remaining user-only OAuth/account consent explicitly rather than counting it as
 done. Commit/push each completed item's changes before moving to the next.
-The application and database ports (8787/55438) were not listening at this audit;
-permission to start the updated application with saved data has been requested,
-not inferred. Tests run one suite at a time with inherited two-CPU affinity and
-nice 10. This correction supersedes historical completion/count statements in
-the ledger below; their test evidence remains useful but is not deployment proof.
+The user explicitly authorized starting the current application with existing
+data on 2026-09-17. It is now running at `http://127.0.0.1:8787` with the existing
+encrypted PostgreSQL database on 55438, after an offline encrypted backup.
+All 510 saved messages, the empty queue and the workspace reference survived
+startup unchanged; no worker or real model turn was started. Both provider
+gateway keys are absent in this launch configuration, so Codex/Claude execution
+is not enabled. Do not silently adopt host credentials or count provider/native
+integration gates as passed. Tests run one suite at a time with inherited
+two-CPU affinity and nice 10. This correction supersedes historical
+completion/count statements in the ledger below; their test evidence remains
+useful but is not deployment proof. Item 02 is next; item 20 stays paused.
 
 | # | Request / acceptance condition | State |
 | --- | --- | --- |
-| 01 | Render Markdown and HTML; isolate snippet CSS and malformed/unclosed tags from the chat UI | Priority delivery audit: five current browser checks pass, including real HTTP/SSE/storage/reload without intercepted chat responses; saved-data application activation/acceptance still pending |
-| 02 | Sidebar MCP manager; environment selection configures the chosen agent with those servers | Reopened for delivery: prior real Codex/Claude MCP discovery and environment/browser checks; backend activation and deployed acceptance pending |
+| 01 | Render Markdown and HTML; isolate snippet CSS and malformed/unclosed tags from the chat UI | Delivered: seven targeted browser checks pass; genuine saved HTML renders and survives reload on the live application at 1600/900/320px, with unchanged message hashes. Live mobile PR-bar overflow fixed and covered |
+| 02 | Sidebar MCP manager; environment selection configures the chosen agent with those servers | Next priority delivery audit: prior real Codex/Claude MCP discovery and environment/browser checks; deployed manager acceptance and provider runtime configuration still pending |
 | 03 | Preconfigured development MCPs, including Linear and Atlassian | Reopened for delivery: prior seven-provider endpoint and preset UI checks; current deployed acceptance pending |
 | 04 | Custom MCPs, including browser OAuth installation of `https://paladira.com/api/mcp` | Reopened for delivery: prior live discovery and local consent fixture; actual user authorization/authenticated acceptance pending |
 | 05 | Store conversation/context usage outside disposable containers; continue viewing after stop | Reopened for delivery: prior stop/restart, real PostgreSQL reload and stopped-chat browser checks; current saved-data acceptance pending |
@@ -59,12 +66,12 @@ the ledger below; their test evidence remains useful but is not deployment proof
 | 12 | Compact single-line sidebar chats, without the Idle/age sub-row | Reopened for delivery: prior row geometry, inline actions and accessible status checks; current deployed acceptance pending |
 | 13 | Reasonable default styling for unstyled HTML | Reopened for delivery: prior typography, table alignment and author-CSS override checks; current deployed acceptance pending |
 | 14 | Improve composer / command UI | Reopened for delivery: prior responsive controls, agent switching and command-picker interaction checks; current deployed acceptance pending |
-| 15 | Make the specified chat itself a real long-chat rendering example, not a personal-folder copy or invented messages | Awaiting real source chat/transcript; 254 real and 241 synthetic records audited in target; cleanup needs backend activation |
+| 15 | Make the specified chat itself a real long-chat rendering example, not a personal-folder copy or invented messages | Awaiting real source chat/transcript; current saved target has 269 genuine and 241 historical sample records, all preserved during authorized startup. No sample cleanup was authorized or performed by that startup |
 | 16 | Private, persisted Chrome connections per user; authenticate separately, anonymous browser by default, top-right opt-in for agent access | Reopened for delivery: prior real-extension, private-profile, consent/revocation/restart and cross-user checks; current deployed setup acceptance pending |
 | 17 | Queued follow-up questions must be clickable and answerable | Reopened for delivery: prior options/text/skip, retained-draft and stale-reply checks; current deployed acceptance pending |
-| 18 | `/plan` works from the web composer | Reopened for delivery: prior task/read-only, busy-queue and failure-preservation checks; backend activation and deployed acceptance pending |
+| 18 | `/plan` works from the web composer | Reopened for delivery: prior task/read-only, busy-queue and failure-preservation checks; current provider runtime configuration and deployed acceptance pending |
 | 19 | Send now on individual queued messages, retaining the rest | Reopened for delivery: prior interruption/FIFO, Stop race, retry, attachment and draft checks; current deployed acceptance pending |
-| 20 | `/goal` and every available native/installed slash command work, without unsupported-terminal placeholders | Paused for the user's priority delivery re-audit of 01–14/16–19; preserve doctor MCP work, then resume remaining gaps in `command-support.md`; backend activation pending |
+| 20 | `/goal` and every available native/installed slash command work, without unsupported-terminal placeholders | Paused for the user's priority delivery re-audit of 01–14/16–19; preserve doctor MCP work, then resume remaining gaps in `command-support.md`; provider runtime/deployed native acceptance pending |
 | 21 | GitHub, environments and MCPs have explicit multi-company availability; no credential fallback/crossover, including secondary repos | Relay scope tests pass; audit inherited host-CLI credentials/config too; live migration/scope choice pending |
 | 22 | Resize sidebar, chat and third-column panels | Existing source; dedicated interaction verification pending |
 | 23 | Shared Chrome viewport presets: xxs, xs, sm, md, lg, xlg | Existing source; pending ordered verification |
@@ -77,7 +84,7 @@ the ledger below; their test evidence remains useful but is not deployment proof
 | 30 | Visible chat tabs and browser interaction pause idle sleep/countdown | Source/tests exist; live verification pending |
 | 31 | Attachment images are clickable to inspect before and after sending | Existing source; pending ordered verification |
 | 32 | Direct native-browser app URLs per chat, preserving port/path; remote HTTP and WebSocket forwarding too | Local aliases implemented; remote forwarding pending |
-| 33 | Compact always available; send native `/compact`, queue while busy, retain draft, no misleading Claude/idle tooltip | Source, FIFO, browser and real-CLI/local-stub checks passed; deployed backend pending |
+| 33 | Compact always available; send native `/compact`, queue while busy, retain draft, no misleading Claude/idle tooltip | Source, FIFO, browser and real-CLI/local-stub checks passed; provider runtime/deployed native acceptance pending |
 | 34 | Hide internal `<relay-title>` metadata from streamed/saved responses; no bogus HTML previews | Queued; cause inspected, fix not started |
 | 35 | Notify the agent when PR checks fail; if the container is stopped when checks pass, wake it and deliver a GitHub event message | New report appended; not started |
 | 36 | Subscribe to GitHub PR/check/auto-merge events for prompt UI status updates, with polling as a reconciliation fallback | New report appended after clarification; not started |
@@ -90,6 +97,34 @@ the ledger below; their test evidence remains useful but is not deployment proof
 
 ## Verification ledger
 
+- Priority delivery acceptance, 01 (2026-09-17): after explicit user startup
+  consent, backed up the existing encrypted control directory offline, then
+  started the current application against that database and its existing
+  workspace. Before/after message and queue hashes match: **1 chat, 510
+  messages, 0 queued inputs, 0 started workers**. The 241 historical tagged
+  samples remain preserved, not regenerated, removed or used for this check.
+  A fresh sandboxed Chromium profile opened a genuine saved HTML answer through
+  the message navigator and preview controls on port 8787. Chat HTTP and SSE
+  responses were not replaced; mutations other than ephemeral presence were
+  blocked by the verifier. Eight served asset hashes matched the current files.
+  Opaque-origin isolation, table rendering, Escape, reload and 1600/900/320px
+  layouts passed twice, with no page errors, blocked mutation attempts or
+  changes to messages/workspace. Local screenshots and receipts stay outside
+  Git; no personal Chrome profile or external authorization was used.
+  The first live check reproduced **404px document width on a 320px screen**:
+  the PR bar's implicit minimum grid track expanded to fit its branch. An
+  explicit `minmax(0, 1fr)` track now contains it while retaining the full
+  branch title and visible PR/change/CI/close controls. A separate intercepted
+  PR-metadata layout fixture covers that regression at 1600/900/390/320px;
+  it is not presented as a live GitHub integration check. The combined document
+  and PR regression suite passes **7/7**, syntax and diff checks pass, one
+  worker/two CPUs/nice 10. The live verifier initially injected Playwright's
+  `serviceWorkers: "block"` script, which itself throws when reading
+  `navigator.serviceWorker` in an opaque iframe; that unnecessary test-only
+  injection was removed, not the product sandbox. An earlier reload timeout
+  was not reproduced in the final two runs and is not claimed as a separate
+  fixed application defect. Item 01 closes; item 02 is next. Runtime agent
+  authentication and the other priority acceptance gates remain open.
 - Priority delivery re-audit, 01 (2026-09-17): added
   `test/browser/delivery-preview.spec.mjs`. Unlike the previous rendering
   fixtures, it sends through the actual composer, receives the server's SSE,

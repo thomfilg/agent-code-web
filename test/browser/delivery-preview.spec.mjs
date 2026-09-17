@@ -1,10 +1,16 @@
 import { test, expect } from "@playwright/test";
 import http from "node:http";
 
+const createdChats = [];
+test.afterEach(async ({ request }) => {
+  for (const id of createdChats.splice(0)) expect((await request.delete(`/api/chats/${id}`)).ok()).toBe(true);
+});
+
 test("stored Markdown and HTML render through real HTTP and SSE, survive reload, and stay isolated", async ({ page, request }, testInfo) => {
   const created = await request.post("/api/chats", { data: { agent: "mock", title: "Disposable rendering delivery check" } });
   expect(created.ok()).toBe(true);
   const { chat } = await created.json();
+  createdChats.push(chat.id);
   const externalRequests = [], errors = [], eventStreams = [];
   const forbiddenOrigin = http.createServer((incoming, response) => { externalRequests.push(incoming.url); response.end("Unexpected external request"); });
   await new Promise((resolve, reject) => { forbiddenOrigin.once("error", reject); forbiddenOrigin.listen(0, "127.0.0.1", resolve); });
@@ -80,6 +86,41 @@ test("stored Markdown and HTML render through real HTTP and SSE, survive reload,
   } finally {
     await page.close();
     await new Promise((resolve, reject) => forbiddenOrigin.close(error => error ? reject(error) : resolve()));
-    expect((await request.delete(`/api/chats/${chat.id}`)).ok()).toBe(true);
   }
+});
+
+test("long PR branches do not widen the chat or its document overlay on mobile", async ({ page, request }) => {
+  const created = await request.post("/api/chats", { data: { agent: "mock", title: "Disposable PR preview layout" } });
+  expect(created.ok()).toBe(true);
+  const { chat } = await created.json();
+  createdChats.push(chat.id);
+  const branch = "feat/a-long-feature-name-that-must-not-expand-the-conversation";
+  const snapshot = { ...chat, messages: [{ id: "preview-answer", role: "assistant", text: "```html\n<table><tr><td>Saved document</td></tr></table>\n```" }], pullRequests: [{ repository: "Acme/long-repository-name", number: 1789, headRef: branch, state: "open", checks: "failing", conflicts: false, additions: 903, deletions: 19, ci: { inProgress: 0, passed: 2, skipped: 0, failed: 1 }, autoMerge: false }] };
+  try {
+    await page.route(`**/api/chats/${chat.id}`, route => route.request().method() === "GET" ? route.fulfill({ json: { chat: snapshot } }) : route.continue());
+    await page.route("**/api/sidebar", async route => { const response = await route.fetch(), data = await response.json(); data.chats = data.chats.map(item => item.id === chat.id ? { ...item, pullRequests: snapshot.pullRequests } : item); await route.fulfill({ json: data }); });
+    await page.route(`**/api/chats/${chat.id}/events*`, route => route.fulfill({ contentType: "text/event-stream", body: ": layout fixture\n\n" }));
+    await page.goto(`/#chat=${chat.id}`);
+    const row = page.locator(".pull-request-bar");
+    for (const width of [1600, 900, 390, 320]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(row).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      const composer = await page.locator(".composer-wrap").boundingBox(), bounds = await row.boundingBox();
+      expect(bounds.x).toBeGreaterThanOrEqual(composer.x);
+      expect(bounds.x + bounds.width).toBeLessThanOrEqual(composer.x + composer.width + 1);
+      await expect(row.getByRole("link", { name: "⑂ #1789" })).toBeInViewport();
+      await expect(row.getByRole("button", { name: "View changes for PR 1789" })).toBeInViewport();
+      await expect(row.locator(".ci-menu > summary")).toBeInViewport();
+      await expect(row.getByRole("button", { name: "×", exact: true })).toBeInViewport();
+      await expect(row.locator(".pr-branch")).toHaveAttribute("title", `Acme/long-repository-name · ${branch}`);
+      await page.getByRole("button", { name: "Open HTML preview ↗", exact: true }).click();
+      await expect(page.frameLocator("#preview-content iframe").locator("td")).toHaveText("Saved document");
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      await page.keyboard.press("Escape");
+    }
+    expect(await row.locator(".pr-branch").evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true);
+    await row.locator(".ci-menu > summary").click();
+    await expect(row.locator(".ci-count.failed strong")).toHaveText("1");
+  } finally { await page.close(); }
 });

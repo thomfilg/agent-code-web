@@ -322,7 +322,7 @@ dialog { max-height: calc(100dvh - 28px); }
 .pr-deletions { color: #f78181; }
 .pr-closed { color: var(--muted); }
 #diff-selection { width: 100%; margin-top: 8px; padding: 6px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--panel); }
-.pull-request-bars { display: grid; gap: 5px; margin-bottom: 6px; }
+.pull-request-bars { display: grid; grid-template-columns: minmax(0, 1fr); gap: 5px; margin-bottom: 6px; }
 .pull-request-bar { display: flex; align-items: center; gap: 8px; min-height: 34px; border-radius: 8px; background: #242622; border: 1px solid var(--line); padding: 3px 7px; font-size: 11px; }
 .pull-request-bar > a { white-space: nowrap; text-decoration: none; }
 .pr-open { color: #3fb950; }.pr-merged { color: #a371f7; }.pr-failing { color: #f85149; }
