@@ -1,12 +1,25 @@
 #!/usr/bin/env node
+import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 let prompt = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { prompt += chunk; });
-process.stdin.on("end", () => {
+process.stdin.on("end", async () => {
   const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
   send({ type: "system", subtype: "init", session_id: "fixture", model: "fixture-claude", claude_code_version: "2.1.0-fixture" });
   if (prompt === "wait for interruption") { setInterval(() => {}, 1000); return; }
+  if (/^\/(?:config|settings)(?:\s|$)/.test(prompt)) {
+    const filename = path.join(process.env.CLAUDE_CONFIG_DIR, "settings.json");
+    const settings = await readFile(filename, "utf8").then(JSON.parse).catch(() => ({}));
+    const model = /\bmodel=([\w.\[\]-]+)/.exec(prompt)?.[1];
+    const mode = /\bpermissionMode=(\w+)/.exec(prompt)?.[1];
+    if (["opus", "sonnet", "haiku", "default", "best", "sonnet[1m]", "opus[1m]", "opusplan"].includes(model)) settings.model = model;
+    if (["auto", "acceptEdits", "plan", "default", "dontAsk"].includes(mode)) settings.permissions = { ...settings.permissions, defaultMode: mode };
+    if (/\w+=/.test(prompt)) await writeFile(filename, JSON.stringify(settings));
+    const failed = prompt.includes("failAfterWrite=true");
+    send({ type: "result", subtype: failed ? "error_during_execution" : "success", is_error: failed, result: failed ? "Native fixture failed after writing settings" : "Native settings fixture completed" }); return;
+  }
   if (prompt === "inspect-settings") {
     const flag = name => { const i = process.argv.indexOf(name); return i < 0 ? null : process.argv[i + 1]; };
     send({ type: "result", subtype: "success", result: JSON.stringify({ model: flag("--model"), effort: flag("--effort"), mode: flag("--permission-mode"), environmentEffort: process.env.CLAUDE_CODE_EFFORT_LEVEL || null }) }); return;

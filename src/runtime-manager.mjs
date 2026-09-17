@@ -28,6 +28,7 @@ import { CodexApprovals } from "./codex-approvals.mjs";
 import { CodexFeedback } from "./codex-feedback.mjs";
 import { CodexLogout } from "./codex-logout.mjs";
 import { desktopBinding, desktopInfo } from "./desktop-handoff.mjs";
+import { CLAUDE_PERMISSION_MODES, claudeConfigRequest } from "./claude-settings.mjs";
 
 const ADAPTERS = {
   codex: CodexAdapter,
@@ -53,6 +54,7 @@ export class RuntimeManager extends EventEmitter {
   async enqueue(chatId, rawText, attachmentIds = []) {
     const text = clampText(rawText, 100_000, "message");
     if (!this.store.get(chatId)) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    this.#checkClaudeConfiguration(this.store.get(chatId), text, attachmentIds);
     if (this.attachments) await this.attachments.resolve(chatId, attachmentIds);
     const item = { id: newId("queued"), text, attachmentIds, createdAt: nowIso() };
     const chat = await this.store.update(chatId, current => {
@@ -640,6 +642,7 @@ export class RuntimeManager extends EventEmitter {
       const settings = this.models ? await this.models.creationSettings(agent) : { model: this.config[agent]?.model || null, effort: this.config[agent]?.effort || null };
       await this.stop(chatId, "agent-switch");
       const updated = await this.store.update(chatId, current => ({ agent, ...settings, modelSelectionSet: true,
+        ...(agent !== "claude" && ["default", "dont_ask"].includes(current.mode) ? { mode: "plan" } : {}),
         agentSessionId: null, needsAgentHandoff: true, pendingRequest: null, awaitingUser: false,
         nativeForkSessionId: null, forkGoalPending: false, forkContextPending: false, goal: null,
         usage: null, usageAccount: null, rateLimits: null, sessionDetails: null, taskProgress: null, connectors: null, slashCommands: [], commandCatalog: [],
@@ -660,15 +663,61 @@ export class RuntimeManager extends EventEmitter {
     const settings = await this.models.validate(chat.agent, input);
     guard();
     if (this.#switching.has(chatId) || this.store.get(chatId)?.agent !== chat.agent) throw Object.assign(new Error("The agent changed; select its model again"), { statusCode: 409 });
-    const updated = await this.store.update(chatId, () => { guard(); return { ...settings, modelSelectionSet: true }; });
+    const updated = await this.store.update(chatId, current => { guard(); return { ...settings, modelSelectionSet: true, modelSettingsRevision: (current.modelSettingsRevision || 0) + 1 }; });
     this.publishChat(updated); return updated;
   }
 
   async setMode(chatId, mode) {
-    if (!["auto", "accept_edits", "plan"].includes(mode)) throw new Error("Choose Auto, Accept edits, or Plan");
-    const updated = await this.store.update(chatId, { mode });
+    if (this.#switching.has(chatId)) throw Object.assign(new Error("Wait for the agent switch to finish"), { statusCode: 409 });
+    const updated = await this.store.update(chatId, chat => {
+      const allowed = chat.agent === "claude" ? Object.values(CLAUDE_PERMISSION_MODES) : ["auto", "accept_edits", "plan"];
+      if (!allowed.includes(mode)) throw new Error("Choose a permission mode supported by this agent");
+      return { mode, modeSettingsRevision: (chat.modeSettingsRevision || 0) + 1 };
+    });
     if (!updated) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     this.publishChat(updated); return updated;
+  }
+
+  #checkClaudeConfiguration(chat, text, attachments) {
+    if (chat.agent !== "claude") return;
+    const request = claudeConfigRequest(text);
+    if (/^\/effort\s+status$/.test(text.trim()) && attachments.length) throw new Error("/effort status does not accept attachments. Remove them or send them in a separate message.");
+    if (!request) return;
+    if (attachments.length) throw new Error("/config and /settings do not accept attachments. Remove them or send them in a separate message.");
+    if (request.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native /config changes require a private Claude profile. This worker uses a shared host profile; use this chat's model and mode controls instead.");
+  }
+
+  async #syncClaudeConfiguration(chatId, native, original, guard) {
+    if (!native || !Object.keys(native).length) return;
+    const catalog = Object.hasOwn(native, "model") && this.models ? await this.models.list("claude") : null;
+    guard();
+    const scope = chat => JSON.stringify([chat.agent, chat.ownerId, chat.environmentId, chat.workspace, companyForChat(chat)]);
+    const conflicts = [];
+    const updated = await this.store.update(chatId, current => {
+      guard();
+      if (scope(current) !== scope(original)) throw new Error("The chat's profile changed while the native command was running. Recheck its settings before continuing.");
+      const patch = {};
+      if (Object.hasOwn(native, "model")) {
+        if (current.model === original.model && current.effort === original.effort && current.modelSettingsRevision === original.modelSettingsRevision) {
+          const selected = catalog?.models.find(item => item.id === native.model);
+          patch.model = native.model; patch.modelSelectionSet = true;
+          patch.modelSettingsRevision = (current.modelSettingsRevision || 0) + 1;
+          patch.effort = current.effort === "auto" || selected?.efforts.includes(current.effort) ? current.effort : "auto";
+        } else conflicts.push("model/effort");
+      }
+      if (Object.hasOwn(native, "mode")) {
+        if (current.mode === original.mode && current.modeSettingsRevision === original.modeSettingsRevision) {
+          patch.mode = native.mode; patch.modeSettingsRevision = (current.modeSettingsRevision || 0) + 1;
+        }
+        else conflicts.push("permission mode");
+      }
+      return patch;
+    });
+    guard(); this.publishChat(updated);
+    if (conflicts.length) {
+      const message = await this.store.appendMessage(chatId, { role: "system", kind: "notice", text: `The native command saved its profile settings, but newer web choices for ${conflicts.join(" and ")} were kept for subsequent turns.` });
+      this.#emit(chatId, { type: "message", message });
+    }
   }
 
   async addRepository(chatId, selection) {
@@ -925,6 +974,7 @@ export class RuntimeManager extends EventEmitter {
     const text = clampText(rawText, 100_000, "message");
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("chat not found"), { statusCode: 404 });
+    this.#checkClaudeConfiguration(chat, text, attachmentIds);
     const commandAction = approval ? { type: "approvalRetry", approval,
       prompt: "I confirmed the specific denied action recorded by the native approval immediately before this message. Retry that exact action once in the same context, using the current permission policy. Do not broaden the operation, change permissions, or treat this as permission for other actions. If the action is no longer appropriate or still denied, explain and stop this retry." } : messageCommand(chat.agent, text);
     if (chat.workflowState === "archived") throw Object.assign(new Error("Unarchive this chat before sending a message"), { statusCode: 409 });
@@ -1067,13 +1117,24 @@ export class RuntimeManager extends EventEmitter {
         ...(commandAction?.type === "goal" ? { goalDirective: commandAction } : currentChat.forkGoalPending && currentChat.mode !== "plan" && commandAction?.type !== "review" ? { goalDirective: { action: "resume", fork: true } } : {}),
         ...(claude ? { systemPrompt: responsePrompt("", automaticTitle) + (currentChat.needsAgentHandoff ? handoffPrompt(currentChat, "") : "") + browserPrompt } : {}),
         mode: currentChat.mode || "accept_edits", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) });
-      const result = commandAction?.approval ? await this.approvals.retry(chatId, commandAction.approval, runtime.adapter, send, () => {
+      const checkConfiguration = () => {
+        if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) throw Object.assign(new Error("Settings command cancelled"), { name: "AbortError" });
+      };
+      const nativeSend = async () => {
+        try { return await send(); }
+        catch (error) {
+          if (commandAction?.type === "claudeConfig") await this.#syncClaudeConfiguration(chatId, error.nativeSettings, currentChat, checkConfiguration);
+          throw error;
+        }
+      };
+      const result = commandAction?.approval ? await this.approvals.retry(chatId, commandAction.approval, runtime.adapter, nativeSend, () => {
         if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) throw Object.assign(new Error("Approval retry cancelled because the chat stopped"), { name: "AbortError" });
         runtime.adapter.assertInputReady?.();
-      }) : await send();
+      }) : await nativeSend();
       if (turn.cancelled || runtime.generation !== generation) return;
       runtime.titleStream?.flush();
       await runtime.eventQueue;
+      if (commandAction?.type === "claudeConfig") await this.#syncClaudeConfiguration(chatId, result.nativeSettings, currentChat, checkConfiguration);
       if (claude && /^\/reload-(?:skills|plugins)(?:\s|$)/.test(text)) await this.#refreshCommandCatalog(chatId);
       if (!result.turnsHandled) {
       const output = metadata ? extractResponse(result.text || "", automaticTitle) : { text: result.text || "", title: null, awaitingUser: false };

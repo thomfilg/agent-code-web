@@ -220,7 +220,7 @@ test("Claude interruption preserves its session and gateway capability", async t
   const adapter = new ClaudeAdapter({ chat, store, config: testConfig(root, { CLAUDE_BIN: path.join(fixtureDir, "fake-claude.mjs") }), broker: new CapabilityBroker({ ttlMs: 10000 }), hooks: {} });
   t.after(() => adapter.stop()); await adapter.start();
   const capability = adapter.capability, sent = adapter.send("wait for interruption");
-  const rejected = assert.rejects(sent, /exited/); await waitFor(() => adapter.child);
+  const rejected = assert.rejects(sent, /interrupted/); await waitFor(() => adapter.child);
   const sessionId = adapter.sessionId; await adapter.interrupt(); await rejected;
   assert.equal(adapter.sessionId, sessionId); assert.equal(adapter.capability, capability);
   assert.equal((await adapter.send("next")).text, "claude received next");

@@ -6,12 +6,12 @@ test.afterEach(async ({ page }) => { for (const id of created.get(page) || []) a
 async function fixture(page) {
   await page.addInitScript(() => { const Native = window.EventSource; window.fixtureSources = []; window.EventSource = class extends Native { constructor(...args) { super(...args); window.fixtureSources.push(this); } }; });
   const { chat } = await (await page.request.post("/api/chats", { data: { agent: "claude", title: `Claude commands ${Date.now()}` } })).json(); created.set(page, [chat.id]);
-  const f = { snapshot: { ...chat, revision: 10000, commandCatalogRevision: 0 }, catalog: [{ name: "fixture-old", description: "Old native command" }], reads: 0, calls: [], errors: [] };
+  const f = { snapshot: { ...chat, revision: 10000, commandCatalogRevision: 0 }, catalog: [{ name: "fixture-old", description: "Old native command" }], reads: 0, calls: [], errors: [], responseStatus: 202 };
   page.on("pageerror", error => f.errors.push(error.message));
   await page.route(`**/api/chats/${chat.id}`, route => route.fulfill({ json: { chat: f.snapshot } }));
   await page.route(`**/api/chats/${chat.id}/events*`, route => route.fulfill({ contentType: "text/event-stream", body: ": fixture\n\n" }));
   await page.route(`**/api/chats/${chat.id}/commands`, async route => { f.reads++; const commands = [...webCommands("claude"), { name: "reload-skills" }, ...f.catalog]; await f.gate; await route.fulfill({ json: { commands } }); });
-  for (const tail of ["messages", "queue"]) await page.route(`**/api/chats/${chat.id}/${tail}`, route => { f.calls.push({ tail, ...route.request().postDataJSON() }); return route.fulfill({ status: 202, json: {} }); });
+  for (const tail of ["messages", "queue"]) await page.route(`**/api/chats/${chat.id}/${tail}`, route => { f.calls.push({ tail, ...route.request().postDataJSON() }); return route.fulfill({ status: f.responseStatus, json: f.responseStatus === 202 ? {} : { error: "/config and /settings do not accept attachments. Remove them or send them in a separate message." } }); });
   await page.goto(`/#chat=${chat.id}`); await expect(page.locator("#chat-title")).toHaveText(chat.title);
   f.emit = async () => {
     f.snapshot = { ...f.snapshot, revision: f.snapshot.revision + 1, commandCatalogRevision: f.snapshot.commandCatalogRevision + 1 };
@@ -55,4 +55,62 @@ test("catalog refresh leaves a closed menu, draft and attachments untouched and 
   await input.fill("/fixture"); await expect(page.locator("#slash-options")).toContainText("/fixture-new");
   await page.evaluate(chat => window.fixtureSources.find(source => source.url.includes(`/chats/${chat.id}/events`)).dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "chat_updated", chat }) })), stale);
   await expect(page.locator("#slash-options")).toContainText("/fixture-new"); expect(f.reads).toBe(2); expect(f.calls).toEqual([]); expect(f.errors).toEqual([]);
+});
+
+for (const width of [1280, 320]) test(`native configuration at ${width}px stays literal, queues when busy, and updates model, Auto effort and Claude-only modes`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input");
+  for (const status of ["idle", "running"]) {
+    f.snapshot.status = status; await f.emit();
+    const text = "/config model=haiku permissionMode=dontAsk\nlanguage=pt-BR";
+    await input.fill(text); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+    await expect.poll(() => f.calls.length).toBe(status === "idle" ? 1 : 2);
+    expect(f.calls.at(-1)).toEqual({ tail: status === "idle" ? "messages" : "queue", text, attachments: [] });
+  }
+  f.snapshot = { ...f.snapshot, status: "idle", model: "haiku", effort: "auto", mode: "dont_ask" }; await f.emit();
+  await expect(page.getByRole("combobox", { name: "Chat model", exact: true })).toHaveValue("haiku");
+  await expect(page.locator("#composer-model-controls .effort-label")).toHaveText("Auto");
+  await expect(page.locator("#mode-label")).toHaveText("Deny prompts");
+  await page.locator("#mode-label").click();
+  await expect(page.locator('[data-agent-mode="default"]')).toBeVisible();
+  await expect(page.locator("#mode-provider-note")).toContainText("cannot yet be answered");
+  await page.keyboard.press("Escape");
+  f.snapshot = { ...f.snapshot, model: "default", mode: "default" }; await f.emit();
+  await expect(page.getByRole("combobox", { name: "Chat model", exact: true })).toHaveValue("default");
+  await expect(page.locator("#mode-label")).toHaveText("Manual");
+  f.snapshot = { ...f.snapshot, agent: "codex", model: "gpt-5.6-sol", effort: "high", mode: "plan" }; await f.emit();
+  await page.locator("#mode-label").click();
+  await expect(page.locator('[data-agent-mode="default"]')).toBeHidden(); await expect(page.locator('[data-agent-mode="dont_ask"]')).toBeHidden();
+  expect(f.errors).toEqual([]); expect(f.calls).toHaveLength(2);
+});
+
+test("rejected configuration preserves its draft and files and can be retried after removing the attachment", async ({ page }) => {
+  const f = await fixture(page), input = page.locator("#message-input"); f.responseStatus = 400;
+  await page.locator("#attachment-input").setInputFiles({ name: "keep-config.txt", mimeType: "text/plain", buffer: Buffer.from("Unsent private fixture") });
+  await expect(page.locator("#attachment-chips")).toContainText("keep-config.txt");
+  const text = "/settings model=sonnet"; await input.fill(text); await input.press("Escape");
+  await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect(page.locator("#toasts")).toContainText("do not accept attachments");
+  await expect(input).toHaveValue(text); await expect(page.locator("#attachment-chips")).toContainText("keep-config.txt");
+  await page.locator("#attachment-chips button").filter({ hasText: "×" }).click(); f.responseStatus = 202;
+  await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect.poll(() => f.calls.length).toBe(2); expect(f.calls[1]).toEqual({ tail: "messages", text, attachments: [] });
+  await expect(input).toHaveValue(""); expect(f.errors).toEqual([]);
+});
+
+test("Claude Manual and Deny prompts controls save through the real API without starting a worker", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 800 });
+  const { chat } = await (await page.request.post("/api/chats", { data: { agent: "claude", title: "Native permission controls" } })).json(); created.set(page, [chat.id]);
+  await page.goto(`/#chat=${chat.id}`); await expect(page.locator("#chat-title")).toHaveText(chat.title);
+  for (const [mode, label] of [["default", "Manual"], ["dont_ask", "Deny prompts"]]) {
+    await page.locator("#mode-label").click(); await page.locator(`[data-agent-mode="${mode}"]`).click();
+    await expect(page.locator("#mode-label")).toHaveText(label);
+    const saved = (await (await page.request.get(`/api/chats/${chat.id}`)).json()).chat;
+    expect(saved.mode).toBe(mode); expect(saved.status).toBe("stopped"); expect(saved.agentSessionId).toBeNull(); expect(saved.messages).toEqual([]);
+  }
+  await page.getByLabel("Choose effort", { exact: true }).click();
+  await page.getByLabel("Chat effort", { exact: true }).selectOption("auto");
+  await expect(page.locator(".effort-auto-note")).toBeVisible(); await expect(page.getByRole("slider", { name: "Effort level" })).toBeHidden();
+  await page.getByLabel("Chat effort", { exact: true }).selectOption("high");
+  await expect(page.getByRole("slider", { name: "Effort level" })).toBeVisible();
 });

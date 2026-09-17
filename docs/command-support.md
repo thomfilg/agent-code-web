@@ -40,8 +40,9 @@ and remain at the beginning of native stream-json input.
 | `/app` (Codex) | Explicit same-session desktop link for verified local host profiles, with native locator inspection, stopped-session cache, computer/profile confirmation and no prompt/credential/history transfer. Remote/private profiles show their actual connection limits. Controller/browser and installed-CLI inspection checks; OS launch acceptance and private/remote handoff remain open. |
 | `/init [instructions]` | Repository-instruction creation task with multiline instructions and attachments, retaining the same chat, queue and permission mode. Six controller/unit and three browser cases pass; installed CLI verifies actual AGENTS.md creation, preservation on resume and no writes in Plan. Generated prose still needs repository-owner review; live activation pending. |
 | Installed Codex skills | `skills/list` plus structured skill input. No fake terminal entries substituted for skills. |
-| Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI verifies command-first continuation, custom-command/skill expansion, local aliases and same-session resume. Native catalog changes and successful skill reloads refresh both menu caches immediately. Stateful settings, bundled workflows and account-backed command acceptance remain open below. |
-| `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. |
+| Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI verifies command-first continuation, custom-command/skill expansion, local aliases and same-session resume. Native catalog changes and successful skill reloads refresh both menu caches immediately. Remaining stateful commands, bundled workflows and account-backed acceptance are listed below. |
+| `/config key=value`, `/settings key=value` (Claude) | Native private-profile settings, with verified model/mode readback into Relay and subsequent-turn/Stop persistence. Partial native results remain visible; newer web selections win over late readback. Shared host mutations stay locked on item 21. Attachments are rejected before accepting/queueing the command. |
+| `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. |
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
 | `/fast [on/off]`, `/personality [friendly/pragmatic/none]` | Catalog-driven, persisted per-chat settings, applied in FIFO order to later turns. Stop/model-change guards, retryable personality picker and draft/attachment protection. Controller/browser checks and actual installed-CLI parameter/resume verification pass; live activation remains pending. |
 | `/usage`, `/status`, `/context` | Existing session/usage inspection. |
@@ -83,14 +84,70 @@ Do not treat removing entries from autocomplete as implementing them.
   current Linux worker. Native APIs still need capability/version checks if a
   Windows worker is introduced.
 - Claude acceptance below covers the command transport, native local results,
-  custom expansion, reload and resume, not every command's effect. Next verify
-  stateful `/config`/`/settings`, `/fast`, `/autocompact` and `/goal` across actual
+  custom expansion, configuration readback, reload and resume, not every command's effect. Next verify
+  stateful `/fast`, `/autocompact` and `/goal` across actual
   Relay turn settings and worker restarts, plus native MCP actions, bundled
   workflows and installed plugin namespaces. Account-backed commands and shared
   host-profile writes also need the company-isolation gate in item 21. Do not
   infer support from a catalog entry or treat a native removal notice as a
   working replacement. Use the installed version's capabilities, not commands
   added only in newer documentation.
+
+### Claude configuration effects and persistence
+
+The installed Claude **2.1.222** accepts `/config key=value` and `/settings`
+natively in print mode. The [native model precedence](https://code.claude.com/docs/en/model-config#setting-your-model)
+explains the reproduced bug: startup arguments override saved configuration.
+Relay previously retained its old model/mode and sent them again next turn,
+despite the native command's successful acknowledgement. Private gateway
+profiles now read back only `model` and `permissions.defaultMode` before/after
+the command and reconcile verified changes into the owning chat. Explicit
+same-value requests also reconcile an older native value with a newer, different
+web choice. Invalid assignments do not accidentally restore unrelated native
+defaults. Native partial successes, including a failed process after writing,
+retain applied choices and visible failures rather than claiming atomic success.
+
+Inspection uses the owning worker, a fixed private path, bounded reads/output,
+link/hardlink and file-change checks, a minimal credential-free environment,
+timeout and Stop cancellation. No raw settings, permission rules, hooks,
+environment or credentials are returned. Shared host-profile mutation is refused
+before accepting or queueing input; read-only help still works. The original
+command reaches the native CLI unchanged, and attachments are rejected instead
+of being appended to its argument string. Owner/profile/Stop guards prevent late
+updates; per-control revisions retain newer web selections, even reselection
+of the original value, with a visible conflict notice.
+
+All five native permission modes round-trip; Manual and Deny prompts are
+Claude-only controls and pass their actual CLI flags. Manual approval replies
+are not implemented and are explicitly labelled. Switching either mode to
+Codex defaults to Plan. Native model aliases include the Claude account default,
+distinct from Relay's configured default. Unsupported old effort is cleared
+when changing models. `/effort auto` explicitly resets native effort, rather
+than reapplying Relay's High default; `/effort status` runs the native query.
+
+`node scripts/smoke-real-claude-commands.mjs --settings` verifies Sonnet and
+`thinking=false` in actual loopback requests, same-session Stop/resume, partially
+accepted `/settings model=haiku madeUp=wrong`, native mode persistence, Auto
+effort status and account-default selection. Three deterministic model replies;
+no external inference, personal credentials or live chat/profile changes. The
+initial acceptance failed because Relay remained on Opus after native Sonnet
+selection. The later Haiku assertion exposed the installed CLI's native Sonnet
+promotion in Plan mode; switching explicitly to Accept edits verifies the actual
+Haiku execution request, without replacing the configured Opus/High baseline or
+weakening its model assertion. Native bundled workflows and other remaining
+commands still need their own effect-level acceptance.
+
+Eleven new unit/controller cases cover parsing/readback, scope and filesystem
+safety, aborts, partial failure, FIFO, Stop/owner races, concurrent/repeated web
+selections, effort reset and host/attachment rejection. Four new browser cases
+cover desktop/320px updates, busy queueing, retained drafts/files after rejection,
+and actual mode/effort API changes without waking a worker. The existing mobile
+slider regression correctly caught Auto being placed before Low; Auto now stays
+outside the fixed-level slider instead of weakening the existing Low assertion.
+Final normal unit/controller suite: **391/391**. Related browser regressions:
+**27/27**. Both installed-Claude smoke variants and JavaScript syntax/whitespace
+checks pass. Earlier broad history/network browser gates and live activation
+remain open; no deployment, live approval or real-account change is included.
 
 ### Claude command execution and catalog refresh
 

@@ -428,9 +428,11 @@ worker VMs plus authenticated control-plane APIs for that boundary.
 
 Codex options and per-model reasoning levels come from the installed CLI's
 [`model/list`](https://developers.openai.com/codex/app-server/) response, not a
-hard-coded GPT list. Claude uses supported CLI aliases (Fable when available,
-Opus, Sonnet, Haiku) and levels advertised by `claude --help`. Haiku has no
-effort picker. Claude account/provider policy may limit models or cap effort;
+hard-coded GPT list. Claude uses native aliases (including its account default,
+extended-context and Opus-plan choices) and levels advertised by `claude --help`.
+Explicit Auto effort clears a previous override instead of restoring Relay's
+configured High default; Haiku offers only that reset, not unsupported levels.
+Claude account/provider policy may limit models or cap effort;
 Fable may bill usage credits in non-interactive mode. See
 [Claude model configuration](https://code.claude.com/docs/en/model-config).
 Changing settings does not interrupt an active turn; they apply to the next
@@ -438,6 +440,19 @@ message. New selections default to **Sol/high** for Codex and **Opus/high** for
 Claude. Override with `CODEX_MODEL`, `CODEX_EFFORT`, `CLAUDE_MODEL`, and
 `CLAUDE_EFFORT`; saved explicit per-chat selections are retained. Unsupported
 model selections fail visibly rather than silently switching models.
+
+In private Claude profiles, `/config key=value` and its `/settings` alias run
+natively and reconcile the saved model and permission mode with the chat's
+controls, including partial native successes. The next turn and Stop/resume
+retain those choices. Other keys, such as `thinking`, stay native settings.
+`/effort status` reads the native effort; `/model default` selects the Claude
+account default, distinct from Relay's configured default. Claude may use a
+different planning model in Plan mode. Newer web selections win over a late
+native response. These configuration commands reject attachments, and shared
+host-profile writes remain locked until company/profile isolation is complete.
+Claude's Manual and Deny prompts modes are selectable; Relay cannot yet answer
+native Claude manual approvals. Switching either Claude-only mode to Codex
+falls back to Plan, never to a broader permission mode.
 
 The composer agent selector switches an idle chat between Codex and Claude.
 Stop active work first. Its chat ID, files, repositories, title, pins, groups,

@@ -3,6 +3,8 @@ export function messageCommand(agent, text) {
   const match = /^\/([\w:.-]+)(?:\s+([\s\S]*))?$/.exec(text.trim());
   if (!match) return null;
   const argument = (match[2] || "").trim();
+  if (agent === "claude" && ["config", "settings"].includes(match[1])) return { type: "claudeConfig", prompt: text };
+  if (agent === "claude" && match[1] === "effort" && argument === "status") return null;
   if (match[1] === "keymap") throw new Error("Open /keymap without arguments to remap Relay keyboard shortcuts. This is a web control, not agent input.");
   if (match[1] === "vim") throw new Error("Use /vim in the web composer to toggle Vim editing, not as agent input.");
   if (match[1] === "statusline") throw new Error("Open /statusline in the web composer to configure its footer, not as agent input.");
@@ -17,7 +19,7 @@ export function messageCommand(agent, text) {
   }
   if (["model", "effort", "reasoning"].includes(match[1]) && argument) {
     const key = match[1] === "model" ? "model" : "effort";
-    return { type: "settings", settings: { [key]: argument === "default" ? null : argument } };
+    return { type: "settings", settings: { [key]: argument === "default" && !(agent === "claude" && key === "model") ? null : argument } };
   }
   if (agent !== "codex") return null; // Preserve Claude's installed commands and plugin aliases.
   if (match[1] === "app") throw new Error("Open /app without arguments in the web composer to hand off the saved session. This is not agent input.");

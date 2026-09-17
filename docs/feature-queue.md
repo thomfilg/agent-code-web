@@ -62,6 +62,25 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: fixed Claude `/config`/`/settings` effects being overwritten by Relay's
+  stale next-turn model and permission flags. Private-profile readback now
+  reconciles actually applied values, including partial failures and same-value
+  requests; retains newer web choices; and survives Stop/resume in the original
+  chat. Five native permission modes, explicit Auto effort, native effort status
+  and the separate Claude account-default model are covered. Shared host writes
+  stay gated on item 21; files are rejected before submission/queueing. Eleven
+  new unit/controller and four browser checks cover failure, scope, FIFO,
+  concurrency, file-read safety and desktop/320px controls. Actual installed
+  Claude 2.1.222 verifies model and thinking changes with three loopback replies;
+  original command smoke still passes with four. Normal suite **391/391**, related
+  browser regressions **27/27**, syntax/whitespace pass. The existing slider test
+  caught Auto being misordered as the lowest effort; fixed the picker without
+  changing its Low assertion. Native Plan promotion of Haiku to Sonnet is
+  documented separately from execution-model verification. No real credentials,
+  live data, app/Chrome restarts or deployment. Save to PR #2 without merging.
+  Item 20 stays active: next verify remaining stateful Claude `/fast`,
+  `/autocompact`, `/goal` and other installed-command effects. Queue count/order
+  and previous activation/account/browser gates are unchanged.
 - 20: installed Claude 2.1.222 now has real command-first, custom-command/skill
   expansion, multiline/Unicode, native local alias and same-session resume
   acceptance. Four loopback fixture model replies; no external inference or

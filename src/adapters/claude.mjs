@@ -5,6 +5,7 @@ import path from "node:path";
 import { buildWorkerEnvironment, spawnWorker, terminateWorker } from "../worker-process.mjs";
 import { errorMessage, redact } from "../utils.mjs";
 import { claudeUsage, claudeContext, claudeRateLimits, safeSessionDetails } from "../session-info.mjs";
+import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings } from "../claude-settings.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks }) {
@@ -37,7 +38,11 @@ export class ClaudeAdapter {
 
   async send(text, { model, effort, resetEffort, mode = "accept_edits", systemPrompt } = {}) {
     const version = this.sendVersion;
-    if (this.child) throw new Error("A Claude turn is already running for this chat");
+    const configuration = claudeConfigRequest(text);
+    if (configuration?.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native /config changes require a private Claude profile. This worker uses a shared host profile; use this chat's model and mode controls instead.");
+    const nativeMode = Object.keys(CLAUDE_PERMISSION_MODES).find(key => CLAUDE_PERMISSION_MODES[key] === mode);
+    if (!nativeMode) throw new Error("Unsupported Claude permission mode");
+    if (this.child || this.settingsInspection) throw new Error("A Claude turn is already running for this chat");
     if (this.stopped || (this.config.claude.authMode === "gateway" && !this.capability)) await this.start();
 
     const isNew = !this.sessionId;
@@ -66,13 +71,23 @@ export class ClaudeAdapter {
     const uploads = path.join(this.runtimeHome, "uploads");
     await ensureDirectory(uploads);
     if (resetEffort) env.CLAUDE_CODE_EFFORT_LEVEL = "auto";
+    const inspect = async () => {
+      const controller = new AbortController(); this.settingsInspection = controller;
+      try {
+        const value = await inspectClaudeSettings({ runtimeHome: this.runtimeHome, executor: this.executor, isolation: this.config.processIsolation, signal: controller.signal });
+        if (version !== this.sendVersion) throw new Error("Interrupted");
+        return value;
+      } catch { throw new Error("Cannot safely verify this chat's private Claude settings. The command queue is paused; check the private profile before retrying."); }
+      finally { if (this.settingsInspection === controller) this.settingsInspection = null; }
+    };
+    const beforeSettings = configuration?.mutate ? await inspect() : null;
 
     const args = [
       "--print",
       "--verbose",
       "--output-format", "stream-json",
       "--include-partial-messages",
-      "--permission-mode", mode === "plan" ? "plan" : mode === "auto" ? "auto" : "acceptEdits",
+      "--permission-mode", nativeMode,
       "--prompt-suggestions", "false",
       "--add-dir", uploads,
       ...(systemPrompt ? ["--append-system-prompt", systemPrompt] : []),
@@ -172,22 +187,27 @@ export class ClaudeAdapter {
     });
 
     return new Promise((resolve, reject) => {
+      let spawnFailed = false;
       child.once("error", (error) => {
-        this.child = null;
+        spawnFailed = true;
+        if (this.child === child) this.child = null;
         reject(error);
       });
-      child.once("exit", (code, signal) => {
-        this.child = null;
+      child.once("close", (code, signal) => { void (async () => {
+        if (spawnFailed) return;
+        if (this.child === child) this.child = null;
+        if (version !== this.sendVersion) throw new Error("Claude turn interrupted");
+        const nativeSettings = beforeSettings ? claudeSettingsChanges(beforeSettings, await inspect(), configuration) : undefined;
         const resultFailed = resultMessage && (
           resultMessage.is_error === true ||
           (resultMessage.subtype && resultMessage.subtype !== "success")
         );
         if (code === 0 && !resultFailed) {
-          resolve({ text: streamed || fallback, status: "completed", compacted });
+          resolve({ text: streamed || fallback, status: "completed", compacted, ...(nativeSettings ? { nativeSettings } : {}) });
         } else {
-          reject(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`));
+          reject(Object.assign(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`), { nativeSettings }));
         }
-      });
+      })().catch(reject); });
     });
   }
 
@@ -197,6 +217,7 @@ export class ClaudeAdapter {
 
   async interrupt() {
     this.sendVersion += 1;
+    this.settingsInspection?.abort();
     // Claude print mode is one child per turn. Keep its resume ID, capability,
     // worker lease and browser; only terminate this turn's CLI process.
     const child = this.child;
@@ -205,6 +226,7 @@ export class ClaudeAdapter {
 
   async stop() {
     this.sendVersion += 1;
+    this.settingsInspection?.abort();
     this.stopped = true;
     const child = this.child;
     this.child = null;

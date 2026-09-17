@@ -53,8 +53,9 @@ export class ChatControls {
       closeSidePanel("diff");
       document.querySelectorAll(".control-menu[open]").forEach(menu => menu.open = false);
     }
-    $("#mode-label").textContent = { auto: "Auto", accept_edits: "Edits", plan: "Plan" }[chat.mode || "accept_edits"];
-    $("#mode-provider-note").textContent = chat.agent === "codex" ? "Auto routes eligible approvals through Codex's automatic safety reviewer (uses model tokens). Edits asks you. Plan uses a read-only sandbox." : "Claude uses its native permission modes. Your CLI/account may restrict availability.";
+    $("#mode-label").textContent = { auto: "Auto", accept_edits: "Edits", plan: "Plan", default: "Manual", dont_ask: "Deny prompts" }[chat.mode || "accept_edits"];
+    document.querySelectorAll("[data-claude-mode]").forEach(button => { button.hidden = chat.agent !== "claude"; });
+    $("#mode-provider-note").textContent = chat.agent === "codex" ? "Auto routes eligible approvals through Codex's automatic safety reviewer (uses model tokens). Edits asks you. Plan uses a read-only sandbox." : "Claude uses its native permission modes; account restrictions still apply. Manual approvals cannot yet be answered in Relay, so actions requiring them may be denied.";
     const percentage = Number.isFinite(chat.usage?.contextTokens) && chat.usage?.contextWindow ? Math.min(100, chat.usage.contextTokens / chat.usage.contextWindow * 100) : 0;
     $("#usage-ring").style.setProperty("--usage", `${percentage}%`);
     $("#archive-current-chat").textContent = chat.archived ? "Unarchive" : "Archive";

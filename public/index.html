@@ -142,6 +142,8 @@
                     <button type="button" data-agent-mode="auto">Auto<small>Provider-managed approvals</small></button>
                     <button type="button" data-agent-mode="accept_edits">Accept edits<small>Allow workspace edits; commands may need approval</small></button>
                     <button type="button" data-agent-mode="plan">Plan<small>Make a plan before changing files</small></button>
+                    <button type="button" data-agent-mode="default" data-claude-mode hidden>Manual<small>Native default policy; approval replies are not yet supported here</small></button>
+                    <button type="button" data-agent-mode="dont_ask" data-claude-mode hidden>Deny prompts<small>Deny actions requiring approval; keep existing allowed actions</small></button>
                     <p class="muted" id="mode-provider-note"></p>
                   </div></details>
                   <select id="chat-agent-select" aria-label="Chat agent" title="Switch agent · conversation and workspace are retained"></select>
@@ -152,6 +154,7 @@
                       <select class="effort-select" aria-label="Chat effort" title="Effort"></select>
                       <input class="effort-slider" type="range" min="0" max="0" step="1" aria-label="Effort level">
                       <div class="effort-scale"><span>Faster</span><span>More reasoning</span></div>
+                      <p class="muted effort-auto-note" hidden>Auto uses Claude's native effort choice. Select a fixed level above to use the slider.</p>
                       <p class="muted">Higher effort can take longer and use more tokens. Available levels come from the selected model.</p>
                     </div></details>
                     <p class="model-note" role="status"></p>

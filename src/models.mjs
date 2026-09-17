@@ -54,9 +54,9 @@ export class ModelCatalog {
     const { stdout } = await exec(this.config.claude.bin, ["--help"], { timeout: 15000, env: { PATH: process.env.PATH, HOME: os.homedir() } });
     const advertised = /--effort[^\n]*\n?\s*\(([^)]+)\)/.exec(stdout)?.[1]?.split(",").map(value => value.trim()) || [];
     const efforts = ["low", "medium", "high", "xhigh", "max"].filter(value => advertised.includes(value));
-    const aliases = ["opus", "sonnet", "haiku"];
+    const aliases = ["opus", "sonnet", "haiku", "default", "best", "sonnet[1m]", "opus[1m]", "opusplan"];
     if (stdout.includes("fable")) aliases.unshift("fable");
-    return { models: aliases.map(id => ({ id, label: id[0].toUpperCase() + id.slice(1), efforts: id === "haiku" ? [] : efforts, defaultEffort: null })), source: "claude-cli-aliases", configuredDefault: this.config.claude.model || null, note: "CLI model aliases. The resolved version and account availability are checked by Claude when you send a message; Fable may require usage credits." };
+    return { models: aliases.map(id => ({ id, label: id === "default" ? "Claude account default" : id[0].toUpperCase() + id.slice(1), efforts: id === "haiku" ? ["auto"] : ["auto", ...efforts], defaultEffort: null })), source: "claude-cli-aliases", configuredDefault: this.config.claude.model || null, note: "CLI aliases; Claude checks account availability when you send and may use a different planning model in Plan mode. Auto effort uses Claude's native default; Fable may require usage credits." };
   }
   async validate(agent, input) {
     const model = input.model || null; const effort = input.effort || null;
@@ -67,7 +67,7 @@ export class ModelCatalog {
     const selected = catalog.models.find(item => item.id === (model || catalog.configuredDefault)) || (!model ? catalog.models.find(item => item.isDefault) : null);
     if (agent === "mock" || (model && !selected)) throw fail("Choose a model from the available models list");
     const allowed = selected?.efforts || (agent === "claude" ? catalog.models.find(item => item.id === "opus")?.efforts : []);
-    if (effort && !allowed?.includes(effort)) throw fail("This effort level is not supported by the selected model");
+    if (effort && !(agent === "claude" && effort === "auto") && !allowed?.includes(effort)) throw fail("This effort level is not supported by the selected model");
     const extra = {};
     if (Object.hasOwn(input, "serviceTier")) {
       if (agent !== "codex" || (input.serviceTier !== null && !selected?.serviceTiers?.some(tier => tier.id === input.serviceTier))) throw fail("This service tier is not available for the selected model");
@@ -96,7 +96,7 @@ export class ModelCatalog {
     const target = chat.model || catalog.configuredDefault;
     const selected = catalog.models.find(item => item.id === target) || (!target ? catalog.models.find(item => item.isDefault) : null);
     if (target && !selected) throw fail(`Model ${target} is not available. Choose another model before sending a message.`);
-    const effort = chat.effort || (selected?.efforts.includes(catalog.configuredDefaultEffort) ? catalog.configuredDefaultEffort : selected?.defaultEffort) || null;
+    const effort = chat.agent === "claude" && chat.effort === "auto" ? null : chat.effort || (selected?.efforts.includes(catalog.configuredDefaultEffort) ? catalog.configuredDefaultEffort : selected?.defaultEffort) || null;
     return { model: chat.model || catalog.configuredDefault || selected?.id || (chat.agent === "claude" ? "default" : null), effort, resetEffort: !effort,
       ...(chat.agent === "codex" && Object.hasOwn(chat, "serviceTier") ? { serviceTier: selected?.serviceTiers?.some(tier => tier.id === chat.serviceTier) ? chat.serviceTier : null } : {}),
       ...(chat.agent === "codex" && chat.personality ? { personality: selected?.supportsPersonality ? chat.personality : "none" } : {}) };
