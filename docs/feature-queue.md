@@ -62,6 +62,38 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: installed Claude 2.1.222 now has real command-first, custom-command/skill
+  expansion, multiline/Unicode, native local alias and same-session resume
+  acceptance. Four loopback fixture model replies; no external inference or
+  personal/native host-profile changes. Reproduced and fixed stale Relay menus
+  after successful `/reload-skills`: scoped invalidation plus a persisted
+  catalog revision refresh controller/browser caches and an open slash query,
+  without consuming drafts/files or accepting old replies. Failed/interrupted
+  reloads do not announce success. Four controller/unit and three browser cases
+  pass. Final normal unit suite **380/380**, related browser regressions **28/28**,
+  native smoke and repository JavaScript syntax/whitespace checks pass. The
+  initial unit fixture needed its missing broker; product regressions and
+  assertions remain recorded in `command-support.md`. Existing broad browser
+  history/network gates remain open. Next safe item-20 work: stateful Claude
+  command effects and restart persistence, then other installed-command effects;
+  account/host-profile and activation gates remain explicit. Update PR #2 without
+  merge/deployment. The original queue order/count is unchanged.
+- 20: `/init` now has document, controller and browser acceptance evidence.
+  Installed Codex 0.154.0 reads a disposable repository and uses native Code Mode
+  tools to create actual AGENTS.md bytes, preserves them after same-session
+  resume, and cannot write in Plan mode. Unrelated files remain unchanged.
+  Nine deterministic loopback responses; no external inference, personal
+  credentials or live chat/profile/approval changes. This proves integration,
+  not generated-prose quality, which still needs review. Six controller/unit
+  cases cover routing, FIFO, attachments, Stop/restart, failures and ownership;
+  three browser cases cover discovery, multiline idle/busy sends, newer-draft/file
+  preservation and failed-send retry. Normal unit suite **376/376**; focused
+  browser suite **3/3**. OpenAI Docs supplied the scaffold/review contract.
+  Existing production dispatch required no change. Native fixture corrections
+  and remaining gates are documented in `command-support.md`; earlier broad
+  browser failures and activation remain open. Keep item 20 active; next safe
+  work is installed Claude-command acceptance. Save checkpoints to PR #2 without
+  merge/deployment.
 - 20: `/fast` and `/personality` now have browser/controller and installed-native
   parameter acceptance. Settings persist per chat, honor FIFO, use real model
   capabilities, never become prompts, and clear unsupported native overrides.

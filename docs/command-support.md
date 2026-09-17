@@ -38,9 +38,9 @@ and remain at the beginning of native stream-json input.
 | `/theme` | Relay web equivalent: preview/save four syntax palettes with per-account persistence; real self-hosted code tokenization in an isolated browser worker, plus themed diff colors. Keeps literal source, drafts/files and active work unchanged. Unknown/large/complex blocks stay readable; worker failures can be retried. Activation pending. |
 | `/pets`, `/pet`, `/pets <name>`, `/pets off` | Relay web equivalent: eight real built-ins, saved selection/Off, private uploaded custom pets and current-chat activity. Preview/save, named selection, reduced motion, hidden-tab pausing, bounded image decoding and explicit custom deletion. No agent input or native profile changes. Activation pending. |
 | `/app` (Codex) | Explicit same-session desktop link for verified local host profiles, with native locator inspection, stopped-session cache, computer/profile confirmation and no prompt/credential/history transfer. Remote/private profiles show their actual connection limits. Controller/browser and installed-CLI inspection checks; OS launch acceptance and private/remote handoff remain open. |
-| `/init [instructions]` | Repository-instruction creation task, preserving existing AGENTS.md and unrelated edits. Parser/dispatch tests; resulting repository document still needs acceptance verification. |
+| `/init [instructions]` | Repository-instruction creation task with multiline instructions and attachments, retaining the same chat, queue and permission mode. Six controller/unit and three browser cases pass; installed CLI verifies actual AGENTS.md creation, preservation on resume and no writes in Plan. Generated prose still needs repository-owner review; live activation pending. |
 | Installed Codex skills | `skills/list` plus structured skill input. No fake terminal entries substituted for skills. |
-| Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI `/reload-skills`, `/autocompact 200k` and `/config` return visible native results without any model call; full installed-command acceptance still pending. |
+| Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI verifies command-first continuation, custom-command/skill expansion, local aliases and same-session resume. Native catalog changes and successful skill reloads refresh both menu caches immediately. Stateful settings, bundled workflows and account-backed command acceptance remain open below. |
 | `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. |
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
 | `/fast [on/off]`, `/personality [friendly/pragmatic/none]` | Catalog-driven, persisted per-chat settings, applied in FIFO order to later turns. Stop/model-change guards, retryable personality picker and draft/attachment protection. Controller/browser checks and actual installed-CLI parameter/resume verification pass; live activation remains pending. |
@@ -82,6 +82,93 @@ Do not treat removing entries from autocomplete as implementing them.
 - Windows-only sandbox setup and read-directory commands do not apply to the
   current Linux worker. Native APIs still need capability/version checks if a
   Windows worker is introduced.
+- Claude acceptance below covers the command transport, native local results,
+  custom expansion, reload and resume, not every command's effect. Next verify
+  stateful `/config`/`/settings`, `/fast`, `/autocompact` and `/goal` across actual
+  Relay turn settings and worker restarts, plus native MCP actions, bundled
+  workflows and installed plugin namespaces. Account-backed commands and shared
+  host-profile writes also need the company-isolation gate in item 21. Do not
+  infer support from a catalog entry or treat a native removal notice as a
+  working replacement. Use the installed version's capabilities, not commands
+  added only in newer documentation.
+
+### Claude command execution and catalog refresh
+
+The official [programmatic usage guide](https://code.claude.com/docs/en/headless#create-a-commit)
+documents expansion of user-invoked skills/custom commands in print mode and
+the limitations of terminal-only controls. The [command reference](https://code.claude.com/docs/en/commands)
+documents leading command names, arguments, aliases and version-dependent
+availability. Relay passes native Claude input at the beginning of the message;
+its own handoff and formatting context remains in appended system instructions.
+
+`node scripts/smoke-real-claude-commands.mjs` exercises installed Claude Code
+**2.1.222** and the real Relay manager/adapter, using only disposable repositories
+and private profiles. Starting a new conversation with `/reload-skills` does not
+call a model or prevent subsequent conversation. Actual custom `.claude/commands`
+and `.claude/skills` contents expand into the native request, preserving multiline
+and Unicode arguments. `/settings --help` expands the installed `/config` alias;
+reload, settings help and `/autocompact 200k` return native text without inference.
+After Stop, continuation retains the same native session and prior history.
+Four deterministic loopback model replies cover continuation/expansion; there
+are no external inference requests, personal accounts, real plugins or live
+workspaces. A scripted reply is not proof that a bundled workflow performs its
+intended task; the remaining effect-level acceptance is listed above.
+
+The smoke reproduced a real stale-catalog failure: after an on-disk skill was
+added and native reload completed, Relay still returned the earlier cached menu.
+Successful reload and changed native command metadata now invalidate only the
+owning chat's catalog. A persisted `commandCatalogRevision` travels with chat
+updates and versions both controller and browser caches, including return from
+another chat or controller restart. The open slash menu re-runs its current
+search; closed menus stay closed. Stale pending discovery/replayed snapshots
+cannot restore old commands, and drafts/files are preserved. Unchanged native
+reports do not cause another revision; failures/interruption do not publish a
+successful reload refresh. No new model calls or worker restarts are introduced.
+
+Four controller/unit and three browser cases cover these behaviors. The final
+normal unit/controller suite passes **380/380** and related command browser
+regressions pass **28/28**, including the three `/init` browser checks. Installed
+CLI smoke, all JavaScript syntax and whitespace checks pass. One initial unit
+fixture omitted its capability broker and was corrected; the native stale-menu
+assertion and controller/browser assertions were retained. No timeout, command
+semantics or assertion was relaxed. Earlier full-browser history/network gates
+and live activation remain open; this is not full installed-command acceptance.
+
+### Repository initialization
+
+OpenAI Docs' [initialization command](https://learn.chatgpt.com/docs/developer-commands#generate-agentsmd-with-init)
+defines `/init` as generating a repository instruction scaffold for review, not
+silently replacing existing conventions. Relay requests inspection of actual
+repository evidence, preserves existing `AGENTS.md` and unrelated edits, and
+keeps multiline additional instructions and the original user command in the
+same chat. The existing task dispatch needed no production change for this
+checkpoint. Claude's native `/init` is not translated into Codex instructions.
+
+Six controller/unit cases cover authenticated submission, original chat/text,
+FIFO queueing and scoped attachments, Stop/restart and explicit queue resume,
+read-only Plan, native failure reporting, and auth/origin/ownership rejection.
+Three browser cases cover command selection without sending, idle and busy
+submission, multiline text, preservation of newer drafts/files after a delayed
+reply, and retry with the original command and files after an error.
+
+`node scripts/smoke-real-init.mjs` uses the installed Codex **0.154.0** with
+disposable repository/profile data and nine deterministic loopback responses.
+Real native Code Mode reads repository evidence and applies an actual
+`AGENTS.md` patch. Exact file bytes establish creation and preservation after
+same-session resume; an attempted Plan-mode patch is denied and leaves the
+document unchanged. README, package metadata and unrelated user-draft bytes
+remain unchanged. No external inference, personal credentials, live approvals
+or real repositories are used. The fixture exercises the CLI/tool integration,
+not an actual model's ability to choose accurate prose; generated instructions
+still require review as the official command describes.
+
+The native fixture initially assumed legacy top-level tool advertisement and a
+textual patch-success acknowledgement. Actual advertised Code Mode and generated
+protocol schema corrected those fixture assumptions; exact filesystem assertions
+were retained. The full normal unit/controller suite passes **376/376** and the
+focused browser run passes **3/3**. These results do not close earlier full-browser
+history/network failures or deployment gates. `/init` acceptance is covered;
+remaining installed Claude-command effect acceptance is recorded above.
 
 ### Fast and personality
 
@@ -118,8 +205,8 @@ expected a literal null instead of the CLI's normalized default; the generated
 protocol and actual native reply corrected those fixture assumptions. No
 timeouts or assertions were relaxed to conceal a product failure. This focused
 browser run does not close older full-suite history/network failures. Nothing
-was deployed. Item 20 remains open; next is `/init` repository-document
-acceptance, then remaining installed Claude-command acceptance.
+was deployed. `/init` repository-document acceptance is recorded above;
+remaining installed Claude-command acceptance keeps item 20 open.
 
 ### Desktop handoff
 
@@ -179,7 +266,8 @@ failures found an overridden cache header (fixed) and two test-fixture mistakes
 real controls without weakened assertions or longer timeouts. This targeted
 browser result does not erase the earlier full-suite history/network failures.
 Fast/personality browser/native parameter acceptance is recorded above. The
-remaining `/init` and installed Claude-command checks still keep item 20 open.
+`/init` acceptance is recorded above; installed Claude-command checks still keep
+item 20 open.
 
 ### Pets
 

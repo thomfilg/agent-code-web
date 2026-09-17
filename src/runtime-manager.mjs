@@ -1074,6 +1074,7 @@ export class RuntimeManager extends EventEmitter {
       if (turn.cancelled || runtime.generation !== generation) return;
       runtime.titleStream?.flush();
       await runtime.eventQueue;
+      if (claude && /^\/reload-(?:skills|plugins)(?:\s|$)/.test(text)) await this.#refreshCommandCatalog(chatId);
       if (!result.turnsHandled) {
       const output = metadata ? extractResponse(result.text || "", automaticTitle) : { text: result.text || "", title: null, awaitingUser: false };
       if (output.title) await this.#agentEvent(chatId, { type: "title", title: output.title });
@@ -1400,13 +1401,16 @@ export class RuntimeManager extends EventEmitter {
       this.commands?.invalidate(chatId);
       this.publishChat(await this.store.update(chatId, { usageAccount: null, rateLimits: null })); return;
     }
-    if (event.type === "command_catalog") { this.publishChat(await this.store.update(chatId, { commandCatalog: event.commands })); return; }
-    if (["usage", "context_usage", "rate_limits", "workspace_diff", "session_capabilities"].includes(event.type)) {
+    if (event.type === "command_catalog") { await this.#refreshCommandCatalog(chatId, { commandCatalog: event.commands }); return; }
+    if (event.type === "session_capabilities") {
+      await this.#refreshCommandCatalog(chatId, { connectors: event.connectors, slashCommands: event.slashCommands }); return;
+    }
+    if (["usage", "context_usage", "rate_limits", "workspace_diff"].includes(event.type)) {
       this.publishChat(await this.store.update(chatId, chat => {
         if (event.type === "usage") return { usage: mergeUsage(chat.usage, event.usage) };
         if (event.type === "context_usage") return { usage: { ...chat.usage, ...event.usage } };
         if (event.type === "rate_limits") return { rateLimits: event.merge ? [...new Map([...(chat.rateLimits || []), ...event.rateLimits].map(limit => [limit.id, limit])).values()] : event.rateLimits };
-        return event.type === "workspace_diff" ? { workspaceDiff: event.diff } : { connectors: event.connectors, slashCommands: event.slashCommands };
+        return { workspaceDiff: event.diff };
       })); return;
     }
     if (event.type === "request_resolved") {
@@ -1464,6 +1468,16 @@ export class RuntimeManager extends EventEmitter {
     if (chat && chat.agent !== "mock") await this.workerBackend.sleep(chat).then(observed => this.config.workerBackend === "ec2" && runtime.adapter.confirmImportWorkerStopped?.(observed)).catch(() => {});
     await this.#setStatus(chatId, "error", errorMessage(error), null);
     this.#emit(chatId, { type: "runtime_error", text: errorMessage(error) });
+  }
+
+  async #refreshCommandCatalog(chatId, patch = null) {
+    let changed = !patch;
+    const chat = await this.store.update(chatId, current => {
+      if (patch) changed = ["commandCatalog", "slashCommands"].some(key => Object.hasOwn(patch, key) && JSON.stringify(current[key] || []) !== JSON.stringify(patch[key] || []));
+      return { ...patch, ...(changed ? { commandCatalogRevision: (current.commandCatalogRevision || 0) + 1 } : {}) };
+    });
+    if (changed) this.commands?.invalidate(chatId);
+    if (chat) this.publishChat(chat);
   }
 
   #emit(chatId, event, retain = true) {

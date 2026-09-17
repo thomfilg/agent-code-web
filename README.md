@@ -807,6 +807,9 @@ state.
   and Enter or Tab to insert without sending. Claude reports installed commands,
   plugin aliases and native commands through its initialize response. Codex
   skills come from `skills/list`, and invoke the native structured skill input.
+  Native catalog changes and a completed Claude `/reload-skills` refresh the
+  menu immediately, including an already-open search. Late discovery replies
+  cannot restore the old list, and the unsent text and attachments stay intact.
   `/goal` uses persisted native goals; `edit`, `pause`, `resume` and `clear` work
   without substituting ordinary prompts for goal controls. `/review` starts the
   native reviewer, optionally with `--base <branch>`, `--commit <SHA>`, or custom

@@ -10,7 +10,7 @@ const clean = item => ({ name: String(item.name || "").replace(/^\//, "").slice(
 export class CommandCatalog {
   constructor(config, models = null) { this.config = config; this.models = models; this.cache = new Map(); this.pending = new Map(); }
   async list(chat) {
-    const key = `${chat.id}:${chat.agent}:${chat.model || "default"}`;
+    const key = `${chat.id}:${chat.agent}:${chat.model || "default"}:${chat.commandCatalogRevision || 0}`;
     if (this.cache.get(key)?.expires > Date.now()) return this.cache.get(key).value;
     if (this.pending.has(key)) return this.pending.get(key);
     const promise = this.discover(chat).then(value => { if (this.pending.get(key) === promise) this.cache.set(key, { value, expires: Date.now() + 60000 }); return value; }).finally(() => { if (this.pending.get(key) === promise) this.pending.delete(key); });

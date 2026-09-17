@@ -10,7 +10,12 @@ export class SlashComposer {
     this.input.addEventListener("blur", () => { clearTimeout(this.blurTimer); this.blurTimer = setTimeout(() => { if (!composerHasFocus(this.input)) this.close(); }, 150); });
     document.querySelector("#slash-commands").onclick = () => { document.querySelectorAll(".control-menu[open]").forEach(n => n.open = false); this.input.value = "/"; this.input.focus(); this.update(); };
   }
-  key() { return `${this.state.active?.id}:${this.state.active?.agent}:${this.state.active?.model || "default"}`; }
+  key() { return `${this.state.active?.id}:${this.state.active?.agent}:${this.state.active?.model || "default"}:${this.state.active?.commandCatalogRevision || 0}`; }
+  refresh(chatId) {
+    const reopen = this.state.active?.id === chatId && !this.menu.hidden && composerHasFocus(this.input);
+    this.invalidate(chatId);
+    if (reopen) void this.update();
+  }
   invalidate(chatId) {
     for (const map of [this.cache, this.pending]) for (const key of map.keys()) if (key.startsWith(`${chatId}:`)) map.delete(key);
     if (this.state.active?.id === chatId) this.close();

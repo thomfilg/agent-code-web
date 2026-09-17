@@ -337,9 +337,11 @@ function connectEvents(chatId) {
       // EventSource replays turn history on reconnect; old snapshots must not
       // undo newer pins, moves, names or states already fetched from the API.
       if ((event.chat.revision || 0) < (state.active.revision || 0) || event.chat.updatedAt < state.active.updatedAt) return;
+      const commandsChanged = (event.chat.commandCatalogRevision || 0) !== (state.active.commandCatalogRevision || 0);
       state.active = { ...state.active, ...event.chat };
       updateChatSummary(event.chat);
       renderActive();
+      if (commandsChanged) slashComposer.refresh(chatId);
     } else if (event.type === "message") {
       if (event.message.kind === "tool" && event.message.meta?.itemId) state.liveTools.delete(event.message.meta.itemId);
       const index = state.active.messages.findIndex((message) => message.id === event.message.id);
