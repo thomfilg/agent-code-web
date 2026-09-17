@@ -15,6 +15,7 @@ and remain at the beginning of native stream-json input.
 | Commands | Dispatch / verification |
 | --- | --- |
 | `/goal`, objective, `edit`, `pause`, `resume`, `clear` | Persisted native thread goals; resume queues when busy; objective edits preserve multiline text. Real CLI protocol checks pass; new edit/queue browser check passes. |
+| `/goal [condition\|clear]` (Claude) | Actual native evaluator loop, status, native clear aliases and active-goal Stop/resume verified in private profiles. Literal commands retain FIFO ordering; evaluation failures are visible and streamed goal steps retain their boundaries. Uses Claude semantics, not fabricated Codex pause/resume/state APIs. Hook policies still apply; live activation pending. |
 | `/plan [task]` | Native Plan collaboration/read-only mode; busy requests queue. Unit and browser checks pass. |
 | `/compact` | Native compaction, FIFO while busy, wakes stopped worker. Real Codex/Claude adapters tested with local API fixtures. |
 | `/review [--base branch / --commit SHA / instructions]` | Native `review/start`, not an ordinary prompt. Tracks both inner execution and outer completion IDs. Real adapter completion and interruption pass. |
@@ -85,15 +86,74 @@ Do not treat removing entries from autocomplete as implementing them.
 - Windows-only sandbox setup and read-directory commands do not apply to the
   current Linux worker. Native APIs still need capability/version checks if a
   Windows worker is introduced.
-- Claude acceptance below covers the command transport, native local results,
-  custom expansion, configuration readback, reload and resume, not every command's effect. Next verify
-  stateful Claude `/goal` across
-  actual Relay turn settings and worker restarts, plus native MCP actions, bundled
+- Claude acceptance below covers command transport, native local results,
+  custom expansion, configuration readback, reload, Fast, goals and resume, not
+  every command's effect. Next verify native MCP actions, bundled
   workflows and installed plugin namespaces. Account-backed commands and shared
   host-profile writes also need the company-isolation gate in item 21. Do not
   infer support from a catalog entry or treat a native removal notice as a
   working replacement. Use the installed version's capabilities, not commands
   added only in newer documentation.
+
+### Claude native goal execution and response boundaries
+
+The installed Claude **2.1.222** catalog exposes `/goal`. Relay already preserves
+its native command prefix; acceptance now exercises its actual Stop-hook
+evaluator, not an invented controller loop or a prose-only acknowledgment.
+The [native goal contract](https://code.claude.com/docs/en/goal) describes setting
+a condition, querying state, clearing it, and restoring an active goal with the
+same native session. Claude's native clear aliases remain literal; Codex-only
+`pause`, `resume` and `edit` semantics are not imposed on Claude's condition text.
+Ordinary explicit input continues the restored goal. Merely opening its chat or
+querying `/goal` does not start another model turn.
+
+The new `scripts/smoke-real-claude-goals.mjs` runs the real manager, CLI and
+provider gateway in a private network/PID namespace with loopback only, authored
+model replies and no personal profile/provider credentials:
+
+- Default: four actual model requests prove immediate task execution, a native
+  negative evaluation followed by continuation, then positive evaluation and
+  clearing. The condition retains multiline Unicode, the second turn receives
+  native evaluator feedback, and completion stays cleared after Stop. Queries
+  and an overlong condition do not become inference.
+- `--resume`: interrupt the real in-flight evaluator, retain the same session,
+  inspect the still-active goal, continue explicitly and complete it. A separate
+  chat has no inherited goal. Stop a second goal, clear it and exercise every
+  installed clear alias without inference. Six actual requests; saved session
+  identity is read back from disposable storage.
+- `--errors`: malformed evaluator output leaves the goal active, now with a
+  visible web notice instead of a dropped `ctrl+o` terminal notification.
+  A private native `disableAllHooks` setting refuses goal activation without
+  inference or policy mutation. Two actual requests. It is not reported as a
+  completed goal or silently retried.
+
+These tests exposed concatenated goal steps in Relay's response stream. The
+adapter now keeps paragraph boundaries between distinct main-agent messages,
+preserves all content blocks within each message, fills missing streamed text
+from complete events, and avoids duplicating native events. Child-agent text and
+thinking blocks cannot enter the parent's textual response. Both live deltas
+and the saved answer use this same accumulator. Local-command result text still
+renders, but native error results are not streamed as successful assistant text.
+
+The first probe incorrectly identified the evaluator by a Haiku model name:
+this installed setup actually used Sonnet. The fixture now recognizes the
+native evaluator request contract without changing its model/effort. A second
+regression caught that Claude emits an assistant event **per content block**;
+ending a message at the first such event lost the next block. The actual native
+fixture now contains multiple blocks and retains its exact text assertion.
+
+Seven added unit/controller tests cover boundaries, native block/event replay,
+complete-only and legacy output, child/thinking exclusion, notices and literal
+FIFO commands. Three added browser cases cover 1280px/320px command selection,
+queued multiline conditions, visible evaluation warnings and paragraph/draft
+preservation; related browser regressions **25/25**. The native command/skill
+smoke still passes with four loopback replies, and native Fast with seven
+requests/twelve account checks. This proves command transport and native-loop
+behavior, not model quality for an arbitrary requested application. No native
+goal metadata is fabricated from prose, no real chats/accounts are changed and
+no deployment is performed. Keep item 20 open for native MCP actions, bundled
+workflows, installed plugin namespaces and the previously recorded profile,
+gateway, policy and activation limitations.
 
 ### Claude private-gateway Fast checkpoint
 
@@ -149,7 +209,7 @@ The follow-up rejection/cooldown/configuration checkpoint below covers the
 additional native cases. Shared host profiles still need item 21 isolation;
 custom gateways need their own authenticated availability integration. Live
 backend activation is not performed by these checkpoints. Keep item 20 open and
-continue Claude goals and remaining installed commands; this is not a claim
+continue remaining installed commands; this is not a claim
 that every command is complete.
 
 ### Claude Fast provider feedback and restart persistence

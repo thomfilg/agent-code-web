@@ -13,6 +13,10 @@ process.stdin.on("end", async () => {
   send({ type: "system", subtype: "init", session_id: "fixture", model: "fixture-claude", claude_code_version: "2.1.0-fixture" });
   if (prompt === "wait for interruption") { setInterval(() => {}, 1000); return; }
   if (prompt === "/fast on") { send({ type: "result", subtype: "success", result: fastAllowed ? "Fast mode ON (this session only)" : "Fast mode unavailable" }); return; }
+  if (prompt === "goal hook error fixture") {
+    for (let index = 0; index < 2; index++) send({ type: "system", subtype: "notification", key: "stop-hook-error", text: "Stop hook error occurred · ctrl+o to see" });
+    send({ type: "result", subtype: "success", result: "The working turn ended without a successful goal evaluation." }); return;
+  }
   if (/^\/autocompact(?:\s|$)/.test(prompt)) {
     const filename = path.join(process.env.CLAUDE_CONFIG_DIR, "settings.json");
     const settings = await readFile(filename, "utf8").then(JSON.parse).catch(() => ({}));

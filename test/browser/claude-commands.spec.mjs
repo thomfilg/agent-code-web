@@ -61,6 +61,36 @@ test("rejected Claude Fast input retains its draft and attachment for an explici
   expect(f.calls.at(-1)).toEqual({ tail: "messages", text: "/fast on", attachments: [] }); expect(f.errors).toEqual([]);
 });
 
+for (const width of [1280, 320]) test(`native Claude goals at ${width}px insert without sending and preserve literal queued conditions`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input");
+  f.catalog = [{ name: "goal", description: "Set a goal — keep working until the condition is met" }]; await f.emit();
+  await input.fill("/goa"); await expect(page.locator("#slash-options")).toContainText("/goal");
+  await page.locator("#slash-options [role=option]").click(); await expect(input).toHaveValue("/goal "); expect(f.calls).toEqual([]);
+  const commands = ["/goal Complete both steps\nand preserve ação.", "/goal", "/goal clear"];
+  for (const [index, text] of commands.entries()) {
+    await input.fill(text); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+    await expect.poll(() => f.calls.length).toBe(index + 1);
+    expect(f.calls.at(-1)).toEqual({ tail: index === 0 ? "messages" : "queue", text, attachments: [] });
+    f.snapshot.status = "running"; await f.emit();
+  }
+  expect(f.errors).toEqual([]);
+});
+
+test("native goal responses keep paragraph boundaries and evaluator notices are visible without consuming the draft", async ({ page }) => {
+  const f = await fixture(page), input = page.locator("#message-input");
+  await input.fill("Keep this unsent message");
+  f.snapshot.messages = [
+    { id: "msg_goal_reply", role: "assistant", kind: "message", agent: "claude", text: "First step verified.\n\nSecond step still needs verification." },
+    { id: "msg_goal_notice", role: "system", kind: "notice", text: "Claude reported a Stop-hook error. The completion check failed; use /goal to inspect any active goal or check the native hook settings." },
+  ];
+  await f.emit();
+  await expect(page.locator(".message-body p").filter({ hasText: "First step verified." })).toHaveText("First step verified.");
+  await expect(page.locator(".message-body p").filter({ hasText: "Second step still needs verification." })).toHaveText("Second step still needs verification.");
+  await expect(page.getByText(/Claude reported a Stop-hook error/)).toBeVisible();
+  await expect(input).toHaveValue("Keep this unsent message"); expect(f.calls).toEqual([]); expect(f.errors).toEqual([]);
+});
+
 test("a stale pending discovery cannot replace commands fetched after the native catalog changes", async ({ page }) => {
   const f = await fixture(page), input = page.locator("#message-input");
   let release; f.gate = new Promise(resolve => { release = resolve; });

@@ -200,6 +200,18 @@ test("Claude adapter rejects structured error results even when the CLI exits ze
   await adapter.stop();
 });
 
+test("Claude exposes native evaluator failures once per invocation without an unusable terminal shortcut", async t => {
+  const { root, store, chat } = await fixtureChat(t, "claude"), events = [];
+  const adapter = new ClaudeAdapter({ chat, store, config: testConfig(root, { CLAUDE_BIN: path.join(fixtureDir, "fake-claude.mjs") }), broker: new CapabilityBroker({ ttlMs: 10000 }), hooks: { onEvent: event => events.push(event) } });
+  t.after(() => adapter.stop()); await adapter.start();
+  for (let index = 0; index < 2; index++) {
+    await adapter.send("goal hook error fixture");
+    const notices = events.filter(event => event.type === "notice"); assert.equal(notices.length, index + 1);
+    assert.match(notices.at(-1).text, /completion check failed/); assert.match(notices.at(-1).text, /\/goal/);
+    assert.doesNotMatch(notices.at(-1).text, /ctrl\+o/);
+  }
+});
+
 test("Codex interrupts a turn by its ID and reuses the same app-server and thread", async t => {
   const { root, store, chat } = await fixtureChat(t, "codex");
   let request;

@@ -73,3 +73,15 @@ test("busy native aliases retain their exact prefix and refresh only when the qu
   assert.deepEqual(f.inputs.map(input => input.text), ["Current task", "/fixture-plugin:review Keep this argument\nand this line", "/reload-skills"]);
   assert.equal(f.store.get(f.chat.id).commandCatalogRevision, 1);
 });
+
+test("Claude goals and native clear aliases keep their literal arguments and FIFO order without Codex goal actions", async t => {
+  const f = await fixture(t); f.gate = Promise.withResolvers();
+  const running = f.manager.send(f.chat.id, "Current task"); await waitFor(() => f.inputs.length === 1);
+  const commands = ["/goal Complete both steps\nand preserve ação.", "/goal", "/goal clear", "/goal off"];
+  for (const command of commands) await f.manager.enqueue(f.chat.id, command);
+  assert.deepEqual(f.inputs.map(input => input.text), ["Current task"]);
+  f.gate.resolve(); await running; await waitFor(() => !f.manager.isBusy(f.chat.id) && !f.store.get(f.chat.id).queuedMessages.length);
+  assert.deepEqual(f.inputs.map(input => input.text), ["Current task", ...commands]);
+  assert(!f.store.get(f.chat.id).messages.some(message => message.kind === "error"));
+  assert.equal(f.store.get(f.chat.id).goal, undefined, "Do not invent Codex goal state from a Claude command/prose response");
+});

@@ -7,6 +7,7 @@ import { errorMessage, redact } from "../utils.mjs";
 import { claudeUsage, claudeContext, claudeRateLimits, safeSessionDetails } from "../session-info.mjs";
 import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings } from "../claude-settings.mjs";
 import { claudeFastRequest, claudeFastState, claudeFastCredential, checkClaudeFastAvailability, claudeFastUnavailable } from "../claude-fast.mjs";
+import { ClaudeTextStream } from "../claude-text-stream.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch, now = Date.now }) {
@@ -179,8 +180,7 @@ export class ClaudeAdapter {
     this.child = child;
     child.stdin.end(fastRequest ? "/fast on" : text);
 
-    let streamed = "";
-    let fallback = "";
+    const output = new ClaudeTextStream(delta => this.hooks.onEvent?.({ type: "assistant_delta", delta }));
     let resultMessage = null;
     let nativeFast = null;
     const notifications = new Set();
@@ -199,9 +199,10 @@ export class ClaudeAdapter {
     lines.on("line", (line) => {
       let event;
       try { event = JSON.parse(line); } catch { return; }
-      if (event.type === "system" && event.subtype === "notification" && ["fast-mode-overage-rejected", "fast-mode-org-changed", "fast-mode-cooldown-started", "fast-mode-cooldown-expired"].includes(event.key) && typeof event.text === "string" && !notifications.has(event.key)) {
+      output.accept(event);
+      if (event.type === "system" && event.subtype === "notification" && ["fast-mode-overage-rejected", "fast-mode-org-changed", "fast-mode-cooldown-started", "fast-mode-cooldown-expired", "stop-hook-error"].includes(event.key) && typeof event.text === "string" && !notifications.has(event.key)) {
         notifications.add(event.key);
-        this.hooks.onEvent?.({ type: "notice", text: redact(event.text).slice(0, 1500) });
+        this.hooks.onEvent?.({ type: "notice", text: event.key === "stop-hook-error" ? "Claude reported a Stop-hook error. The completion check failed; use /goal to inspect any active goal or check the native hook settings." : redact(event.text).slice(0, 1500) });
       }
       if (event.type === "system" && event.subtype === "compact_boundary") {
         compacted = true;
@@ -217,17 +218,7 @@ export class ClaudeAdapter {
         this.hooks.onEvent?.({ type: "session_capabilities", connectors: (event.mcp_servers || []).map(server => ({ name: server.name, status: server.status })), slashCommands: event.slash_commands || [] });
         this.hooks.onEvent?.({ type: "session_details", details: safeSessionDetails("claude", { cwd: this.workspace, model: event.model, cliVersion: event.claude_code_version }) });
       }
-      if (event.type === "stream_event" && event.event?.type === "content_block_delta") {
-        const delta = event.event.delta?.text || "";
-        if (delta) {
-          streamed += delta;
-          this.hooks.onEvent?.({ type: "assistant_delta", delta });
-        }
-      } else if (event.type === "assistant") {
-        fallback = (event.message?.content || [])
-          .filter((block) => block.type === "text")
-          .map((block) => block.text)
-          .join("");
+      if (event.type === "assistant") {
         for (const block of event.message?.content || []) {
           if (block.type === "tool_use" && !activeTools.has(block.id)) {
             const input = redact(JSON.stringify(block.input || {}, null, 2)).slice(0, 16000);
@@ -250,7 +241,6 @@ export class ClaudeAdapter {
         nativeFast = claudeFastState(event);
         this.hooks.onEvent?.({ type: "usage", usage: claudeUsage(event, lastRequest, sampleId) });
         for (const itemId of activeTools.keys()) completeTool(itemId, "", false, true);
-        if (!streamed && !fallback && typeof event.result === "string") fallback = event.result;
       }
     });
     child.stderr.setEncoding("utf8");
@@ -286,7 +276,7 @@ export class ClaudeAdapter {
         }
         if (code === 0 && !resultFailed) {
           if (enableFast && (!nativeFast || nativeFast.state === "off" || nativeFast.disabledReason)) throw Object.assign(new Error(claudeFastUnavailable(nativeFast?.disabledReason)), { nativeFast });
-          resolve({ text: streamed || fallback, status: "completed", compacted, ...(nativeSettings ? { nativeSettings } : {}), ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) });
+          resolve({ text: output.text, status: "completed", compacted, ...(nativeSettings ? { nativeSettings } : {}), ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) });
         } else {
           reject(Object.assign(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`), { nativeSettings, ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) }));
         }

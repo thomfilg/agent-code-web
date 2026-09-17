@@ -62,6 +62,21 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: Claude `/goal` now has actual native evaluator-loop and same-session
+  Stop/resume acceptance. Four loopback requests exercise negative/positive
+  evaluation; six cover interrupted evaluation, restored condition, explicit
+  continuation, independent chats and all native clear aliases; two cover
+  evaluator failure and native hook policy. Fixed silently dropped evaluation
+  warnings and concatenated native response steps. The stream accumulator
+  retains every content block, deduplicates events and excludes child/thinking
+  text from the parent's response. Preserved native model/effort and literal
+  FIFO commands; no invented Codex goal state. Seven new unit/controller cases;
+  three browser additions, related browser suite **25/25**. Native commands and
+  Fast regressions still pass (four and seven loopback requests respectively).
+  Normal unit suite **422/422**; JavaScript syntax/whitespace checks pass.
+  Next safe item-20 work: native MCP actions, bundled workflows and installed
+  plugin namespaces. Original order/count, previous host/gateway/policy and
+  activation gates remain open; no merge/deploy/live-data changes.
 - 20: native Claude Fast credits, API rejection/cooldown and `/config`/`/settings`
   interoperability are now verified. Fixed lost native credit notices and
   process-local cooldown loss; authoritative API denials override stale native
