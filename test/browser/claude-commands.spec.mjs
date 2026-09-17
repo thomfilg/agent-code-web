@@ -38,6 +38,33 @@ test("native debug is selectable, queues intact while busy, and keeps the draft 
   expect(f.calls[1]).toEqual({ tail: "queue", text, attachments: [] }); await expect(input).toHaveValue(""); expect(f.errors).toEqual([]);
 });
 
+for (const width of [1280, 320]) test(`native batch at ${width}px keeps its queue and draft through all partial reports`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input");
+  f.catalog = [{ name: "batch", description: "Parallel native work in isolated worktrees" }]; f.snapshot.status = "idle"; await f.emit();
+  await input.fill("/bat"); await page.locator("#slash-options [role=option]").filter({ hasText: "/batch" }).click();
+  await expect(input).toHaveValue("/batch "); expect(f.calls).toEqual([]);
+  const text = "/batch Apply five independent changes\nPreserve ação and require plan approval.";
+  await input.fill(text); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect.poll(() => f.calls.length).toBe(1); expect(f.calls[0]).toEqual({ tail: "messages", text, attachments: [] });
+  f.snapshot = { ...f.snapshot, status: "running", statusDetail: "Native background task is working", idleDeadlineAt: null,
+    messages: [{ id: "batch-input", role: "user", kind: "message", text }, { id: "batch-start", role: "assistant", kind: "message", text: "Five native worktree agents are running." }],
+    queuedMessages: [{ id: "after-batch", text: "Continue after all reports" }] }; await f.emit();
+  await input.fill("Keep this unsent draft");
+  for (let count = 1; count <= 5; count++) {
+    f.snapshot = { ...f.snapshot, messages: [...f.snapshot.messages, { id: `batch-report-${count}`, role: "assistant", kind: "message", text: `${count}/5 native units reported.` }] }; await f.emit();
+    await expect(page.getByText(`${count}/5 native units reported.`, { exact: true })).toBeVisible();
+    await expect(page.locator("#runtime-status")).toHaveText("running");
+    await expect(page.locator('[data-queue-id="after-batch"]')).toContainText("Continue after all reports");
+    await expect(page.locator("#countdown")).not.toContainText("SLEEPS IN"); await expect(input).toHaveValue("Keep this unsent draft");
+  }
+  f.snapshot = { ...f.snapshot, status: "idle", queuedMessages: [], messages: [...f.snapshot.messages,
+    { id: "batch-follow-up", role: "user", kind: "message", text: "Continue after all reports" },
+    { id: "batch-follow-up-reply", role: "assistant", kind: "message", text: "Follow-up finished after the batch." }] }; await f.emit();
+  await expect(page.locator(".queue-row")).toHaveCount(0); await expect(page.getByText("Follow-up finished after the batch.", { exact: true })).toBeVisible();
+  await expect(input).toHaveValue("Keep this unsent draft"); expect(f.calls).toHaveLength(1); expect(f.errors).toEqual([]);
+});
+
 for (const width of [1280, 320]) test(`native research at ${width}px stays running after launch and keeps draft/files on a failed Send now`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page), input = page.locator("#message-input"), actions = [];

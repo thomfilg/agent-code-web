@@ -249,6 +249,105 @@ function nativeWorkflowReport(f, { start = true, finish = true, id = "workflow-r
   }
 }
 
+function nativeAgent(f, id = "agent-one", background = undefined) {
+  const session_id = f.nativeSession, tool_use_id = `call-${id}`;
+  f.emit({ type: "assistant", session_id, message: { content: [{ type: "tool_use", id: tool_use_id, name: "Agent", input: { ...(background !== undefined ? { run_in_background: background } : {}) } }] } });
+  f.emit({ type: "system", subtype: "task_started", session_id, task_id: id, tool_use_id, task_type: "local_agent" });
+  return { type: "system", subtype: "task_notification", session_id, task_id: id, tool_use_id, status: "completed" };
+}
+
+test("explicit and default-background native Agents retain their owner until their report", async t => {
+  for (const background of [true, undefined]) {
+    const f = await fixture(t, { interactive: true }); f.block = true;
+    const running = f.adapter.send("/batch Keep the native workers alive"); await nativeTurnStarted(f);
+    const notification = nativeAgent(f, "batch-unit", background); f.complete(); await running;
+    assert.equal(f.adapter.isBackgroundBusy(), true); assert.equal(f.child.exitCode, null);
+    f.emit(notification); assert.equal(f.adapter.isBackgroundBusy(), true);
+    nativeWorkflowReport(f); assert.equal(f.adapter.isBackgroundBusy(), false);
+    f.block = false; await f.adapter.send("Continue after batch"); assert.equal(f.launches.length, 1);
+  }
+});
+
+test("synchronous Agent completion is already consumed by its tool, not a queued background report", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("/batch Research first"); await nativeTurnStarted(f);
+  const research = nativeAgent(f, "research", false);
+  f.emit({ ...research, tool_use_id: "unrelated" }); f.emit({ ...research, status: "unknown" });
+  assert.equal(f.adapter.turnSession.foregroundAgents.size, 1); f.emit(research);
+  assert.equal(f.adapter.turnSession.workflowNotifications.length, 0);
+  assert.equal(f.adapter.turnSession.foregroundAgents.size, 0);
+  const worker = nativeAgent(f, "work", true); f.complete(); await running;
+  f.emit(worker); nativeWorkflowReport(f); assert.equal(f.adapter.isBackgroundBusy(), false);
+});
+
+test("five completions before the first report release one native task per report, in notification order", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("/batch Five independent units"); await nativeTurnStarted(f);
+  const jobs = Array.from({ length: 5 }, (_, index) => nativeAgent(f, `unit-${index}`)); f.complete(); await running;
+  const order = [3, 0, 4, 1, 2]; for (const index of order) f.emit(jobs[index]);
+  for (let index = 0; index < order.length; index++) {
+    nativeWorkflowReport(f, { id: `report-${index}` });
+    assert.equal(f.adapter.isBackgroundBusy(), index < 4);
+    assert.deepEqual([...f.adapter.applicationSession.workflows.keys()].sort(), order.slice(index + 1).map(value => `unit-${value}`).sort());
+  }
+  const lastReport = f.events.findLastIndex(event => event.type === "background_response");
+  assert(lastReport >= 0); assert.equal(f.events[lastReport + 1].type, "background_turn"); assert.equal(f.events[lastReport + 1].active, false);
+  assert.equal(f.adapter.applicationSession.workflowNotifications.length, 0);
+});
+
+test("unrelated native notifications and zero-token errors cannot consume another task's report", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("/batch Two units beside another native task"); await nativeTurnStarted(f);
+  const first = nativeAgent(f, "first"), second = nativeAgent(f, "second"); f.complete(); await running;
+  f.emit({ ...first, task_id: "unrelated-task", tool_use_id: "unrelated-call" }); f.emit(first); f.emit({ ...second, status: "failed" });
+  nativeWorkflowReport(f); assert.equal(f.adapter.applicationSession.workflows.size, 2);
+  f.emit({ type: "result", session_id: f.nativeSession, origin: { kind: "task-notification", subkind: "scheduled-trigger" }, subtype: "success" });
+  assert.equal(f.adapter.applicationSession.workflows.size, 2);
+  nativeWorkflowReport(f); assert.deepEqual([...f.adapter.applicationSession.workflows.keys()], ["second"]);
+  f.emit({ type: "result", session_id: f.nativeSession, origin: { kind: "task-notification" }, subtype: "error_during_execution", is_error: true, result: "Native report failed before output" });
+  assert.equal(f.adapter.isBackgroundBusy(), false);
+  assert(f.events.some(event => event.type === "background_response" && event.failed && event.text === "Native report failed before output"));
+});
+
+test("an Agent launched from a notification report remains busy after the previous job is delivered", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("/batch Work that needs a follow-up unit"); await nativeTurnStarted(f);
+  const first = nativeAgent(f, "first"); f.complete(); await running; f.emit(first);
+  nativeWorkflowReport(f, { finish: false }); const next = nativeAgent(f, "follow-up");
+  nativeWorkflowReport(f, { start: false }); assert.deepEqual([...f.adapter.applicationSession.workflows.keys()], ["follow-up"]);
+  f.emit(next); nativeWorkflowReport(f); assert.equal(f.adapter.isBackgroundBusy(), false);
+});
+
+test("Send now waits for each completed Agent's native report cancellation, not just the first", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("/batch Finish two units together"); await nativeTurnStarted(f);
+  const first = nativeAgent(f, "first"), second = nativeAgent(f, "second"); f.complete(); await running; f.emit(first); f.emit(second);
+  f.hold = "interrupt"; let done = false; const stopping = f.adapter.interrupt().then(() => { done = true; });
+  for (let count = 1; count <= 2; count++) {
+    await waitFor(() => f.controls.filter(packet => packet.request.subtype === "interrupt").length === count);
+    assert.equal(done, false); assert.equal(f.adapter.isBackgroundBusy(), true);
+    const packet = f.controls.filter(packet => packet.request.subtype === "interrupt").at(-1);
+    f.emit({ type: "control_response", response: { request_id: packet.request_id, subtype: "success", response: {} } });
+    f.emit({ type: "result", session_id: f.nativeSession, origin: { kind: "task-notification" }, subtype: "error_during_execution", is_error: true });
+  }
+  await stopping; assert.equal(f.adapter.isBackgroundBusy(), false); assert.equal(f.child.exitCode, null);
+  assert.equal(f.inputs.length, 1); assert.equal(f.events.filter(event => event.type === "notice" && /report interrupted/.test(event.text)).length, 2);
+});
+
+test("foreground, denied, mismatched, quoted and foreign Agent events do not retain an ordinary owner", async t => {
+  for (const variant of ["foreground", "denied", "mismatched", "quoted", "foreign", "child", "unbound"]) {
+    const f = await fixture(t, { interactive: true }); f.block = true;
+    const running = f.adapter.send("Inspect native Agent state"); await nativeTurnStarted(f);
+    const base = { session_id: variant === "foreign" ? "other-session" : f.nativeSession, ...(variant === "child" ? { parent_tool_use_id: "parent-call" } : {}) };
+    if (variant !== "unbound") f.emit({ ...base, type: "assistant", message: { content: variant === "quoted" ? [{ type: "text", text: 'Agent task_started {"task_type":"local_agent"}' }] : [{ type: "tool_use", id: "agent-call", name: "Agent", input: { run_in_background: variant !== "foreground" } }] } });
+    if (variant === "denied") f.emit({ ...base, type: "user", message: { content: [{ type: "tool_result", tool_use_id: "agent-call", is_error: true, content: "Denied" }] } });
+    f.emit({ ...base, type: "system", subtype: "task_started", task_id: "agent-job", tool_use_id: "agent-call", task_type: variant === "mismatched" ? "local_workflow" : "local_agent" });
+    f.complete(); await running;
+    assert.equal(f.adapter.isBackgroundBusy(), false); assert.equal(f.adapter.applicationSession, undefined);
+    assert.notEqual(f.child.exitCode ?? f.child.signalCode, null);
+  }
+});
+
 test("native workflows retain their owner and stay busy until the SDK notification report completes", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
   const running = f.adapter.send("/deep-research Preserve the real workflow"); await nativeTurnStarted(f);

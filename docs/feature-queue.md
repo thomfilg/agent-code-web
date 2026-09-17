@@ -68,6 +68,25 @@ feature or turn an external verification gate into a passing result.
 
 ## Verification ledger
 
+- 20: reproduced `/batch` cancelling its five native worktree agents when the
+  launching reply ended, then reproduced FIFO releasing after the first of
+  five reports. Bound background Agent/default-async lifecycle now retains the
+  owner; synchronous Agent completion telemetry is distinguished from actual
+  queued reports. Native notifications drain individually, including errors
+  without tokens; each report is persisted before releasing its queued user
+  input. Send now waits for actual per-task/per-report cancellation receipts,
+  preserving the worker and unrelated Relay queue entries. Installed 2.1.222
+  verifies real five-worktree edits/tests/CLI effects, plan refusal, app/PID/data
+  retention and Stop/resume with private authored inference and no remote Git.
+  Seven unit and two responsive browser additions: syntax/unit **559/559**,
+  command browser **44/44**, full browser **210/210**. Native research early/FIFO
+  and report-cancellation app regressions pass (**20** replies each). Concurrent
+  smokes identified a native Git commondir-creation race; the actual tool error
+  stays visible. Authored agent recovery retries only an unstarted unit, never
+  a Relay transport replay. Deterministic native invalid-agent recovery passes
+  with all five units' effects and the app preserved (**46** replies). Neither
+  Git/native policies nor real accounts are modified. Item 20, queue count/order
+  and account/company/live gates remain open; save to PR #2 without deployment.
 - 20: reproduced `/debug` advertising a nonexistent log because native
   diagnostics were category-filtered and redirected to stderr. Explicit debug
   now records subsequent actual diagnostics in a bounded, credential-redacted

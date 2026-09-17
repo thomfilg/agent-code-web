@@ -29,7 +29,9 @@ export class ClaudeSession {
     this.scheduledJobs = new Set(); this.scheduleCalls = new Map(); this.onSchedulesChanged = onSchedulesChanged;
     this.restoredJobs = 0;
     this.fixedJobs = new Set(); this.reportedJobs = new Set(); this.dynamicWakeup = null;
-    this.workflowCalls = new Set(); this.workflows = new Map(); this.onWorkflowsChanged = onWorkflowsChanged;
+    this.workflowCalls = new Map(); this.workflows = new Map(); this.onWorkflowsChanged = onWorkflowsChanged;
+    this.workflowNotifications = [];
+    this.foregroundAgents = new Map();
     this.onBackgroundEvent = onBackgroundEvent;
     this.control = new ClaudeControlChannel(child, controlTimeoutMs);
     this.requests = requestHooks ? new ClaudeRequests(child, requestHooks, cwd) : null;
@@ -91,6 +93,8 @@ export class ClaudeSession {
       const workflows = this.workflows.size;
       for (const workflow of this.workflows.values()) workflow.terminal.resolve();
       this.workflowReport?.done.resolve(); this.workflowReport = null;
+      this.workflowNotifications.length = 0;
+      this.foregroundAgents.clear();
       this.workflows.clear();
       if (workflows) this.onWorkflowsChanged();
       this.scheduleCalls.clear();
@@ -144,16 +148,36 @@ export class ClaudeSession {
     // Retain only an actual native task bound to this main session's tool use.
     // Workflow prompts, child tasks and quoted/foreign IDs are not evidence.
     if (canStart && event.type === "assistant" && Array.isArray(event.message?.content)) {
-      for (const block of event.message.content) if (block.type === "tool_use" && ["Workflow", "RunWorkflow"].includes(block.name)
-        && validId(block.id) && this.workflowCalls.size < 100) this.workflowCalls.add(block.id);
+      for (const block of event.message.content) if (block.type === "tool_use" && validId(block.id) && this.workflowCalls.size < 100) {
+        const type = ["Workflow", "RunWorkflow"].includes(block.name) ? "local_workflow"
+          : block.name === "Agent" ? block.input?.run_in_background === false ? "foreground_agent" : "local_agent" : null;
+        if (type) this.workflowCalls.set(block.id, type);
+      }
     } else if (event.type === "user" && Array.isArray(event.message?.content)) {
       for (const block of event.message.content) if (block.type === "tool_result") this.workflowCalls.delete(block.tool_use_id);
-    } else if (canStart && event.type === "system" && event.subtype === "task_started" && event.task_type === "local_workflow"
-      && validId(event.task_id) && this.workflowCalls.has(event.tool_use_id) && !this.workflows.has(event.task_id)) {
+    } else if (canStart && event.type === "system" && event.subtype === "task_started" && event.task_type === "local_agent"
+      && validId(event.task_id) && this.workflowCalls.get(event.tool_use_id) === "foreground_agent") {
+      this.foregroundAgents.set(event.task_id, event.tool_use_id);
+    } else if (canStart && event.type === "system" && event.subtype === "task_started" && ["local_workflow", "local_agent"].includes(event.task_type)
+      && validId(event.task_id) && this.workflowCalls.get(event.tool_use_id) === event.task_type && !this.workflows.has(event.task_id)) {
       this.workflows.set(event.task_id, { toolUseId: event.tool_use_id, terminal: Promise.withResolvers(), settled: false });
     } else if (event.type === "system" && event.subtype === "task_notification") {
+      // The SDK also emits completion telemetry for a synchronous Agent, but
+      // that result is already consumed by its tool call, not a new query.
+      if (this.foregroundAgents.has(event.task_id)) {
+        if (this.foregroundAgents.get(event.task_id) === event.tool_use_id && ["completed", "failed", "stopped"].includes(event.status)) this.foregroundAgents.delete(event.task_id);
+        return;
+      }
       const workflow = this.workflows.get(event.task_id);
-      if (workflow && workflow.toolUseId === event.tool_use_id && ["completed", "failed", "stopped"].includes(event.status)) {
+      const matches = workflow && workflow.toolUseId === event.tool_use_id;
+      if (validId(event.task_id) && ["completed", "failed"].includes(event.status)
+        && (!workflow || matches && !workflow.settled)) {
+        // Print-mode 2.1.222 drains task notifications individually, in queue
+        // order (only ordinary prompts are coalesced). Preserve unrelated
+        // task notifications too, so their reports cannot consume our jobs.
+        this.workflowNotifications.push({ id: event.task_id, workflow: matches ? workflow : null });
+      }
+      if (matches && ["completed", "failed", "stopped"].includes(event.status)) {
         workflow.settled = true; workflow.terminal.resolve();
         if (event.status === "stopped") this.workflows.delete(event.task_id);
         // This reports computation, not consumption of its result. Even when
@@ -162,23 +186,34 @@ export class ClaudeSession {
       }
     } else if (event.type === "result") {
       this.workflowCalls.clear();
-      if (event.origin?.kind === "task-notification" && this.workflowReport) {
+      if (event.origin?.kind === "task-notification" && !event.origin.subkind) {
+        // A provider error can finish a report without emitting any tokens.
+        this.startWorkflowReport();
+      }
+      if (event.origin?.kind === "task-notification" && !event.origin.subkind && this.workflowReport) {
         event.relayWorkflowInterrupted = this.workflowReport.interrupting === true && event.subtype === "error_during_execution";
-        for (const id of this.workflowReport.ids) this.workflows.delete(id);
+        const { notification } = this.workflowReport;
+        if (notification.workflow && this.workflows.get(notification.id) === notification.workflow) this.workflows.delete(notification.id);
+        if (this.workflowNotifications[0] === notification) this.workflowNotifications.shift();
         this.workflowReport.done.resolve(); this.workflowReport = null;
       }
     }
     if (!this.active?.started && !this.backgroundCommand && !this.workflowReport
       && (event.type === "stream_event" && event.event?.type === "message_start" || event.type === "assistant")) {
       // Installed SDK task-notification turns do not emit command_lifecycle.
-      // Bind the report's first main output to already-settled tasks. A later
-      // completion must wait for its own report rather than this one's result.
-      const ids = [...this.workflows].filter(([, workflow]) => workflow.settled).map(([id]) => id);
-      if (ids.length) this.workflowReport = { ids, done: Promise.withResolvers() };
+      // Bind exactly one notification, even if several tasks completed before
+      // the first report. Queued user input waits for every separate result.
+      this.startWorkflowReport();
     }
     if (before !== this.workflows.size) {
       if (event.type === "result") return true;
       this.onWorkflowsChanged();
+    }
+  }
+
+  startWorkflowReport() {
+    if (!this.workflowReport && this.workflowNotifications.length) {
+      this.workflowReport = { notification: this.workflowNotifications[0], done: Promise.withResolvers() };
     }
   }
 
@@ -199,10 +234,10 @@ export class ClaudeSession {
     // Work can complete while stop_task is in flight. Inspect the latest
     // state after its receipt, including a summary query before its first
     // token; it still needs an actual task-notification cancellation result.
-    const awaitingReport = targets.filter(([id, workflow]) => this.workflows.get(id) === workflow && workflow.settled).map(([id]) => id);
-    if (!this.workflowReport && awaitingReport.length) this.workflowReport = { ids: awaitingReport, done: Promise.withResolvers() };
-    const report = this.workflowReport;
-    if (report && this.workflowReport === report) {
+    while (targets.some(([id, workflow]) => this.workflows.get(id) === workflow && workflow.settled)) {
+      this.startWorkflowReport();
+      const report = this.workflowReport;
+      if (!report) throw Error("Native workflow report is not bound; the queued message was not sent. Stop the worker before retrying.");
       report.interrupting = true;
       try { await this.control.request("interrupt"); }
       catch {

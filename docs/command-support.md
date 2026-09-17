@@ -49,6 +49,7 @@ and remain at the beginning of native stream-json input.
 | Installed Claude commands / plugin aliases | Native prefixes and arguments remain intact. Installed legacy commands and skills with the same basename execute distinct file effects, retain Unicode/multiline FIFO and resume history. Native Plan refusals and private-chat isolation pass. `/reload-skills` refreshes both menu caches; actual plugin reload is covered below. Other advertised commands and account-backed acceptance remain open. |
 | `/reload-plugins [--force]` (Claude) | Actual native `reload_plugins` SDK control, verified component counts and sanitized catalog/connector refresh; no inference or fake native input. First-command Stop/retry works without a missing journal. Same live CLI and HTTP app/state survive reload; explicit Stop ends the app. Failed/partial/late results, bounded cancellation, files and shared-host gates are covered. |
 | `/deep-research` (Claude) | Native private-SDK workflow orchestration, owner lifetime through the final report, FIFO, Stop/resume and targeted Send now. Actual native phase/dedup/voting execution with authored structured replies is verified; this is not a claim about public-source retrieval or research quality. Running apps remain intact until explicit Stop; account/shared-host/live gates remain. |
+| `/batch` (Claude) | Native plan approval/refusal, foreground research, five background worktrees and their separate reports. Actual local edits, tests, CLI effects, FIFO, Send now and Stop/resume are verified with authored inference. Running HTTP apps/PIDs/data survive until explicit Stop. Native launch errors remain visible for agent-driven recovery; Relay does not replay tools. Remote commits/PR publication and account/company/live gates remain unverified. |
 | `/config key=value`, `/settings key=value` (Claude) | Native private-profile settings, with verified model/mode readback into Relay and subsequent-turn/Stop persistence. Partial native results remain visible; newer web selections win over late readback. Shared host mutations stay locked on item 21. Attachments are rejected before accepting/queueing the command. |
 | `/autocompact [auto/tokens]` (Claude) | Native current-window inspection, private-profile threshold persistence and reset. Actual automatic summary/compact-boundary and same-session Stop/resume verified; disabled state and native environment precedence retained. Shared host mutation and linked files fail closed; attached input is rejected before sending/queueing. Live activation pending. |
 | `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. Installed-CLI acceptance verifies effort changes inside a retained application session and explicit worker-environment precedence. |
@@ -109,7 +110,7 @@ Do not treat removing entries from autocomplete as implementing them.
   added only in newer documentation.
 
 - The fresh installed **2.1.222** SDK catalog also advertises these entries
-  without effect-level evidence in this ledger: `/batch`, `/fewer-permission-prompts`,
+  without effect-level evidence in this ledger: `/fewer-permission-prompts`,
   `/doctor`, `/claude-api`, `/agents`, `/color`, `/heapdump`,
   `/workflow-launch-exec`, `/security-review`, `/insights`, `/recap`, `/design`,
   `/design-consent`, `/design-revoke` and `/team-onboarding`. Next classify their
@@ -124,6 +125,62 @@ Do not treat removing entries from autocomplete as implementing them.
   precedence and retained-owner integration are accepted below. Shared-host
   account/company isolation and live activation remain external gates; they
   are not enabled by these private fixture results.
+
+### Claude native batch lifetime and report checkpoint
+
+Installed **2.1.222** reproduced two Relay defects: a `/batch` launching reply
+terminated its native owner and cancelled all five worktree agents; after
+retaining that owner, the first report released the queued user input even
+though four more native reports were still pending. Background `Agent` calls
+(including the native default when `run_in_background` is omitted) now use
+the same bound main-session task lifecycle as `Workflow`/`RunWorkflow`.
+
+Native print mode drains task-notification queries individually; it only
+coalesces ordinary prompts. The controller observes notification order and
+releases one task after its own report, persisting that report before FIFO
+drains. Unrelated notifications do not consume another task's report.
+Synchronous `Agent` calls also emit completion telemetry, but consume their
+result through the foreground tool call and must not reserve another report.
+Foreign/child/unbound/mismatched/denied events cannot retain an ordinary owner.
+Zero-token report errors release only their own task and remain visible.
+Send now waits for actual task-stop receipts and separately acknowledges each
+in-flight report cancellation; it does not replace the native process or
+discard other Relay queue entries.
+
+`node scripts/smoke-real-claude-batch.mjs` uses the installed CLI, five real Git
+worktrees and actual per-unit Edit/Bash/Node-test/CLI effects. All inference is
+authored test data, not delegated implementation or a claim about model work
+quality. Fresh profiles, a loopback-only network namespace and a dummy gateway
+keep real accounts, personal Chrome, remote Git and live chat data out of scope.
+The fixture explicitly prohibits worker commit/push/PR operations; it does
+not replace their native implementation or claim account-backed publication.
+
+Variants: `--deny-plan` verifies no worktree writes; `--application` retains an
+existing real HTTP app/PID/data; `--send-now` cancels all five held agents and
+keeps the same owner/history; `--stop` terminates that owner and resumes the
+saved native history; `--report` with either interruption exercises a report
+before its first token. `--retry-launch` deliberately requests one nonexistent
+native agent type, then an authored coordinator retries that unstarted unit
+while preserving the other four. Every variant preserves the main workspace
+and an unrelated chat. Successful ordinary/application/recovery runs use
+**43/45/46** authored replies; plan refusal uses **6**. Seven new session checks
+and desktop/320px browser checks cover partial reports, draft/queue safety and
+failure paths. Syntax/unit checks pass **559/559**, command browser checks
+**44/44**, and the full browser suite **210/210**. Native deep-research
+early-completion/FIFO and report-Send-now app regressions pass (**20** replies
+each).
+
+Concurrent native smoke execution reproduced a Git startup race: one
+`git worktree add` reads a sibling's `.git/worktrees/.../commondir` before that
+sibling finishes creating it. The CLI surfaces `Failed to create worktree` as
+an actual failed tool result. This is not silently converted into success:
+the authored coordinator may issue a new Agent call for that still-unstarted
+unit, bounded to three known pre-launch failures; unrelated errors still fail
+the fixture. Four standalone Send-now reruns and three concurrent complete
+application runs pass, as does deterministic invalid-type recovery. Git itself
+is not patched, no native policies are changed, and Relay never automatically
+replays these calls. Real agent reasoning/publication and account/company/live
+gates remain separate. Keep item 20 open; no later queue feature is started.
 
 ### Claude private debug capture checkpoint
 
