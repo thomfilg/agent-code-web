@@ -49,7 +49,7 @@ and remain at the beginning of native stream-json input.
 | `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. Installed-CLI acceptance verifies effort changes inside a retained application session and explicit worker-environment precedence. |
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
 | `/fast [on/off]`, `/personality [friendly/pragmatic/none]` (Codex) | Catalog-driven, persisted per-chat settings, applied in FIFO order to later turns. Stop/model-change guards, retryable personality picker and draft/attachment protection. Controller/browser checks and actual installed-CLI parameter/resume verification pass; live activation remains pending. |
-| `/fast [on/off]` (Claude) | Per-chat private-gateway opt-in, fresh authenticated account checks, structured native status, FIFO and same-session Stop/resume. Native Fast/standard requests, credits, API denials, persisted cooldowns, configuration/model interop and managed-policy enforcement verified. No provider key in workers. Host profiles, custom upstreams, native managed-policy limitations and live activation remain gated below. |
+| `/fast [on/off]` (Claude) | Per-chat private-gateway opt-in, fresh authenticated account checks, structured native status, FIFO and same-session Stop/resume. First opt-in and later toggles preserve a running app. Native Fast/standard requests, credits, API denials, persisted cooldowns, configuration/model interop and managed-policy enforcement verified. No provider key in workers. Host profiles, custom upstreams, native managed-policy limitations and live activation remain gated below. |
 | `/usage`, `/status`, `/context` | Existing session/usage inspection. |
 | `/diff`, `/mcp`, `/skills`, `/help` | Workspace diff, connection manager, installed-command picker. |
 | `/mcp reconnect/enable/disable [server\|all]` (Claude) | Actual native SDK controls with post-action status verification, per-chat native persistence, FIFO, error/Stop recovery and no model call. Bare `/mcp` keeps the saved-connection manager; `/mcp verbose` shows worker-reported status. Private-file preflight and host-profile mutation gates apply; live activation pending. |
@@ -309,9 +309,9 @@ The scope-change test covers nine account/profile/workspace/owner/company
 variants. Syntax/unit suite: **476/476**; combined Claude-command/conversation
 browser suite: **59/59**. Native regressions pass for first-run Send now (**8**
 replies), first-review Stop/resume (**3**), and explicit recipe approvals plus
-questions (**13**). MCP/review interop is accepted below. Retained-session
-account/Fast cooldown and shell-classifier workflow gates remain open; this is
-not blanket acceptance of every command or a deployment.
+questions (**13**). MCP/review and retained-session Fast interop are accepted
+below. Shell-classifier and other workflow gates remain open; this is not
+blanket acceptance of every command or a deployment.
 
 ### Claude MCP and review inside a running application
 
@@ -361,8 +361,62 @@ combined Claude-command/conversation browser suite **59/59**. The unit fixture's
 local executor metadata was corrected so private-file checks actually use its
 local files; native fixture failures now shut down and clean their disposable
 resources. Those harness corrections are separate from the reproduced native
-cache defect. Other command/workflow, shared-host/company, Fast and activation
-gates remain open; item 20 and the original feature order are unchanged.
+cache defect. Retained Fast interop is accepted below. Other command/workflow,
+shared-host/company and activation gates remain open; item 20 and the original
+feature order are unchanged.
+
+### Claude Fast inside an already-running application
+
+Two retained-session gaps are fixed. First, a denied `/fast on` previously
+returned an error without disabling Fast in the CLI that still owned the app.
+It now sends an acknowledged native Fast-off control and clears the preference
+before reporting an account denial or failed availability lookup. An unconfirmed
+native activation is also explicitly switched off. A failed control cannot
+claim success; an interrupted lookup cannot send a late write. No app restart
+or automatic command replay is involved.
+
+Second, first opt-in no longer requires stopping a standard-speed application.
+Installed **2.1.222** accepts the gateway compatibility environment through
+`apply_flag_settings`, not only at startup. After a fresh authenticated account
+check, Relay reads `get_settings`, preserves the flag layer's other environment
+entries and applies that compatibility setting and Fast preference through the
+native control. Invalid snapshots/errors fail before input; a failed write does
+not mark the setting as applied. Only native structured activation confirms
+success. The [gateway Fast contract](https://code.claude.com/docs/en/fast-mode#use-fast-mode-behind-proxies-and-llm-gateways)
+still applies: this client compatibility setting does not authorize an account
+or remove native model, worker, managed-policy or API-side restrictions.
+
+`node scripts/smoke-real-claude-fast.mjs --application` verifies these paths
+with the installed CLI, actual native Bash and a disposable HTTP app. The same
+CLI, native session, app PID and in-memory data survive:
+
+- Credit exhaustion, organization/extra-usage rejection, rate limits and
+  overload; next-turn requests actually use the expected Fast/standard speed.
+- Persisted/reloaded cooldowns, explicit off/on, model promotion and model
+  switches; a control never becomes inference.
+- Account denial and unavailable account service, explicit recovery and first
+  opt-in after standard startup, including a refused first attempt.
+- Explicit Stop closes the app; the saved native context and preference resume.
+
+The run uses **51** main loopback requests plus native titles. It does not
+advance the native clock or claim to have waited out the real ten-minute
+cooldown; the existing `--limits` expiry fixture still advances only Relay's
+clock after an explicit Stop. `--application --policy` uses a private mount
+namespace and verifies the existing native managed per-session opt-in refusal:
+unconfirmed activation is switched off, the app remains running and the next
+request stays standard (**3** main requests plus titles). The policy file is
+unchanged. Successful activation under that native managed-policy limitation
+is still not claimed.
+
+Seven new adapter/session tests cover immediate off, cancellation, failed
+controls, invalid snapshots, preserved settings and first opt-in. Syntax/unit
+suite **487/487**; combined Claude-command/conversation browser **59/59**.
+Existing native Fast base, settings, managed-policy and limits regressions
+pass (**7/3/2/21** main requests). All native acceptance uses disposable
+profiles, dummy keys and a loopback-only network/PID namespace; no actual
+accounts, inference, host policy changes, deployment or live service restart.
+Item 20 remains active for the other documented command/workflow and account
+isolation gates.
 
 ### Claude application sessions and native usage
 
@@ -420,14 +474,15 @@ Remaining gates are explicit:
   Native shell permission-classifier requests still need their own fixture
   contract; file-tool acceptance does not establish that separate case.
   Native policy was not bypassed and no classifier approval was fabricated.
-- Appended system instructions and initial Fast compatibility environment
-  cannot be replaced by these native controls. Such changes fail before input,
-  with an explicit Stop/retry notice; running apps are not silently terminated.
+- Appended system instructions cannot be replaced by these native controls.
+  Such changes fail before input, with an explicit Stop/retry notice; running
+  apps are not silently terminated. First Fast opt-in now uses native runtime
+  settings after a fresh account check, as accepted above.
   Native effort changes and environment precedence are now accepted above.
   Long-lived capability renewal and account-change rejection are accepted
-  above, as are retained-session MCP/review controls and effects. Native Fast
-  entitlement/cooldown interop still needs acceptance. Missed capability
-  deadlines and revocation remain enforced.
+  above, as are retained-session MCP/review and Fast controls and effects.
+  Missed capability deadlines and revocation remain enforced. Shared-host,
+  custom-upstream and native managed-policy Fast limitations remain explicit.
 
 Fixture corrections: wait for the actual server's readiness; distinguish native
 title generation from the main query; Haiku does not accept an effort picker

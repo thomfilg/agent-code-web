@@ -57,6 +57,14 @@ export class ClaudeAdapter {
     }
   }
 
+  async disableFast(version) {
+    this.assertCapability();
+    // A retained CLI can still service background notifications between web
+    // turns. A denied opt-in must switch it off, not just change the UI state.
+    if (this.applicationSession && !this.applicationSession.ended) await this.applicationSession.control.request("apply_flag_settings", { settings: { fastMode: false } });
+    if (version !== this.sendVersion) throw Error("Claude turn interrupted");
+  }
+
   async send(text, { model, effort, resetEffort, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, onPermissionMode, mode = "accept_edits", systemPrompt } = {}) {
     const version = this.sendVersion;
     const configuration = claudeConfigRequest(text);
@@ -85,10 +93,7 @@ export class ClaudeAdapter {
     // The following turn explicitly starts with fastMode:false; no inference,
     // account lookup or global Claude settings write is needed for this action.
     if (fastRequest && !enableFast) {
-      // A retained CLI can still service its own background notifications.
-      // Turn Fast off there now, not only on the next foreground message.
-      if (this.applicationSession && !this.applicationSession.ended) await this.applicationSession.control.request("apply_flag_settings", { settings: { fastMode: false } });
-      if (version !== this.sendVersion) throw Error("Claude turn interrupted");
+      await this.disableFast(version);
       return { text: "Fast mode OFF (this chat only).", status: "completed", nativeFast: { state: "off" }, fastPreference: false, fastCooldown: null };
     }
     const heldCooldown = !enableFast && fastMode === true && sameAccount && Number.isSafeInteger(fastCooldown?.until) && fastCooldown.until > this.now() && ["rate_limit", "overloaded"].includes(fastCooldown.reason) ? fastCooldown : null;
@@ -106,7 +111,11 @@ export class ClaudeAdapter {
         if (!availability.enabled) throw Object.assign(new Error(claudeFastUnavailable(availability.disabledReason)), { nativeFast: { state: "off", disabledReason: availability.disabledReason } });
       } catch (error) {
         if (!controller.signal.aborted && version === this.sendVersion && !error.nativeFast) error.nativeFast = { state: "off", disabledReason: "network_error" };
-        if (enableFast || controller.signal.aborted || version !== this.sendVersion) throw error;
+        if (controller.signal.aborted || version !== this.sendVersion) throw error;
+        if (enableFast) {
+          await this.disableFast(version);
+          throw Object.assign(error, { fastPreference: false, fastCooldown: null });
+        }
         fastMode = false; fastFallback = error.nativeFast;
         this.hooks.onEvent?.({ type: "notice", text: `${error.message} Continuing at standard speed; use /fast on to retry.` });
       } finally { if (this.fastInspection === controller) this.fastInspection = null; }
@@ -414,7 +423,10 @@ export class ClaudeAdapter {
           fastResult = { ...fastResult, nativeFast: { state: "cooldown" }, fastCooldown: cooldown };
         }
         if (code === 0 && !resultFailed) {
-          if (enableFast && (!nativeFast || nativeFast.state === "off" || nativeFast.disabledReason)) throw Object.assign(new Error(claudeFastUnavailable(nativeFast?.disabledReason)), { nativeFast });
+          if (enableFast && (!nativeFast || nativeFast.state === "off" || nativeFast.disabledReason)) {
+            await this.disableFast(version);
+            throw Object.assign(new Error(claudeFastUnavailable(nativeFast?.disabledReason)), { nativeFast: nativeFast || { state: "off" }, fastPreference: false, fastCooldown: null });
+          }
           resolve({ text: mcpOutcome?.text ?? output.text, status: "completed", compacted, ...(nativeSettings ? { nativeSettings } : {}), ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) });
         } else {
           reject(Object.assign(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`), { nativeSettings, ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) }));

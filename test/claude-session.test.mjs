@@ -7,6 +7,7 @@ import { ClaudeSession, claudeCallResult } from "../src/claude-session.mjs";
 import { ClaudeAdapter } from "../src/adapters/claude.mjs";
 import { ChatStore } from "../src/store.mjs";
 import { CapabilityBroker } from "../src/capabilities.mjs";
+import { claudeFastCredential } from "../src/claude-fast.mjs";
 import { mergeUsage } from "../src/session-info.mjs";
 import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
 
@@ -28,6 +29,7 @@ function transport(f) {
     f.total++;
     f.emit({ type: "assistant", message: { id: `message_${f.total}`, model: "fixture", content: [{ type: "text", text }], usage: { input_tokens: 100, output_tokens: 10 } } });
     f.emit({ type: "result", subtype: failed ? "error_during_execution" : "success", is_error: failed, result: text, session_id: f.nativeSession,
+      ...(f.fastState ? { fast_mode_state: f.fastState } : {}),
       usage: { input_tokens: 100, output_tokens: 10 }, total_cost_usd: f.total / 10,
       modelUsage: { fixture: { inputTokens: f.total * 100, outputTokens: f.total * 10, costUSD: f.total / 10, contextWindow: 200000 } } });
   };
@@ -37,6 +39,10 @@ function transport(f) {
       f.mcp.find(server => server.name === packet.request.serverName).status = packet.request.enabled ? "connected" : "disabled";
     }
     if (f.mcp && packet.request.subtype === "mcp_status") response = { mcpServers: f.mcp.map(server => ({ ...server })) };
+    if (packet.request.subtype === "get_settings") response = f.settingsSnapshot || { sources: [{ source: "flagSettings", settings: f.flagSettings || {} }] };
+    if (packet.request.subtype === "apply_flag_settings" && f.fastState && f.refuse !== "apply_flag_settings" && typeof packet.request.settings.fastMode === "boolean") {
+      f.fastState = !f.fastPolicyDenied && packet.request.settings.fastMode ? "on" : "off";
+    }
     f.emit({ type: "control_response", response: { request_id: packet.request_id,
       subtype: f.refuse === packet.request.subtype ? "error" : "success", response, error: "Fixture control rejected" } });
     if (packet.request.subtype === "interrupt" && !f.refuse) f.complete("Interrupted at native checkpoint.", f.failInterrupt);
@@ -365,6 +371,102 @@ test("Fast off immediately reaches a retained CLI without model input or account
   f.refuse = "apply_flag_settings";
   await assert.rejects(f.adapter.send("/fast off"), /control failed/);
   assert.equal(f.inputs.length, 1);
+});
+
+test("a rejected Fast opt-in disables the already-running native session before returning the error", async t => {
+  for (const networkFailure of [false, true]) {
+    const f = await fixture(t);
+    f.adapter.fetchImpl = async () => Response.json({ enabled: true });
+    const settings = { fastMode: true, fastCredential: claudeFastCredential(f.config.claude), model: "opus" };
+    await f.adapter.send("/run Keep the application running", settings);
+    const controls = f.controls.length;
+    f.adapter.fetchImpl = async () => {
+      if (networkFailure) throw Error("Unavailable account service");
+      return Response.json({ enabled: false, disabled_reason: "preference" });
+    };
+    await assert.rejects(f.adapter.send("/fast on", settings), error => {
+      assert.match(error.message, networkFailure ? /Could not verify/ : /disabled by the organization/);
+      assert.equal(error.fastPreference, false); assert.equal(error.fastCooldown, null);
+      return true;
+    });
+    assert.deepEqual(f.controls.slice(controls).map(packet => packet.request), [{ subtype: "apply_flag_settings", settings: { fastMode: false } }]);
+    assert.equal(f.inputs.length, 1); assert.equal(f.launches.length, 1); assert.equal(f.child.exitCode, null);
+  }
+});
+
+test("first Fast opt-in uses native runtime settings, preserves other flag environment and retains the application", async t => {
+  const f = await fixture(t); f.fastState = "off"; f.flagSettings = { env: { KEEP_FIXTURE: "unchanged" } };
+  let lookups = 0; f.adapter.fetchImpl = async () => { lookups++; return Response.json({ enabled: true }); };
+  await f.adapter.send("/run Start at standard speed");
+  const session = f.adapter.sessionId, capability = f.adapter.capability;
+  assert.equal(f.launches[0].env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK, undefined);
+  const result = await f.adapter.send("/fast on");
+  assert.equal(lookups, 1); assert.equal(result.fastPreference, true); assert.equal(result.nativeFast.state, "on");
+  assert.deepEqual(f.controls.slice(-2).map(packet => packet.request), [{ subtype: "get_settings" },
+    { subtype: "apply_flag_settings", settings: { fastMode: true, effortLevel: null, env: { KEEP_FIXTURE: "unchanged", CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK: "1" } } }]);
+  assert.equal(f.inputs.at(-1).message.content, "/fast on"); assert.equal(f.launches.length, 1); assert.equal(f.child.exitCode, null);
+  assert.equal(f.adapter.sessionId, session); assert.equal(f.adapter.capability, capability);
+});
+
+test("failed runtime Fast settings do not send the command, pin compatibility or replay writes; explicit retry recovers", async t => {
+  const f = await fixture(t); f.fastState = "off"; f.adapter.fetchImpl = async () => Response.json({ enabled: true });
+  await f.adapter.send("/run Keep this application");
+  f.refuse = "apply_flag_settings";
+  await assert.rejects(f.adapter.send("/fast on"), /control failed/);
+  assert.equal(f.adapter.applicationSession.env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK, undefined);
+  assert.equal(f.inputs.length, 1); assert.equal(f.child.exitCode, null);
+  assert.equal(f.controls.filter(packet => packet.request.subtype === "apply_flag_settings").length, 1);
+  f.refuse = null; assert.equal((await f.adapter.send("/fast on")).fastPreference, true);
+  assert.equal(f.controls.filter(packet => packet.request.subtype === "get_settings").length, 2);
+  assert.equal(f.inputs.length, 2); assert.equal(f.launches.length, 1);
+});
+
+test("invalid native settings snapshots cannot authorize a Fast environment write or submit the command", async t => {
+  for (const snapshot of [{}, { sources: [null] }, { sources: [], errors: [{ message: "Private fixture parse failure" }] }, { sources: [{ source: "flagSettings", settings: { env: false } }] }]) {
+    const f = await fixture(t); f.fastState = "off"; f.settingsSnapshot = snapshot;
+    f.adapter.fetchImpl = async () => Response.json({ enabled: true });
+    await f.adapter.send("/run Keep this application");
+    await assert.rejects(f.adapter.send("/fast on"), /Cannot verify native Fast/);
+    assert(!f.controls.some(packet => packet.request.subtype === "apply_flag_settings"));
+    assert.equal(f.inputs.length, 1); assert.equal(f.child.exitCode, null);
+    assert.equal(f.adapter.applicationSession.env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK, undefined);
+  }
+});
+
+test("an unconfirmed native Fast activation is explicitly switched off without stopping the application", async t => {
+  const f = await fixture(t); f.fastState = "off"; f.fastPolicyDenied = true;
+  f.adapter.fetchImpl = async () => Response.json({ enabled: true });
+  await f.adapter.send("/run Keep this application");
+  await assert.rejects(f.adapter.send("/fast on"), error => {
+    assert.match(error.message, /could not be confirmed/); assert.equal(error.fastPreference, false); return true;
+  });
+  assert.deepEqual(f.controls.at(-1).request, { subtype: "apply_flag_settings", settings: { fastMode: false } });
+  assert.equal(f.inputs.length, 2); assert.equal(f.launches.length, 1); assert.equal(f.child.exitCode, null);
+});
+
+test("interrupting retained Fast authorization cannot send a late disable or another user input", async t => {
+  const f = await fixture(t); f.adapter.fetchImpl = async () => Response.json({ enabled: true });
+  const settings = { fastMode: true, fastCredential: claudeFastCredential(f.config.claude), model: "opus" };
+  await f.adapter.send("/run Keep this application", settings);
+  const controls = f.controls.length, gate = Promise.withResolvers(); let checking = false;
+  f.adapter.fetchImpl = async (_, { signal }) => { checking = true; await gate.promise; signal.throwIfAborted(); return Response.json({ enabled: false }); };
+  const pending = f.adapter.send("/fast on", settings), rejected = assert.rejects(pending, /interrupted/);
+  await waitFor(() => checking); await f.adapter.interrupt(); gate.resolve(); await rejected;
+  assert.equal(f.controls.length, controls); assert.equal(f.inputs.length, 1);
+  assert.equal(f.child.exitCode, null); assert.equal(f.launches.length, 1);
+});
+
+test("failed native disable after account refusal cannot claim Fast was switched off", async t => {
+  const f = await fixture(t); f.adapter.fetchImpl = async () => Response.json({ enabled: true });
+  const settings = { fastMode: true, fastCredential: claudeFastCredential(f.config.claude), model: "opus" };
+  await f.adapter.send("/run Keep this application", settings);
+  f.adapter.fetchImpl = async () => Response.json({ enabled: false }); f.refuse = "apply_flag_settings";
+  await assert.rejects(f.adapter.send("/fast on", settings), error => {
+    assert.match(error.message, /control failed/); assert.equal(error.fastPreference, undefined); return true;
+  });
+  assert.equal(f.inputs.length, 1); assert.equal(f.child.exitCode, null); assert.equal(f.launches.length, 1);
+  f.refuse = null;
+  assert.equal((await f.adapter.send("/fast off", settings)).fastPreference, false);
 });
 
 test("a native process exiting cleanly without a result cannot report a successful run", async t => {

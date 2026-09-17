@@ -67,9 +67,6 @@ export class ClaudeSession {
         if (flag(args, "--append-system-prompt") !== flag(this.args, "--append-system-prompt")) {
           throw Error("This chat's system instructions changed. Stop the application session before retrying to apply them; its running applications have not been stopped.");
         }
-        if (env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK === "1" && this.env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK !== "1") {
-          throw Error("Fast needs a Claude startup setting. Stop this application session before enabling Fast; its running applications have not been stopped.");
-        }
         if (env.CLAUDE_CODE_EFFORT_LEVEL !== this.env.CLAUDE_CODE_EFFORT_LEVEL) {
           throw Error("The worker's Claude effort environment changed. Stop the application session before retrying to apply it; its running applications have not been stopped.");
         }
@@ -77,7 +74,19 @@ export class ClaudeSession {
         await this.control.request("set_model", { model: flag(args, "--model") || "default" });
         const settings = JSON.parse(flag(args, "--settings") || "{}");
         settings.effortLevel = flag(args, "--effort") || null;
+        const enableGatewayFast = env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK === "1" && this.env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK !== "1";
+        if (enableGatewayFast) {
+          // Only the adapter's fresh authenticated account check supplies this
+          // compatibility flag. The native settings control applies env changes
+          // to a retained CLI too; preserve unrelated flag-layer environment.
+          const snapshot = await this.control.request("get_settings");
+          if (!Array.isArray(snapshot.sources) || snapshot.sources.some(source => !source || typeof source !== "object") || snapshot.errors?.length) throw Error("Cannot verify native Fast settings; retry after checking the Claude session.");
+          const existing = snapshot.sources.find(source => source.source === "flagSettings")?.settings?.env ?? {};
+          if (typeof existing !== "object" || Array.isArray(existing)) throw Error("Cannot verify native Fast environment; retry after checking the Claude session.");
+          settings.env = { ...existing, CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK: "1" };
+        }
         await this.control.request("apply_flag_settings", { settings });
+        if (enableGatewayFast) this.env = { ...this.env, CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK: "1" };
       }
       if (this.ended) throw Error("Claude application session stopped before input");
       const turn = new EventEmitter();

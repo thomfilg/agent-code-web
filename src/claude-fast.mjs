@@ -1,4 +1,4 @@
-// Claude print mode requires an explicit startup opt-in. Its bearer-only
+// Claude print mode requires an explicit flag-settings opt-in. Its bearer-only
 // gateway transport cannot perform the native organization lookup itself.
 // Perform that same authenticated lookup in the controller, never in a worker
 // holding a master key. No cached or guessed result authorizes Fast.

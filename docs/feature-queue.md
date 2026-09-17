@@ -62,6 +62,22 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: first Claude Fast opt-in now works in an already-running standard-speed
+  application through native settings, after a fresh authenticated account
+  check. A refused/unconfirmed activation now explicitly disables Fast in the
+  retained CLI and clears the preference; failed controls cannot claim success
+  or replay writes. Installed-native acceptance covers actual app/PID/data
+  continuity, credits, entitlement/network failures, cooldown persistence,
+  toggles, model changes, recovery and Stop/resume (**51** main loopback
+  requests). Private managed-policy acceptance retains the app and verifies
+  native refusal with subsequent standard speed (**3** requests), without
+  changing the policy. Seven unit/session additions; syntax/unit **487/487**,
+  browser **59/59**. Existing native Fast base/settings/policy/limits regressions
+  pass (**7/3/2/21** requests). Real native cooldown time is not accelerated;
+  prior expiry verification remains controller-clock/explicit-Stop scoped.
+  Item 20 stays active; shell classifier, bundled workflows, plugin namespaces
+  and company/account/live activation gates remain. Save to PR #2, no merge,
+  deployment or live-data/account changes; queue order/count unchanged.
 - 20: fixed native MCP reconnect leaving stale tools available after disable
   in a retained application session. Reconnect now uses ordered native toggles
   and verified status, without restarting the app, editing credentials or
