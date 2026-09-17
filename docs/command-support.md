@@ -20,6 +20,8 @@ and remain at the beginning of native stream-json input.
 | `/compact` | Native compaction, FIFO while busy, wakes stopped worker. Real Codex/Claude adapters tested with local API fixtures. |
 | `/review [--base branch / --commit SHA / instructions]` | Native `review/start`, not an ordinary prompt. Tracks both inner execution and outer completion IDs. Real adapter completion and interruption pass. |
 | `/code-review [level] [--fix] [target]` (Claude) | Native bundled review with actual diff/read/findings and explicit file-fix verification. Findings survive Stop/resume; Plan blocks edits. SDK interruption checkpoints the first review for Stop and Send now; flags, targets, FIFO, drafts and remaining queued inputs are retained. GitHub `--comment` and live activation are not covered by this acceptance. |
+| `/simplify [target]` (Claude) | Native cleanup instructions reach the CLI; actual diff/read/edit/run preserves behavior. Empty diffs, refused Plan exceptions, Stop, Send now and retained applications verified with authored inference. This is integration acceptance, not a model-review-quality or parallel-reviewer claim. |
+| `/loop [interval] prompt` (Claude) | Native schedules now survive the scheduling reply and keep the worker awake. Real elapsed-time fire, visible response, running state, selected Send now interruption, list/delete and Stop verified. Native resume/list restores saved tasks; unobserved restored/expired schedules still need lifecycle reconciliation below. |
 | `/run`, `/verify` (Claude) | Actual native tools drive an HTTP application that remains available between replies. Native Send now preserves it, including interruption of the first command; Stop terminates it and the same native history resumes. Private-profile native approvals support recipe creation, denial and cancellation; saved recipes reload and run. Native shell-classifier routing, refusals and cancellation are accepted below; remaining workflow/shared-host gates are explicit. |
 | `/run-skill-generator`, generated project run skills (Claude) | Native generation creates the driver and recipe through explicit protected-file approval after actual HTTP interaction. Reload/discovery, direct invocation, `/run` reuse and `/verify` all execute against the app. Native background Bash ownership now retains apps launched by any private SDK input, not just those two built-in command names. Denial, Stop, Send now and saved-context resume pass. |
 | `/side [question]`, `/btw [question]` | Native ephemeral Codex fork on the same worker, separate third-column transcript/questions, scoped attachments and independent stop. Parent context/goal/turn are retained; no copied chat folder or injected main messages. Real installed CLI verified concurrent turns, inherited context, active-goal isolation, cancellation and parent survival. Controller/browser checks pass; live backend activation pending. |
@@ -93,14 +95,72 @@ Do not treat removing entries from autocomplete as implementing them.
 - Claude acceptance below covers command transport, native local results,
   custom expansion, configuration readback, reload, Fast, goals, native MCP
   actions, bundled `/code-review`, retained applications, shell classification
-  and resume, not every command's effect. Next verify other bundled
-  workflows (`/simplify`, `/loop`)
-  and installed plugin namespaces. `/code-review --comment`, account-backed
+  and resume, not every command's effect. `/simplify` integration and active
+  `/loop` scheduling now have effect-level acceptance below. Next finish
+  `/loop` lifecycle reconciliation (ordinary resume without `CronList`,
+  native one-shot/expiry changes and dynamic wakeups), then installed plugin
+  namespaces. `/code-review --comment`, account-backed
   commands and shared
   host-profile writes also need the company-isolation gate in item 21. Do not
   infer support from a catalog entry or treat a native removal notice as a
   working replacement. Use the installed version's capabilities, not commands
   added only in newer documentation.
+
+### Claude simplification and native scheduling checkpoint
+
+Two native scheduling defects reproduced with installed Claude **2.1.222**:
+the scheduler exited with code 143 immediately after confirming a new job;
+after retention was fixed, a real scheduled turn still appeared idle and could
+not be interrupted with Send now. Both paths are now fixed.
+
+Only structured `CronCreate`/`CronList`/`CronDelete` results bound to a known
+main-session call change the observed schedule set. Failed, quoted, child,
+foreign, missing and late results cannot retain the CLI or suppress sleep.
+Confirmed schedules retain their existing SDK owner and pause idle shutdown;
+verified deletion releases idle protection. Native command lifecycle events
+mark automatic turns as working without inventing user messages. Send now
+waits for that turn's cancellation receipt and retains the process, schedules
+and other queued inputs. Explicit Stop still terminates the worker.
+
+`node scripts/smoke-real-claude-loop.mjs` uses the real scheduler, tools and
+elapsed clock, a private profile, a loopback-only network/PID namespace and
+authored model replies. It creates a one-minute schedule, observes actual
+counter writes 1 then 2, displays the background reply, lists/deletes the job
+and resumes saved history: **10** main replies. `--send-now` holds the actual
+timed inference call, interrupts it, sends only the selected cancellation,
+checks the untouched counter/other queued input, then resumes: **9** replies.
+`--stop` terminates the worker while a job exists, resumes its native history,
+uses real `CronList` to observe that same job and explicitly deletes it:
+**7** replies, no replay of the counter write.
+
+Important: despite its tool result saying “session-only,” this installed
+version restores the schedule from native history on resume. Stop is not a
+claim that the job was deleted. This matches the current
+[scheduled-task documentation](https://code.claude.com/docs/en/scheduled-tasks).
+Current retention is based on observed native scheduling calls, not a new
+controller scheduler. Ordinary resume without a scheduling readback, native
+one-shot completion/expiry and dynamic `ScheduleWakeup` reconciliation are
+still open; the tested list-on-resume path does not close those gates.
+
+`node scripts/smoke-real-claude-workflows.mjs --simplify` checks native target
+and cleanup instructions plus actual diff/read/edit/CLI effects, with identical
+results before/after cleanup: **6** main replies including resume. `--plan`
+refuses the native edit exception and checks the unchanged file (**5**);
+`--empty` keeps already-clean code unchanged (**4**); `--interrupt` and
+`--send-now` preserve first-command history and the other queue entry (**3**
+each). `--application --plan` and `--application --send-now` preserve the same
+real HTTP app/data until explicit Stop (**8/6** main replies, one title each).
+These are fixed inference replies, not an evaluation of review quality or a
+claim that four review agents were executed.
+
+Seven session/controller additions and two responsive browser cases cover
+state binding, idle protection, interruption, drafts and files. Syntax/unit:
+**498/498**. Combined Claude-command/conversation browser suite: **61/61**.
+Native first-run Send now and code-review fix regressions: **8/7** replies.
+Fixture corrections were separate: Plan requires refusing its SDK exception;
+new protocol tests wait for native `started`, not merely input-write time;
+trace output is bounded and namespace timeouts use SIGKILL. No real inference,
+live deployment, account mutation or live-chat edits. Item 20 remains active.
 
 ### Claude native approvals and questions
 

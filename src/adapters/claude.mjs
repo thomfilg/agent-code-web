@@ -237,8 +237,17 @@ export class ClaudeAdapter {
         });
     try {
       if (this.applicationSession?.ended) this.applicationSession = null;
-      const manage = launchArgs => new ClaudeSession(spawn(launchArgs), args, env, event => this.backgroundEvent(event),
-        interactive ? { requestHooks: this.hooks, cwd: this.workspace } : {});
+      const manage = launchArgs => {
+        const session = new ClaudeSession(spawn(launchArgs), args, env, event => this.backgroundEvent(event), {
+          ...(interactive ? { requestHooks: this.hooks, cwd: this.workspace } : {}),
+          onSchedulesChanged: () => {
+            if (this.stopped || ![this.turnSession, this.applicationSession].includes(session)) return;
+            if (session.scheduledJobs.size && !session.ended) this.applicationSession = session;
+            this.hooks.onEvent?.({ type: "scheduled_work" });
+          },
+        });
+        return session;
+      };
       if (!this.applicationSession && applicationRequest) {
         const launchArgs = args.includes("--input-format") ? args : [...args, "--input-format", "stream-json"];
         this.applicationSession = manage(launchArgs);
@@ -464,6 +473,14 @@ export class ClaudeAdapter {
     await requests.respond(requestId, payload);
   }
 
+  hasScheduledWork() {
+    return !this.stopped && !this.applicationSession?.ended && Boolean(this.applicationSession?.scheduledJobs.size);
+  }
+
+  isBackgroundBusy() {
+    return !this.stopped && !this.applicationSession?.ended && Boolean(this.applicationSession?.backgroundCommand);
+  }
+
   permissionMode(event) {
     const observer = this.modeObserver;
     if (this.stopped || !observer || observer.version !== this.sendVersion) return;
@@ -480,6 +497,7 @@ export class ClaudeAdapter {
 
   backgroundEvent(event) {
     this.permissionMode(event);
+    if (!this.stopped && event.type === "background_turn") { this.hooks.onEvent?.(event); return; }
     if (this.stopped || !["assistant", "stream_event", "result"].includes(event.type)) return;
     this.backgroundOutput ||= new ClaudeTextStream(() => {});
     this.backgroundOutput.accept(event);
@@ -506,6 +524,7 @@ export class ClaudeAdapter {
     await this.reviewInterruption?.();
     if (child) await terminateWorker(child);
     else if (this.turnSession?.pending) await this.turnSession.stop();
+    else if (this.isBackgroundBusy()) await this.applicationSession.interruptBackground();
   }
 
   async stop() {

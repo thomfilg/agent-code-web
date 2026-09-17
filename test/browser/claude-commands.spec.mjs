@@ -23,6 +23,31 @@ async function fixture(page) {
 const requestEvent = (page, id, event) => page.evaluate(({ id, event }) => window.fixtureSources.find(source => source.url.includes(`/chats/${id}/events`))
   .dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) })), { id, event });
 
+for (const width of [1280, 320]) test(`native loops at ${width}px expose awake/running state and Send now without consuming the draft`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input"), actions = [];
+  f.catalog = [{ name: "loop", description: "Schedule a native recurring prompt" }, { name: "simplify", description: "Simplify changed code" }]; await f.emit();
+  await input.fill("/loo"); await expect(page.locator("#slash-options")).toContainText("/loop");
+  await page.locator("#slash-options [role=option]").click(); await expect(input).toHaveValue("/loop "); expect(f.calls).toEqual([]);
+  await input.fill("Keep this draft unsent");
+  await page.locator("#attachment-input").setInputFiles({ name: "loop-context.txt", mimeType: "text/plain", buffer: Buffer.from("Unsent context") });
+  f.snapshot = { ...f.snapshot, status: "idle", idleKeepAwakeReason: "schedule", idleDeadlineAt: null, statusDetail: "Sleep paused while native scheduled tasks are active" }; await f.emit();
+  await expect(page.locator("#runtime-status")).toHaveText("Ready"); await expect(page.locator("#countdown")).toHaveText("KEPT AWAKE");
+  await expect(page.locator("#runtime-detail")).toContainText("scheduled tasks");
+  f.snapshot = { ...f.snapshot, status: "running", idleKeepAwakeReason: null, statusDetail: "Native background task is working", queuedMessages: [{ id: "later", text: "Keep queued" }, { id: "now", text: "Cancel this loop" }] }; await f.emit();
+  await expect(page.locator("#runtime-status")).toHaveText("running"); await expect(page.locator("#queue-message")).toBeVisible();
+  await page.route(`**/api/chats/${f.snapshot.id}/queue`, async route => {
+    actions.push(route.request().postDataJSON());
+    f.snapshot = { ...f.snapshot, revision: f.snapshot.revision + 1, queuedMessages: f.snapshot.queuedMessages.filter(item => item.id !== "now") };
+    await route.fulfill({ json: { chat: f.snapshot } });
+  });
+  await page.locator('[data-queue-id="now"]').getByRole("button", { name: "Send now", exact: true }).click();
+  await expect(page.locator(".queue-row")).toHaveCount(1); await expect(page.locator(".queue-text")).toHaveText("Keep queued");
+  expect(actions).toEqual([{ sendNowId: "now" }]); expect(f.calls).toEqual([]);
+  await expect(input).toHaveValue("Keep this draft unsent"); await expect(page.locator("#attachment-chips")).toContainText("loop-context.txt");
+  expect(f.errors).toEqual([]);
+});
+
 for (const width of [1280, 320]) test(`expired Claude access at ${width}px offers explicit Stop without sending the draft or dropping files`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page), input = page.locator("#message-input"), stops = [];

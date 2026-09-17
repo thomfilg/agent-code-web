@@ -62,6 +62,21 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: fixed two reproduced native `/loop` defects: reply completion killed its
+  scheduler, and timed turns were invisible to busy/Send-now handling. Bound
+  scheduling results now retain the SDK session and pause idle sleep; native
+  lifecycle events expose running work and cancellation waits for its own
+  receipt. Installed-CLI fixtures verify real timed counter effects, list/delete,
+  queue preservation and Stop/resume (**10/9/7** authored main replies).
+  `/simplify` now has actual cleanup/unchanged-behavior, empty, Plan-refusal,
+  Stop, Send-now and retained-HTTP-app evidence (**6/5/4/3/3/8/6** main replies).
+  Seven unit/controller and two browser additions; **498/498** syntax/unit,
+  **61/61** browser; native app interruption and review-fix regressions pass.
+  Corrected test assumptions about native restored schedules, Plan exceptions
+  and asynchronous lifecycle-start ordering; no real inference/account changes.
+  Next: `/loop` ordinary-resume/expiry/dynamic reconciliation, then plugin
+  namespaces; shared-host/company/account/live gates remain. Queue order/count
+  unchanged. Save to PR #2 without merge/deployment or edits to live user data.
 - 20: reproduced generated `/run-fixture` losing its real HTTP app at reply
   completion, then fixed private SDK lifetime based on a bound native main
   Bash background-task event rather than the slash command's name. Ordinary

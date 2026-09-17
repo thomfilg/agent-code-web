@@ -13,8 +13,11 @@ const flag = (args, name) => { const index = args.indexOf(name); return index < 
 // the same stream contract as the one-shot adapter, but a result closes only
 // that logical turn, not the CLI which owns its background application tasks.
 export class ClaudeSession {
-  constructor(child, args, env, onBackgroundEvent = () => {}, { controlTimeoutMs = 30000, requestHooks, cwd } = {}) {
+  constructor(child, args, env, onBackgroundEvent = () => {}, { controlTimeoutMs = 30000, requestHooks, cwd, onSchedulesChanged = () => {} } = {}) {
     this.child = child; this.args = args; this.env = env; this.active = null; this.pending = false;
+    this.sessionId = flag(args, "--session-id") || flag(args, "--resume");
+    this.controlTimeoutMs = controlTimeoutMs;
+    this.scheduledJobs = new Set(); this.scheduleCalls = new Map(); this.onSchedulesChanged = onSchedulesChanged;
     this.onBackgroundEvent = onBackgroundEvent;
     this.control = new ClaudeControlChannel(child, controlTimeoutMs);
     this.requests = requestHooks ? new ClaudeRequests(child, requestHooks, cwd) : null;
@@ -24,6 +27,7 @@ export class ClaudeSession {
       let event; try { event = JSON.parse(line); } catch { return; }
       this.control.accept(event);
       if (this.requests?.accept(event)) return;
+      this.trackSchedules(event);
       if (event.type === "result") {
         const previous = this.usageBaseline;
         this.usageBaseline = event;
@@ -31,6 +35,13 @@ export class ClaudeSession {
       }
       const turn = this.active;
       if (event.type === "command_lifecycle" && event.command_uuid === turn?.commandUuid && event.state === "started") turn.started = true;
+      if (event.type === "command_lifecycle" && event.session_id === this.sessionId && !event.parent_tool_use_id
+        && typeof event.command_uuid === "string" && event.command_uuid) {
+        if (event.state === "started" && event.command_uuid !== turn?.commandUuid && event.command_uuid !== this.backgroundCommand && !this.stopping) {
+          this.backgroundCommand = event.command_uuid; this.backgroundDone = Promise.withResolvers();
+          this.onBackgroundEvent({ type: "background_turn", active: true });
+        } else if (["completed", "cancelled"].includes(event.state) && event.command_uuid === this.backgroundCommand) this.finishBackground();
+      }
       if (turn && (turn.started || event.type === "control_response" || event.type === "system" || event.type === "command_lifecycle")) {
         turn.stdout.write(`${JSON.stringify(event)}\n`);
         if (event.type === "result") this.finish(turn, 0, null);
@@ -43,11 +54,56 @@ export class ClaudeSession {
     });
     child.once("close", (code, signal) => {
       this.ended = true; this.control.close(); this.lines.close();
+      this.finishBackground();
+      this.scheduleCalls.clear();
+      if (this.scheduledJobs.size) { this.scheduledJobs.clear(); this.onSchedulesChanged(); }
       // A logical reply is successful only after its native result. An empty
       // clean process exit must not masquerade as a completed application run.
       if (this.active) this.finish(this.active, code === 0 ? 1 : code, signal);
       this.resolveClosed();
     });
+  }
+
+  finishBackground() {
+    if (!this.backgroundCommand) return;
+    this.backgroundCommand = null; this.backgroundDone.resolve();
+    this.onBackgroundEvent({ type: "background_turn", active: false });
+  }
+
+  async interruptBackground() {
+    if (!this.backgroundCommand) return;
+    const done = this.backgroundDone.promise;
+    this.requests?.cancel(); this.scheduleCalls.clear();
+    await this.control.request("interrupt");
+    let timer;
+    try {
+      await Promise.race([done, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("Native scheduled task did not acknowledge cancellation. Stop the worker before retrying; the queued message was not sent.")), this.controlTimeoutMs); })]);
+    } finally { clearTimeout(timer); }
+  }
+
+  trackSchedules(event) {
+    // Native structured results, bound to a reported main-session tool call.
+    // Neither quoted text nor child/foreign/failed/late results keep a worker
+    // awake. This observes native scheduling; it never grants tool permission.
+    if (this.ended || this.stopping || this.active?.interrupting || this.requests?.suspended
+      || event.session_id !== this.sessionId || event.parent_tool_use_id) return;
+    const blocks = event.message?.content;
+    if (event.type === "assistant" && Array.isArray(blocks)) {
+      for (const block of blocks) if (block.type === "tool_use" && typeof block.id === "string" && block.id
+        && ["CronCreate", "CronDelete", "CronList"].includes(block.name)) this.scheduleCalls.set(block.id, block);
+    } else if (event.type === "user" && Array.isArray(blocks)) {
+      const results = blocks.filter(block => block.type === "tool_result");
+      if (results.length !== 1) return;
+      const result = results[0], call = this.scheduleCalls.get(result.tool_use_id);
+      this.scheduleCalls.delete(result.tool_use_id);
+      const data = event.tool_use_result, validId = id => typeof id === "string" && /^[a-f0-9]{8}$/.test(id);
+      if (!call || result.is_error || !data || typeof data !== "object" || Array.isArray(data)) return;
+      const before = [...this.scheduledJobs].sort().join(",");
+      if (call.name === "CronCreate" && validId(data.id) && typeof data.recurring === "boolean" && typeof data.humanSchedule === "string") this.scheduledJobs.add(data.id);
+      if (call.name === "CronDelete" && validId(data.id) && data.id === call.input?.id) this.scheduledJobs.delete(data.id);
+      if (call.name === "CronList" && Array.isArray(data.jobs) && data.jobs.length <= 50 && data.jobs.every(job => job && validId(job.id))) this.scheduledJobs = new Set(data.jobs.map(job => job.id));
+      if (before !== [...this.scheduledJobs].sort().join(",")) this.onSchedulesChanged();
+    } else if (event.type === "result") this.scheduleCalls.clear();
   }
 
   async open(args, env, { resetEffort = false } = {}) {
@@ -127,6 +183,7 @@ export class ClaudeSession {
       });
       turn.kill = signal => {
         this.requests?.cancel();
+        this.scheduleCalls.clear();
         if (signal === "SIGKILL") void terminateWorker(this.child, 0);
         else if (!turn.interrupting) turn.interrupting = this.control.request("interrupt").catch(() => terminateWorker(this.child));
       };

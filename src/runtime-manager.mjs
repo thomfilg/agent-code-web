@@ -123,6 +123,13 @@ export class RuntimeManager extends EventEmitter {
       } catch (error) { turn.cancelled = false; throw error; }
       await turn.done;
       this.#emit(chatId, { type: "turn_interrupted" });
+    } else {
+      const runtime = this.#runtimes.get(chatId);
+      if (runtime?.adapter.isBackgroundBusy?.()) {
+        await runtime.adapter.interrupt();
+        await runtime.eventQueue;
+        this.#emit(chatId, { type: "turn_interrupted" });
+      }
     }
     await this.#draining.get(chatId);
     if (version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(new Error("Send now cancelled because the chat was stopped"), { name: "AbortError", statusCode: 409 });
@@ -539,7 +546,7 @@ export class RuntimeManager extends EventEmitter {
     ];
   }
 
-  isBusy(chatId) { return this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(this.#runtimes.get(chatId)?.busy) || this.#importPending(chatId); }
+  isBusy(chatId) { const runtime = this.#runtimes.get(chatId); return this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.busy || runtime?.adapter.isBackgroundBusy?.()) || this.#importPending(chatId); }
   publishChat(chat) { if (chat) this.#emit(chat.id, { type: "chat_updated", chat }); }
 
   // A viewer may wake the worker without starting an LLM turn. Share this lease
@@ -1067,7 +1074,7 @@ export class RuntimeManager extends EventEmitter {
     const commandAction = approval ? { type: "approvalRetry", approval,
       prompt: "I confirmed the specific denied action recorded by the native approval immediately before this message. Retry that exact action once in the same context, using the current permission policy. Do not broaden the operation, change permissions, or treat this as permission for other actions. If the action is no longer appropriate or still denied, explain and stop this retry." } : messageCommand(chat.agent, text);
     if (chat.workflowState === "archived") throw Object.assign(new Error("Unarchive this chat before sending a message"), { statusCode: 409 });
-    if (this.#switching.has(chatId) || this.#queued.has(chatId) || this.#runtimes.get(chatId)?.busy || (this.#sendingNow.has(chatId) && this.#sendingNow.get(chatId) !== queueAction)) {
+    if (this.#switching.has(chatId) || this.#queued.has(chatId) || this.#runtimes.get(chatId)?.busy || this.#runtimes.get(chatId)?.adapter.isBackgroundBusy?.() || (this.#sendingNow.has(chatId) && this.#sendingNow.get(chatId) !== queueAction)) {
       throw Object.assign(new Error("this chat already has a running turn"), { statusCode: 409 });
     }
     this.#queued.add(chatId);
@@ -1518,12 +1525,12 @@ export class RuntimeManager extends EventEmitter {
 
   async #scheduleIdleStop(chatId, runtime) {
     clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
-    if (this.#runtimes.get(chatId) !== runtime || runtime.busy) return;
-    const reason = this.#importPending(chatId) ? "import" : this.#forking.has(chatId) ? "fork" : runtime.adapter.agents?.busy() ? "agents" : this.sideChats.busy(chatId) ? "side" : this.browsers?.hasViewers(chatId) ? "browser" : this.workspacePresence.has(chatId) ? "workspace" : this.presence.has(chatId) ? "tab" : null;
+    if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.adapter.isBackgroundBusy?.()) return;
+    const reason = this.#importPending(chatId) ? "import" : this.#forking.has(chatId) ? "fork" : runtime.adapter.hasScheduledWork?.() ? "schedule" : runtime.adapter.agents?.busy() ? "agents" : this.sideChats.busy(chatId) ? "side" : this.browsers?.hasViewers(chatId) ? "browser" : this.workspacePresence.has(chatId) ? "workspace" : this.presence.has(chatId) ? "tab" : null;
     const chat = this.store.get(chatId);
     if (reason) {
       if (chat?.idleKeepAwakeReason !== reason || chat?.idleDeadlineAt || chat?.status !== "idle") {
-        const updated = await this.store.update(chatId, current => ({ ...runtimeWorkflowPatch(current, "idle"), status: "idle", statusDetail: reason === "import" ? "Sleep paused until the import is reconciled" : reason === "fork" ? "Creating an independent fork" : reason === "agents" ? "Sleep paused while child agents are working" : reason === "side" ? "Sleep paused while the side chat is working" : reason === "browser" ? "Sleep paused while you're using Chrome" : reason === "workspace" ? "Sleep paused while the workspace viewer is open" : "Sleep paused while this chat tab is visible", idleDeadlineAt: null, idleKeepAwakeReason: reason }));
+        const updated = await this.store.update(chatId, current => ({ ...runtimeWorkflowPatch(current, "idle"), status: "idle", statusDetail: reason === "import" ? "Sleep paused until the import is reconciled" : reason === "fork" ? "Creating an independent fork" : reason === "schedule" ? "Sleep paused while native scheduled tasks are active" : reason === "agents" ? "Sleep paused while child agents are working" : reason === "side" ? "Sleep paused while the side chat is working" : reason === "browser" ? "Sleep paused while you're using Chrome" : reason === "workspace" ? "Sleep paused while the workspace viewer is open" : "Sleep paused while this chat tab is visible", idleDeadlineAt: null, idleKeepAwakeReason: reason }));
         if (updated) this.publishChat(updated);
       }
       return;
@@ -1531,8 +1538,8 @@ export class RuntimeManager extends EventEmitter {
     const deadline = new Date(Date.now() + this.config.idleTimeoutMs).toISOString();
     await this.#setStatus(chatId, "idle", "Waiting for another message", deadline);
     runtime.idleTimer = setTimeout(() => {
-      if (this.#importPending(chatId) || this.#forking.has(chatId) || runtime.adapter.agents?.busy() || this.sideChats.busy(chatId) || this.browsers?.hasViewers(chatId) || this.workspacePresence.has(chatId) || this.presence.has(chatId)) { void this.#scheduleIdleStop(chatId, runtime); return; }
-      if (this.#runtimes.get(chatId) !== runtime || runtime.busy) return;
+      if (this.#importPending(chatId) || this.#forking.has(chatId) || runtime.adapter.hasScheduledWork?.() || runtime.adapter.agents?.busy() || this.sideChats.busy(chatId) || this.browsers?.hasViewers(chatId) || this.workspacePresence.has(chatId) || this.presence.has(chatId)) { void this.#scheduleIdleStop(chatId, runtime); return; }
+      if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.adapter.isBackgroundBusy?.()) return;
       this.stop(chatId, "idle-timeout").catch((error) => this.#fatal(chatId, error));
     }, this.config.idleTimeoutMs);
     runtime.idleTimer.unref?.();
@@ -1561,6 +1568,18 @@ export class RuntimeManager extends EventEmitter {
       return;
     }
     if (event.type === "goal") { this.publishChat(await this.store.update(chatId, { goal: event.goal })); return; }
+    if (event.type === "scheduled_work") { await this.refreshActivity(chatId); return; }
+    if (event.type === "background_turn") {
+      const runtime = this.#runtimes.get(chatId); if (!runtime || runtime.busy) return;
+      if (runtime.adapter.isBackgroundBusy?.()) {
+        clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
+        await this.#setStatus(chatId, "running", "Native background task is working", null);
+      } else {
+        await this.#scheduleIdleStop(chatId, runtime);
+        void this.#drainQueue(chatId);
+      }
+      return;
+    }
     if (event.type === "background_response") {
       const chat = this.store.get(chatId); if (!chat) return;
       const output = extractResponse(event.text || "", chat.autoTitle);

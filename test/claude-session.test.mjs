@@ -148,6 +148,102 @@ test("failed native-mode synchronization reaches the runtime fatal handler witho
   }
 });
 
+const scheduleCall = (f, name, id = "cron-call", input = {}) => f.emit({ type: "assistant", session_id: f.nativeSession,
+  message: { content: [{ type: "tool_use", id, name, input }] } });
+const scheduleResult = (f, data, { id = "cron-call", failed = false, ...extra } = {}) => f.emit({ type: "user", session_id: f.nativeSession,
+  message: { content: [{ type: "tool_result", tool_use_id: id, content: "Native scheduling result", is_error: failed }] }, tool_use_result: data, ...extra });
+const schedule = { id: "abcdef12", recurring: true, humanSchedule: "Every minute", durable: false };
+const scheduledTurnStarted = (f, count = 1) => waitFor(() => f.inputs?.length === count && f.adapter.turnSession?.active?.started);
+
+test("actual native cron creation retains both slash and ordinary sessions; deletion releases idle protection", async t => {
+  for (const text of ["/loop 1m Check the fixture", "Check the fixture every minute"]) {
+    const f = await fixture(t, { interactive: true }); f.block = true;
+    const running = f.adapter.send(text); await scheduledTurnStarted(f);
+    scheduleCall(f, "CronCreate"); scheduleResult(f, schedule); f.complete(); await running;
+    assert.equal(f.adapter.hasScheduledWork(), true); assert.equal(f.child.exitCode, null);
+    assert(f.events.some(event => event.type === "scheduled_work"));
+    const next = f.adapter.send("Cancel that schedule"); await scheduledTurnStarted(f, 2);
+    scheduleCall(f, "CronDelete", "delete", { id: schedule.id }); scheduleResult(f, { id: schedule.id }, { id: "delete" });
+    f.complete(); await next;
+    assert.equal(f.adapter.hasScheduledWork(), false); assert.equal(f.launches.length, 1);
+    assert.deepEqual(f.inputs.map(input => input.message.content), [text, "Cancel that schedule"]);
+    await f.adapter.stop(); assert.notEqual(f.child.exitCode ?? f.child.signalCode, null);
+  }
+});
+
+test("quoted, failed, foreign, child, unbound and malformed cron results cannot retain a worker", async t => {
+  for (const variant of ["quoted", "failed", "foreign", "child", "unbound", "malformed", "missing", "child-call"]) {
+    const f = await fixture(t, { interactive: true }); f.block = true;
+    const running = f.adapter.send("Inspect only"); await scheduledTurnStarted(f);
+    if (variant === "child-call") f.emit({ type: "assistant", session_id: f.nativeSession, parent_tool_use_id: "child",
+      message: { content: [{ type: "tool_use", id: "cron-call", name: "CronCreate", input: {} }] } });
+    else if (variant !== "unbound") scheduleCall(f, "CronCreate");
+    if (variant === "quoted") f.emit({ type: "assistant", session_id: f.nativeSession, message: { content: [{ type: "text", text: JSON.stringify(schedule) }] } });
+    else scheduleResult(f, variant === "malformed" ? { ...schedule, id: "" } : variant === "missing" ? undefined : schedule, {
+      ...(variant === "failed" ? { failed: true } : {}), ...(variant === "foreign" ? { session_id: "foreign" } : {}), ...(variant === "child" ? { parent_tool_use_id: "child" } : {}),
+    });
+    f.complete(); await running;
+    assert.equal(f.adapter.hasScheduledWork(), false); assert.equal(f.adapter.applicationSession, undefined);
+    assert.notEqual(f.child.exitCode ?? f.child.signalCode, null);
+  }
+});
+
+test("cron snapshots and background cancellation reconcile state without trusting failed or mismatched deletions", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("List restored schedules"); await scheduledTurnStarted(f);
+  scheduleCall(f, "CronList"); scheduleResult(f, { jobs: [schedule, { ...schedule, id: "12345678" }] });
+  f.complete(); await running;
+  assert.equal(f.adapter.applicationSession.scheduledJobs.size, 2);
+  scheduleCall(f, "CronDelete", "wrong", { id: "12345678" }); scheduleResult(f, { id: schedule.id }, { id: "wrong" });
+  scheduleCall(f, "CronDelete", "failed", { id: schedule.id }); scheduleResult(f, { id: schedule.id }, { id: "failed", failed: true });
+  assert.equal(f.adapter.applicationSession.scheduledJobs.size, 2);
+  scheduleCall(f, "CronList", "invalid"); scheduleResult(f, { jobs: [null] }, { id: "invalid" });
+  assert.equal(f.adapter.applicationSession.scheduledJobs.size, 2);
+  scheduleCall(f, "CronList", "empty"); scheduleResult(f, { jobs: [] }, { id: "empty" });
+  assert.equal(f.adapter.hasScheduledWork(), false);
+  scheduleCall(f, "CronCreate", "background"); scheduleResult(f, schedule, { id: "background" });
+  assert.equal(f.adapter.hasScheduledWork(), true);
+  await f.adapter.stop(); assert.equal(f.adapter.hasScheduledWork(), false);
+});
+
+test("interrupted or completed cron calls cannot promote a late success", async t => {
+  for (const completed of [false, true]) {
+    const f = await fixture(t, { interactive: true }); f.block = true; f.hold = "interrupt";
+    const running = f.adapter.send("Create a schedule"), rejected = assert.rejects(running, /interrupted/);
+    await scheduledTurnStarted(f);
+    scheduleCall(f, "CronCreate");
+    if (completed) scheduleResult(f, {}, { failed: true });
+    const interrupting = f.adapter.interrupt(); await waitFor(() => f.controls.some(control => control.request.subtype === "interrupt"));
+    scheduleResult(f, schedule);
+    f.respond(f.controls.find(control => control.request.subtype === "interrupt"));
+    await interrupting; await rejected;
+    assert.equal(f.adapter.hasScheduledWork(), false); assert.equal(f.adapter.applicationSession, undefined);
+  }
+});
+
+test("native scheduled lifecycle is busy between replies and interruption waits for its own cancellation receipt", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("/loop 1m Check"); await scheduledTurnStarted(f);
+  scheduleCall(f, "CronCreate"); scheduleResult(f, schedule); f.complete(); await running;
+  const lifecycle = { type: "command_lifecycle", session_id: f.nativeSession, command_uuid: "scheduled-tick", state: "started" };
+  f.emit({ ...lifecycle, session_id: "foreign" }); f.emit({ ...lifecycle, parent_tool_use_id: "child" });
+  assert.equal(f.adapter.isBackgroundBusy(), false);
+  f.emit(lifecycle); assert.equal(f.adapter.isBackgroundBusy(), true);
+  assert(f.events.some(event => event.type === "background_turn" && event.active));
+  f.hold = "interrupt"; let completed = false;
+  const interrupting = f.adapter.interrupt().then(() => { completed = true; });
+  await waitFor(() => f.controls.some(control => control.request.subtype === "interrupt"));
+  f.respond(f.controls.find(control => control.request.subtype === "interrupt"));
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(completed, false);
+  f.emit({ ...lifecycle, command_uuid: "unrelated", state: "cancelled" });
+  assert.equal(f.adapter.isBackgroundBusy(), true);
+  f.emit({ ...lifecycle, state: "cancelled" }); await interrupting;
+  assert.equal(f.adapter.isBackgroundBusy(), false); assert.equal(f.adapter.hasScheduledWork(), true);
+  assert.equal(f.child.exitCode, null); assert.equal(f.inputs.length, 1);
+  f.emit({ ...lifecycle, command_uuid: "second-tick" }); assert.equal(f.adapter.isBackgroundBusy(), true);
+  await f.adapter.stop(); assert.equal(f.adapter.isBackgroundBusy(), false);
+});
+
 test("a native background Bash task retains an ordinary or generated-skill session without replaying input", async t => {
   for (const text of ["Start this project's HTTP app", "/run-fixture Start the generated recipe"]) {
     const f = await fixture(t, { interactive: true }); f.block = true;

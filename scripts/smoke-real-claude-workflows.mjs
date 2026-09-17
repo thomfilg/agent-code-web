@@ -16,7 +16,7 @@ import { spawnWorker } from "../src/worker-process.mjs";
 // No real inference, GitHub operations, personal profiles or external network.
 const exec = promisify(execFile);
 if (!process.argv.includes("--network-isolated")) {
-  const result = await exec("/usr/bin/unshare", ["--user", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", "--", process.execPath, process.argv[1], ...process.argv.slice(2), "--network-isolated"], { timeout: 90000, maxBuffer: 40000 });
+  const result = await exec("/usr/bin/unshare", ["--user", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", "--", process.execPath, process.argv[1], ...process.argv.slice(2), "--network-isolated"], { timeout: 90000, killSignal: "SIGKILL", maxBuffer: 40000 });
   process.stdout.write(result.stdout); process.stderr.write(result.stderr);
   assert.match(result.stdout, /^PASS:/m, "The fixture must complete its assertions");
 } else {
@@ -25,15 +25,19 @@ if (!process.argv.includes("--network-isolated")) {
   assert.equal((await exec("/usr/bin/ip", ["route", "show"])).stdout.trim(), "");
   const root = await mkdtemp("/tmp/relay-claude-workflows-"), requests = [], mainRequests = [], nativeResults = [], launches = [];
   let manager, gatewayServer, chat, fixtureError, firstSession, step = 0;
-  const fix = process.argv.includes("--fix");
+  const simplify = process.argv.includes("--simplify");
+  const workflow = simplify ? "simplify" : "code-review";
+  const fix = simplify || process.argv.includes("--fix");
   const application = process.argv.includes("--application");
   let applicationStep = application ? 0 : null, applicationUrl, applicationState;
   const plan = process.argv.includes("--plan"), empty = process.argv.includes("--empty");
   const sendNow = process.argv.includes("--send-now");
   const interrupt = process.argv.includes("--interrupt") || sendNow, held = Promise.withResolvers(), release = Promise.withResolvers();
   let resuming = false;
-  const original = 'const [left, right] = process.argv.slice(2).map(Number);\nconsole.log(JSON.stringify({ total: left + right }));\n';
-  const broken = original.replace("left + right", "left - right");
+  const original = simplify
+    ? 'const [left, right] = process.argv.slice(2).map(Number);\nconst total = left + right;\nconsole.log(JSON.stringify({ total }));\n'
+    : 'const [left, right] = process.argv.slice(2).map(Number);\nconsole.log(JSON.stringify({ total: left + right }));\n';
+  const broken = simplify ? original.replace("{ total }", "{ total: total }") : original.replace("left + right", "left - right");
   const respond = async (request, response) => {
     if (request.url.includes("count_tokens")) { response.writeHead(200, { "content-type": "application/json" }); response.end('{"input_tokens":100}'); return; }
     if (request.method !== "POST" || !/\/messages(?:\?|$)/.test(request.url)) { response.writeHead(404); response.end(); return; }
@@ -54,21 +58,44 @@ if (!process.argv.includes("--network-isolated")) {
       assert(results.length); assert(!results.at(-1).is_error, JSON.stringify(results.at(-1)));
       content = [{ type: "text", text: "The actual application is running." }]; applicationStep = null;
     } else if (resuming) {
-      assert.match(JSON.stringify(body.messages), interrupt ? /code-review/ : empty ? /No findings were reported/ : fix && !plan ? /Actual invocation returned total 5/ : /CLI subtracts instead of adding/);
+      assert.match(JSON.stringify(body.messages), interrupt ? new RegExp(workflow) : simplify ? /native simplify fixture/ : empty ? /No findings were reported/ : fix && !plan ? /Actual invocation returned total 5/ : /CLI subtracts instead of adding/);
       content = [{ type: "text", text: "Saved review context retained." }];
     } else {
       const text = JSON.stringify(body.messages);
       const results = body.messages.flatMap(message => Array.isArray(message.content) ? message.content : []).filter(block => block.type === "tool_result");
       if (step === 0) {
-        assert.match(text, /reviewing a pull request for real bugs/);
-        assert.match(text, /also restate the findings in your final reply/);
-        if (fix) assert.match(text, /apply the.*findings to the working tree/);
+        if (simplify) {
+          assert.match(text, /Review target:.*total\.mjs/);
+          assert.match(text, /reuse, simplification, efficiency, and altitude/);
+          assert.match(text, /Do not look for correctness bugs/);
+          assert.match(text, /Apply the fixes/);
+        } else {
+          assert.match(text, /reviewing a pull request for real bugs/);
+          assert.match(text, /also restate the findings in your final reply/);
+          if (fix) assert.match(text, /apply the.*findings to the working tree/);
+        }
         content = [{ type: "tool_use", id: `tool_${index}`, name: "Bash", input: { command: "git diff -- total.mjs", description: "Inspect the disposable CLI diff" } }];
       } else if (step === 1) {
         assert(results.length); assert(!results.at(-1).is_error);
-        if (!empty) assert.match(JSON.stringify(results.at(-1)), /left - right/);
+        if (!empty) assert.match(JSON.stringify(results.at(-1)), simplify ? /total: total/ : /left - right/);
         if (interrupt) { held.resolve(); await release.promise; response.end(); return; }
         content = [{ type: "tool_use", id: `tool_${index}`, name: "Read", input: { file_path: `${chat.workspace}/total.mjs` } }];
+      } else if (simplify && step === 2) {
+        assert(results.length); assert(!results.at(-1).is_error);
+        assert.match(JSON.stringify(results.at(-1)), empty ? /JSON.stringify\(\{ total \}\)/ : /total: total/);
+        content = empty ? [{ type: "text", text: "The native simplify fixture is already clean. No changes applied." }]
+          : [{ type: "tool_use", id: `tool_${index}`, name: "Edit", input: { file_path: `${chat.workspace}/total.mjs`, old_string: "{ total: total }", new_string: "{ total }" } }];
+      } else if (simplify && step === 3) {
+        if (plan) {
+          assert.equal(results.at(-1).is_error, true, "Plan mode must reject simplification edits too");
+          content = [{ type: "text", text: "Plan mode denied the native simplify fixture edit; no changes applied." }];
+        } else {
+          assert(!results.at(-1).is_error);
+          content = [{ type: "tool_use", id: `tool_${index}`, name: "Bash", input: { command: "node total.mjs 2 3", description: "Verify behavior after simplifying" } }];
+        }
+      } else if (simplify && step === 4) {
+        assert(!results.at(-1).is_error); assert.match(JSON.stringify(results.at(-1)), /total.*5/);
+        content = [{ type: "text", text: "Removed a redundant property name in the native simplify fixture. Actual invocation returned total 5, unchanged from before cleanup." }];
       } else if (step === 2) {
         assert(results.length); assert(!results.at(-1).is_error); assert.match(JSON.stringify(results.at(-1)), empty ? /left \+ right/ : /left - right/);
         content = [{ type: "tool_use", id: `tool_${index}`, name: "ReportFindings", input: { level: "high", findings: empty ? [] : [{ file: "total.mjs", line: 2, summary: "The CLI subtracts instead of adding the inputs.", short_summary: "Addition replaced with subtraction", failure_scenario: "Running node total.mjs 2 3 prints -1 instead of 5.", category: "correctness", verdict: "CONFIRMED" }] } }];
@@ -163,12 +190,13 @@ server.listen(0,'127.0.0.1',async()=>{ await writeFile('.application.json',JSON.
       applicationState = await (await fetch(applicationUrl, { method: "POST", body: "preserve ação" })).json();
       await checkApplication(); if (plan) await manager.setMode(chat.id, "plan");
     }
-    const command = `/code-review high ${fix ? "--fix " : ""}total.mjs`;
+    if (simplify) assert.equal((await exec(process.execPath, ["total.mjs", "2", "3"], { cwd: chat.workspace, env })).stdout.trim(), '{"total":5}', "The cleanup fixture must already have correct behavior");
+    const command = simplify ? "/simplify total.mjs" : `/code-review high ${fix ? "--fix " : ""}total.mjs`;
     if (interrupt) {
       const running = manager.send(chat.id, command); let timer;
       try {
         await Promise.race([held.promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("The actual review turn was not reached")), 15000); })]);
-        assert.equal(store.get(chat.id).agentSessionId, application ? firstSession : null, "Keep an existing application journal; do not invent a first-review checkpoint");
+        if (!simplify) assert.equal(store.get(chat.id).agentSessionId, application ? firstSession : null, "Keep an existing application journal; do not invent a first-review checkpoint");
         if (application) await checkApplication();
         await manager.enqueue(chat.id, "Retain the queued follow-up");
         if (sendNow) {
@@ -181,7 +209,7 @@ server.listen(0,'127.0.0.1',async()=>{ await writeFile('.application.json',JSON.
       } finally { clearTimeout(timer); release.resolve(); }
       if (!sendNow) assert.equal(store.get(chat.id).status, "stopped");
       assert.equal(store.get(chat.id).queuedMessages[0].text, "Retain the queued follow-up");
-      assert.equal(nativeResults.at(-1), "success", "The cancelled native handler still checkpoints its journal");
+      if (!simplify) assert.equal(nativeResults.at(-1), "success", "The cancelled native handler still checkpoints its journal");
       assert.equal(store.get(chat.id).agentSessionId, firstSession);
       resuming = true;
       if (!sendNow) await manager.send(chat.id, "Continue after the interrupted review.");
@@ -201,14 +229,29 @@ server.listen(0,'127.0.0.1',async()=>{ await writeFile('.application.json',JSON.
         await assert.rejects(fetch(applicationUrl, { signal: AbortSignal.timeout(2000) }));
         assert.equal(launches.length, 2); assert.equal(store.get(chat.id).agentSessionId, firstSession);
       }
-      console.log(`PASS: actual ${application ? "retained-application" : "first-command"} code review ${sendNow ? "Send now" : "Stop"} interruption, queued-input preservation and same-session continuation${application ? "; the same HTTP app/data survived until explicit Stop" : ""}; ${mainRequests.length} main and ${requests.length - mainRequests.length} title loopback requests.`);
+      console.log(`PASS: actual ${application ? "retained-application" : "first-command"} ${workflow} ${sendNow ? "Send now" : "Stop"} interruption, queued-input preservation and same-session continuation${application ? "; the same HTTP app/data survived until explicit Stop" : ""}; ${mainRequests.length} main and ${requests.length - mainRequests.length} title loopback requests.`);
     } else {
-      await manager.send(chat.id, command);
+      const running = manager.send(chat.id, command);
+      if (simplify && plan && !empty) {
+        // In SDK mode native Plan can ask for an explicit edit exception.
+        // Refuse that request; never count a pending approval as a refusal.
+        let complete = false; void running.then(() => { complete = true; }, () => { complete = true; });
+        const deadline = Date.now() + 15000;
+        while (!complete && !store.get(chat.id).pendingRequest && Date.now() < deadline) await delay(20);
+        const pending = store.get(chat.id).pendingRequest;
+        if (pending) {
+          assert.match(pending.command, /total\.mjs/);
+          assert.match(pending.command, /new_string/);
+          assert.equal(await readFile(`${chat.workspace}/total.mjs`, "utf8"), broken);
+          await manager.respond(chat.id, pending.requestId, { decision: "decline" });
+        }
+      }
+      await running;
       if (fixtureError) throw fixtureError;
       assert.deepEqual(store.get(chat.id).messages.filter(message => message.kind === "error").map(message => message.text), []);
-      assert.equal(mainRequests.length, (fix ? plan ? 5 : 6 : 4) + (application ? 2 : 0));
+      assert.equal(mainRequests.length, (simplify ? empty ? 3 : plan ? 4 : 5 : fix ? plan ? 5 : 6 : 4) + (application ? 2 : 0));
       assert.equal(await readFile(`${chat.workspace}/total.mjs`, "utf8"), empty || fix && !plan ? original : broken, fix && !plan ? "Explicit --fix must actually change the file" : "Read-only review must not apply fixes");
-      assert.match(store.get(chat.id).messages.at(-1).text, empty ? /No findings were reported/ : fix && !plan ? /Actual invocation returned total 5/ : /CLI subtracts instead of adding/);
+      assert.match(store.get(chat.id).messages.at(-1).text, simplify ? /native simplify fixture/ : empty ? /No findings were reported/ : fix && !plan ? /Actual invocation returned total 5/ : /CLI subtracts instead of adding/);
       {
         const session = store.get(chat.id).agentSessionId; resuming = true;
         if (application) {
@@ -224,7 +267,7 @@ server.listen(0,'127.0.0.1',async()=>{ await writeFile('.application.json',JSON.
           await assert.rejects(fetch(applicationUrl, { signal: AbortSignal.timeout(2000) })); assert.equal(launches.length, 2);
         }
       }
-      console.log(`PASS: native code-review instructions, actual diff/read/report tools, final findings, same-session Stop/resume and ${fix ? plan ? "native Plan-mode edit refusal" : "applied/observed fixes" : empty ? "empty findings" : "read-only review"} verified${application ? "; review/follow-up retained the same real HTTP app/data until explicit Stop" : ""}; ${mainRequests.length} main and ${requests.length - mainRequests.length} title loopback replies.`);
+      console.log(`PASS: native ${workflow} instructions, actual diff/read${simplify ? "" : "/report"} tools, final findings, same-session Stop/resume and ${empty ? "empty findings" : fix ? plan ? "native Plan-mode edit refusal" : "applied/observed fixes" : "read-only review"} verified${application ? "; review/follow-up retained the same real HTTP app/data until explicit Stop" : ""}; ${mainRequests.length} main and ${requests.length - mainRequests.length} title loopback replies.`);
     }
   } finally {
     await manager?.shutdown(); server.closeAllConnections(); gatewayServer?.closeAllConnections();
