@@ -115,8 +115,11 @@ The database contained no chats; this proves account-record preservation, not a
 live model session's resumption.
 
 The user has authorized the minimal real prompt “Responda apenas OK” on Personal.
-A subsequent reconnect attempt failed and the account is currently awaiting new
-user consent; no real prompt has been sent. Before marking Codex delivered,
+A subsequent reconnect attempt failed, and the next pending attempt expired
+without completion. Personal is currently disconnected; no real prompt has
+been sent. The one-click reconnect and diagnostic changes are active on
+`localhost:8787` after a controlled restart that preserved all 12 records then
+present and the credential file byte-for-byte. Before marking Codex delivered,
 complete that consent, run the authorized prompt, confirm which named account
 ran it, and verify that the same chat/account resumes after a controlled restart.
 Claude, GitHub, Linear and AWS

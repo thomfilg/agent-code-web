@@ -258,11 +258,20 @@ References inspected for this request:
   A second native probe succeeded with the new deadlines (6.9-second initialization,
   0.57-second code issuance), then cancelled and removed its private profile.
   Neither probe granted consent or submitted a model prompt.
-  The user authorized “Responda apenas OK” through Personal. Its latest saved
-  state is a new pending sign-in without credentials, so the real-turn check
-  remains pending user consent. A restart preflight detected the live login
-  process and stopped before changing the running server or data. Activate the
-  backend timeout/error changes only after that pending flow resolves.
+  The user authorized “Responda apenas OK” through Personal. A restart preflight
+  detected its live pending login and stopped before touching the server/data.
+  That flow then expired without completion, and its native process exited.
+  After verifying no remaining pending logins or chats, Relay was restarted
+  with this version through Doppler. Backup `relay-before-reconnect-HscGUw` was
+  verified offline; all **12 then-existing encrypted record payloads** and the
+  credential file remained byte-for-byte unchanged. Both named accounts were
+  disconnected before and after the restart; no previous credentials were
+  restored from backups. Google remains configured, anonymous account access
+  remains 401, and the served account/picker/style files match the source.
+  Personal must complete fresh user consent before the already-authorized
+  real-turn/resume check. No real model prompt has been submitted.
+  The two final mobile/reconnect browser checks also passed after message
+  wording was shortened for a multi-user product.
   The separate Delete account request is appended as non-MVP item 46, not
   implemented or used as a reason to interrupt this authentication refinement.
 
