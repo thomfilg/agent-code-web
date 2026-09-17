@@ -9,6 +9,7 @@ import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, in
 import { claudeFastRequest, claudeFastState, claudeFastCredential, checkClaudeFastAvailability, claudeFastUnavailable } from "../claude-fast.mjs";
 import { ClaudeTextStream } from "../claude-text-stream.mjs";
 import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR, ClaudeControlChannel, runClaudeMcpCommand } from "../claude-mcp.mjs";
+import { ClaudeSession, claudeCallResult } from "../claude-session.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch, now = Date.now }) {
@@ -49,6 +50,7 @@ export class ClaudeAdapter {
     // The native review handler checkpoints its journal only when it returns.
     // Keep its SDK input open so Stop can cancel the query and let it flush.
     const reviewRequest = /^\/code-review(?:\s|$)/.test(text.trimStart());
+    const applicationRequest = /^\/(?:run|verify)(?:\s|$)/.test(text.trimStart());
     if (mcpRequest?.action && this.config.claude.authMode !== "gateway") throw new Error(CLAUDE_MCP_PRIVATE_ERROR);
     if (fastRequest && this.config.claude.authMode !== "gateway") throw new Error("Fast changes require a private Claude profile; shared host profiles remain locked until company/profile isolation is complete.");
     if (configuration?.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
@@ -65,7 +67,13 @@ export class ClaudeAdapter {
     // Turning it off must always work, including after account access is lost.
     // The following turn explicitly starts with fastMode:false; no inference,
     // account lookup or global Claude settings write is needed for this action.
-    if (fastRequest && !enableFast) return { text: "Fast mode OFF (this chat only).", status: "completed", nativeFast: { state: "off" }, fastPreference: false, fastCooldown: null };
+    if (fastRequest && !enableFast) {
+      // A retained CLI can still service its own background notifications.
+      // Turn Fast off there now, not only on the next foreground message.
+      if (this.applicationSession && !this.applicationSession.ended) await this.applicationSession.control.request("apply_flag_settings", { settings: { fastMode: false } });
+      if (version !== this.sendVersion) throw Error("Claude turn interrupted");
+      return { text: "Fast mode OFF (this chat only).", status: "completed", nativeFast: { state: "off" }, fastPreference: false, fastCooldown: null };
+    }
     const heldCooldown = !enableFast && fastMode === true && sameAccount && Number.isSafeInteger(fastCooldown?.until) && fastCooldown.until > this.now() && ["rate_limit", "overloaded"].includes(fastCooldown.reason) ? fastCooldown : null;
     if (heldCooldown) this.hooks.onEvent?.({ type: "notice", text: "Claude Fast is cooling down. This turn uses standard speed until the saved provider retry time; /fast off disables Fast." });
     let availability, fastFallback = null;
@@ -91,7 +99,7 @@ export class ClaudeAdapter {
     const sessionId = this.sessionId || randomUUID();
     // These native handlers create a resumable journal only on completion.
     // Preflight, startup and forced-stop failures must not retain a missing ID.
-    const provisionalSession = isNew && (mcpRequest?.action || reviewRequest);
+    const provisionalSession = isNew && (mcpRequest?.action || reviewRequest || applicationRequest);
     if (isNew && !provisionalSession) {
       this.sessionId = sessionId;
       await this.hooks.onSessionId?.(sessionId);
@@ -177,18 +185,35 @@ export class ClaudeAdapter {
     this.providerObservation = unobserve;
     const finishObservation = () => { unobserve(); if (this.providerObservation === unobserve) this.providerObservation = null; };
     let child;
-    try { child = this.executor
-      ? this.executor.spawn(this.config.claude.bin, args, {
+    const spawn = launchArgs => this.executor
+      ? this.executor.spawn(this.config.claude.bin, launchArgs, {
           cwd: this.workspace,
           env,
           stdio: ["pipe", "pipe", "pipe"],
         })
-      : spawnWorker(this.config.claude.bin, args, {
+      : spawnWorker(this.config.claude.bin, launchArgs, {
           isolation: this.config.processIsolation,
           cwd: this.workspace,
           env,
           stdio: ["pipe", "pipe", "pipe"],
-        }); } catch (error) { finishObservation(); throw error; }
+        });
+    try {
+      if (this.applicationSession?.ended) this.applicationSession = null;
+      if (!this.applicationSession && applicationRequest) {
+        const launchArgs = args.includes("--input-format") ? args : [...args, "--input-format", "stream-json"];
+        this.applicationSession = new ClaudeSession(spawn(launchArgs), args, env, event => this.backgroundEvent(event));
+      }
+      child = this.applicationSession ? await this.applicationSession.open(args, env) : spawn(args);
+      if (version !== this.sendVersion) throw Error("Claude turn interrupted");
+    } catch (error) {
+      finishObservation();
+      // Failed first initialization must not leave a live, unaddressable CLI
+      // or retry a provisional session whose journal was never checkpointed.
+      if (provisionalSession && !this.sessionId) {
+        await this.applicationSession?.stop(); this.applicationSession = null;
+      }
+      throw error;
+    }
     this.child = child;
     if (provisionalSession) this.sessionId = sessionId;
     const mcpControl = mcpRequest?.action ? new ClaudeControlChannel(child) : null;
@@ -216,6 +241,7 @@ export class ClaudeAdapter {
     let compacted = false;
     let lastRequest = null;
     const sampleId = randomUUID();
+    let resultBaseline = null, resultCount = 0;
     let stderr = "";
     const activeTools = new Map();
     const completeTool = (itemId, output = "", failed = false, resultMissing = false) => {
@@ -271,7 +297,12 @@ export class ClaudeAdapter {
         resultMessage = event;
         if (reviewControl) child.stdin.end();
         nativeFast = claudeFastState(event);
-        this.hooks.onEvent?.({ type: "usage", usage: claudeUsage(event, lastRequest, sampleId) });
+        // Resuming a stopped background task can emit an empty local result
+        // before the actual model reply, even in one-shot mode. Each native
+        // result needs its own sample; process totals still need deltas.
+        const usageResult = this.applicationSession ? event : claudeCallResult(event, resultBaseline);
+        resultBaseline = event;
+        this.hooks.onEvent?.({ type: "usage", usage: claudeUsage(usageResult, lastRequest, `${sampleId}:${event.uuid || ++resultCount}`) });
         for (const itemId of activeTools.keys()) completeTool(itemId, "", false, true);
       }
     });
@@ -298,11 +329,15 @@ export class ClaudeAdapter {
         if (reviewControl) this.reviewInterruption = null;
         if (this.child === child) this.child = null;
         const checkpointed = resultMessage?.subtype === "success" && resultMessage.is_error !== true;
+        // Application prompts journal their interrupted query as a native
+        // error result (unlike the bundled review's success checkpoint).
+        const applicationCheckpoint = applicationRequest && version !== this.sendVersion && resultMessage?.subtype === "error_during_execution" && resultMessage.session_id === sessionId;
         if (provisionalSession) {
           // Graceful review cancellation still returns and saves its journal.
           // Preserve that checkpoint even though the running turn was stopped.
-          this.sessionId = checkpointed && (reviewControl || version === this.sendVersion) ? sessionId : null;
+          this.sessionId = applicationCheckpoint || checkpointed && (reviewControl || applicationRequest || version === this.sendVersion) ? sessionId : null;
           if (this.sessionId) await this.hooks.onSessionId?.(this.sessionId);
+          else if (this.applicationSession) { await this.applicationSession.stop(); this.applicationSession = null; }
         }
         if (version !== this.sendVersion) throw new Error("Claude turn interrupted");
         if (mcpError) throw mcpError;
@@ -331,7 +366,7 @@ export class ClaudeAdapter {
           reject(Object.assign(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`), { nativeSettings, ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) }));
         }
       })().catch(reject); });
-      if (mcpControl) void runClaudeMcpCommand(mcpControl, mcpRequest).then(outcome => {
+      if (mcpControl) void runClaudeMcpCommand(mcpControl, mcpRequest, { initialize: !this.applicationSession }).then(outcome => {
         if (version !== this.sendVersion) throw Error("Claude turn interrupted");
         mcpOutcome = outcome;
         // A local status command checkpoints the native session journal after
@@ -346,16 +381,31 @@ export class ClaudeAdapter {
     throw new Error("Interactive approval responses are currently implemented for Codex only");
   }
 
+  backgroundEvent(event) {
+    if (this.stopped || !["assistant", "stream_event", "result"].includes(event.type)) return;
+    this.backgroundOutput ||= new ClaudeTextStream(() => {});
+    this.backgroundOutput.accept(event);
+    if (event.type === "assistant" && !event.parent_tool_use_id && event.message?.usage) this.backgroundRequest = event.message;
+    if (event.type === "result") {
+      this.hooks.onEvent?.({ type: "usage", usage: claudeUsage(event, this.backgroundRequest, randomUUID()) });
+      const failed = event.is_error === true || Boolean(event.subtype && event.subtype !== "success");
+      const text = this.backgroundOutput.text || (failed ? redact(event.result || "Claude background task failed") : "");
+      if (text) this.hooks.onEvent?.({ type: "background_response", text, failed });
+      this.backgroundOutput = null; this.backgroundRequest = null;
+    }
+  }
+
   async interrupt() {
     this.sendVersion += 1;
     this.settingsInspection?.abort();
     this.fastInspection?.abort();
     this.providerObservation?.(); this.providerObservation = null;
-    // Claude print mode is one child per turn. Keep its resume ID, capability,
-    // worker lease and browser; only terminate this turn's CLI process.
+    // Application turns are logical children: interrupt their native query,
+    // retaining the CLI and its background servers. Other turns are one-shot.
     const child = this.child;
     await this.reviewInterruption?.();
     if (child) await terminateWorker(child);
+    else if (this.applicationSession?.pending) await this.applicationSession.stop();
   }
 
   async stop() {
@@ -368,6 +418,7 @@ export class ClaudeAdapter {
     this.child = null;
     await this.reviewInterruption?.();
     if (child) await terminateWorker(child);
+    await this.applicationSession?.stop(); this.applicationSession = null;
     this.broker.revokeChat(this.chat.id);
     this.capability = "";
   }

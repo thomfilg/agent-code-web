@@ -104,3 +104,23 @@ test("bundled reviews preserve flags and multiline targets in FIFO and pause on 
   assert.deepEqual(f.store.get(f.chat.id).queuedMessages.map(item => item.text), [retained]);
   assert.equal(f.inputs.length, 4); assert.equal(f.store.get(f.chat.id).messages.at(-1).text, f.error);
 });
+
+test("background completion saves an independent answer without consuming the foreground reply, queue or another chat", async t => {
+  const f = await fixture(t), other = await f.manager.createChat({ agent: "claude", title: "Other application" });
+  f.gate = Promise.withResolvers();
+  const running = f.manager.send(f.chat.id, "/verify Keep this foreground response"); await waitFor(() => f.inputs.length === 1);
+  await f.manager.enqueue(f.chat.id, "/run Retained follow-up"); await f.store.update(f.chat.id, { queuePaused: true });
+  const before = f.store.get(f.chat.id).messages.filter(message => message.role === "user");
+  const start = f.events.find(event => event.type === "turn_started");
+  await f.hooks.get(f.chat.id).onEvent({ type: "background_response", text: "Background application exited.\n<relay-waiting>no</relay-waiting>" });
+  assert.equal(f.manager.isBusy(f.chat.id), true);
+  assert.deepEqual(f.store.get(f.chat.id).messages.filter(message => message.role === "user"), before);
+  assert.deepEqual(f.store.get(f.chat.id).queuedMessages.map(item => item.text), ["/run Retained follow-up"]);
+  assert.equal(f.store.get(other.id).messages.length, 0);
+  const background = f.store.get(f.chat.id).messages.at(-1);
+  assert.equal(background.role, "assistant"); assert.equal(background.text, "Background application exited."); assert.notEqual(background.id, start.messageId);
+  f.gate.resolve(); await running;
+  const final = f.store.get(f.chat.id).messages.at(-1);
+  assert.equal(final.id, start.messageId); assert.equal(final.text, "Native fixture result");
+  assert.deepEqual(f.store.get(f.chat.id).queuedMessages.map(item => item.text), ["/run Retained follow-up"]);
+});

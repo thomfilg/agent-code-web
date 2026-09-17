@@ -1514,6 +1514,12 @@ export class RuntimeManager extends EventEmitter {
       return;
     }
     if (event.type === "goal") { this.publishChat(await this.store.update(chatId, { goal: event.goal })); return; }
+    if (event.type === "background_response") {
+      const chat = this.store.get(chatId); if (!chat) return;
+      const output = extractResponse(event.text || "", chat.autoTitle);
+      const message = await this.store.appendMessage(chatId, { role: event.failed ? "system" : "assistant", agent: chat.agent, kind: event.failed ? "error" : "message", text: output.text });
+      this.#emit(chatId, { type: "message", message }); return;
+    }
     if (event.type === "goal_turn_started") {
       const runtime = this.#runtimes.get(chatId); if (!runtime) return;
       runtime.assistantMessageId = newId("msg");

@@ -20,6 +20,7 @@ and remain at the beginning of native stream-json input.
 | `/compact` | Native compaction, FIFO while busy, wakes stopped worker. Real Codex/Claude adapters tested with local API fixtures. |
 | `/review [--base branch / --commit SHA / instructions]` | Native `review/start`, not an ordinary prompt. Tracks both inner execution and outer completion IDs. Real adapter completion and interruption pass. |
 | `/code-review [level] [--fix] [target]` (Claude) | Native bundled review with actual diff/read/findings and explicit file-fix verification. Findings survive Stop/resume; Plan blocks edits. SDK interruption checkpoints the first review for Stop and Send now; flags, targets, FIFO, drafts and remaining queued inputs are retained. GitHub `--comment` and live activation are not covered by this acceptance. |
+| `/run`, `/verify` (Claude) | Actual native tools drive an HTTP application that remains available between replies. Native Send now preserves it, including interruption of the first command; Stop terminates it and the same native history resumes. Existing project recipes reload and run. Protected recipe creation still needs native approval support; this is not full workflow acceptance. |
 | `/side [question]`, `/btw [question]` | Native ephemeral Codex fork on the same worker, separate third-column transcript/questions, scoped attachments and independent stop. Parent context/goal/turn are retained; no copied chat folder or injected main messages. Real installed CLI verified concurrent turns, inherited context, active-goal isolation, cancellation and parent survival. Controller/browser checks pass; live backend activation pending. |
 | `/fork [title]` (Codex) | Independent chat, workspace, native history and attachment records. Same company/environment/settings, without queued inputs, approval state or browser grants. Active-source and nested-fork native tests pass; goals remain paused until explicit input. Empty chats need no fabricated native turn. Controller and browser retry/draft/navigation checks pass; live activation pending. Workspace portability limits are below. |
 | `/agent`, `/subagents` (Codex) | Native descendant picker, separate conversation/composer/approvals, direct replies or active-turn steering, and child-only interruption. Bounded history pages and controller-owned snapshots remain readable while asleep. Verified with the installed CLI using synthetic stored sessions and loopback responses, plus controller and desktop/mobile browser tests. Live activation pending. |
@@ -91,13 +92,83 @@ Do not treat removing entries from autocomplete as implementing them.
 - Claude acceptance below covers command transport, native local results,
   custom expansion, configuration readback, reload, Fast, goals, native MCP
   actions, bundled `/code-review` and resume, not every command's effect.
-  Next verify other bundled workflows (`/run`, `/verify`, `/simplify`, `/loop`)
+  Next finish the application-session gates below, then verify other bundled
+  workflows (`/run-skill-generator`, `/simplify`, `/loop`)
   and installed plugin namespaces. `/code-review --comment`, account-backed
   commands and shared
   host-profile writes also need the company-isolation gate in item 21. Do not
   infer support from a catalog entry or treat a native removal notice as a
   working replacement. Use the installed version's capabilities, not commands
   added only in newer documentation.
+
+### Claude application sessions and native usage
+
+The previous one-process-per-reply transport reproduced `ECONNREFUSED` after a
+successful native `/run`: Claude's exit also ended its background HTTP server.
+`/run` and `/verify` now retain the CLI and expose logical reply streams to the
+existing adapter. Native command UUID/start events separate a queued user input
+from an unrelated background answer. Settings changes use native controls;
+they do not rewrite slash input or replace Claude's base system instructions.
+Stop terminates the owning process tree and revokes the chat capability. Send
+now interrupts the query without ending the application session. An interrupted
+first application query reports an error checkpoint, unlike bundled review's
+success checkpoint; its matching native session ID must survive interruption.
+Startup and uncheckpointed failures still cannot leave a broken resume ID.
+
+Native background answers are saved separately, never as fabricated user
+messages, and never replace a foreground response ID or consume the queue.
+The CLI reports cumulative model/cost totals across streaming replies; those
+are converted into call deltas. A resumed one-shot CLI can also emit an empty
+local result before its real reply. Distinct result samples prevent that empty
+checkpoint from suppressing the actual usage. Fast off is applied immediately
+to the retained CLI, including subsequent native background activity.
+
+`node scripts/smoke-real-claude-run.mjs` runs installed Claude **2.1.222**, the
+Relay gateway/controller and actual HTTP app/tools in private loopback/PID
+namespaces, with authored model responses and no real inference or accounts:
+
+- Default: real Read/Bash, HTTP create/list, changed validation returning 400,
+  protected recipe-write refusal, separately supplied project recipe/reload,
+  actual model change, Stop and same-native-context resume: **12** requests.
+- `--send-now`: interrupt a later query, retain the actual app/data and other
+  queued input, Stop and resume: **10** requests including native title calls.
+- `--first-send-now`: interrupt the first run after actual HTTP interaction,
+  retain its journal/application, Stop and resume: **8** requests.
+- `--background-exit`: stop only the exact disposable app PID, save its native
+  completion answer independently, then resume history: **6** requests.
+
+All variants check persisted usage, real server availability/closure and native
+context. Thirteen new unit/controller cases cover logical/process lifetime,
+startup/cancellation/errors, literal UTF-8 inputs/settings, usage, background
+isolation and immediate Fast off. Three responsive browser additions verify
+discovery, literal queuing, independent background display and draft retention.
+Normal unit suite: **449/449**; Claude command browser suite: **23/23**. Existing
+native command, MCP and review Send now regression smokes also pass.
+
+Remaining gates are explicit:
+
+- Protected `.claude/skills` creation is denied by the installed native CLI in
+  this path. Scoped allow-rule/private-hook attempts did not establish approval
+  support. The smoke proves the denial, then installs a **separate authored
+  fixture recipe**; it does not claim the agent created it. Production Claude
+  interactive approvals and `/run-skill-generator` remain open.
+- The additional application-session Plan/permission-classifier scenario was
+  not accepted: native classifier requests need their own fixture contract.
+  Earlier bundled-review Plan acceptance does not establish this case. Native
+  policy was not bypassed and no classifier approval was fabricated.
+- Appended system instructions and initial Fast compatibility environment
+  cannot be replaced by these native controls. Such changes fail before input,
+  with an explicit Stop/retry notice; running apps are not silently terminated.
+  Native effort environment precedence, expired capabilities/long-lived renewal,
+  account/cooldown and MCP/review interop *within* a retained app session still
+  need acceptance. Existing capability expiration/revocation is not relaxed.
+
+Fixture corrections: wait for the actual server's readiness; distinguish native
+title generation from the main query; Haiku does not accept an effort picker
+value. These are not product fixes. The reproduced product fixes are server
+lifetime, first-interruption checkpoint, dropped background answers and usage
+accounting. The queue stays on item 20; no deployment, live-data changes, merge,
+personal Chrome access or host/company credential writes.
 
 ### Claude bundled code review and interruption
 

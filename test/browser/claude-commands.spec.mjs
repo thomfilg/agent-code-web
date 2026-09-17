@@ -66,6 +66,34 @@ test("review findings stay readable after stop, and a rejected send keeps the co
   expect(f.calls).toHaveLength(1); expect(f.errors).toEqual([]);
 });
 
+for (const width of [1280, 320]) test(`run and verify at ${width}px retain multiline arguments and queue without altering the draft`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input");
+  f.catalog = [{ name: "run", description: "Run the actual application" }, { name: "verify", description: "Verify the changed behavior" }]; await f.emit();
+  await input.fill("/ver"); await expect(page.locator("#slash-options")).toContainText("/verify");
+  await page.locator("#slash-options [role=option]").click(); await expect(input).toHaveValue("/verify "); expect(f.calls).toEqual([]);
+  for (const [index, text] of ["/run Start the HTTP app\nKeep it available", "/verify Reject invalid input and preserve ação"].entries()) {
+    await input.fill(text); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+    await expect.poll(() => f.calls.length).toBe(index + 1);
+    expect(f.calls.at(-1)).toEqual({ tail: index ? "queue" : "messages", text, attachments: [] });
+    f.snapshot.status = "running"; await f.emit();
+  }
+  expect(f.errors).toEqual([]);
+});
+
+test("a background answer does not replace a live foreground stream or consume the unsent draft", async ({ page }) => {
+  const f = await fixture(page), input = page.locator("#message-input");
+  f.snapshot.status = "running"; await f.emit(); await input.fill("Keep my unsent message");
+  const emit = event => page.evaluate(({ id, event }) => window.fixtureSources.find(source => source.url.includes(`/chats/${id}/events`))
+    .dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) })), { id: f.snapshot.id, event });
+  await emit({ type: "turn_started", messageId: "foreground_application_reply" });
+  await emit({ type: "assistant_delta", delta: "Checking the actual HTTP route." });
+  await emit({ type: "message", message: { id: "background_application_reply", role: "assistant", agent: "claude", kind: "message", text: "The background HTTP server stopped." } });
+  await expect(page.getByText("Checking the actual HTTP route.", { exact: true })).toBeVisible();
+  await expect(page.getByText("The background HTTP server stopped.", { exact: true })).toBeVisible();
+  await expect(input).toHaveValue("Keep my unsent message"); expect(f.calls).toEqual([]); expect(f.errors).toEqual([]);
+});
+
 for (const width of [1280, 320]) test(`Claude MCP controls at ${width}px preserve manager/status dialogs and queue native actions`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page), input = page.locator("#message-input");

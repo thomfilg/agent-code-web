@@ -212,6 +212,19 @@ test("Claude exposes native evaluator failures once per invocation without an un
   }
 });
 
+test("an empty native resume checkpoint does not discard the subsequent model usage sample", async t => {
+  const { root, store, chat } = await fixtureChat(t, "claude"), events = [];
+  const adapter = new ClaudeAdapter({ chat, store, config: testConfig(root, { CLAUDE_BIN: path.join(fixtureDir, "fake-claude.mjs") }),
+    broker: new CapabilityBroker({ ttlMs: 10000 }), hooks: { onEvent: event => events.push(event) } });
+  t.after(() => adapter.stop());
+  const result = await adapter.send("multiple native results after resume");
+  assert.equal(result.text, "Native application context retained.");
+  const samples = events.filter(event => event.type === "usage").map(event => event.usage);
+  assert.equal(samples.length, 2); assert.notEqual(samples[0].sampleId, samples[1].sampleId);
+  assert.equal(samples[0].totals.inputTokens, 0); assert.equal(samples[1].totals.inputTokens, 100);
+  assert.equal(samples[1].totals.outputTokens, 10); assert.equal(samples[1].costUsd, 0.1);
+});
+
 test("Codex interrupts a turn by its ID and reuses the same app-server and thread", async t => {
   const { root, store, chat } = await fixtureChat(t, "codex");
   let request;

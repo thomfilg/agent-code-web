@@ -51,6 +51,11 @@ process.stdin.on("end", async () => {
     send({ type: "result", subtype: "error_during_execution", is_error: true, result: "fixture failed" });
     return;
   }
+  if (prompt === "multiple native results after resume") {
+    send({ type: "result", uuid: "empty-local-checkpoint", subtype: "success", result: "", usage: { input_tokens: 0, output_tokens: 0 }, modelUsage: {}, total_cost_usd: 0 });
+    send({ type: "result", uuid: "actual-resumed-reply", subtype: "success", result: "Native application context retained.", usage: { input_tokens: 100, output_tokens: 10 }, modelUsage: { fixture: { inputTokens: 100, outputTokens: 10 } }, total_cost_usd: 0.1 });
+    return;
+  }
   send({ type: "assistant", message: { content: [{ type: "tool_use", id: "tool_fixture", name: "Read", input: {} }] } });
   send({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tool_fixture", content: "fixture.txt" }] } });
   send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "claude " } } });

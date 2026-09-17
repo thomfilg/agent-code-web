@@ -53,7 +53,7 @@ export class ClaudeControlChannel {
 }
 
 const statuses = new Set(["connected", "cached", "pending", "disabled", "failed", "needs-auth", "needs-approval"]);
-export async function runClaudeMcpCommand(channel, command, { settleMs = 10000 } = {}) {
+export async function runClaudeMcpCommand(channel, command, { settleMs = 10000, initialize = true } = {}) {
   if (!["reconnect", "enable", "disable"].includes(command?.action) || typeof command.server !== "string") throw Error("Invalid native MCP action");
   const status = async () => {
     const result = await channel.request("mcp_status");
@@ -65,7 +65,7 @@ export async function runClaudeMcpCommand(channel, command, { settleMs = 10000 }
       return { name: server.name, status: server.status };
     });
   };
-  await channel.request("initialize");
+  if (initialize) await channel.request("initialize");
   let servers = await status();
   const deadline = Date.now() + settleMs;
   while (servers.some(server => server.status === "pending" && server.name !== "ide" && (command.server === "all" || server.name === command.server)) && Date.now() < deadline) {

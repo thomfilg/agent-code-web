@@ -62,6 +62,21 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: fixed native Claude `/run` servers dying when a reply ended. Retained
+  application sessions now preserve real HTTP apps/data across replies and Send
+  now, including first-command interruption; Stop closes them and native history
+  resumes. Fixed dropped background answers, cumulative usage double counting
+  and resumed empty checkpoints hiding actual usage. Fast off reaches the live
+  CLI immediately. Installed-CLI loopback acceptance covers actual HTTP/tools,
+  existing recipe reload, model change, later/first interruption, background
+  exit and Stop/resume (12/10/8/6 requests). Protected recipe creation remains
+  denied, not falsely counted as implemented. Thirteen unit/controller and three
+  browser additions; normal suite **449/449**, Claude command browser suite
+  **23/23**. Previous command/MCP/review Send now smokes also passed. Remaining
+  native classifier, startup-setting, long-lived
+  credential and retained-session interop gates are in `command-support.md`.
+  Original order/count unchanged; item 20 remains active. Save this checkpoint
+  to PR #2 without merge, deploy, live-data or account changes.
 - 20: bundled Claude `/code-review` now has effect-level acceptance and a fix
   for first-command Stop/resume losing its native journal. Review turns use SDK
   interruption with bounded flushing; provisional IDs prevent broken resumes
