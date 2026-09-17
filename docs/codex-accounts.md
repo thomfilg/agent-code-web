@@ -27,7 +27,16 @@ automatically, including a link that was still being prepared. Relay stays
 pending until the native client confirms completion and the controller verifies
 the saved identity. Codes expire after ten minutes; closing the panel does not
 authorize anything. An interrupted server login must be restarted with
-**Reconnect** on the affected account.
+**Reconnect** on the affected account. Reconnect is a single action on that card:
+it retains the saved name and exact company permissions without reopening the
+creation form. Adding a company and the access/storage explanation are compact,
+expandable controls, not required steps on every reconnection.
+
+Native initialization and device-code issuance each have a bounded 60-second
+deadline, separate from shorter account/status RPCs. Failures identify startup,
+code timeout, an unsupported response or explicitly denied device access using
+fixed, credential-free messages. An arbitrary failure no longer tells the user
+to enable device-code access in ChatGPT.
 
 Choose the account explicitly when creating a chat. Existing chats expose an
 account button next to the agent picker: open it and select **Use in this chat**.
@@ -105,9 +114,12 @@ the local credential file byte-for-byte, including Personal's connected account.
 The database contained no chats; this proves account-record preservation, not a
 live model session's resumption.
 
-Before marking Codex delivered, the user must explicitly authorize a minimal
-real prompt, confirm which named account ran it, and verify that the same
-chat/account resumes after a controlled restart. Claude, GitHub, Linear and AWS
+The user has authorized the minimal real prompt “Responda apenas OK” on Personal.
+A subsequent reconnect attempt failed and the account is currently awaiting new
+user consent; no real prompt has been sent. Before marking Codex delivered,
+complete that consent, run the authorized prompt, confirm which named account
+ran it, and verify that the same chat/account resumes after a controlled restart.
+Claude, GitHub, Linear and AWS
 have separate open MVP gates in [feature-queue.md](feature-queue.md).
 
 Protocol reference: [official Codex app-server authentication documentation](https://learn.chatgpt.com/docs/app-server#auth-endpoints).

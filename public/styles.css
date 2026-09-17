@@ -752,5 +752,11 @@ dialog { max-height: calc(100dvh - 28px); }
 #agent-account-fields { display: grid; gap: 16px; min-width: 0; padding: 0; margin: 0; border: 0; }
 .agent-account-progress { display: flex; align-items: center; gap: 10px; overflow-wrap: anywhere; }
 .agent-account-progress::before { content: ""; width: 14px; height: 14px; flex: 0 0 14px; border: 2px solid var(--line); border-top-color: currentColor; border-radius: 50%; animation: agent-account-spin 1s linear infinite; }
+.agent-account-help, .company-picker-extra { font-size: 12px; color: var(--muted); }
+.agent-account-help summary, .company-picker-extra summary { cursor: pointer; }
+.agent-account-help p { margin-top: 10px; }
+.company-picker.compact { margin: 0; padding: 0; border: 0; }
+.company-picker-extra[open] { display: grid; gap: 10px; }
+.company-picker-extra .form-error:empty { display: none; }
 @keyframes agent-account-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .agent-account-progress::before { animation: none; } }

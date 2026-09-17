@@ -4,7 +4,23 @@ import os from "node:os";
 import path from "node:path";
 import { JsonRpcProcess } from "./json-rpc-process.mjs";
 
-const failure = () => new Error("Codex authentication could not be completed. Enable device-code sign-in in your ChatGPT security settings (or ask your workspace administrator), then reconnect.");
+const messages = {
+  startup_timeout: "Starting Codex sign-in took too long. Try again.",
+  startup_failed: "The server could not start Codex sign-in. Try again or contact the Relay administrator.",
+  code_timeout: "Timed out waiting for a Codex sign-in code. Try again.",
+  code_failed: "Could not get a Codex sign-in code. Try again.",
+  device_disabled: "Device-code sign-in is disabled for this account. Enable it in ChatGPT security settings or ask your workspace administrator.",
+  unsupported_response: "This server's Codex version could not complete sign-in. Contact the Relay administrator.",
+  authentication: "Codex authentication could not be completed. Try signing in again.",
+};
+export class CodexAccountError extends Error {
+  constructor(code) {
+    const safeCode = Object.hasOwn(messages, code) ? code : "authentication";
+    super(messages[safeCode]); this.code = safeCode;
+  }
+}
+const failure = () => new CodexAccountError("authentication");
+const timeout = error => /timed out after \d+ms$/.test(error?.message || "");
 
 // Only the controller uses this private, temporary native profile. The durable
 // copy is an encrypted database record, not a host CLI or a worker auth.json.
@@ -27,10 +43,12 @@ export class CodexAccountClient {
       this.rpc.on("exit", () => this.loginFailure?.());
       this.rpc.on("request", message => this.rpc.respondError(message.id, -32601, "Authentication only"));
       this.rpc.start();
-      await this.rpc.request("initialize", { clientInfo: { name: "agent_relay_account", version: "1.0" }, capabilities: { experimentalApi: true } });
+      // Native startup can exceed the ordinary RPC deadline on a busy host.
+      // Keep this bounded, but separate it from quick account/status requests.
+      await this.rpc.request("initialize", { clientInfo: { name: "agent_relay_account", version: "1.0" }, capabilities: { experimentalApi: true } }, 60000);
       this.rpc.notify("initialized", {});
       return this;
-    } catch { await this.close(); throw failure(); }
+    } catch (error) { await this.close(); throw new CodexAccountError(timeout(error) ? "startup_timeout" : "startup_failed"); }
   }
   async login() {
     let loginId, early = [];
@@ -45,14 +63,20 @@ export class CodexAccountClient {
     });
     completed.catch(() => {});
     try {
-      const flow = await this.rpc.request("account/login/start", { type: "chatgptDeviceCode" });
-      const url = new URL(flow.verificationUrl);
+      const flow = await this.rpc.request("account/login/start", { type: "chatgptDeviceCode" }, 60000);
+      let url;
+      try { url = new URL(flow.verificationUrl); } catch { throw new CodexAccountError("unsupported_response"); }
       if (flow.type !== "chatgptDeviceCode" || typeof flow.loginId !== "string" || !flow.loginId || flow.loginId.length > 200 ||
           url.origin !== "https://auth.openai.com" || url.pathname !== "/codex/device" || url.search || url.hash || url.username || url.password ||
-          typeof flow.userCode !== "string" || !/^[A-Za-z0-9-]{4,32}$/.test(flow.userCode)) throw failure();
+          typeof flow.userCode !== "string" || !/^[A-Za-z0-9-]{4,32}$/.test(flow.userCode)) throw new CodexAccountError("unsupported_response");
       this.loginId = flow.loginId; this.acceptLogin(flow.loginId);
       return { verificationUrl: url.href, userCode: flow.userCode, completed };
-    } catch { this.loginFailure(); throw failure(); }
+    } catch (error) {
+      this.loginFailure();
+      if (error instanceof CodexAccountError) throw error;
+      const disabled = /device[- ]code.*(?:disabled|not enabled|not allowed)|(?:enable|allow).*device[- ]code/i.test(error?.message || "");
+      throw new CodexAccountError(timeout(error) ? "code_timeout" : disabled ? "device_disabled" : "code_failed");
+    }
   }
   async snapshot({ refresh = false } = {}) {
     try {

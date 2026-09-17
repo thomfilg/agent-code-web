@@ -3,7 +3,7 @@ import test from "node:test";
 import { EventEmitter } from "node:events";
 import { access, readFile, writeFile, stat, symlink } from "node:fs/promises";
 import path from "node:path";
-import { CodexAccountClient } from "../src/codex-account-client.mjs";
+import { CodexAccountClient, CodexAccountError } from "../src/codex-account-client.mjs";
 import { temporaryDirectory, testConfig } from "./helpers.mjs";
 
 const auth = () => ({ auth_mode: "chatgpt", unexpected: "not-retained", tokens: {
@@ -60,7 +60,7 @@ test("untrusted native URLs, malformed auth files and symlinks fail closed witho
   const request = rpc.request;
   for (const verificationUrl of ["http://auth.openai.com/codex/device", "https://evil.example/codex/device", "https://auth.openai.com/codex/device?token=secret-native-value"]) {
     rpc.request = async method => method === "account/login/start" ? { type: "chatgptDeviceCode", loginId: "fixture", userCode: "CODE-1234", verificationUrl } : request(method);
-    await assert.rejects(() => client.login(), error => !error.message.includes("secret-native-value") && /authentication/.test(error.message));
+    await assert.rejects(() => client.login(), error => error instanceof CodexAccountError && error.code === "unsupported_response" && !error.message.includes("secret-native-value"));
   }
   rpc.request = request;
   await writeFile(path.join(root, "outside.json"), JSON.stringify(auth()));
@@ -81,4 +81,40 @@ test("early completion is not lost; cancellation and failure reject pending cons
   rpc.request = request;
   const flow = await client.login(); await client.cancel(); await client.close();
   await assert.rejects(flow.completed, /authentication/); assert.equal(rpc.cancelled, true);
+});
+
+test("slow native startup and code issuance have separate bounded deadlines", async t => {
+  const { client, rpc } = await fixture(t), request = rpc.request;
+  await client.close();
+  const deadlines = new Map();
+  rpc.request = async (method, params, timeoutMs) => {
+    deadlines.set(method, timeoutMs);
+    if (["initialize", "account/login/start"].includes(method) && !(timeoutMs > 15000 && timeoutMs <= 60000)) throw Error(`${method} timed out after 15000ms`);
+    return request(method, params, timeoutMs);
+  };
+  await client.start(); await client.login(); await client.cancel();
+  assert.equal(deadlines.get("initialize"), 60000);
+  assert.equal(deadlines.get("account/login/start"), 60000);
+  assert.equal(deadlines.get("account/login/cancel"), 5000);
+});
+
+test("native failures expose a safe stage-specific message without blaming unrelated account settings", async t => {
+  const { client, rpc } = await fixture(t), request = rpc.request;
+  for (const [method, nativeMessage, expectedCode] of [
+    ["initialize", "initialize timed out after 60000ms", "startup_timeout"],
+    ["initialize", "ENOENT secret-native-value", "startup_failed"],
+    ["account/login/start", "account/login/start timed out after 60000ms", "code_timeout"],
+    ["account/login/start", "device code authentication is not enabled secret-native-value", "device_disabled"],
+    ["account/login/start", "request failed secret-native-value https://example.test/private", "code_failed"],
+  ]) {
+    await client.close();
+    rpc.request = async (name, ...args) => { if (name === method) throw Error(nativeMessage); return request(name, ...args); };
+    if (method !== "initialize") await client.start();
+    await assert.rejects(() => method === "initialize" ? client.start() : client.login(), error => {
+      assert.ok(error instanceof CodexAccountError); assert.equal(error.code, expectedCode);
+      assert.doesNotMatch(error.message, /secret-native-value|example\.test/);
+      if (expectedCode !== "device_disabled") assert.doesNotMatch(error.message, /security settings|workspace administrator/);
+      return true;
+    });
+  }
 });

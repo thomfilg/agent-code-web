@@ -5,6 +5,7 @@ import { createAgentWebServer } from "../../src/server.mjs";
 import { testConfig } from "../helpers.mjs";
 import { googleOidcFixture, googleTestEnv } from "../fixtures/google-oidc.mjs";
 import { codexAccountFixture } from "../fixtures/codex-account.mjs";
+import { CodexAccountError } from "../../src/codex-account-client.mjs";
 
 const test = base.extend({
   relay: async ({}, use) => {
@@ -233,4 +234,46 @@ test("a delayed pending-status response cannot restore a cancelled account's cod
     await expect(card(page, "Cancel race").locator("code")).toHaveCount(0);
     await expect(card(page, "Cancel race").getByRole("button", { name: "Reconnect", exact: true })).toBeVisible();
   } finally { release(); }
+});
+
+test("Reconnect is one click inside the saved account, preserves scope and exposes a retryable startup error only once", async ({ page, relay }) => {
+  await login(page, relay); await page.locator("#agent-accounts-button").click();
+  await page.locator("#agent-account-new").click();
+  await page.getByLabel("Account name", { exact: true }).fill("Personal");
+  const companies = page.locator("#agent-account-companies");
+  await companies.getByLabel("Add companies", { exact: true }).fill("12-apps");
+  await companies.getByRole("button", { name: "Add companies", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in to Codex", exact: true }).click();
+  await expect(card(page, "Personal").locator("code")).toBeVisible();
+  relay.codex.clients.at(-1).approve(); await expect(card(page, "Personal")).toContainText("Connected");
+  page.once("dialog", dialog => dialog.accept());
+  await card(page, "Personal").getByRole("button", { name: "Disconnect", exact: true }).click();
+  await expect(card(page, "Personal").getByRole("button", { name: "Reconnect", exact: true })).toBeVisible();
+  const original = relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId)[0];
+  const gate = Promise.withResolvers(); let failStart = true;
+  relay.app.agentAccounts.clientFactory = () => {
+    const client = relay.codex.factory(), start = client.start;
+    client.start = async function (auth) { await gate.promise; if (failStart) throw new CodexAccountError("startup_timeout"); return start.call(this, auth); };
+    return client;
+  };
+  try {
+    await card(page, "Personal").getByRole("button", { name: "Reconnect", exact: true }).click();
+    await expect(card(page, "Personal").getByRole("status")).toContainText("Connecting to Codex");
+    await expect(page.locator("#agent-account-form")).toBeHidden();
+    gate.resolve();
+    const message = new CodexAccountError("startup_timeout").message;
+    await expect(card(page, "Personal").getByText(message, { exact: true })).toHaveCount(1);
+    await expect(card(page, "Personal").getByRole("button", { name: "Reconnect", exact: true })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("codex-reconnect-simple.png") });
+    failStart = false;
+    await card(page, "Personal").getByRole("button", { name: "Reconnect", exact: true }).click();
+    await expect(card(page, "Personal").locator("code")).toBeVisible();
+    await expect(page.locator("#agent-account-form")).toBeHidden();
+    const saved = relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId);
+    expect(saved).toHaveLength(1); expect(saved[0].id).toBe(original.id);
+    expect(saved[0].companies).toEqual(["12-apps"]); expect(saved[0].allowUnassigned).toBe(false);
+    await page.locator("#agent-account-new").click();
+    await expect(companies.locator("details")).not.toHaveAttribute("open", "");
+    await expect(page.locator(".agent-account-help")).not.toHaveAttribute("open", "");
+  } finally { gate.resolve(); }
 });

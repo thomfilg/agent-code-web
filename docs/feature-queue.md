@@ -234,8 +234,37 @@ References inspected for this request:
 | 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | Codex account-bound device-code UI and automated checks pass; real Personal account consent confirmed, real turn/resume acceptance remains open. Claude native login is next, not implemented. No global profile is imported |
 | 44 | Authenticate Relay users with Google using `@12-apps/auth`; persist data privately per user and support multiple named Claude/Codex accounts (personal/company), explicitly selected per chat with no credential fallback | Google login is live. Codex named accounts, encrypted persistence, explicit chat binding and access-only worker renewal pass automated checks. Real Codex account acceptance and Claude multi-account support remain open |
 | 45 | Provide a repeatable AWS deployment script for the complete Relay application, following future-pay's deployment guidance; add reusable AWS support to `12-apps/ci` and keep Relay a thin application-specific consumer | MVP blocker: references reviewed and acceptance criteria recorded above. Shared registry currently has only DigitalOcean/Cloudflare; existing Relay EC2 worker scaffolding is not a complete controller deployment. No AWS provisioning or deployment performed |
+| 46 | Delete a saved agent account, separately from disconnecting it; confirm the specific account, remove its stored credentials, prevent other-user deletion, and retain conversations without silently selecting another account | New request (2026-09-17), appended outside the MVP under the standing queue rule; not implemented |
 
 ## Verification ledger
+
+- Codex reconnection refinement (2026-09-17): replaced reopening the saved
+  account's name/company form with a one-click Reconnect action inside its card.
+  It retains the exact account ID and access scope, shows immediate progress,
+  hides stale errors during the attempt and renders a failure only once. New
+  account creation keeps explicit company selection, with extra company inputs
+  and the longer access/storage explanation behind expandable controls.
+  **13/13 account/Google browser tests** and **28/28 focused account/server tests**
+  passed; **15/15 account/client tests** passed again after final message hardening.
+  The new browser regression covers failure, retry, original scope preservation,
+  no duplicate account and no repeated form. Reviewed the shorter dialog capture.
+  The reported login failed about 15 seconds after entering pending state;
+  the previous client applied a 15-second deadline to initialization and code
+  issuance and discarded the underlying stage. An isolated native probe with
+  the live configuration succeeded (8.3-second initialization, 0.55-second code
+  issuance), so the historical failure's exact cause is not proven. Both startup
+  stages now have separate bounded 60-second deadlines and fixed stage-specific
+  errors; native tokens, codes, URLs and raw error strings are never forwarded.
+  A second native probe succeeded with the new deadlines (6.9-second initialization,
+  0.57-second code issuance), then cancelled and removed its private profile.
+  Neither probe granted consent or submitted a model prompt.
+  The user authorized “Responda apenas OK” through Personal. Its latest saved
+  state is a new pending sign-in without credentials, so the real-turn check
+  remains pending user consent. A restart preflight detected the live login
+  process and stopped before changing the running server or data. Activate the
+  backend timeout/error changes only after that pending flow resolves.
+  The separate Delete account request is appended as non-MVP item 46, not
+  implemented or used as a reason to interrupt this authentication refinement.
 
 - Codex sign-in UX follow-up (2026-09-17): Add account now explicitly expands
   or collapses a focused form and retains the unsent name/company selection.

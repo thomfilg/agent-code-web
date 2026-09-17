@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { CodexAccountClient } from "./codex-account-client.mjs";
+import { CodexAccountClient, CodexAccountError } from "./codex-account-client.mjs";
 import { companyForChat, normalizeCompanyScope, scopeAllows } from "../public/company-scope.js";
 
 const fail = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
@@ -80,12 +80,15 @@ export class AgentAccounts {
         flow.verificationUrl = login.verificationUrl; flow.userCode = login.userCode;
         flow.timer = setTimeout(() => { void this.cancel(ownerId, id, "Sign-in expired. Connect again.").catch(() => {}); }, this.loginTimeoutMs);
         flow.timer.unref?.();
-        login.completed.then(() => this.finish(flow, record), () => this.cancel(ownerId, id, "Codex sign-in was not completed. Check device-code access in ChatGPT and reconnect.")).catch(() => {});
+        login.completed.then(() => this.finish(flow, record), () => this.cancel(ownerId, id, "Codex sign-in was not completed. Try signing in again.")).catch(() => {});
         return this.status(ownerId, id);
-      } catch {
+      } catch (error) {
         this.flows.delete(id); await flow.client.close().catch(() => {});
-        await this.save({ ...record, status: "disconnected", error: "Codex sign-in could not start. Check the installed CLI and device-code access in ChatGPT, then reconnect." });
-        throw fail("Codex sign-in could not start. Check the installed CLI and device-code access in ChatGPT, then reconnect.", 502);
+        // Only our fixed, credential-free messages can reach the UI. Native
+        // errors may contain tokens, codes or URLs and must never be forwarded.
+        const message = error instanceof CodexAccountError ? new CodexAccountError(error.code).message : "Codex sign-in could not start on the server. Try again.";
+        await this.save({ ...record, status: "disconnected", error: message });
+        throw fail(message, 502);
       }
     }));
   }

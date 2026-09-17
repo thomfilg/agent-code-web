@@ -4,10 +4,10 @@ export function knownCompanies(state, records = []) {
   return [...new Set([...(state?.chats || []).map(companyForChat), ...records.flatMap(record => [...companyScope(record).companies, record.login])].filter(Boolean))].sort();
 }
 export class CompanyPicker {
-  constructor(root, onChange = () => {}) {
+  constructor(root, onChange = () => {}, { compact = false } = {}) {
     this.root = root; this.onChange = onChange;
     const fieldset = document.createElement("fieldset"); fieldset.className = "company-picker";
-    const legend = document.createElement("legend"); legend.textContent = "Available companies";
+    const legend = document.createElement("legend"); legend.textContent = compact ? "Available to" : "Available companies";
     this.choices = document.createElement("div"); this.choices.className = "company-choices";
     const label = document.createElement("label"), caption = document.createElement("span"); caption.textContent = "Add companies";
     this.input = document.createElement("input"); this.input.placeholder = "12-apps, thomfilg"; this.input.autocomplete = "off";
@@ -27,11 +27,19 @@ export class CompanyPicker {
     this.input.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); addCompanies(); } };
     const help = document.createElement("p"); help.className = "muted";
     help.textContent = "Only checked companies can use this configuration. The first repository determines a chat’s company; secondary repositories never expand its access. No wildcard or global credentials.";
-    fieldset.append(legend, this.choices, label, add, this.error, help); root.replaceChildren(fieldset);
+    if (compact) {
+      fieldset.classList.add("compact");
+      this.extra = document.createElement("details"); this.extra.className = "company-picker-extra";
+      const summary = document.createElement("summary"); summary.textContent = "Add a company";
+      this.extra.append(summary, label, add, this.error);
+      fieldset.append(legend, this.choices, this.extra);
+    } else fieldset.append(legend, this.choices, label, add, this.error, help);
+    root.replaceChildren(fieldset);
   }
   set(record = {}, known = []) {
     this.scope = companyScope(record); this.known = [...new Set([...known, ...this.scope.companies])].sort();
     this.input.value = ""; this.error.textContent = ""; this.render();
+    if (this.extra) this.extra.open = !this.known.length;
   }
   value() { return { companies: [...this.scope.companies], allowUnassigned: this.scope.allowUnassigned }; }
   render() {

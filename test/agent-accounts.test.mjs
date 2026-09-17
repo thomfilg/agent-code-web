@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentAccounts } from "../src/agent-accounts.mjs";
+import { CodexAccountError } from "../src/codex-account-client.mjs";
 import { MemoryRecords, RecordCipher } from "../src/database.mjs";
 import { codexAccountFixture } from "./fixtures/codex-account.mjs";
 import { waitFor } from "./helpers.mjs";
@@ -120,4 +121,29 @@ test("shutdown drains a login still registering its temporary profile", async t 
   const closing = accounts.close(); gate.resolve(); await login; await closing;
   assert.equal(accounts.flows.size, 0); assert.ok(fixture.clients.every(client => client.closed));
   assert.equal(accounts.hasConnected(alice, "codex"), false);
+});
+
+test("login failure preserves only fixed diagnostic messages and remains retryable", async t => {
+  for (const safe of [true, false]) {
+    const { accounts, fixture } = await setup(t), factory = accounts.clientFactory;
+    accounts.clientFactory = () => {
+      const client = factory();
+      client.start = async () => {
+        const error = safe ? new CodexAccountError("startup_timeout") : new Error("private-code-secret https://example.test/token");
+        if (safe) error.message += " private-code-secret";
+        throw error;
+      };
+      return client;
+    };
+    const expected = safe ? new CodexAccountError("startup_timeout").message : "Codex sign-in could not start on the server. Try again.";
+    await assert.rejects(() => accounts.begin(alice, input), { message: expected, statusCode: 502 });
+    const saved = accounts.list(alice)[0];
+    assert.equal(saved.error, expected); assert.equal(saved.status, "disconnected");
+    assert.equal(fixture.clients[0].closed, true); assert.equal(accounts.flows.size, 0);
+    assert.doesNotMatch(JSON.stringify(saved), /private-code-secret|example\.test/);
+    accounts.clientFactory = factory;
+    const result = await accounts.begin(alice, { ...input, id: saved.id });
+    assert.equal(result.account.id, saved.id); assert.equal(result.account.status, "pending");
+    assert.equal(accounts.list(alice).length, 1);
+  }
 });

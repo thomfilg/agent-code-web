@@ -9,13 +9,13 @@ export class AgentAccountSettings {
   constructor({ api, state, changed, chatUpdated, toast }) {
     Object.assign(this, { api, state, changed, chatUpdated, toast });
     this.accounts = []; this.logins = new Map(); this.errors = new Map(); this.actions = new Map(); this.accountVersions = new Map(); this.generation = 0; this.listRequest = 0;
-    this.companies = new CompanyPicker($("#agent-account-companies"));
+    this.companies = new CompanyPicker($("#agent-account-companies"), () => {}, { compact: true });
     $("#agent-accounts-button").onclick = () => this.open();
     $("#connect-codex-button").onclick = () => this.open();
     $("#chat-agent-account").onclick = () => this.open();
     $("#agent-account-new").onclick = () => {
       if (!$("#agent-account-form").hidden) this.showForm(false);
-      else this.edit(null);
+      else this.edit();
     };
     $("#agent-account-cancel").onclick = () => this.showForm(false);
     $("#agent-account-form").onsubmit = event => { event.preventDefault(); void this.connect(); };
@@ -50,8 +50,11 @@ export class AgentAccountSettings {
       const row = node("section", "", "agent-account-card"), heading = node("h3", `${account.name} · Codex`);
       row.dataset.accountId = account.id; heading.id = `heading-${account.id}`; row.setAttribute("aria-labelledby", heading.id);
       const status = account.status === "pending" ? this.logins.has(account.id) ? "Waiting for authorization" : "Connecting…" : account.status === "connected" ? "Connected" : "Not connected";
-      row.append(heading, node("p", `${account.email || "Not signed in"} · ${status}`, "muted"), node("p", scopeLabel(account), "muted"));
-      if (account.error) row.append(node("p", account.error, "form-error"));
+      row.append(heading);
+      if (!this.actions.has(account.id)) row.append(node("p", account.email ? `${account.email} · ${status}` : status, "muted"));
+      else if (account.email) row.append(node("p", account.email, "muted"));
+      row.append(node("p", scopeLabel(account), "muted"));
+      if (account.error && !this.actions.has(account.id) && !this.errors.has(account.id)) row.append(node("p", account.error, "form-error"));
       if (this.errors.has(account.id)) { const error = node("p", this.errors.get(account.id), "form-error"); error.setAttribute("role", "alert"); row.append(error); }
       if (this.actions.has(account.id)) {
         const progress = node("p", this.actions.get(account.id), "agent-account-progress"); progress.setAttribute("role", "status"); row.append(progress);
@@ -72,7 +75,7 @@ export class AgentAccountSettings {
           return this.act(account, "Disconnecting…", async () => this.accept(await this.api(`/api/agent-accounts/${account.id}/disconnect`, { method: "POST" })));
         }));
         else if (account.status === "pending") this.renderLogin(row, account);
-        else row.append(button("Reconnect", () => this.edit(account)));
+        else row.append(button("Reconnect", () => this.reconnect(account)));
       }
       list.append(row);
     }
@@ -106,20 +109,29 @@ export class AgentAccountSettings {
     catch (error) { this.errors.set(account.id, error.message); }
     finally { this.actions.delete(account.id); this.renderList(); this.schedulePoll(); }
   }
+  async reconnect(account) {
+    // Reconnection is not account creation: keep the saved name and exact
+    // access scope, and show progress on this card without reopening a form.
+    await this.act(account, `Connecting to Codex for “${account.name}”…`, async () => {
+      this.accept(await this.api("/api/agent-accounts", { method: "POST", body: JSON.stringify({
+        id: account.id, provider: account.provider, name: account.name,
+        companies: account.companies, allowUnassigned: account.allowUnassigned,
+      }) }));
+    });
+  }
   showForm(visible) {
     $("#agent-account-form").hidden = !visible;
     $("#agent-account-new").textContent = visible ? "− Close account form" : "＋ Add Codex account";
     $("#agent-account-new").setAttribute("aria-expanded", String(visible));
   }
-  edit(account) {
+  edit() {
     if (this.connecting) return;
-    if (!this.formInitialized || this.editing?.id !== account?.id) {
-      this.editing = account; this.formInitialized = true;
-      $("#agent-account-name").value = account?.name || "";
-      this.companies.set(account || {}, knownCompanies(this.state, this.accounts));
+    if (!this.formInitialized) {
+      this.formInitialized = true;
+      $("#agent-account-name").value = "";
+      this.companies.set({}, knownCompanies(this.state, this.accounts));
       $("#agent-account-error").textContent = "";
     }
-    $("#agent-account-form-title").textContent = account ? `Reconnect “${account.name}”` : "Add a Codex account";
     this.showForm(true);
     $("#agent-account-form").scrollIntoView({ block: "nearest" }); $("#agent-account-name").focus({ preventScroll: true });
   }
@@ -154,12 +166,12 @@ export class AgentAccountSettings {
   async connect() {
     if (this.connecting) return;
     const input = { provider: "codex", name: $("#agent-account-name").value,
-      ...(this.editing ? { id: this.editing.id } : {}), ...this.companies.value() };
+      ...this.companies.value() };
     const generation = this.generation;
     this.setConnecting(input.name); $("#agent-account-error").textContent = "";
     try {
       const result = await this.api("/api/agent-accounts", { method: "POST", body: JSON.stringify(input) });
-      this.accept(result); this.formInitialized = false; this.editing = null; this.showForm(false);
+      this.accept(result); this.formInitialized = false; this.showForm(false);
       if (generation === this.generation && $("#agent-accounts-dialog").open) {
         const row = [...$("#agent-account-list").children].find(element => element.dataset.accountId === result.account.id);
         row?.scrollIntoView({ block: "nearest" }); row?.querySelector("a")?.focus({ preventScroll: true });
