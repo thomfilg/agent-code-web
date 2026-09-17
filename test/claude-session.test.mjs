@@ -245,6 +245,42 @@ test("failed readback never claims success or drops a retained app after native 
   assert.equal(f.child.exitCode, null); assert.equal(f.launches.length, 1);
 });
 
+test("doctor diagnoses malformed private settings without repair or leaking raw errors, then can reconcile a repair", async t => {
+  for (const repair of [false, true]) {
+    const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Start the fixture");
+    const file = `${f.store.runtimeHome(f.chat.id)}/claude/settings.json`;
+    await writeFile(file, '{"secret-broken": ');
+    f.settingsSnapshot = { effective: { model: "opus" }, sources: [], errors: [{ message: "secret parse position/path" }] }; f.block = true;
+    const running = f.adapter.send("/doctor Diagnose this profile");
+    await waitFor(() => f.inputs.length === 2 && f.adapter.turnSession?.active?.started);
+    if (repair) { await writeFile(file, '{"model":"sonnet"}'); f.settingsSnapshot = { effective: { model: "sonnet" }, sources: [], errors: [] }; }
+    f.complete("Diagnostic report"); const result = await running;
+    assert.deepEqual(result.nativeSettings, repair ? { model: "sonnet" } : {});
+    assert.equal(await readFile(file, "utf8"), repair ? '{"model":"sonnet"}' : '{"secret-broken": ');
+    assert.equal(f.events.some(event => /existing configuration errors/.test(event.text)), !repair);
+    assert(!JSON.stringify([result, f.events]).includes("secret")); assert.equal(f.launches.length, 1); assert.equal(f.child.exitCode, null);
+  }
+});
+
+test("checkup refuses newly broken or changed unverified settings without replacing the running app", async t => {
+  for (const previousErrors of [false, true]) {
+    const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Start the fixture");
+    f.settingsSnapshot = { effective: { model: "opus" }, sources: [], errors: previousErrors ? [{}] : [] }; f.block = true;
+    const running = f.adapter.send("/checkup Inspect configuration"); await waitFor(() => f.inputs.length === 2 && f.adapter.turnSession?.active?.started);
+    f.settingsSnapshot = { effective: { model: previousErrors ? "sonnet" : "opus" }, sources: [], errors: [{ message: "secret" }] }; f.complete();
+    await assert.rejects(running, error => /Cannot safely verify settings after/.test(error.message) && !error.nativeSettings && !error.message.includes("secret"));
+    assert.equal(f.child.exitCode, null); assert.equal(f.launches.length, 1);
+  }
+});
+
+test("doctor rejects unsafe private metadata before launching even though parse errors are diagnostic input", async t => {
+  const f = await fixture(t, { interactive: true }), profile = `${f.store.runtimeHome(f.chat.id)}/claude`;
+  await mkdir(profile, { recursive: true }); await mkdir(f.chat.workspace, { recursive: true }); await writeFile(`${f.chat.workspace}/outside.json`, "{}");
+  await symlink(`${f.chat.workspace}/outside.json`, `${profile}/.claude.json`);
+  await assert.rejects(f.adapter.send("/doctor"), /Cannot safely verify/);
+  assert.equal(f.launches.length, 0); assert.equal(f.adapter.sessionId, null);
+});
+
 test("interrupting settings inspection before or after input rejects late results and retains the owning application", async t => {
   for (const after of [false, true]) {
     const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Start the fixture");

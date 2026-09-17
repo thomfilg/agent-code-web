@@ -14,12 +14,15 @@ export function claudePermissionMode(event, sessionId) {
 // Only identify requested keys here. The native CLI still parses and executes
 // the original command, including validation and partial-success reporting.
 export function claudeConfigRequest(text) {
-  const match = /^\/(config|settings|autocompact|update-config|fewer-permission-prompts)(?:\s+([\s\S]*))?$/.exec(text.trim());
+  const match = /^\/(config|settings|autocompact|update-config|fewer-permission-prompts|doctor|checkup)(?:\s+([\s\S]*))?$/.exec(text.trim());
   if (!match) return null;
   // This is an agent-executed settings skill, not a local key=value command.
   // Even --help/no arguments expand its prompt; never infer read-only access
   // or requested settings from free-form text. It can take reference files.
   if (["update-config", "fewer-permission-prompts"].includes(match[1])) return { mutate: true, values: {}, kind: "prompt" };
+  // Doctor diagnoses malformed JSON too. Keep filesystem/profile safety
+  // checks, but let the native diagnostic read invalid configuration.
+  if (["doctor", "checkup"].includes(match[1])) return { mutate: true, values: {}, kind: "prompt", diagnostic: true };
   const argument = (match[2] || "").trim();
   if (!argument || argument === "--help") return { mutate: false, values: {} };
   // This native control writes the same private settings file. Leave its
@@ -51,22 +54,22 @@ export function claudeSettingsChanges(before, after, request) {
 // SDK get_settings performs the native user/project/local/flag/policy merge.
 // Keep only the two picker fields; raw source settings can contain credentials,
 // hooks and environment variables and must never reach events or persistence.
-export function claudeSettingsSnapshot(snapshot) {
+export function claudeSettingsSnapshot(snapshot, { diagnostic = false } = {}) {
   const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
   if (!object(snapshot) || !object(snapshot.effective) || !Array.isArray(snapshot.sources)
     || snapshot.sources.length > 5 || snapshot.sources.some(source => !object(source) || !object(source.settings)
       || !["userSettings", "projectSettings", "localSettings", "flagSettings", "policySettings"].includes(source.source))
     || new Set(snapshot.sources.map(source => source.source)).size !== snapshot.sources.length
-    || snapshot.errors !== undefined && (!Array.isArray(snapshot.errors) || snapshot.errors.length)) throw Error("Cannot verify native Claude settings");
+    || snapshot.errors !== undefined && (!Array.isArray(snapshot.errors) || !diagnostic && snapshot.errors.length)) throw Error("Cannot verify native Claude settings");
   const { effective } = snapshot;
   if (effective.permissions !== undefined && !object(effective.permissions)) throw Error("Cannot verify native Claude settings");
   const model = effective.model ?? "default", permissionMode = effective.permissions?.defaultMode ?? "default";
   if (typeof model !== "string" || model.length > 150 || !/^[\w.\[\]-]+$/.test(model)
     || typeof permissionMode !== "string" || !Object.hasOwn(CLAUDE_PERMISSION_MODES, permissionMode)) throw Error("Cannot verify native Claude settings");
-  return { model, permissionMode };
+  return { model, permissionMode, ...(diagnostic ? { hasErrors: Boolean(snapshot.errors?.length) } : {}) };
 }
 
-export async function inspectNativeClaudeSettings(control, signal) {
+export async function inspectNativeClaudeSettings(control, signal, options) {
   signal?.throwIfAborted();
   let abort;
   try {
@@ -76,17 +79,17 @@ export async function inspectNativeClaudeSettings(control, signal) {
       signal.addEventListener("abort", abort, { once: true }); if (signal.aborted) abort();
     })]) : await pending;
     signal?.throwIfAborted();
-    return claudeSettingsSnapshot(snapshot);
+    return claudeSettingsSnapshot(snapshot, options);
   } finally { if (abort) signal.removeEventListener("abort", abort); }
 }
 
-// Serializable worker-side reader. It returns two non-secret fields only,
-// never raw settings, permissions rules, hooks, environment or credentials.
-export async function readPrivateClaudeSettings(runtimeHome, filename = "settings.json") {
+// Serializable worker-side reader. Return only two non-secret fields or a
+// diagnostic file-boundary attestation, never raw settings or credentials.
+export async function readPrivateClaudeSettings(runtimeHome, filename = "settings.json", pathOnly = false) {
   const fs = await import("node:fs/promises"), path = await import("node:path"), { constants } = await import("node:fs");
   if (!["settings.json", ".claude.json"].includes(filename)) throw Error("Invalid private profile file");
   const profile = path.join(runtimeHome, "claude"), filepath = path.join(profile, filename);
-  const empty = { model: "default", permissionMode: "default" };
+  const empty = pathOnly ? { fileSafe: true } : { model: "default", permissionMode: "default" };
   if (await fs.realpath(runtimeHome) !== path.resolve(runtimeHome)) throw Error("Private runtime path is linked");
   try { if ((await fs.lstat(profile)).isSymbolicLink() || await fs.realpath(profile) !== path.resolve(profile)) throw Error("Private profile path is linked"); }
   catch (error) { if (error.code === "ENOENT") return empty; throw error; }
@@ -104,10 +107,13 @@ export async function readPrivateClaudeSettings(runtimeHome, filename = "setting
       bytes += bytesRead;
     }
     if (bytes !== stat.size) throw Error("Settings changed during inspection");
-    const data = JSON.parse(buffer.subarray(0, bytes).toString("utf8"));
-    if (!data || typeof data !== "object" || Array.isArray(data)) throw Error("Invalid private settings object");
     const after = await file.stat(), current = await fs.lstat(filepath);
     if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs || after.ino !== current.ino || after.dev !== current.dev || current.isSymbolicLink() || await fs.realpath(profile) !== path.resolve(profile)) throw Error("Settings changed during inspection");
+    // This attests only the file boundary, never its configuration values.
+    // /doctor must be able to diagnose a broken file without repairing it.
+    if (pathOnly) return empty;
+    const data = JSON.parse(buffer.subarray(0, bytes).toString("utf8"));
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw Error("Invalid private settings object");
     // MCP toggles write .claude.json. Validate the private file, but never
     // return its account metadata, auth configuration or project settings.
     if (filename === ".claude.json") return empty;
@@ -118,14 +124,14 @@ export async function readPrivateClaudeSettings(runtimeHome, filename = "setting
   } finally { await file.close(); }
 }
 
-export async function inspectClaudeSettings({ runtimeHome, executor, isolation, signal, filename = "settings.json" }) {
+export async function inspectClaudeSettings({ runtimeHome, executor, isolation, signal, filename = "settings.json", pathOnly = false }) {
   signal?.throwIfAborted();
   if (!executor || executor.metadata?.backend === "local") {
-    const result = await readPrivateClaudeSettings(runtimeHome, filename); signal?.throwIfAborted(); return result;
+    const result = await readPrivateClaudeSettings(runtimeHome, filename, pathOnly); signal?.throwIfAborted(); return result;
   }
-  const script = `(${readPrivateClaudeSettings.toString()})(process.argv[1],process.argv[2]).then(value => process.stdout.write(JSON.stringify(value))).catch(() => { process.stderr.write("Cannot safely inspect this private Claude profile"); process.exitCode = 1; });`;
+  const script = `(${readPrivateClaudeSettings.toString()})(process.argv[1],process.argv[2],process.argv[3]==="true").then(value => process.stdout.write(JSON.stringify(value))).catch(() => { process.stderr.write("Cannot safely inspect this private Claude profile"); process.exitCode = 1; });`;
   return new Promise((resolve, reject) => {
-    const child = (executor.spawn?.bind(executor) || spawnWorker)("node", ["-e", script, runtimeHome, filename], { cwd: runtimeHome, env: { PATH: executor.environmentPath || process.env.PATH, HOME: runtimeHome, LANG: "C.UTF-8" }, isolation, stdio: ["ignore", "pipe", "pipe"] });
+    const child = (executor.spawn?.bind(executor) || spawnWorker)("node", ["-e", script, runtimeHome, filename, String(pathOnly)], { cwd: runtimeHome, env: { PATH: executor.environmentPath || process.env.PATH, HOME: runtimeHome, LANG: "C.UTF-8" }, isolation, stdio: ["ignore", "pipe", "pipe"] });
     let output = "", settled = false;
     const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); error ? reject(error) : resolve(value); };
     const abort = () => { void terminateWorker(child); finish(Error("Claude settings inspection interrupted")); };
@@ -141,6 +147,10 @@ export async function inspectClaudeSettings({ runtimeHome, executor, isolation, 
       if (code !== 0) return finish(Error("Cannot safely inspect this private Claude profile"));
       try {
         const value = JSON.parse(output);
+        if (pathOnly) {
+          if (value?.fileSafe !== true || Object.keys(value).length !== 1) throw Error("Invalid settings response");
+          finish(null, { fileSafe: true }); return;
+        }
         if (typeof value.model !== "string" || value.model.length > 150 || !/^[\w.\[\]-]+$/.test(value.model) || !Object.hasOwn(CLAUDE_PERMISSION_MODES, value.permissionMode)) throw Error("Invalid settings response");
         finish(null, { model: value.model, permissionMode: value.permissionMode });
       } catch { finish(Error("Invalid Claude settings inspection response")); }

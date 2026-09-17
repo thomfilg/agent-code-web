@@ -23,6 +23,42 @@ async function fixture(page) {
 const requestEvent = (page, id, event) => page.evaluate(({ id, event }) => window.fixtureSources.find(source => source.url.includes(`/chats/${id}/events`))
   .dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) })), { id, event });
 
+for (const width of [1280, 320]) test(`doctor at ${width}px preserves queued files and requires separate cleanup/permission answers`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input"), card = page.locator("#approval-card"), replies = [];
+  const name = width === 320 ? "checkup" : "doctor";
+  f.catalog = [{ name, description: "Health-check the private setup and propose fixes" }];
+  f.snapshot.status = "running"; await f.emit();
+  await input.fill(`/${name.slice(0, 3)}`); await page.locator("#slash-options [role=option]").filter({ hasText: `/${name}` }).click();
+  await expect(input).toHaveValue(`/${name} `); expect(f.calls).toEqual([]);
+  const text = `/${name} Inspect this private profile.\nPreserve ação.`; await input.fill(text); await input.press("Escape");
+  await page.locator("#attachment-input").setInputFiles({ name: "diagnostic-context.txt", mimeType: "text/plain", buffer: Buffer.from("Fixture diagnostic reference") });
+  await expect(page.locator("#attachment-chips")).toContainText("diagnostic-context.txt");
+  f.responseStatus = 400; f.responseError = "Native settings changes require a private Claude profile. Shared host settings writes are locked.";
+  await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect(page.locator("#toasts")).toContainText("private Claude profile"); await expect(input).toHaveValue(text);
+  await expect(page.locator("#attachment-chips")).toContainText("diagnostic-context.txt");
+  f.responseStatus = 202; await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect.poll(() => f.calls.length).toBe(2); expect(f.calls[0]).toEqual(f.calls[1]); expect(f.calls[1].tail).toBe("queue");
+  expect(f.calls[1].text).toBe(text); expect(f.calls[1].attachments).toHaveLength(1); await expect(input).toHaveValue("");
+  await input.fill("Keep this unrelated draft");
+  for (const [id, question, options, answer] of [
+    ["cleanup", "Remove only the duplicate local instruction?", ["Clean up everything (recommended)", "Let me pick", "No, keep everything"], "Clean up everything (recommended)"],
+    ["permissions", "Separately grant Bash(relay-doctor-read list)?", ["Allow the exact read command", "Keep current permissions"], "Keep current permissions"],
+  ]) {
+    await page.route(`**/api/chats/${f.snapshot.id}/requests/${id}/respond`, route => { replies.push({ id, ...route.request().postDataJSON() }); return route.fulfill({ json: { resolved: true } }); });
+    await requestEvent(page, f.snapshot.id, { type: "request", request: { requestId: id, method: "claude/tool/requestUserInput", prompt: "Claude needs your answer",
+      questions: [{ id: "question_1", header: id, question, options: options.map(label => ({ label })) }] } });
+    await expect(card).toContainText(question); await expect(card.locator("input:checked")).toHaveCount(0);
+    await card.getByRole("radio", { name: answer, exact: true }).check();
+    expect(await card.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    await card.getByRole("button", { name: "Send answers", exact: true }).click(); await expect(card).not.toBeVisible();
+    await expect.poll(() => replies.at(-1)).toEqual({ id, answers: { question_1: answer } });
+    await expect(input).toHaveValue("Keep this unrelated draft");
+  }
+  expect(replies).toHaveLength(2); expect(f.calls).toHaveLength(2); expect(f.errors).toEqual([]);
+});
+
 test("native debug is selectable, queues intact while busy, and keeps the draft after a private-profile refusal", async ({ page }) => {
   const f = await fixture(page), input = page.locator("#message-input");
   f.catalog = [{ name: "debug", description: "Turn on debug logging and investigate problems" }];

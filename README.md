@@ -876,6 +876,13 @@ state.
   roots remain locked. This does not disable native policy or ask/deny rules;
   it enables Claude to apply trusted project rules such as those reviewed by
   `/fewer-permission-prompts`.
+- Claude `/doctor` and `/checkup` use the native private-profile diagnostic,
+  retaining separate cleanup and permission questions. They can diagnose
+  malformed settings without repairing them automatically. Unsafe profile
+  files and shared-host profiles stay locked; verified native model/mode changes
+  reconcile without replacing a running application or newer web choices.
+  Installation/account operations and broader native check coverage are not
+  established by the private diagnostic fixtures; see the coverage checklist.
 - Usage has a compact context/limits popover and a detailed session breakdown.
   Current context is distinct from cumulative tokens. Claude context includes
   the last main request's cache reads and writes; Codex cached input is already

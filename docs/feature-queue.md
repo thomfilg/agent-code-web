@@ -69,6 +69,30 @@ feature or turn an external verification gate into a passing result.
 
 ## Verification ledger
 
+- 20: private `/doctor` and `/checkup` now have shared-host admission guards,
+  literal FIFO/attachments and diagnostic-safe file checks. Actual **2.1.222**
+  diagnoses malformed user/project JSON without repairing it, deduplicates local
+  memory only after cleanup consent and applies an exact local read rule only
+  after separate permission consent. Denial/skip preserve their respective
+  files/rules; a retained app/PID/data survives until Stop, then the same journal
+  resumes. Native readback does not invent settings from errors, overwrite newer
+  choices or cross ownership. Syntax/unit **581/581**, command browser **48/48**;
+  six real-CLI cases with **5–13** authored replies, including Stop during a
+  pending question with unchanged files and retained paused queue; the native
+  retained-project `/update-config` regression passes **7** replies. An intervening
+  full-suite repeat was **580/581** (Chrome connection username-field visibility
+  timeout); the unchanged isolated Chrome test passed **1/1** and the final full
+  run passed **581/581**. Its intermittent cause is not established or claimed
+  fixed. Broader doctor checks still need
+  effect acceptance; stay on item 20 before the next command. No live
+  activation or account/installation changes; **24 open items**, same order.
+  Read-only Codex feasibility confirmation for queued item 42: the existing
+  descendant picker already uses `thread/list/read`, status notifications and
+  direct `turn/start`/`turn/steer`. Official OpenAI documentation confirms these
+  primitives ([app-server](https://learn.chatgpt.com/docs/app-server#api-overview),
+  [subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents)).
+  This is not implementation of the requested both-provider panel/popup; that
+  remains queued. No secondary agents were spawned for this investigation.
 - 20: explicit private Claude workspace trust now has an exact-path inspection,
   unchecked confirmation and five-minute actor/chat/scope/worker-bound review.
   Shared host profiles, unsafe/linked paths and broader native trust roots stay

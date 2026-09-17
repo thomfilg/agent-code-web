@@ -62,6 +62,53 @@ test("fewer-permission-prompts requires a private profile even for empty/help in
   for (const text of ["Explain /fewer-permission-prompts", "/plugin:fewer-permission-prompts", "/fewer-permission-prompts-extra"]) assert.equal(claudeConfigRequest(text), null);
 });
 
+test("doctor and checkup remain literal private diagnostic prompts, including help and reference files", () => {
+  for (const name of ["doctor", "checkup"]) for (const suffix of ["", " --help", ' Keep permissionMode="auto" as an example.\nPreserve ação.']) {
+    const text = `/${name}${suffix}`, request = claudeConfigRequest(text);
+    assert.deepEqual(request, { mutate: true, values: {}, kind: "prompt", diagnostic: true });
+    assert.deepEqual(messageCommand("claude", text), { type: "claudeConfig", prompt: text });
+    assert.equal(messageCommand("codex", text), null);
+    const settings = { model: "opus", permissionMode: "default" };
+    assert.deepEqual(claudeSettingsChanges(settings, settings, request), {});
+  }
+  for (const text of ["Explain /doctor", "/plugin:doctor", "/doctor-extra", "/checkup-extra"]) assert.equal(claudeConfigRequest(text), null);
+});
+
+test("diagnostics accept reported parse errors but never unsafe native mode/schema or private source data", () => {
+  const value = { effective: { model: "sonnet", permissions: { defaultMode: "default" } }, sources: [], errors: [{ message: "secret-invalid-source" }] };
+  assert.deepEqual(claudeSettingsSnapshot(value, { diagnostic: true }), { model: "sonnet", permissionMode: "default", hasErrors: true });
+  assert.throws(() => claudeSettingsSnapshot(value), /Cannot verify/);
+  for (const invalid of [{ ...value, sources: null }, { ...value, errors: "secret" }, { ...value, effective: { permissions: { defaultMode: "bypassPermissions" } } }]) {
+    assert.throws(() => claudeSettingsSnapshot(invalid, { diagnostic: true }), /Cannot verify/);
+  }
+});
+
+test("diagnostic path checks tolerate malformed JSON locally/remotely without claiming settings values", async t => {
+  const root = await temporaryDirectory(t); await mkdir(`${root}/claude`);
+  const executor = { metadata: { backend: "ec2" }, spawn: spawnWorker };
+  for (const filename of ["settings.json", ".claude.json"]) {
+    await writeFile(`${root}/claude/${filename}`, '{"secret-invalid": ');
+    await assert.rejects(readPrivateClaudeSettings(root, filename));
+    for (const worker of [undefined, executor]) {
+      assert.deepEqual(await inspectClaudeSettings({ runtimeHome: root, filename, executor: worker, pathOnly: true }), { fileSafe: true });
+    }
+    assert.equal(await readFile(`${root}/claude/${filename}`, "utf8"), '{"secret-invalid": ');
+  }
+});
+
+test("diagnostic inspection retains profile, link and size boundaries for both private configuration files", async t => {
+  const root = await temporaryDirectory(t), secret = `${root}/outside.json`; await writeFile(secret, "private");
+  for (const filename of ["settings.json", ".claude.json"]) for (const kind of ["symlink", "hardlink", "oversized", "profile"]) {
+    const home = `${root}/${filename}-${kind}`; await mkdir(home); const profile = `${home}/claude`, file = `${profile}/${filename}`;
+    if (kind === "profile") await symlink(root, profile); else await mkdir(profile);
+    if (kind === "symlink") await symlink(secret, file);
+    if (kind === "hardlink") await link(secret, file);
+    if (kind === "oversized") await writeFile(file, " ".repeat(2 * 1024 * 1024 + 1));
+    await assert.rejects(inspectClaudeSettings({ runtimeHome: home, filename, pathOnly: true }));
+  }
+  assert.equal(await readFile(secret, "utf8"), "private");
+});
+
 test("native settings inspection uses the effective merge and returns no private source data", () => {
   const snapshot = { effective: { model: "haiku", permissions: { defaultMode: "plan" }, env: { SECRET: "never-return" } },
     sources: [{ source: "userSettings", settings: { model: "opus" } }, { source: "localSettings", settings: { model: "sonnet" } },
@@ -141,7 +188,7 @@ async function fixture(t, { fake = false, host = false } = {}) {
   const f = { calls, starts: 0 };
   const manager = new RuntimeManager({ store, config, models, broker, gatewayOrigin: "http://127.0.0.1:9", adapterFactory: params => {
     if (!fake) return new ClaudeAdapter({ ...params, store, config, broker, gatewayOrigin: "http://127.0.0.1:9" });
-    return { start: async () => { f.starts++; }, send: async (text, settings) => { calls.push({ text, settings }); await f.gate?.promise; return { text: "Native fixture response", nativeSettings: /^\/(?:config|update-config)(?:\s|$)/.test(text) ? { model: "sonnet", mode: "plan" } : undefined }; }, stop: async () => f.gate?.resolve() };
+    return { start: async () => { f.starts++; }, send: async (text, settings) => { calls.push({ text, settings }); await f.gate?.promise; return { text: "Native fixture response", nativeSettings: /^\/(?:config|update-config|doctor|checkup)(?:\s|$)/.test(text) ? { model: "sonnet", mode: "plan" } : undefined }; }, stop: async () => f.gate?.resolve() };
   } });
   t.after(() => manager.shutdown());
   const chat = await manager.createChat({ agent: "claude", title: "Private configuration test" });
@@ -301,6 +348,36 @@ test("fewer-permission-prompts cannot read shared-host history or change its all
   await assert.rejects(adapter.send("/fewer-permission-prompts"), /shared host profile/);
   assert.equal(adapter.child, null); assert.equal(f.starts, 0); assert.equal(f.calls.length, 0);
   assert.equal(f.store.get(f.chat.id).messages.length, 0); assert.deepEqual(f.store.get(f.chat.id).queuedMessages || [], []);
+});
+
+test("doctor and its alias reject shared-host access before every input path, startup and saved queue", async t => {
+  const f = await fixture(t, { fake: true, host: true });
+  const adapter = new ClaudeAdapter({ chat: f.chat, store: f.store, config: f.config, broker: f.broker, hooks: {} });
+  for (const name of ["doctor", "checkup"]) for (const suffix of ["", " --help", " Diagnose only"]) {
+    const text = `/${name}${suffix}`;
+    for (const method of ["submit", "enqueue", "send"]) await assert.rejects(f.manager[method](f.chat.id, text, ["reference-file"]), /shared host profile/);
+    await assert.rejects(adapter.send(text), /shared host profile/);
+  }
+  assert.equal(adapter.child, null); assert.equal(f.starts, 0); assert.equal(f.calls.length, 0);
+  assert.equal(f.store.get(f.chat.id).messages.length, 0); assert.deepEqual(f.store.get(f.chat.id).queuedMessages || [], []);
+});
+
+test("doctor aliases keep literal FIFO input and readback, without overwriting newer choices or another owner", async t => {
+  for (const name of ["doctor", "checkup"]) {
+    const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+    const running = f.manager.send(f.chat.id, "Current task"); await waitFor(() => f.calls.length === 1);
+    const text = `/${name} Inspect my private profile.\nPreserve ação.`;
+    await f.manager.enqueue(f.chat.id, text); await f.manager.enqueue(f.chat.id, "Continue afterwards");
+    f.gate.resolve(); await running; await waitFor(() => f.calls.length === 3 && !f.manager.isBusy(f.chat.id));
+    assert.equal(f.calls[1].text, text); assert.equal(f.calls[2].settings.model, "sonnet"); assert.equal(f.calls[2].settings.mode, "plan");
+    f.gate = Promise.withResolvers(); const next = f.manager.send(f.chat.id, text); await waitFor(() => f.calls.length === 4);
+    await f.manager.setModel(f.chat.id, { model: "haiku", effort: "auto" }); await f.manager.setMode(f.chat.id, "default");
+    f.gate.resolve(); await next;
+    assert.equal(f.store.get(f.chat.id).model, "haiku"); assert.equal(f.store.get(f.chat.id).mode, "default");
+    f.gate = Promise.withResolvers(); const stale = f.manager.send(f.chat.id, text); await waitFor(() => f.calls.length === 5);
+    await f.store.update(f.chat.id, { ownerId: "different-owner" }); f.gate.resolve(); await stale;
+    assert.equal(f.store.get(f.chat.id).model, "haiku"); assert.equal(f.store.get(f.chat.id).mode, "default");
+  }
 });
 
 test("private allowlist prompts preserve FIFO, literal arguments and the selected model/mode", async t => {

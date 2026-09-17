@@ -101,6 +101,7 @@ export class ClaudeAdapter {
     const version = this.sendVersion;
     const configuration = claudeConfigRequest(text);
     const settingsPrompt = configuration?.kind === "prompt";
+    const diagnostic = configuration?.diagnostic === true;
     const fastRequest = claudeFastRequest(text);
     const mcpRequest = claudeMcpRequest(text);
     const pluginReload = claudePluginReloadRequest(text);
@@ -206,18 +207,19 @@ export class ClaudeAdapter {
     const inspect = async (filename = "settings.json") => {
       const controller = new AbortController(); this.settingsInspection = controller;
       try {
-        const value = await inspectClaudeSettings({ runtimeHome: this.runtimeHome, executor: this.executor, isolation: this.config.processIsolation, signal: controller.signal, filename });
+        const value = await inspectClaudeSettings({ runtimeHome: this.runtimeHome, executor: this.executor, isolation: this.config.processIsolation, signal: controller.signal, filename, pathOnly: diagnostic });
         if (version !== this.sendVersion) throw new Error("Interrupted");
         return value;
       } catch { throw new Error("Cannot safely verify this chat's private Claude settings. The command queue is paused; check the private profile before retrying."); }
       finally { if (this.settingsInspection === controller) this.settingsInspection = null; }
     };
     const beforeSettings = configuration?.mutate ? await inspect() : null;
+    if (diagnostic) await inspect(".claude.json");
     let beforeNativeSettings;
     const inspectNative = async session => {
       const controller = new AbortController(); this.settingsInspection = controller;
       try {
-        const value = await inspectNativeClaudeSettings(session.control, controller.signal);
+        const value = await inspectNativeClaudeSettings(session.control, controller.signal, { diagnostic });
         if (version !== this.sendVersion) throw Error("Interrupted");
         this.assertCapability();
         return value;
@@ -511,7 +513,16 @@ export class ClaudeAdapter {
         // restart it or substitute a controller-side approximation of policy.
         let afterNativeSettings, settingsError;
         if (beforeNativeSettings && version === this.sendVersion) {
-          try { await inspect(); afterNativeSettings = await inspectNative(managed); }
+          try {
+            await inspect(); if (diagnostic) await inspect(".claude.json");
+            afterNativeSettings = await inspectNative(managed);
+            if (afterNativeSettings.hasErrors) {
+              if (!beforeNativeSettings.hasErrors || beforeNativeSettings.model !== afterNativeSettings.model || beforeNativeSettings.permissionMode !== afterNativeSettings.permissionMode) {
+                throw Error("Cannot safely verify settings after the native diagnostic. The command queue is paused; check the private configuration before retrying.");
+              }
+              this.hooks.onEvent?.({ type: "notice", text: "Claude's existing configuration errors are still present. No model or permission-mode changes were synchronized. Review the diagnostic before requesting a repair." });
+            }
+          }
           catch (error) { settingsError = error; }
         }
         if (managed && managed !== this.applicationSession) await managed.stop();

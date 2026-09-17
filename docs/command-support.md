@@ -52,6 +52,7 @@ and remain at the beginning of native stream-json input.
 | `/batch` (Claude) | Native plan approval/refusal, foreground research, five background worktrees and their separate reports. Actual local edits, tests, CLI effects, FIFO, Send now and Stop/resume are verified with authored inference. Running HTTP apps/PIDs/data survive until explicit Stop. Native launch errors remain visible for agent-driven recovery; Relay does not replay tools. Remote commits/PR publication and account/company/live gates remain unverified. |
 | `/config key=value`, `/settings key=value` (Claude) | Native private-profile settings, with verified model/mode readback into Relay and subsequent-turn/Stop persistence. Partial native results remain visible; newer web selections win over late readback. Shared host mutations stay locked on item 21. Attachments are rejected before accepting/queueing the command. |
 | `/fewer-permission-prompts` (Claude) | Private native history review, exact project-rule merge and explicit web workspace-trust setup verified, including actual enforcement, denial, retained apps and Stop/resume. Chat actions → Workspace trust requires an exact-path review and separate confirmation. Shared-host profiles and broader/linked trust roots remain locked. |
+| `/doctor`, `/checkup` (Claude) | Private diagnostic integration verified: actual native expansion, broken-JSON diagnosis without implicit repair, local memory deduplication and separate consent for an exact project-local read rule. Native readback, refusal/skip, retained apps and Stop/resume pass. Shared-host profiles remain locked; broader check coverage and installation/account effects remain unverified below. |
 | `/autocompact [auto/tokens]` (Claude) | Native current-window inspection, private-profile threshold persistence and reset. Actual automatic summary/compact-boundary and same-session Stop/resume verified; disabled state and native environment precedence retained. Shared host mutation and linked files fail closed; attached input is rejected before sending/queueing. Live activation pending. |
 | `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. Installed-CLI acceptance verifies effort changes inside a retained application session and explicit worker-environment precedence. |
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
@@ -111,13 +112,18 @@ Do not treat removing entries from autocomplete as implementing them.
   added only in newer documentation.
 
 - The fresh installed **2.1.222** SDK catalog also advertises these entries
-  without effect-level evidence in this ledger: `/doctor`, `/claude-api`,
+  without effect-level evidence in this ledger: `/claude-api`,
   `/agents`, `/color`, `/heapdump`,
   `/workflow-launch-exec`, `/security-review`, `/insights`, `/recap`, `/design`,
   `/design-consent`, `/design-revoke` and `/team-onboarding`. Next classify their
   installed behavior and verify/implement each applicable action, starting with
   the first entries. This is explicit inventory within item 20, not new feature
   requests or an increased queue count. Discovery is not effect acceptance.
+
+- `/doctor` and alias `/checkup` now have private diagnostic/cleanup/permission
+  evidence below. Other native doctor check categories remain unverified;
+  partial private coverage does not close item 20 or authorize host installation
+  changes. Continue this acceptance before starting the next native command.
 
 - `/debug` private capture/reproduction and `/dataviz` resource/tool integration
   are accepted below. `/design-sync` has
@@ -126,6 +132,65 @@ Do not treat removing entries from autocomplete as implementing them.
   precedence and retained-owner integration are accepted below. Shared-host
   account/company isolation and live activation remain external gates; they
   are not enabled by these private fixture results.
+
+### Claude private doctor and checkup integration
+
+Installed **2.1.222** expands `/doctor` (alias `/checkup`) as a mutating bundled
+prompt, including bare/help invocations. It is not the narrower `claude doctor`
+terminal command. Relay now classifies both as private settings prompts before
+startup, saved input or queue admission. Arguments and attached reference files
+stay literal; free-form text is never parsed as a configuration assignment.
+
+Diagnostic preflight still verifies bounded, regular, unlinked private files
+and the owning worker/profile, but does not reject malformed JSON before the
+native diagnostic can examine it. This path returns a file-safety attestation,
+not guessed settings. Native SDK before/after snapshots retain only model,
+permission mode and an error-present flag; raw errors/settings never reach the
+UI. Existing parse errors with unchanged effective selectors can be reported
+without an implicit repair or selector change. New errors or changed unverified
+selectors pause the queue. Other configuration commands remain strict.
+Readback, newer UI choices, owner changes and retained-app lifetime reuse the
+existing settings guards. Neither cleanup consent nor a saved rule grants
+workspace trust or disables native permissions.
+
+`node scripts/smoke-real-claude-doctor.mjs` uses the actual installed prompt,
+SDK, tool engine and questions in a loopback-only namespace with temporary
+profiles and authored model replies. Confirmed cases:
+
+- `--broken-user`: **11** replies; malformed user JSON is diagnosed, not repaired.
+- `--application`: **13** replies; confirmed local memory deduplication and a
+  separately approved exact local read rule take effect; app/PID/data survive.
+- `--alias --deny-permissions`: **9** replies; `/checkup` cleanup is allowed,
+  permissions stay unchanged, and the attempted read still requires approval.
+- `--broken-project --deny-cleanup`: **9** replies; invalid project JSON is
+  diagnosed; declining cleanup does not decline separately approved permissions.
+- `--skip`: **7** replies; neither unanswered question grants a write.
+- `--application --stop-cleanup`: **5** replies; Stop at the cleanup question
+  leaves both files untouched, rejects a late answer, keeps other queued input
+  paused and terminates only at the explicit Stop. The journal still resumes.
+
+All cases preserve unrelated settings/safety instructions/chat and resume the
+same journal after Stop. Completed diagnostics verify actual permission
+enforcement; cancellation verifies that no proposed write took place. Nine new
+unit/controller/transport checks cover classification, worker-side file safety,
+parse-error handling, verified repair readback, FIFO, stale ownership and newer
+choices. Two desktop/mobile browser cases keep drafts/files through refusal,
+queue both names literally and require distinct, unselected question answers.
+Syntax/unit checks pass **581/581**; Claude command browser checks **48/48**.
+An intervening full-suite repeat was **580/581**: the Chrome connection fixture
+timed out because its username field was not visible. The unchanged isolated
+Chrome test then passed **1/1**; its intermittent cause is not established or
+claimed fixed by this diagnostic work. A final full run passed **581/581** with
+unchanged assertions. Chromium's sandbox was not disabled.
+The retained-project `/update-config` regression also passes with **7** authored
+replies, preserving model/mode/environment effects and the running application.
+
+These fixtures establish selected effects, not autonomous diagnosis quality or
+all ten native checks. Installation repair/uninstall/update, extension cleanup,
+checked-in instruction migration, hook/context/history analysis and a native
+auto-default grant still lack doctor-specific effect acceptance. Do not alter
+the user's installation/account to test them. Shared-host company isolation and
+live activation remain separate gates. No live service/profile was changed.
 
 ### Claude explicit private workspace-trust consent
 
