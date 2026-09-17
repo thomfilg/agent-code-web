@@ -19,6 +19,7 @@ and remain at the beginning of native stream-json input.
 | `/plan [task]` | Native Plan collaboration/read-only mode; busy requests queue. Unit and browser checks pass. |
 | `/compact` | Native compaction, FIFO while busy, wakes stopped worker. Real Codex/Claude adapters tested with local API fixtures. |
 | `/review [--base branch / --commit SHA / instructions]` | Native `review/start`, not an ordinary prompt. Tracks both inner execution and outer completion IDs. Real adapter completion and interruption pass. |
+| `/code-review [level] [--fix] [target]` (Claude) | Native bundled review with actual diff/read/findings and explicit file-fix verification. Findings survive Stop/resume; Plan blocks edits. SDK interruption checkpoints the first review for Stop and Send now; flags, targets, FIFO, drafts and remaining queued inputs are retained. GitHub `--comment` and live activation are not covered by this acceptance. |
 | `/side [question]`, `/btw [question]` | Native ephemeral Codex fork on the same worker, separate third-column transcript/questions, scoped attachments and independent stop. Parent context/goal/turn are retained; no copied chat folder or injected main messages. Real installed CLI verified concurrent turns, inherited context, active-goal isolation, cancellation and parent survival. Controller/browser checks pass; live backend activation pending. |
 | `/fork [title]` (Codex) | Independent chat, workspace, native history and attachment records. Same company/environment/settings, without queued inputs, approval state or browser grants. Active-source and nested-fork native tests pass; goals remain paused until explicit input. Empty chats need no fabricated native turn. Controller and browser retry/draft/navigation checks pass; live activation pending. Workspace portability limits are below. |
 | `/agent`, `/subagents` (Codex) | Native descendant picker, separate conversation/composer/approvals, direct replies or active-turn steering, and child-only interruption. Bounded history pages and controller-owned snapshots remain readable while asleep. Verified with the installed CLI using synthetic stored sessions and loopback responses, plus controller and desktop/mobile browser tests. Live activation pending. |
@@ -89,12 +90,66 @@ Do not treat removing entries from autocomplete as implementing them.
   Windows worker is introduced.
 - Claude acceptance below covers command transport, native local results,
   custom expansion, configuration readback, reload, Fast, goals, native MCP
-  actions and resume, not every command's effect. Next verify bundled workflows
-  and installed plugin namespaces. Account-backed commands and shared
+  actions, bundled `/code-review` and resume, not every command's effect.
+  Next verify other bundled workflows (`/run`, `/verify`, `/simplify`, `/loop`)
+  and installed plugin namespaces. `/code-review --comment`, account-backed
+  commands and shared
   host-profile writes also need the company-isolation gate in item 21. Do not
   infer support from a catalog entry or treat a native removal notice as a
   working replacement. Use the installed version's capabilities, not commands
   added only in newer documentation.
+
+### Claude bundled code review and interruption
+
+Installed Claude **2.1.222** expands `/code-review` into its native review
+instructions and tools. Its internal review query does not stream its tool
+events through the parent print output; the native instructions explicitly
+require findings in the final reply, which Relay saves and displays. Do not
+invent structured findings or treat a catalog entry/stock model reply as proof
+that a review read the diff or applied a fix.
+
+The real CLI reproduced a broken first-command resume: terminating an active
+review with SIGTERM left no journal for the already-persisted session ID.
+Review turns now use the native
+[streaming-input interruption contract](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode),
+send an SDK interrupt and allow bounded journal flushing before termination.
+The first ID stays provisional until the native result checkpoint. Graceful
+Stop and Send now retain that checkpoint even though the turn was cancelled;
+startup failures and forced termination without a checkpoint never retain a
+nonexistent first ID or automatically replay `--fix`. Existing session IDs are
+not cleared. Native mode/model/effort and permission enforcement are unchanged.
+
+`node scripts/smoke-real-claude-workflows.mjs` uses the installed CLI and real
+Relay adapter/gateway in a private network/PID namespace with only loopback.
+An authored model fixture operates on a disposable, committed CLI with a real
+addition-to-subtraction diff; it executes actual Git, Read and ReportFindings
+tools, and checks the resulting saved response and same-session continuation.
+No real inference, personal profile, GitHub mutation or external network:
+
+- Default: read-only review, final finding and resumed native context; five
+  loopback replies. `--empty`: empty native findings and no edits; five replies.
+- `--fix`: actual native Edit, actual CLI invocation returning `total: 5`, saved
+  fix summary and resume; seven replies. `--fix --plan`: native edit refusal,
+  unchanged file and resume; six replies.
+- `--interrupt` and `--send-now`: stop during the actual first review query,
+  retain other queued input, resume the same native UUID with its review
+  context, and leave the source unchanged; three requests each.
+
+Four adapter tests cover literal input/settings, first checkpoint, SDK Stop,
+spawn failure, refused/unresponsive control fallback, retained capabilities and
+existing sessions. One controller test covers FIFO and error queue pausing;
+three browser additions cover discovery, multiline flags, busy queueing, saved
+findings and failed-send draft/file retention at desktop and 320px. Normal unit
+suite: **436/436**; Claude command browser suite: **20/20**.
+
+Exploratory fixture corrections were not product fixes: native API histories
+may end in a system reminder rather than the latest tool result; `--fix` keeps
+editing inside the review turn, not a fabricated second apply phase; empty
+ReportFindings returns `No findings reported.`. Assertions still verify actual
+tools/files and native context. This proves integration, not model review
+quality. GitHub `--comment`, other bundled workflows (including scheduled-task
+persistence), installed plugin namespaces and prior company/account/live gates
+remain open. Keep item 20 active; no merge/deploy/live-data changes.
 
 ### Claude native MCP controls and persistence
 

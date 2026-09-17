@@ -62,6 +62,20 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: bundled Claude `/code-review` now has effect-level acceptance and a fix
+  for first-command Stop/resume losing its native journal. Review turns use SDK
+  interruption with bounded flushing; provisional IDs prevent broken resumes
+  after startup/forced-stop failures, without replaying `--fix`. Installed CLI
+  verifies actual diff/read/findings, explicit file edits and CLI output, Plan
+  refusal, empty findings, saved final answers, Stop and Send now. Six isolated
+  variants use five/five/seven/six/three/three local requests; no real inference,
+  external network, personal profile or GitHub mutation. Four adapter plus one
+  FIFO/error test and three responsive browser additions; normal suite
+  **436/436**, Claude command browser suite **20/20**. Fixture corrections are
+  documented separately from the reproduced product defect. Next safe item-20
+  work: other bundled workflows and installed plugin namespaces; `--comment`,
+  host/account/company and live activation gates remain explicit. Original
+  order/count unchanged; save to PR #2 without merge/deploy/live-data changes.
 - 20: fixed installed Claude's print-mode `/mcp` mutation handlers returning
   terminal-only placeholders. Native SDK reconnect/toggle now verify actual
   status and private-profile persistence; literal single/all commands use FIFO.

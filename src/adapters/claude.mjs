@@ -46,6 +46,9 @@ export class ClaudeAdapter {
     const configuration = claudeConfigRequest(text);
     const fastRequest = claudeFastRequest(text);
     const mcpRequest = claudeMcpRequest(text);
+    // The native review handler checkpoints its journal only when it returns.
+    // Keep its SDK input open so Stop can cancel the query and let it flush.
+    const reviewRequest = /^\/code-review(?:\s|$)/.test(text.trimStart());
     if (mcpRequest?.action && this.config.claude.authMode !== "gateway") throw new Error(CLAUDE_MCP_PRIVATE_ERROR);
     if (fastRequest && this.config.claude.authMode !== "gateway") throw new Error("Fast changes require a private Claude profile; shared host profiles remain locked until company/profile isolation is complete.");
     if (configuration?.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
@@ -86,9 +89,10 @@ export class ClaudeAdapter {
 
     const isNew = !this.sessionId;
     const sessionId = this.sessionId || randomUUID();
-    // Control-only initialization does not yet create a resumable journal.
-    // Keep its ID provisional through private-file preflight and spawn too.
-    if (isNew && !mcpRequest?.action) {
+    // These native handlers create a resumable journal only on completion.
+    // Preflight, startup and forced-stop failures must not retain a missing ID.
+    const provisionalSession = isNew && (mcpRequest?.action || reviewRequest);
+    if (isNew && !provisionalSession) {
       this.sessionId = sessionId;
       await this.hooks.onSessionId?.(sessionId);
     }
@@ -142,7 +146,7 @@ export class ClaudeAdapter {
       "--print",
       "--verbose",
       "--output-format", "stream-json",
-      ...(mcpRequest?.action ? ["--input-format", "stream-json"] : []),
+      ...(mcpRequest?.action || reviewRequest ? ["--input-format", "stream-json"] : []),
       "--include-partial-messages",
       "--permission-mode", nativeMode,
       "--prompt-suggestions", "false",
@@ -186,10 +190,24 @@ export class ClaudeAdapter {
           stdio: ["pipe", "pipe", "pipe"],
         }); } catch (error) { finishObservation(); throw error; }
     this.child = child;
-    if (mcpRequest?.action && isNew) this.sessionId = sessionId;
+    if (provisionalSession) this.sessionId = sessionId;
     const mcpControl = mcpRequest?.action ? new ClaudeControlChannel(child) : null;
+    const reviewControl = reviewRequest ? new ClaudeControlChannel(child, 2000) : null;
+    if (reviewControl) {
+      this.reviewInterruption = async () => {
+        let timer, onClose;
+        const closed = new Promise(resolve => { onClose = resolve; child.once("close", onClose); });
+        try {
+          await reviewControl.request("interrupt");
+          child.stdin.end();
+          await Promise.race([closed, new Promise(resolve => { timer = setTimeout(resolve, 2000); })]);
+        } catch { /* Native startup/transport failure still falls back to termination. */ }
+        finally { clearTimeout(timer); child.removeListener("close", onClose); }
+      };
+      child.stdin.write(`${JSON.stringify({ type: "user", message: { role: "user", content: text } })}\n`);
+    }
     let mcpOutcome = null, mcpError = null;
-    if (!mcpControl) child.stdin.end(fastRequest ? "/fast on" : text);
+    if (!mcpControl && !reviewControl) child.stdin.end(fastRequest ? "/fast on" : text);
 
     const output = new ClaudeTextStream(delta => this.hooks.onEvent?.({ type: "assistant_delta", delta }));
     let resultMessage = null;
@@ -211,6 +229,7 @@ export class ClaudeAdapter {
       let event;
       try { event = JSON.parse(line); } catch { return; }
       mcpControl?.accept(event);
+      reviewControl?.accept(event);
       if (!mcpControl) output.accept(event);
       if (event.type === "system" && event.subtype === "notification" && ["fast-mode-overage-rejected", "fast-mode-org-changed", "fast-mode-cooldown-started", "fast-mode-cooldown-expired", "stop-hook-error"].includes(event.key) && typeof event.text === "string" && !notifications.has(event.key)) {
         notifications.add(event.key);
@@ -250,6 +269,7 @@ export class ClaudeAdapter {
         }
       } else if (event.type === "result") {
         resultMessage = event;
+        if (reviewControl) child.stdin.end();
         nativeFast = claudeFastState(event);
         this.hooks.onEvent?.({ type: "usage", usage: claudeUsage(event, lastRequest, sampleId) });
         for (const itemId of activeTools.keys()) completeTool(itemId, "", false, true);
@@ -264,7 +284,8 @@ export class ClaudeAdapter {
       let spawnFailed = false;
       child.once("error", (error) => {
         spawnFailed = true;
-        if (mcpControl && isNew) this.sessionId = null;
+        if (provisionalSession) this.sessionId = null;
+        if (reviewControl) this.reviewInterruption = null;
         finishObservation();
         if (this.child === child) this.child = null;
         reject(error);
@@ -273,11 +294,17 @@ export class ClaudeAdapter {
         finishObservation();
         if (spawnFailed) return;
         mcpControl?.close();
+        reviewControl?.close();
+        if (reviewControl) this.reviewInterruption = null;
         if (this.child === child) this.child = null;
         const checkpointed = resultMessage?.subtype === "success" && resultMessage.is_error !== true;
-        if (mcpControl && isNew && (!checkpointed || version !== this.sendVersion)) this.sessionId = null;
+        if (provisionalSession) {
+          // Graceful review cancellation still returns and saves its journal.
+          // Preserve that checkpoint even though the running turn was stopped.
+          this.sessionId = checkpointed && (reviewControl || version === this.sendVersion) ? sessionId : null;
+          if (this.sessionId) await this.hooks.onSessionId?.(this.sessionId);
+        }
         if (version !== this.sendVersion) throw new Error("Claude turn interrupted");
-        if (mcpControl && isNew && checkpointed) await this.hooks.onSessionId?.(this.sessionId);
         if (mcpError) throw mcpError;
         if (mcpControl && (!mcpOutcome || !checkpointed)) throw new Error("Claude MCP control stopped before verification");
         if (mcpOutcome) {
@@ -327,6 +354,7 @@ export class ClaudeAdapter {
     // Claude print mode is one child per turn. Keep its resume ID, capability,
     // worker lease and browser; only terminate this turn's CLI process.
     const child = this.child;
+    await this.reviewInterruption?.();
     if (child) await terminateWorker(child);
   }
 
@@ -338,6 +366,7 @@ export class ClaudeAdapter {
     this.stopped = true;
     const child = this.child;
     this.child = null;
+    await this.reviewInterruption?.();
     if (child) await terminateWorker(child);
     this.broker.revokeChat(this.chat.id);
     this.capability = "";

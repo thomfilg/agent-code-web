@@ -88,3 +88,19 @@ test("Claude goals and native clear aliases keep their literal arguments and FIF
   assert(!f.store.get(f.chat.id).messages.some(message => message.kind === "error"));
   assert.equal(f.store.get(f.chat.id).goal, undefined, "Do not invent Codex goal state from a Claude command/prose response");
 });
+
+test("bundled reviews preserve flags and multiline targets in FIFO and pause on failure without consuming later input", async t => {
+  const f = await fixture(t); f.gate = Promise.withResolvers();
+  const running = f.manager.send(f.chat.id, "/code-review high total.mjs"); await waitFor(() => f.inputs.length === 1);
+  const next = "/code-review max --fix src/ação.mjs\nKeep the public API", retained = "/code-review low total.mjs";
+  await f.manager.enqueue(f.chat.id, next); await f.manager.enqueue(f.chat.id, retained);
+  f.gate.resolve(); await running;
+  await waitFor(() => !f.manager.isBusy(f.chat.id) && !f.store.get(f.chat.id).queuedMessages.length);
+  assert.deepEqual(f.inputs.map(input => input.text), ["/code-review high total.mjs", next, retained]);
+  f.gate = Promise.withResolvers();
+  const failing = f.manager.send(f.chat.id, next); await waitFor(() => f.inputs.length === 4);
+  await f.manager.enqueue(f.chat.id, retained); f.error = "Native review failed"; f.gate.resolve(); await failing;
+  assert.equal(f.store.get(f.chat.id).queuePaused, true);
+  assert.deepEqual(f.store.get(f.chat.id).queuedMessages.map(item => item.text), [retained]);
+  assert.equal(f.inputs.length, 4); assert.equal(f.store.get(f.chat.id).messages.at(-1).text, f.error);
+});

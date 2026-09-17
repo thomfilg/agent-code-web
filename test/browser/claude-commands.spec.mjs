@@ -32,6 +32,40 @@ test("native skill reload refreshes an open slash menu immediately without chang
   expect(f.reads).toBe(2); expect(f.calls).toHaveLength(1); expect(f.errors).toEqual([]);
 });
 
+for (const width of [1280, 320]) test(`bundled review discovery at ${width}px retains flags and multiline targets for immediate and queued input`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input");
+  f.catalog = [{ name: "code-review", description: "Review code for bugs", argumentHint: "[low|medium|high|xhigh|max] [--fix] [<target>]" }]; await f.emit();
+  await input.fill("/code-r"); await expect(page.locator("#slash-options")).toContainText("/code-review");
+  await page.locator("#slash-options [role=option]").click(); await expect(input).toHaveValue("/code-review "); expect(f.calls).toEqual([]);
+  for (const [index, text] of ["/code-review high total.mjs", "/code-review max --fix src/ação.mjs\nKeep the public API"].entries()) {
+    await input.fill(text); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+    await expect.poll(() => f.calls.length).toBe(index + 1);
+    expect(f.calls.at(-1)).toEqual({ tail: index ? "queue" : "messages", text, attachments: [] });
+    f.snapshot.status = "running"; await f.emit();
+  }
+  expect(f.errors).toEqual([]);
+});
+
+test("review findings stay readable after stop, and a rejected send keeps the command and file for retry", async ({ page }) => {
+  const f = await fixture(page), input = page.locator("#message-input");
+  await page.locator("#attachment-input").setInputFiles({ name: "review-context.txt", mimeType: "text/plain", buffer: Buffer.from("Unsent review context") });
+  await expect(page.locator("#attachment-chips")).toContainText("review-context.txt");
+  const command = "/code-review high --fix total.mjs";
+  await input.fill(command); await input.press("Escape");
+  f.responseStatus = 503; f.responseError = "Native review worker unavailable";
+  await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect(page.locator("#toasts")).toContainText(f.responseError);
+  await expect(input).toHaveValue(command); await expect(page.locator("#attachment-chips")).toContainText("review-context.txt");
+  f.snapshot.status = "stopped";
+  f.snapshot.messages = [{ id: "msg_review_findings", role: "assistant", kind: "message", agent: "claude", text: "total.mjs:2 — The CLI subtracts instead of adding.\n\nRunning node total.mjs 2 3 prints -1 instead of 5." }];
+  await f.emit();
+  await expect(page.locator(".message-body")).toContainText("total.mjs:2 — The CLI subtracts instead of adding.");
+  await expect(page.locator(".message-body")).toContainText("prints -1 instead of 5");
+  await expect(input).toHaveValue(command); await expect(page.locator("#attachment-chips")).toContainText("review-context.txt");
+  expect(f.calls).toHaveLength(1); expect(f.errors).toEqual([]);
+});
+
 for (const width of [1280, 320]) test(`Claude MCP controls at ${width}px preserve manager/status dialogs and queue native actions`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page), input = page.locator("#message-input");
