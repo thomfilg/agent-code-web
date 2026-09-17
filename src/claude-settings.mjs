@@ -48,6 +48,38 @@ export function claudeSettingsChanges(before, after, request) {
   return result;
 }
 
+// SDK get_settings performs the native user/project/local/flag/policy merge.
+// Keep only the two picker fields; raw source settings can contain credentials,
+// hooks and environment variables and must never reach events or persistence.
+export function claudeSettingsSnapshot(snapshot) {
+  const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+  if (!object(snapshot) || !object(snapshot.effective) || !Array.isArray(snapshot.sources)
+    || snapshot.sources.length > 5 || snapshot.sources.some(source => !object(source) || !object(source.settings)
+      || !["userSettings", "projectSettings", "localSettings", "flagSettings", "policySettings"].includes(source.source))
+    || new Set(snapshot.sources.map(source => source.source)).size !== snapshot.sources.length
+    || snapshot.errors !== undefined && (!Array.isArray(snapshot.errors) || snapshot.errors.length)) throw Error("Cannot verify native Claude settings");
+  const { effective } = snapshot;
+  if (effective.permissions !== undefined && !object(effective.permissions)) throw Error("Cannot verify native Claude settings");
+  const model = effective.model ?? "default", permissionMode = effective.permissions?.defaultMode ?? "default";
+  if (typeof model !== "string" || model.length > 150 || !/^[\w.\[\]-]+$/.test(model)
+    || typeof permissionMode !== "string" || !Object.hasOwn(CLAUDE_PERMISSION_MODES, permissionMode)) throw Error("Cannot verify native Claude settings");
+  return { model, permissionMode };
+}
+
+export async function inspectNativeClaudeSettings(control, signal) {
+  signal?.throwIfAborted();
+  let abort;
+  try {
+    const pending = control.request("get_settings");
+    const snapshot = signal ? await Promise.race([pending, new Promise((_, reject) => {
+      abort = () => reject(Error("Native settings inspection interrupted"));
+      signal.addEventListener("abort", abort, { once: true }); if (signal.aborted) abort();
+    })]) : await pending;
+    signal?.throwIfAborted();
+    return claudeSettingsSnapshot(snapshot);
+  } finally { if (abort) signal.removeEventListener("abort", abort); }
+}
+
 // Serializable worker-side reader. It returns two non-secret fields only,
 // never raw settings, permissions rules, hooks, environment or credentials.
 export async function readPrivateClaudeSettings(runtimeHome, filename = "settings.json") {

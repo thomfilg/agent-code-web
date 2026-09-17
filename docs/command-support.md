@@ -119,10 +119,50 @@ Do not treat removing entries from autocomplete as implementing them.
 
 - `/dataviz` resource/tool integration is accepted below. `/design-sync` has
   only private unauthenticated refusal acceptance: upload/account authorization
-  remains an item-21 gate. `/update-config` private user-profile changes are
-  accepted below; finish project/local settings precedence and retained-owner
-  verification before considering the command complete or starting a new
-  feature.
+  remains an item-21 gate. `/update-config` private user/project/local settings,
+  precedence and retained-owner integration are accepted below. Shared-host
+  account/company isolation and live activation remain external gates; they
+  are not enabled by these private fixture results.
+
+### Claude effective settings merge checkpoint
+
+The project and local variants of `/update-config` reproduced the same stale
+picker defect: the native Write succeeded, but a user-file-only readback missed
+the changed settings. Settings prompts now query the owning SDK's actual
+`get_settings` merge before and after execution. Relay does not reimplement
+user/project/local/flag/policy priority or substitute its own policy values.
+Only the validated effective model/default mode leave the inspector; raw source
+settings, environment, hooks and credentials are never published or persisted.
+
+The reply's native owner stays alive until readback finishes. A retained HTTP
+application is not restarted, and failed, malformed, unsupported or cancelled
+inspection cannot claim success or publish late values. Even a noninteractive
+first settings command waits for successful inspection before advertising a
+native session ID. Private-file path checks and native approvals still apply.
+
+The extended `smoke-real-claude-bundled.mjs` uses installed **2.1.222** and
+disposable loopback-only profiles, with authored model replies/picker fixtures:
+
+- `--update-config --project` and `--update-config --local`: actual scoped
+  Write, native merged model/mode readback, unchanged user file and subsequent
+  native model/env effects (**5** main replies each).
+- `--update-config --shadowed` and the same with `--project`: higher-priority
+  local settings win over a lower-scope write, including the next native model
+  and actual environment value (**5** each).
+- `--update-config --resume` and `--update-config --local --deny`: saved native
+  history, real unchanged settings on denial and subsequent turns (**5** each).
+- `--update-config --application --project`, `--application --local`,
+  `--application --local --resume` and `--application --deny`: real HTTP app,
+  PID and data survive configuration/denial until explicit Stop (**7** each).
+
+Six new unit/session cases cover effective snapshots, private-data filtering,
+abort/late responses, one-shot/retained owners, failed first inspection and
+failed post-write verification. The protocol fixture explicitly waits for the
+native lifecycle-start receipt before emitting its result; an earlier fixture
+race was not a native-product failure. Syntax/unit **540/540**, browser **67/67**
+and native first-app Send now (**8** authored requests) pass. This closes the
+private project/local and retained-owner checks carried from the previous
+checkpoint, not item 20's remaining commands or the full feature queue.
 
 ### Claude bundled resources and settings skill checkpoint
 
@@ -163,9 +203,10 @@ Four unit/controller additions cover prompt classification, shared-host guards,
 FIFO, newer selections and late-publication protection. Two responsive browser
 cases cover literal discovery/submission, attachments, failed-save retry,
 queueing, updated selectors and visible authorization guidance. Syntax/unit
-**534/534** and browser **67/67** pass. Project/local configuration precedence,
-retained-owner reload, remaining commands and account/company/live activation
-gates remain open; the overall queue is not complete.
+**534/534** and browser **67/67** pass. At this checkpoint, project/local
+configuration precedence and retained-owner reload remained open; the effective
+settings checkpoint above closes those private integration checks. Remaining
+commands and account/company/live activation gates are still open.
 
 ### Claude native research workflow checkpoint
 

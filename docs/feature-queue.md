@@ -68,6 +68,21 @@ feature or turn an external verification gate into a passing result.
 
 ## Verification ledger
 
+- 20: reproduced and fixed `/update-config` missing project/local configuration
+  changes. Native SDK `get_settings` now supplies the real effective merge
+  before/after the unchanged prompt; only model/default mode are returned,
+  without raw sources, credentials, env or hooks. Readback finishes before a
+  one-shot owner closes and does not restart retained applications. Refusal,
+  invalid configuration and cancellation fail visibly without late publication;
+  failed first inspection cannot advertise a nonexistent native journal.
+  Installed **2.1.222** verifies user/project/local writes, higher-priority local
+  overrides, denial, same-history Stop/resume and real app/PID/data preservation
+  (**5** main replies per ordinary variant, **7** with an application).
+  Six unit/session additions; syntax/unit **540/540**, browser **67/67**, native
+  app Send-now regression **8** requests. This closes the private configuration
+  scope/retained-owner checks from the previous checkpoint. Item 20's remaining
+  commands and account/company/live gates stay open; no later feature started,
+  no live service/profile/data changes. Commit/push to PR #2 before proceeding.
 - 20: reproduced `/update-config` saving a private native model while Relay
   kept the previous web selection. It now participates in guarded native
   settings readback, FIFO and newer-choice reconciliation without parsing

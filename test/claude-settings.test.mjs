@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import { mkdir, writeFile, readFile, symlink, link } from "node:fs/promises";
-import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings, readPrivateClaudeSettings, claudePermissionMode } from "../src/claude-settings.mjs";
+import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings, readPrivateClaudeSettings, claudePermissionMode, claudeSettingsSnapshot, inspectNativeClaudeSettings } from "../src/claude-settings.mjs";
 import { ClaudeAdapter } from "../src/adapters/claude.mjs";
 import { RuntimeManager } from "../src/runtime-manager.mjs";
 import { ChatStore } from "../src/store.mjs";
@@ -48,6 +48,33 @@ test("update-config is an unchanged native prompt, never inferred read-only or p
     assert.equal(messageCommand("codex", text), null);
   }
   for (const text of ["Explain /update-config", "/plugin:update-config model=sonnet", "/update-config-extra"]) assert.equal(claudeConfigRequest(text), null);
+});
+
+test("native settings inspection uses the effective merge and returns no private source data", () => {
+  const snapshot = { effective: { model: "haiku", permissions: { defaultMode: "plan" }, env: { SECRET: "never-return" } },
+    sources: [{ source: "userSettings", settings: { model: "opus" } }, { source: "localSettings", settings: { model: "sonnet" } },
+      { source: "policySettings", settings: { model: "haiku", hooks: { private: "never-return" } } }], applied: { model: "resolved-model" } };
+  assert.deepEqual(claudeSettingsSnapshot(snapshot), { model: "haiku", permissionMode: "plan" });
+  assert.deepEqual(claudeSettingsSnapshot({ effective: {}, sources: [] }), { model: "default", permissionMode: "default" });
+  assert.deepEqual(claudeSettingsSnapshot({ effective: { model: null, permissions: { defaultMode: null } }, sources: [] }), { model: "default", permissionMode: "default" });
+  for (const invalid of [null, {}, { ...snapshot, effective: [] }, { ...snapshot, sources: null },
+    { ...snapshot, sources: [{ source: "other-profile", settings: {} }] }, { ...snapshot, sources: [snapshot.sources[0], snapshot.sources[0]] },
+    { ...snapshot, errors: [{ message: "never-return", file: "private" }] }, { ...snapshot, errors: "private" },
+    { ...snapshot, effective: { model: "../../private" } }, { ...snapshot, effective: { permissions: [] } },
+    ...["bypassPermissions", "__proto__", { mode: "plan" }].map(defaultMode => ({ ...snapshot, effective: { permissions: { defaultMode } } }))]) {
+    assert.throws(() => claudeSettingsSnapshot(invalid), /Cannot verify native Claude settings/);
+  }
+});
+
+test("native settings controls are abortable and late responses cannot publish settings", async () => {
+  const deferred = Promise.withResolvers(), controller = new AbortController(), calls = [];
+  const control = { request: name => { calls.push(name); return deferred.promise; } };
+  const pending = inspectNativeClaudeSettings(control, controller.signal);
+  controller.abort(); await assert.rejects(pending, /interrupted/);
+  deferred.resolve({ effective: { model: "sonnet" }, sources: [] });
+  assert.deepEqual(calls, ["get_settings"]);
+  await assert.rejects(inspectNativeClaudeSettings(control, controller.signal)); assert.equal(calls.length, 1);
+  assert.deepEqual(await inspectNativeClaudeSettings(control), { model: "sonnet", permissionMode: "default" });
 });
 
 test("private settings reader exposes only model and default mode, locally and through the owning executor", async t => {

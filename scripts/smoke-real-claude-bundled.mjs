@@ -18,9 +18,13 @@ import { ModelCatalog } from "../src/models.mjs";
 // Only model replies/data are authored. No real accounts, network, uploads,
 // feature-flag overrides, live services or existing chats are used.
 const exec = promisify(execFile);
-for (const option of process.argv.slice(2)) assert(["--network-isolated", "--trace", "--design-sync", "--update-config", "--deny", "--resume"].includes(option));
+for (const option of process.argv.slice(2)) assert(["--network-isolated", "--trace", "--design-sync", "--update-config", "--deny", "--resume", "--project", "--local", "--application", "--shadowed"].includes(option));
 assert(!process.argv.includes("--design-sync") || !process.argv.includes("--deny") && !process.argv.includes("--resume"));
 assert(!process.argv.includes("--design-sync") || !process.argv.includes("--update-config"));
+assert(!process.argv.includes("--project") && !process.argv.includes("--local") || process.argv.includes("--update-config"));
+assert(!process.argv.includes("--project") || !process.argv.includes("--local"));
+assert(!process.argv.includes("--application") && !process.argv.includes("--shadowed") || process.argv.includes("--update-config"));
+assert(!process.argv.includes("--shadowed") || !process.argv.includes("--local"));
 if (!process.argv.includes("--network-isolated")) {
   const result = await exec("/usr/bin/unshare", ["--user", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", "--", process.execPath, process.argv[1], ...process.argv.slice(2), "--network-isolated"], { timeout: 90000, killSignal: "SIGKILL", maxBuffer: 30000 }).catch(error => {
     process.stdout.write(error.stdout || ""); process.stderr.write(error.stderr || error.message); process.exit(1);
@@ -33,10 +37,14 @@ if (!process.argv.includes("--network-isolated")) {
   const root = await mkdtemp("/tmp/relay-claude-bundled-"), requests = [], assetRoots = [], approvals = [];
   const trace = process.argv.includes("--trace"), design = process.argv.includes("--design-sync"), deny = process.argv.includes("--deny");
   const resume = process.argv.includes("--resume"), configuration = process.argv.includes("--update-config");
-  const question = configuration ? "Update only this private user's settings: use Sonnet and Plan mode, set RELAY_BUNDLED_FLAG=yes, and preserve the existing env entry.\nPreserve ação; no shared profiles." : "Use only authored fixture data: Ação 7, Beta 12, Gamma 5.\nKeep this second line; do not upload anything.";
+  const configScope = process.argv.includes("--local") ? "local" : process.argv.includes("--project") ? "project" : "user";
+  const application = process.argv.includes("--application"), shadowed = process.argv.includes("--shadowed");
+  const question = configuration ? `Update only this private ${configScope} settings file: use Sonnet and Plan mode, set RELAY_BUNDLED_FLAG=yes, and preserve the existing env entry.\nPreserve ação; no shared profiles.` : "Use only authored fixture data: Ação 7, Beta 12, Gamma 5.\nKeep this second line; do not upload anything.";
   const environmentCommand = "node -p 'JSON.stringify({keep:process.env.RELAY_BUNDLED_KEEP,flag:process.env.RELAY_BUNDLED_FLAG})'";
-  const initialSettings = { model: "opus[1m]", permissions: { defaultMode: "acceptEdits", allow: [`Bash(${environmentCommand})`] }, env: { RELAY_BUNDLED_KEEP: "ação" } };
+  const initialSettings = { model: "opus[1m]", permissions: { defaultMode: "acceptEdits", allow: [`Bash(${environmentCommand})`, ...(application ? ["Bash(node server.mjs)"] : [])] }, env: { RELAY_BUNDLED_KEEP: "ação" } };
   const updatedSettings = { ...initialSettings, model: "sonnet", permissions: { ...initialSettings.permissions, defaultMode: "plan" }, env: { ...initialSettings.env, RELAY_BUNDLED_FLAG: "yes" } };
+  const expectedModel = shadowed ? "haiku" : deny ? initialSettings.model : updatedSettings.model;
+  const expectedMode = shadowed || deny ? "accept_edits" : "plan";
   const chart = `<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Authored fixture chart</title>
@@ -52,7 +60,8 @@ body{margin:24px;background:var(--surface);color:var(--ink);font:16px system-ui}
 <rect x="80" y="110" width="175" height="30" fill="var(--c)"/><text x="0" y="132">Gamma</text><text x="265" y="132">5</text></svg>
 <table><caption>Exact fixture values</caption><thead><tr><th>Label</th><th>Value</th></tr></thead><tbody><tr><td>Ação</td><td>7</td></tr><tr><td>Beta</td><td>12</td></tr><tr><td>Gamma</td><td>5</td></tr></tbody></table></html>
 `;
-  let manager, store, gatewayServer, chat, failure, shutdown, titles = 0, step = 0, round = 0, assetRoot, expectedApproval, deferredDesign = false;
+  let manager, store, gatewayServer, chat, failure, shutdown, titles = 0, step = 0, round = 0, assetRoot, expectedApproval, deferredDesign = false, settingsFile;
+  let appStep = application ? 0 : null, appUrl, appState;
   const mainText = body => body.messages.flatMap(message => typeof message.content === "string" ? [message.content] : (message.content || []).map(block => block.text || "")).join("\n");
   const respond = async (request, response) => {
     if (request.url.includes("count_tokens")) { response.writeHead(200, { "content-type": "application/json" }); response.end('{"input_tokens":100}'); return; }
@@ -64,6 +73,7 @@ body{margin:24px;background:var(--surface);color:var(--ink);font:16px system-ui}
     if (!body.tools?.length && text.includes("Write the title in the predominant language")) { titles++; content = [{ type: "text", text: "Native bundled fixture" }]; }
     else {
       requests.push(body); assert(requests.length <= 24, "Unexpected native bundled inference loop");
+      const appTurn = appStep !== null;
       const results = body.messages.flatMap(message => Array.isArray(message.content) ? message.content : []).filter(block => block.type === "tool_result");
       const result = results.at(-1), check = pattern => { assert(result); assert(!result.is_error, JSON.stringify(result)); if (pattern) assert.match(JSON.stringify(result), pattern); };
       const tool = (name, input) => {
@@ -71,8 +81,12 @@ body{margin:24px;background:var(--surface);color:var(--ink);font:16px system-ui}
         return [{ type: "tool_use", id: `bundled_${requests.length}`, name, input }];
       };
       const done = text => [{ type: "text", text }];
-      if (configuration) {
-        const file = `${store.runtimeHome(chat.id)}/claude/settings.json`;
+      if (appStep === 0) {
+        assert.match(text, /Start the fixture HTTP application/);
+        content = tool("Bash", { command: "node server.mjs", description: "Start the disposable HTTP app", run_in_background: true }); appStep++;
+      } else if (appStep === 1) { check(); content = done("The fixture HTTP app is running."); appStep = null; }
+      else if (configuration) {
+        const file = settingsFile;
         if (step === 0) { assert(text.includes(question)); assert.match(text, /Full Settings JSON Schema/); content = tool("Read", { file_path: file }); }
         else if (step === 1) { check(/RELAY_BUNDLED_KEEP/); content = tool("Write", { file_path: file, content: `${JSON.stringify(updatedSettings, null, 2)}\n` }); }
         else if (step === 2) {
@@ -80,10 +94,10 @@ body{margin:24px;background:var(--surface);color:var(--ink);font:16px system-ui}
           content = done(deny ? "The settings write was denied; the private profile was not changed." : "The private settings were updated, preserving the existing environment entry.");
         } else if (step === 3) {
           assert.match(text, /Verify the next native model/);
-          assert.match(body.model, deny ? /opus/ : /sonnet/);
+          assert(body.model.includes(expectedModel.split("[")[0]), "The next native request must use the confirmed model");
           content = tool("Bash", { command: environmentCommand, description: "Read only this fixture's two harmless environment settings" });
         } else if (step === 4) {
-          check(/ação/); if (deny) assert.doesNotMatch(JSON.stringify(result), /yes/); else check(/yes/);
+          check(/ação/); if (shadowed) check(/higher/); else if (deny) assert.doesNotMatch(JSON.stringify(result), /yes/); else check(/yes/);
           content = done("The following native turn used the selected model and actual fixture environment settings.");
         } else throw Error(`Unexpected update-config step ${step}`);
       } else if (step === 0) {
@@ -119,7 +133,7 @@ body{margin:24px;background:var(--surface);color:var(--ink);font:16px system-ui}
         else if (step === 6) { check(); content = done(`Both native palette checks passed and the invalid palette was rejected. [Open the authored chart](chart-${round}.html).`); }
         else throw Error(`Unexpected dataviz step ${step}`);
       }
-      step++;
+      if (!appTurn) step++;
       if (trace) console.log("MODEL", JSON.stringify({ round, step, tool: content[0].name, result: result ? JSON.stringify(result).slice(0, 360) : undefined }));
     }
     const block = content[0], tool = block.type === "tool_use";
@@ -162,6 +176,13 @@ body{margin:24px;background:var(--surface);color:var(--ink);font:16px system-ui}
     if (configuration) {
       await mkdir(`${store.runtimeHome(chat.id)}/claude`, { recursive: true, mode: 0o700 });
       await writeFile(`${store.runtimeHome(chat.id)}/claude/settings.json`, JSON.stringify(initialSettings));
+      settingsFile = configScope === "user" ? `${store.runtimeHome(chat.id)}/claude/settings.json` : `${chat.workspace}/.claude/settings${configScope === "local" ? ".local" : ""}.json`;
+      if (configScope !== "user") { await mkdir(`${chat.workspace}/.claude`, { recursive: true, mode: 0o700 }); await writeFile(settingsFile, JSON.stringify(initialSettings)); }
+      if (shadowed) {
+        await mkdir(`${chat.workspace}/.claude`, { recursive: true, mode: 0o700 });
+        await writeFile(`${chat.workspace}/.claude/settings.local.json`, JSON.stringify({ model: "haiku", permissions: { defaultMode: "acceptEdits" }, env: { RELAY_BUNDLED_FLAG: "higher" } }));
+        await manager.setModel(chat.id, { model: "haiku", effort: "auto" });
+      }
     }
     const other = await manager.createChat({ agent: "claude", title: "Unrelated private fixture" });
     const submit = async text => {
@@ -177,7 +198,7 @@ body{margin:24px;background:var(--surface);color:var(--ink);font:16px system-ui}
             assert.deepEqual(JSON.parse(pending.command), { method: "list_projects", __consentBitShown: null, __consentAskCanReachUser: false }, "No design uploads, project creation or consent grants are allowed");
           } else if (configuration && expectedApproval?.name === "Write") {
             assert.deepEqual(JSON.parse(pending.command), expectedApproval.input);
-            assert.equal(expectedApproval.input.file_path, `${store.runtimeHome(chat.id)}/claude/settings.json`);
+            assert.equal(expectedApproval.input.file_path, settingsFile);
           } else {
             assert.equal(expectedApproval?.name, "Bash", "Only this fixture's exact native tool calls may be approved");
             assert.equal(JSON.parse(pending.command).command, expectedApproval.input.command);
@@ -191,19 +212,35 @@ body{margin:24px;background:var(--surface);color:var(--ink);font:16px system-ui}
       assert(finished, "The native bundled command did not settle"); await sending;
     };
     let session;
+    if (application) {
+      await writeFile(`${chat.workspace}/server.mjs`, "import http from 'node:http';import {writeFile} from 'node:fs/promises';const state={pid:process.pid,value:'Preserve ação and app state'};const server=http.createServer((req,res)=>res.end(JSON.stringify(state)));server.listen(0,'127.0.0.1',async()=>{await writeFile('.runtime.json',JSON.stringify({port:server.address().port}));console.log('HTTP fixture ready');});");
+      await submit("Start the fixture HTTP application with node server.mjs and keep it running.");
+      const deadline = Date.now() + 10000;
+      while (!appUrl && Date.now() < deadline) {
+        try { const { port } = JSON.parse(await readFile(`${chat.workspace}/.runtime.json`, "utf8")); appUrl = `http://127.0.0.1:${port}`; appState = await (await fetch(appUrl, { signal: AbortSignal.timeout(1000) })).json(); }
+        catch { appUrl = null; await delay(25); }
+      }
+      assert(appUrl);
+    }
+    const checkApp = async () => { if (application) assert.deepEqual(await (await fetch(appUrl, { signal: AbortSignal.timeout(1000) })).json(), appState); };
     if (configuration) {
       await submit(`/update-config ${question}`);
+      await checkApp();
       assert.equal(step, 3);
       session = store.get(chat.id).agentSessionId;
-      assert.deepEqual(JSON.parse(await readFile(`${store.runtimeHome(chat.id)}/claude/settings.json`, "utf8")), deny ? initialSettings : updatedSettings);
-      assert.equal(store.get(chat.id).model, deny ? initialSettings.model : "sonnet", "The web model must reflect the saved native configuration");
-      assert.equal(store.get(chat.id).mode, deny ? "accept_edits" : "plan", "The web mode must reflect the saved native configuration");
+      assert.deepEqual(JSON.parse(await readFile(settingsFile, "utf8")), deny ? initialSettings : updatedSettings);
+      if (configScope !== "user") assert.deepEqual(JSON.parse(await readFile(`${store.runtimeHome(chat.id)}/claude/settings.json`, "utf8")), initialSettings);
+      assert.equal(store.get(chat.id).model, expectedModel, "The web model must reflect the effective native configuration");
+      assert.equal(store.get(chat.id).mode, expectedMode, "The web mode must reflect the effective native configuration");
       if (resume) await manager.stop(chat.id);
       await submit("Verify the next native model and the two harmless fixture environment values without changing files.");
+      if (!resume) await checkApp();
       assert.equal(step, 5);
       assert.equal(store.get(chat.id).agentSessionId, session);
       const restored = new ChatStore(root); await restored.initialize();
-      assert.equal(restored.get(chat.id).model, deny ? initialSettings.model : "sonnet");
+      assert.equal(restored.get(chat.id).model, expectedModel);
+      await manager.stop(chat.id);
+      if (application) await assert.rejects(fetch(appUrl, { signal: AbortSignal.timeout(1000) }));
     } else for (round = 0; round < (resume ? 2 : 1); round++) {
       step = 0;
       await submit(`/${design ? "design-sync" : "dataviz"} ${question}`);
@@ -218,7 +255,7 @@ body{margin:24px;background:var(--surface);color:var(--ink);font:16px system-ui}
     assert.equal(store.get(other.id).messages.length, 0);
     await assert.rejects(readFile(`${other.workspace}/chart-0.html`), { code: "ENOENT" });
     assert(!store.get(chat.id).messages.some(message => message.kind === "error"), JSON.stringify(store.get(chat.id).messages));
-    console.log(`PASS: native ${configuration ? `update-config ${deny ? "denial and unchanged settings" : "private settings write, model/mode readback and subsequent environment effects"}` : design ? "design-sync resource extraction and anonymous authorization refusal; no upload" : `dataviz resources, ${deny ? "native validation denial and no output file" : "real light/dark palette validation, invalid palette rejection and HTML/SVG file creation"}`}${resume ? `; same-history Stop/resume${configuration ? "" : " with fresh private assets"}` : ""}; unrelated chat unchanged; ${requests.length} authored main replies, ${titles} titles, ${approvals.length} one-time tool decisions.`);
+    console.log(`PASS: native ${configuration ? `update-config ${configScope} ${deny ? "denial and unchanged settings" : "private settings write, model/mode readback and subsequent environment effects"}` : design ? "design-sync resource extraction and anonymous authorization refusal; no upload" : `dataviz resources, ${deny ? "native validation denial and no output file" : "real light/dark palette validation, invalid palette rejection and HTML/SVG file creation"}`}${resume ? `; same-history Stop/resume${configuration ? "" : " with fresh private assets"}` : ""}${shadowed ? "; higher-priority local settings preserved" : ""}${application ? "; real app/PID/data retained until explicit Stop" : ""}; unrelated chat unchanged; ${requests.length} authored main replies, ${titles} titles, ${approvals.length} one-time tool decisions.`);
   } finally {
     await (shutdown ||= manager?.shutdown()); server.closeAllConnections(); gatewayServer?.closeAllConnections();
     await new Promise(resolve => server.close(resolve)); if (gatewayServer) await new Promise(resolve => gatewayServer.close(resolve));

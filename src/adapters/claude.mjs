@@ -5,7 +5,7 @@ import path from "node:path";
 import { buildWorkerEnvironment, spawnWorker, terminateWorker } from "../worker-process.mjs";
 import { errorMessage, redact } from "../utils.mjs";
 import { claudeUsage, claudeContext, claudeRateLimits, safeSessionDetails } from "../session-info.mjs";
-import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings, claudePermissionMode } from "../claude-settings.mjs";
+import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings, inspectNativeClaudeSettings, claudePermissionMode } from "../claude-settings.mjs";
 import { claudeFastRequest, claudeFastState, claudeFastCredential, claudeFastScope, checkClaudeFastAvailability, claudeFastUnavailable } from "../claude-fast.mjs";
 import { ClaudeTextStream } from "../claude-text-stream.mjs";
 import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR, ClaudeControlChannel, runClaudeMcpCommand } from "../claude-mcp.mjs";
@@ -69,6 +69,7 @@ export class ClaudeAdapter {
   async send(text, { model, effort, resetEffort, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, onPermissionMode, mode = "accept_edits", systemPrompt } = {}) {
     const version = this.sendVersion;
     const configuration = claudeConfigRequest(text);
+    const settingsPrompt = configuration?.kind === "prompt";
     const fastRequest = claudeFastRequest(text);
     const mcpRequest = claudeMcpRequest(text);
     const pluginReload = claudePluginReloadRequest(text);
@@ -129,7 +130,7 @@ export class ClaudeAdapter {
     // These native handlers create a resumable journal only on completion.
     // Preflight, startup and forced-stop failures must not retain a missing ID.
     const provisionalSession = isNew && (mcpRequest?.action || reviewRequest || applicationRequest || pluginReload);
-    if (isNew && !provisionalSession && !interactive) {
+    if (isNew && !provisionalSession && !interactive && !settingsPrompt) {
       this.sessionId = sessionId;
       await this.hooks.onSessionId?.(sessionId);
     }
@@ -155,7 +156,7 @@ export class ClaudeAdapter {
     await ensureDirectory(uploads);
     // SDK sessions can clear effort natively. A startup environment override
     // would otherwise pin Auto and silently defeat all later picker changes.
-    const usesSession = interactive || applicationRequest || pluginReload || this.applicationSession && !this.applicationSession.ended;
+    const usesSession = interactive || applicationRequest || pluginReload || settingsPrompt || this.applicationSession && !this.applicationSession.ended;
     if (resetEffort && !usesSession) env.CLAUDE_CODE_EFFORT_LEVEL = "auto";
     if (usesSession && env.CLAUDE_CODE_EFFORT_LEVEL && !this.effortEnvironmentNotified) {
       this.hooks.onEvent?.({ type: "notice", text: "Claude's worker environment sets CLAUDE_CODE_EFFORT_LEVEL. It may override the web effort selection; use /effort status to check the effective native level." });
@@ -179,6 +180,17 @@ export class ClaudeAdapter {
       finally { if (this.settingsInspection === controller) this.settingsInspection = null; }
     };
     const beforeSettings = configuration?.mutate ? await inspect() : null;
+    let beforeNativeSettings;
+    const inspectNative = async session => {
+      const controller = new AbortController(); this.settingsInspection = controller;
+      try {
+        const value = await inspectNativeClaudeSettings(session.control, controller.signal);
+        if (version !== this.sendVersion) throw Error("Interrupted");
+        this.assertCapability();
+        return value;
+      } catch { throw Error("Cannot safely verify this chat's effective Claude settings. The command queue is paused; check the private configuration before retrying."); }
+      finally { if (this.settingsInspection === controller) this.settingsInspection = null; }
+    };
     if (mcpRequest?.action) await inspect(".claude.json");
     if (pluginReload) { await inspect(".claude.json"); await inspect(); }
     // /fast on promotes non-Opus aliases by native contract. Apply that model
@@ -191,7 +203,7 @@ export class ClaudeAdapter {
       "--print",
       "--verbose",
       "--output-format", "stream-json",
-      ...(mcpRequest?.action || reviewRequest || interactive || pluginReload ? ["--input-format", "stream-json"] : []),
+      ...(mcpRequest?.action || reviewRequest || interactive || pluginReload || settingsPrompt ? ["--input-format", "stream-json"] : []),
       ...(interactive ? ["--permission-prompt-tool", "stdio"] : []),
       ...(interactive ? CLAUDE_SCHEDULE_DIAGNOSTICS : []),
       "--include-partial-messages",
@@ -262,14 +274,15 @@ export class ClaudeAdapter {
         const launchArgs = args.includes("--input-format") ? args : [...args, "--input-format", "stream-json"];
         this.applicationSession = manage(launchArgs);
       }
-      managed = this.applicationSession || (interactive || pluginReload ? manage(args) : null);
+      managed = this.applicationSession || (interactive || pluginReload || settingsPrompt ? manage(args) : null);
       this.turnSession = managed;
       child = managed ? await managed.open(args, env, { resetEffort }) : spawn(args);
       if (version !== this.sendVersion) throw Error("Claude turn interrupted");
       this.assertCapability();
+      if (settingsPrompt) beforeNativeSettings = await inspectNative(managed);
       // No user input exists during SDK initialization/reset. Do not publish
       // a resume ID for a first turn that fails before those controls finish.
-      if (isNew && !provisionalSession && interactive) {
+      if (isNew && !provisionalSession && (interactive || settingsPrompt)) {
         await this.hooks.onSessionId?.(sessionId);
         this.sessionId = sessionId;
         if (version !== this.sendVersion) throw Error("Claude turn interrupted");
@@ -338,7 +351,7 @@ export class ClaudeAdapter {
     let mcpOutcome = null, mcpError = null;
     if (!mcpControl && !reviewControl) {
       const input = fastRequest ? "/fast on" : text;
-      child.stdin.end(interactive ? `${JSON.stringify({ type: "user", message: { role: "user", content: input } })}\n` : input);
+      child.stdin.end(interactive || settingsPrompt ? `${JSON.stringify({ type: "user", message: { role: "user", content: input } })}\n` : input);
     }
 
     const output = new ClaudeTextStream(delta => this.hooks.onEvent?.({ type: "assistant_delta", delta }));
@@ -445,6 +458,14 @@ export class ClaudeAdapter {
       });
       child.once("close", (code, signal) => { void (async () => {
         finishObservation();
+        // Query the actual merge before a one-shot SDK owner is closed. A
+        // retained application owner stays alive; inspecting settings cannot
+        // restart it or substitute a controller-side approximation of policy.
+        let afterNativeSettings, settingsError;
+        if (beforeNativeSettings && version === this.sendVersion) {
+          try { await inspect(); afterNativeSettings = await inspectNative(managed); }
+          catch (error) { settingsError = error; }
+        }
         if (managed && managed !== this.applicationSession) await managed.stop();
         if ((!managed || managed !== this.applicationSession) && this.modeObserver === modeObserver) this.modeObserver = null;
         if (this.turnSession === managed) this.turnSession = null;
@@ -465,13 +486,15 @@ export class ClaudeAdapter {
           else if (this.applicationSession) { await this.applicationSession.stop(); this.applicationSession = null; }
         }
         if (version !== this.sendVersion) throw new Error("Claude turn interrupted");
+        if (settingsError) throw settingsError;
         if (mcpError) throw mcpError;
         if (mcpControl && (!mcpOutcome || !checkpointed)) throw new Error("Claude MCP control stopped before verification");
         if (mcpOutcome) {
           await this.hooks.onEvent?.({ type: "session_capabilities", connectors: mcpOutcome.connectors });
           if (mcpOutcome.failed) throw new Error(mcpOutcome.text);
         }
-        const nativeSettings = beforeSettings ? claudeSettingsChanges(beforeSettings, await inspect(), configuration) : undefined;
+        const nativeSettings = beforeNativeSettings ? claudeSettingsChanges(beforeNativeSettings, afterNativeSettings, configuration)
+          : beforeSettings ? claudeSettingsChanges(beforeSettings, await inspect(), configuration) : undefined;
         const resultFailed = resultMessage && (
           resultMessage.is_error === true ||
           (resultMessage.subtype && resultMessage.subtype !== "success")

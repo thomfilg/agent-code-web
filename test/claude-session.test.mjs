@@ -85,6 +85,68 @@ async function fixture(t, { interactive = false } = {}) {
   return Object.assign(f, { adapter, config, broker, chat, store });
 }
 
+test("settings prompts reconcile the native merged configuration before closing one-shot or retained owners", { timeout: 10000 }, async t => {
+  for (const [retained, interactive] of [[false, false], [false, true], [true, true]]) {
+    const f = await fixture(t, { interactive });
+    if (retained) await f.adapter.send("/run Start the fixture");
+    f.settingsSnapshot = { effective: { model: "opus", permissions: { defaultMode: "acceptEdits" } }, sources: [{ source: "projectSettings", settings: { model: "opus" } }] };
+    f.block = true;
+    const running = f.adapter.send("/update-config Change the project model and mode");
+    await waitFor(() => f.inputs?.length === (retained ? 2 : 1) && f.adapter.turnSession?.active?.started);
+    f.settingsSnapshot = { effective: { model: "sonnet", permissions: { defaultMode: "plan" } }, sources: [{ source: "projectSettings", settings: { model: "sonnet", env: { TOKEN: "never-return" } } }] };
+    f.complete(); const result = await running;
+    assert.deepEqual(result.nativeSettings, { model: "sonnet", mode: "plan" });
+    assert.equal(f.controls.filter(packet => packet.request.subtype === "get_settings").length, 2);
+    assert.equal(f.launches.length, 1);
+    assert.equal(f.child.exitCode === null && f.child.signalCode === null, retained, "Only the retained owner remains running");
+    assert(!JSON.stringify([result, f.events]).includes("never-return"));
+  }
+});
+
+test("invalid native settings prevent prompt execution without stopping an already running application", async t => {
+  const first = await fixture(t); first.settingsSnapshot = { effective: {}, sources: [], errors: [{ message: "private-secret" }] };
+  await assert.rejects(first.adapter.send("/update-config Change settings"), /Cannot safely verify/);
+  assert.deepEqual(first.inputs, []); assert.deepEqual(first.sessions, []);
+  assert.equal(first.adapter.sessionId, null, "Failed first inspection cannot advertise a nonexistent native journal");
+  for (const failure of ["refusal", "malformed", "parse-errors"]) {
+    const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Start the fixture");
+    f.settingsSnapshot = failure === "malformed" ? { effective: [], sources: [] } : { effective: {}, sources: [], ...(failure === "parse-errors" ? { errors: [{ message: "private-secret" }] } : {}) };
+    if (failure === "refusal") f.refuse = "get_settings";
+    await assert.rejects(f.adapter.send("/update-config Change settings"), /Cannot safely verify this chat's effective Claude settings/);
+    assert.equal(f.inputs.length, 1); assert.equal(f.child.exitCode, null); assert.equal(f.launches.length, 1);
+    assert(!JSON.stringify(f.events).includes("private-secret"));
+  }
+});
+
+test("failed readback never claims success or drops a retained app after native settings writes", async t => {
+  const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Start the fixture");
+  f.settingsSnapshot = { effective: { model: "opus" }, sources: [] }; f.block = true;
+  const running = f.adapter.send("/update-config Change settings"); await waitFor(() => f.inputs.length === 2 && f.adapter.turnSession?.active?.started);
+  f.settingsSnapshot = { effective: {}, sources: [], errors: [{ message: "private parsing details" }] }; f.complete();
+  await assert.rejects(running, error => /Cannot safely verify/.test(error.message) && !error.nativeSettings && !error.message.includes("private parsing details"));
+  assert.equal(f.child.exitCode, null); assert.equal(f.launches.length, 1);
+});
+
+test("interrupting settings inspection before or after input rejects late results and retains the owning application", async t => {
+  for (const after of [false, true]) {
+    const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Start the fixture");
+    f.settingsSnapshot = { effective: { model: "opus" }, sources: [] }; f.block = true;
+    if (!after) f.hold = "get_settings";
+    const running = f.adapter.send("/update-config Change settings");
+    if (after) {
+      await waitFor(() => f.inputs.length === 2 && f.adapter.turnSession?.active?.started); f.hold = "get_settings"; f.complete();
+    }
+    await waitFor(() => f.controls.filter(packet => packet.request.subtype === "get_settings").length === (after ? 2 : 1));
+    const late = f.controls.findLast(packet => packet.request.subtype === "get_settings");
+    const rejected = assert.rejects(running, error => /interrupted|Cannot safely verify/.test(error.message) && !error.nativeSettings);
+    await f.adapter.interrupt(); await rejected;
+    assert.equal(f.child.exitCode, null); assert.equal(f.inputs.length, after ? 2 : 1);
+    f.settingsSnapshot = { effective: { model: "sonnet" }, sources: [] }; f.respond(late); f.hold = null; f.block = false;
+    await f.adapter.send("Continue without replacing the app");
+    assert.equal(f.launches.length, 1); assert.equal(f.child.exitCode, null);
+  }
+});
+
 function nativeWorkflow(f, id = "workflow-one", toolUseId = "call-one") {
   const session_id = f.nativeSession;
   f.emit({ type: "assistant", session_id, message: { content: [{ type: "tool_use", id: toolUseId, name: "Workflow", input: { name: "deep-research" } }] } });
