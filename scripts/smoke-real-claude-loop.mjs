@@ -3,7 +3,7 @@ import http from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
-import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, readdir, rm } from "node:fs/promises";
 import { loadConfig } from "../src/config.mjs";
 import { RuntimeManager } from "../src/runtime-manager.mjs";
 import { ClaudeAdapter } from "../src/adapters/claude.mjs";
@@ -26,6 +26,9 @@ if (!process.argv.includes("--network-isolated")) {
   assert.equal((await exec("/usr/bin/ip", ["route", "show"])).stdout.trim(), "");
   const root = await mkdtemp("/tmp/relay-claude-loop-"), launches = [], requests = [];
   const sendNow = process.argv.includes("--send-now"), stop = process.argv.includes("--stop"), release = Promise.withResolvers();
+  const resumePlain = process.argv.includes("--resume-plain");
+  const oneShot = process.argv.includes("--one-shot"), expiredResume = process.argv.includes("--expired-resume");
+  const expiredFire = process.argv.includes("--expired-fire");
   assert(!(sendNow && stop));
   let held = false;
   let manager, gatewayServer, chat, fixtureError, jobId, step = 0, phase = "create";
@@ -47,9 +50,10 @@ if (!process.argv.includes("--network-isolated")) {
       if (process.argv.includes("--trace")) console.log("QUERY", phase, step, last.slice(-600));
       if (phase === "create") {
         if (step === 0) {
-          assert.match(text, /schedule a recurring prompt/); assert.match(last, /RELAY_LOOP_TICK/);
+          if (!oneShot) assert.match(text, /schedule a recurring prompt/);
+          assert.match(last, /RELAY_LOOP_TICK/);
           assert(body.tools.some(tool => tool.name === "CronCreate"));
-          content = tool("CronCreate", { cron: "* * * * *", prompt, recurring: true, durable: false });
+          content = tool("CronCreate", { cron: "* * * * *", prompt, recurring: !oneShot, durable: expiredFire });
         } else if (step === 1) {
           check(); jobId = JSON.stringify(result.content).match(/\b[a-f0-9]{8}\b/)?.[0]; assert(jobId, JSON.stringify(result));
           content = tool("Bash", { command: "node tick.mjs", description: "Execute the first scheduled check now" });
@@ -75,7 +79,8 @@ if (!process.argv.includes("--network-isolated")) {
         else if (step === 2) { check(new RegExp(jobId)); content = tool("CronList", {}); }
         else { check(/No scheduled jobs/); content = done("Stopped worker resumed its native schedule; cancellation confirmed."); }
         step++;
-      } else if (phase === "resume") { assert.match(text, sendNow ? /fixture loop was cancelled/ : /Scheduled fire completed with counter 2/); content = done("Saved loop history retained after Stop."); }
+      } else if (phase === "resume_plain") { assert.match(text, /initial check returned counter 1/); content = done("The previous schedule remains in this conversation. No tool readback was requested."); }
+      else if (phase === "resume") { assert.match(text, sendNow ? /fixture loop was cancelled/ : /Scheduled fire completed with counter 2/); content = done("Saved loop history retained after Stop."); }
       else throw Error(`Unexpected phase ${phase}`);
     }
     const message = { id: `msg_loop_${requests.length}`, type: "message", role: "assistant", model: body.model, content, stop_reason: content.some(block => block.type === "tool_use") ? "tool_use" : "end_turn", stop_sequence: null, usage: { input_tokens: 100, output_tokens: 10 } };
@@ -109,6 +114,7 @@ if (!process.argv.includes("--network-isolated")) {
         if (command === config.claude.bin && args.includes("--print")) {
           launches.push(child);
           if (process.argv.includes("--trace")) {
+            child.stderr.on("data", chunk => console.log("NATIVE-DEBUG", chunk.toString().slice(0, 3000)));
             let buffer = "";
             child.stdout.on("data", chunk => {
               buffer += chunk; const lines = buffer.split("\n"); buffer = lines.pop();
@@ -130,12 +136,33 @@ if (!process.argv.includes("--network-isolated")) {
     await mkdir(`${store.runtimeHome(chat.id)}/claude`, { recursive: true });
     await writeFile(`${store.runtimeHome(chat.id)}/claude/settings.json`, JSON.stringify({ permissions: { allow: ["Bash(node tick.mjs)"] } }));
     await writeFile(`${chat.workspace}/tick.mjs`, "import {readFile,writeFile} from 'node:fs/promises';\nlet counter=0;try{counter=JSON.parse(await readFile('.counter.json','utf8')).counter}catch{}\nconst value={counter:counter+1};await writeFile('.counter.json',JSON.stringify(value));console.log(JSON.stringify(value));\n");
-    await manager.send(chat.id, `/loop 1m ${prompt}`); if (fixtureError) throw fixtureError;
+    await manager.send(chat.id, oneShot ? `Schedule one check for the next minute, then check now too: ${prompt}` : `/loop 1m ${prompt}`); if (fixtureError) throw fixtureError;
     const session = store.get(chat.id).agentSessionId;
     assert.equal(JSON.parse(await readFile(`${chat.workspace}/.counter.json`, "utf8")).counter, 1);
     assert.equal(launches[0].exitCode, null, "The native scheduler must survive its initial reply");
     assert.equal(launches[0].signalCode, null, "The native scheduler must not be terminated after scheduling");
-    if (stop) {
+    verification: if (expiredResume) {
+      await manager.stop(chat.id);
+      const projects = `${store.runtimeHome(chat.id)}/claude/projects`;
+      const journals = (await readdir(projects, { recursive: true })).filter(file => file.endsWith(`/${session}.jsonl`));
+      assert.equal(journals.length, 1);
+      const journal = `${projects}/${journals[0]}`;
+      const rows = (await readFile(journal, "utf8")).trimEnd().split("\n").map(line => JSON.parse(line));
+      let aged = 0;
+      for (const row of rows) if (row.type === "assistant" && row.message?.content?.some(block => block.type === "tool_use" && block.name === "CronCreate")) {
+        row.timestamp = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(); aged++;
+      }
+      assert.equal(aged, 1);
+      // Only this disposable native journal is aged. The native restore code,
+      // scheduler clock, feature flags and expiry policy are unchanged.
+      await writeFile(journal, `${rows.map(row => JSON.stringify(row)).join("\n")}\n`);
+      phase = "resume_plain";
+      await manager.send(chat.id, "Continue our conversation; no need to list or recreate scheduled jobs."); if (fixtureError) throw fixtureError;
+      assert.equal(store.get(chat.id).agentSessionId, session);
+      assert.notEqual(launches.at(-1).exitCode ?? launches.at(-1).signalCode, null, "Expired native schedules must not keep an ordinary worker alive");
+      assert.equal(JSON.parse(await readFile(`${chat.workspace}/.counter.json`, "utf8")).counter, 1);
+      console.log(`PASS: native ${oneShot ? "overdue one-shot" : "expired recurring"} history does not retain or replay work on ordinary resume; ${requests.length} authored main replies.`);
+    } else if (stop) {
       await manager.stop(chat.id);
       assert.notEqual(launches[0].exitCode ?? launches[0].signalCode, null);
       phase = "stopped"; step = 0;
@@ -145,12 +172,28 @@ if (!process.argv.includes("--network-isolated")) {
       assert.match(store.get(chat.id).messages.at(-1).text, /Stopped worker resumed its native schedule/);
       console.log(`PASS: explicit Stop terminates the worker; native list restores the saved schedule on resume and explicit delete cancels it, without replaying the counter write; ${requests.length} authored main replies.`);
     } else {
+      if (resumePlain) {
+        await manager.stop(chat.id); phase = "resume_plain";
+        await manager.send(chat.id, "Continue our conversation; no need to list or recreate scheduled jobs."); if (fixtureError) throw fixtureError;
+        assert.equal(store.get(chat.id).agentSessionId, session);
+        assert.equal(launches.at(-1).exitCode, null, "An ordinary resume must preserve the native restored scheduler without requiring CronList");
+      }
+      const activeLaunches = launches.length;
       phase = "fire"; step = 0;
+      if (expiredFire) {
+        const file = `${chat.workspace}/.claude/scheduled_tasks.json`;
+        const state = JSON.parse(await readFile(file, "utf8"));
+        assert.equal(state.tasks.length, 1); assert.equal(state.tasks[0].id, jobId);
+        // Native watcher and final-fire policy consume an aged private job;
+        // no clock/feature-flag override or controller-generated firing.
+        state.tasks[0].createdAt = Date.now() - 8 * 24 * 60 * 60 * 1000;
+        await writeFile(file, JSON.stringify(state));
+      }
       const deadline = Date.now() + 100000;
       while (!(sendNow ? held : !manager.isBusy(chat.id) && store.get(chat.id).messages.some(message => message.text?.includes("Scheduled fire completed with counter 2"))) && Date.now() < deadline) {
         if (fixtureError) throw fixtureError;
-        assert.equal(launches[0].exitCode, null, "Idle timeout must not kill a pending native schedule");
-        assert.equal(launches[0].signalCode, null); await delay(100);
+        assert.equal(launches.at(-1).exitCode, null, "Idle timeout must not kill a pending native schedule");
+        assert.equal(launches.at(-1).signalCode, null); await delay(100);
       }
       if (sendNow) {
         assert(held, "The native scheduled turn must reach inference");
@@ -167,19 +210,32 @@ if (!process.argv.includes("--network-isolated")) {
         assert.deepEqual(store.get(chat.id).queuedMessages.map(item => item.text), ["Keep this unrelated queued input"]);
       } else {
         assert(store.get(chat.id).messages.some(message => message.role === "assistant" && message.text?.includes("Scheduled fire completed with counter 2")), "A real scheduled fire must become visible in the chat");
+        if (oneShot || expiredFire) {
+          assert.notEqual(store.get(chat.id).idleKeepAwakeReason, "schedule", "A completed native schedule must release idle protection without CronList");
+          assert(store.get(chat.id).idleDeadlineAt);
+          const idleDeadline = Date.now() + 12000;
+          while (launches.at(-1).exitCode === null && launches.at(-1).signalCode === null && Date.now() < idleDeadline) await delay(50);
+          assert.notEqual(launches.at(-1).exitCode ?? launches.at(-1).signalCode, null, "A completed one-shot worker can sleep");
+          assert.equal(JSON.parse(await readFile(`${chat.workspace}/.counter.json`, "utf8")).counter, 2);
+          if (expiredFire) assert.deepEqual(JSON.parse(await readFile(`${chat.workspace}/.claude/scheduled_tasks.json`, "utf8")).tasks, []);
+          console.log(`PASS: actual native ${expiredFire ? "aged recurring final" : "one-shot"} fire becomes visible, releases idle protection and sleeps without a readback or repeated write; ${requests.length} authored main replies.`);
+          break verification;
+        }
         phase = "delete"; step = 0;
         await manager.send(chat.id, "List and cancel the fixture loop, then verify the schedule is empty.");
       }
       if (fixtureError) throw fixtureError;
       assert.equal(JSON.parse(await readFile(`${chat.workspace}/.counter.json`, "utf8")).counter, sendNow ? 1 : 2);
-      assert.equal(launches.length, 1); assert.equal(store.get(chat.id).agentSessionId, session);
+      assert.equal(launches.length, activeLaunches); assert.equal(store.get(chat.id).agentSessionId, session);
       assert.match(store.get(chat.id).messages.at(-1).text, /no scheduled jobs remain/);
       await manager.stop(chat.id); phase = "resume";
       await manager.send(chat.id, "Continue from the saved loop history."); if (fixtureError) throw fixtureError;
-      assert.equal(store.get(chat.id).agentSessionId, session); assert.equal(launches.length, 2);
+      assert.equal(store.get(chat.id).agentSessionId, session); assert.equal(launches.length, activeLaunches + 1);
       assert.match(store.get(chat.id).messages.at(-1).text, /Saved loop history retained/);
-      console.log(`PASS: native loop creation, immediate execution, real timed fire, ${sendNow ? "Send now cancellation and queue preservation" : "visible background reply"}, list/delete, idle protection and Stop/resume; ${requests.length} authored main replies.`);
+      console.log(`PASS: native loop creation, immediate execution, ${resumePlain ? "ordinary resume without readback, " : ""}real timed fire, ${sendNow ? "Send now cancellation and queue preservation" : "visible background reply"}, list/delete, idle protection and Stop/resume; ${requests.length} authored main replies.`);
     }
+    assert(!store.get(chat.id).messages.some(message => /\[ScheduledTasks\]|resume: resurrected/.test(message.text || "")), "Native scheduling diagnostics are not conversation messages");
+    assert.deepEqual(await readdir(`${store.runtimeHome(chat.id)}/claude/debug`).catch(error => { if (error.code === "ENOENT") return []; throw error; }), [], "Scheduling diagnostics must not create native debug files");
   } finally {
     release.resolve();
     await manager?.shutdown(); server.closeAllConnections(); gatewayServer?.closeAllConnections();

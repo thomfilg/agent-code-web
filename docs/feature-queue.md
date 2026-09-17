@@ -62,6 +62,19 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: fixed ordinary `/loop` resume without `CronList` and automatic schedule
+  completion/expiry. A bounded reader of the private native process's filtered
+  scheduling diagnostics observes actual restoration/fire/expiry, without
+  debug files, fabricated user turns, model requests or a parallel scheduler.
+  Installed Claude **2.1.222** verifies ordinary resume and real timed work,
+  one-shot completion/idle sleep, an aged durable job's final fire/deletion,
+  and exclusion of expired recurring/overdue one-shot native history
+  (**11/5/5/4/4** authored main replies). Five new session cases; syntax/unit
+  **503/503**, browser **61/61**; scheduled Send-now and retained-app Send-now
+  regressions pass. Only disposable fixture timestamps were aged; no clock,
+  policy, live-chat or account changes. Next: dynamic `ScheduleWakeup`, then
+  plugin namespaces; shared-host/company/account/live gates remain. Queue
+  order/count unchanged. Save to PR #2 without merge or deployment.
 - 20: fixed two reproduced native `/loop` defects: reply completion killed its
   scheduler, and timed turns were invisible to busy/Send-now handling. Bound
   scheduling results now retain the SDK session and pause idle sleep; native

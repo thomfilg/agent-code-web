@@ -9,7 +9,7 @@ import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, in
 import { claudeFastRequest, claudeFastState, claudeFastCredential, claudeFastScope, checkClaudeFastAvailability, claudeFastUnavailable } from "../claude-fast.mjs";
 import { ClaudeTextStream } from "../claude-text-stream.mjs";
 import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR, ClaudeControlChannel, runClaudeMcpCommand } from "../claude-mcp.mjs";
-import { ClaudeSession, claudeCallResult } from "../claude-session.mjs";
+import { ClaudeSession, claudeCallResult, CLAUDE_SCHEDULE_DIAGNOSTICS } from "../claude-session.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch, now = Date.now }) {
@@ -189,6 +189,7 @@ export class ClaudeAdapter {
       "--output-format", "stream-json",
       ...(mcpRequest?.action || reviewRequest || interactive ? ["--input-format", "stream-json"] : []),
       ...(interactive ? ["--permission-prompt-tool", "stdio"] : []),
+      ...(interactive ? CLAUDE_SCHEDULE_DIAGNOSTICS : []),
       "--include-partial-messages",
       "--permission-mode", nativeMode,
       "--prompt-suggestions", "false",
@@ -242,7 +243,7 @@ export class ClaudeAdapter {
           ...(interactive ? { requestHooks: this.hooks, cwd: this.workspace } : {}),
           onSchedulesChanged: () => {
             if (this.stopped || ![this.turnSession, this.applicationSession].includes(session)) return;
-            if (session.scheduledJobs.size && !session.ended) this.applicationSession = session;
+            if (session.hasScheduledWork() && !session.ended) this.applicationSession = session;
             this.hooks.onEvent?.({ type: "scheduled_work" });
           },
         });
@@ -474,7 +475,7 @@ export class ClaudeAdapter {
   }
 
   hasScheduledWork() {
-    return !this.stopped && !this.applicationSession?.ended && Boolean(this.applicationSession?.scheduledJobs.size);
+    return !this.stopped && !this.applicationSession?.ended && Boolean(this.applicationSession?.hasScheduledWork());
   }
 
   isBackgroundBusy() {

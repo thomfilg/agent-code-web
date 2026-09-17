@@ -9,6 +9,12 @@ import { ClaudeRequests } from "./claude-requests.mjs";
 
 const flag = (args, name) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
 
+// The SDK has no scheduled-task snapshot/change control. These filtered native
+// diagnostics report restoration, automatic deletion and expiry without an
+// extra user turn, model call, transcript replay or controller-side scheduler.
+// Keep them on the owned process pipe, not in debug files or chat messages.
+export const CLAUDE_SCHEDULE_DIAGNOSTICS = ["--debug=ScheduledTasks,resume", "--debug-to-stderr"];
+
 // A Claude application session outlives individual replies. Each turn exposes
 // the same stream contract as the one-shot adapter, but a result closes only
 // that logical turn, not the CLI which owns its background application tasks.
@@ -18,6 +24,7 @@ export class ClaudeSession {
     this.sessionId = flag(args, "--session-id") || flag(args, "--resume");
     this.controlTimeoutMs = controlTimeoutMs;
     this.scheduledJobs = new Set(); this.scheduleCalls = new Map(); this.onSchedulesChanged = onSchedulesChanged;
+    this.restoredJobs = 0;
     this.onBackgroundEvent = onBackgroundEvent;
     this.control = new ClaudeControlChannel(child, controlTimeoutMs);
     this.requests = requestHooks ? new ClaudeRequests(child, requestHooks, cwd) : null;
@@ -47,16 +54,31 @@ export class ClaudeSession {
         if (event.type === "result") this.finish(turn, 0, null);
       } else if (event.type !== "command_lifecycle") this.onBackgroundEvent(event);
     });
-    child.stderr.on("data", chunk => this.active?.stderr.write(chunk));
+    const diagnostics = CLAUDE_SCHEDULE_DIAGNOSTICS.every(argument => args.includes(argument));
+    const decoder = new StringDecoder("utf8"); let stderr = "", dropping = false;
+    const stderrLine = line => {
+      if (/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z \[DEBUG\] /.test(line)) this.trackScheduleDiagnostic(line);
+      else this.active?.stderr.write(`${line}\n`);
+    };
+    child.stderr.on("data", chunk => {
+      if (!diagnostics) { this.active?.stderr.write(chunk); return; }
+      const lines = (stderr + decoder.write(chunk)).split("\n"); stderr = lines.pop();
+      for (const line of lines) {
+        if (!dropping && line.length <= 8192) stderrLine(line);
+        dropping = false;
+      }
+      if (stderr.length > 8192) { stderr = ""; dropping = true; }
+    });
     child.once("error", error => {
       this.error = error;
       if (this.active?.listenerCount("error")) this.active.emit("error", error);
     });
     child.once("close", (code, signal) => {
+      if (diagnostics && stderr && !dropping) stderrLine(stderr + decoder.end());
       this.ended = true; this.control.close(); this.lines.close();
       this.finishBackground();
       this.scheduleCalls.clear();
-      if (this.scheduledJobs.size) { this.scheduledJobs.clear(); this.onSchedulesChanged(); }
+      if (this.hasScheduledWork()) { this.scheduledJobs.clear(); this.restoredJobs = 0; this.onSchedulesChanged(); }
       // A logical reply is successful only after its native result. An empty
       // clean process exit must not masquerade as a completed application run.
       if (this.active) this.finish(this.active, code === 0 ? 1 : code, signal);
@@ -81,6 +103,30 @@ export class ClaudeSession {
     } finally { clearTimeout(timer); }
   }
 
+  hasScheduledWork() { return Boolean(this.scheduledJobs.size || this.restoredJobs); }
+
+  trackScheduleDiagnostic(line) {
+    if (this.ended || this.stopping) return;
+    const match = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z \[DEBUG\] (.*)$/.exec(line);
+    if (!match) return;
+    const text = match[1], before = this.hasScheduledWork();
+    const restored = /^resume: resurrected ([1-9]\d?) session cron task\(s\)$/.exec(text);
+    const scheduled = /^\[ScheduledTasks\] scheduled ([a-f0-9]{8}) for (never|\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z)$/.exec(text);
+    const fired = /^\[ScheduledTasks\] firing ([a-f0-9]{8})( \(recurring\))?$/.exec(text);
+    const expired = /^\[ScheduledTasks\] recurring task ([a-f0-9]{8}) aged out \(\d+h since creation\), deleting after final fire$/.exec(text);
+    if (restored && !this.restorationObserved && Number(restored[1]) <= 50 && !this.active?.interrupting && !this.requests?.suspended) {
+      this.restorationObserved = true; this.restoredJobs = Number(restored[1]);
+    }
+    if (scheduled && !this.active?.interrupting && !this.requests?.suspended) {
+      if (!this.scheduledJobs.has(scheduled[1])) this.restoredJobs = Math.max(0, this.restoredJobs - 1);
+      if (scheduled[2] === "never") this.scheduledJobs.delete(scheduled[1]);
+      else if (this.scheduledJobs.size < 50) this.scheduledJobs.add(scheduled[1]);
+    }
+    if (fired && !fired[2]) this.scheduledJobs.delete(fired[1]);
+    if (expired) this.scheduledJobs.delete(expired[1]);
+    if (before !== this.hasScheduledWork()) this.onSchedulesChanged();
+  }
+
   trackSchedules(event) {
     // Native structured results, bound to a reported main-session tool call.
     // Neither quoted text nor child/foreign/failed/late results keep a worker
@@ -98,11 +144,15 @@ export class ClaudeSession {
       this.scheduleCalls.delete(result.tool_use_id);
       const data = event.tool_use_result, validId = id => typeof id === "string" && /^[a-f0-9]{8}$/.test(id);
       if (!call || result.is_error || !data || typeof data !== "object" || Array.isArray(data)) return;
-      const before = [...this.scheduledJobs].sort().join(",");
+      const before = `${this.restoredJobs}:${[...this.scheduledJobs].sort().join(",")}`;
       if (call.name === "CronCreate" && validId(data.id) && typeof data.recurring === "boolean" && typeof data.humanSchedule === "string") this.scheduledJobs.add(data.id);
-      if (call.name === "CronDelete" && validId(data.id) && data.id === call.input?.id) this.scheduledJobs.delete(data.id);
-      if (call.name === "CronList" && Array.isArray(data.jobs) && data.jobs.length <= 50 && data.jobs.every(job => job && validId(job.id))) this.scheduledJobs = new Set(data.jobs.map(job => job.id));
-      if (before !== [...this.scheduledJobs].sort().join(",")) this.onSchedulesChanged();
+      if (call.name === "CronDelete" && validId(data.id) && data.id === call.input?.id) {
+        if (!this.scheduledJobs.delete(data.id)) this.restoredJobs = Math.max(0, this.restoredJobs - 1);
+      }
+      if (call.name === "CronList" && Array.isArray(data.jobs) && data.jobs.length <= 50 && data.jobs.every(job => job && validId(job.id))) {
+        this.scheduledJobs = new Set(data.jobs.map(job => job.id)); this.restoredJobs = 0;
+      }
+      if (before !== `${this.restoredJobs}:${[...this.scheduledJobs].sort().join(",")}`) this.onSchedulesChanged();
     } else if (event.type === "result") this.scheduleCalls.clear();
   }
 

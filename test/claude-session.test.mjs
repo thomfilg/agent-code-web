@@ -3,7 +3,7 @@ import test from "node:test";
 import { EventEmitter, once } from "node:events";
 import { PassThrough } from "node:stream";
 import { mkdir } from "node:fs/promises";
-import { ClaudeSession, claudeCallResult } from "../src/claude-session.mjs";
+import { ClaudeSession, claudeCallResult, CLAUDE_SCHEDULE_DIAGNOSTICS } from "../src/claude-session.mjs";
 import { ClaudeAdapter } from "../src/adapters/claude.mjs";
 import { ChatStore } from "../src/store.mjs";
 import { CapabilityBroker } from "../src/capabilities.mjs";
@@ -76,7 +76,7 @@ async function fixture(t, { interactive = false } = {}) {
   const executor = { workspace: chat.workspace, runtimeHome: store.runtimeHome(chat.id), metadata: { backend: "local" }, mkdir: directory => mkdir(directory, { recursive: true }),
     spawn(command, args, options) {
       if (f.spawnFailure) throw Error("Fixture spawn failure");
-      f.launches.push({ command, args, env: options.env }); f.nativeSession = args[args.indexOf("--session-id") + 1]; return transport(f);
+      f.launches.push({ command, args, env: options.env }); f.nativeSession = args[args.indexOf(args.includes("--session-id") ? "--session-id" : "--resume") + 1]; return transport(f);
     } };
   const adapter = new ClaudeAdapter({ chat, store, config, executor, broker, gatewayOrigin: "http://127.0.0.1:9",
     hooks: { onSessionId: id => f.sessions.push(id), onEvent: event => f.events.push(event), ...(interactive ? { onRequest: request => f.requests.push(request) } : {}) } });
@@ -154,6 +154,90 @@ const scheduleResult = (f, data, { id = "cron-call", failed = false, ...extra } 
   message: { content: [{ type: "tool_result", tool_use_id: id, content: "Native scheduling result", is_error: failed }] }, tool_use_result: data, ...extra });
 const schedule = { id: "abcdef12", recurring: true, humanSchedule: "Every minute", durable: false };
 const scheduledTurnStarted = (f, count = 1) => waitFor(() => f.inputs?.length === count && f.adapter.turnSession?.active?.started);
+const scheduleDiagnostic = text => `2026-09-17T10:21:52.177Z [DEBUG] ${text}\n`;
+
+test("native restored schedules retain an ordinary resume without synthetic turns or readback tools", async t => {
+  const f = await fixture(t, { interactive: true }); f.hold = "initialize";
+  f.adapter.sessionId = "saved-native-session";
+  const running = f.adapter.send("Continue our conversation");
+  await waitFor(() => f.controls?.length);
+  assert(CLAUDE_SCHEDULE_DIAGNOSTICS.every(argument => f.launches[0].args.includes(argument)));
+  const restored = scheduleDiagnostic("resume: resurrected 2 session cron task(s)");
+  f.child.stderr.write(restored.slice(0, 20)); f.child.stderr.write(restored.slice(20));
+  assert.equal(f.adapter.hasScheduledWork(), true);
+  f.respond(f.controls[0]); const result = await running;
+  assert.equal(f.child.exitCode, null); assert.equal(f.adapter.applicationSession.restoredJobs, 2);
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled abcdef12 for 2026-09-17T10:22:24.844Z"));
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled abcdef12 for 2026-09-17T10:22:24.844Z"));
+  assert.equal(f.adapter.applicationSession.restoredJobs, 1);
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled 12345678 for 2026-09-17T10:22:24.844Z"));
+  assert.equal(f.adapter.applicationSession.restoredJobs, 0);
+  assert.equal(f.adapter.applicationSession.scheduledJobs.size, 2);
+  assert.deepEqual(f.inputs.map(input => input.message.content), ["Continue our conversation"]);
+  assert.doesNotMatch(JSON.stringify([result, f.events]), /resurrected|ScheduledTasks/);
+  await f.adapter.stop(); assert.equal(f.adapter.hasScheduledWork(), false);
+});
+
+test("native one-shot fire and recurring expiry release only their own sleep protection", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Schedule two checks"); await scheduledTurnStarted(f);
+  scheduleCall(f, "CronList"); scheduleResult(f, { jobs: [schedule, { ...schedule, id: "12345678", recurring: false }] });
+  f.complete(); await running;
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] firing 12345678"));
+  assert.deepEqual([...f.adapter.applicationSession.scheduledJobs], [schedule.id]);
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] firing abcdef12 (recurring)"));
+  assert.equal(f.adapter.hasScheduledWork(), true);
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] recurring task abcdef12 aged out (168h since creation), deleting after final fire"));
+  assert.equal(f.adapter.hasScheduledWork(), false); assert.equal(f.child.exitCode, null);
+  assert.equal(f.inputs.length, 1);
+  assert.equal(f.events.filter(event => event.type === "scheduled_work").length, 2);
+});
+
+test("native deletion or empty readback before the first scheduler poll clears restored pending counts", async t => {
+  for (const action of ["delete", "list", "never"]) {
+    const f = await fixture(t, { interactive: true }); f.block = true;
+    const running = f.adapter.send("Inspect restored schedules"); await scheduledTurnStarted(f);
+    f.child.stderr.write(scheduleDiagnostic("resume: resurrected 1 session cron task(s)"));
+    if (action === "delete") { scheduleCall(f, "CronDelete", "delete", { id: schedule.id }); scheduleResult(f, { id: schedule.id }, { id: "delete" }); }
+    else if (action === "list") { scheduleCall(f, "CronList"); scheduleResult(f, { jobs: [] }); }
+    else f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled abcdef12 for never"));
+    assert.equal(f.adapter.hasScheduledWork(), false);
+    f.child.stderr.write(scheduleDiagnostic("resume: resurrected 1 session cron task(s)"));
+    assert.equal(f.adapter.hasScheduledWork(), false, "A duplicate startup diagnostic is not a new restore");
+    f.complete(); await running;
+  }
+});
+
+test("quoted, malformed and oversized diagnostics cannot retain a worker or leak debug text", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("No scheduling"); await scheduledTurnStarted(f);
+  const line = scheduleDiagnostic("[ScheduledTasks] scheduled abcdef12 for 2026-09-17T10:22:24.844Z");
+  f.emit({ type: "assistant", session_id: f.nativeSession, message: { content: [{ type: "text", text: `Quoted: ${line}` }] } });
+  f.child.stderr.write(`Quoted: ${line}`);
+  f.child.stderr.write(scheduleDiagnostic("resume: resurrected 99 session cron task(s)"));
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled other-id for tomorrow"));
+  f.child.stderr.write("x".repeat(9000)); f.child.stderr.write(line);
+  f.child.stderr.write(scheduleDiagnostic("resume: private unrelated diagnostic"));
+  assert.equal(f.adapter.hasScheduledWork(), false);
+  f.complete(); await running;
+  assert.equal(f.adapter.applicationSession, undefined);
+  assert.notEqual(f.child.exitCode ?? f.child.signalCode, null);
+  assert.doesNotMatch(JSON.stringify(f.events), /private unrelated diagnostic/);
+});
+
+test("native scheduling diagnostics from an interrupted or stopped worker cannot resurrect it", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true; f.hold = "interrupt";
+  const running = f.adapter.send("Schedule a check"), rejected = assert.rejects(running, /interrupted/);
+  await scheduledTurnStarted(f);
+  const session = f.adapter.turnSession, interrupting = f.adapter.interrupt();
+  await waitFor(() => f.controls.some(control => control.request.subtype === "interrupt"));
+  f.child.stderr.write(scheduleDiagnostic("resume: resurrected 1 session cron task(s)"));
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled abcdef12 for 2026-09-17T10:22:24.844Z"));
+  f.respond(f.controls.find(control => control.request.subtype === "interrupt"));
+  await interrupting; await rejected; await f.adapter.stop();
+  session.trackScheduleDiagnostic(scheduleDiagnostic("resume: resurrected 1 session cron task(s)").trimEnd());
+  assert.equal(f.adapter.hasScheduledWork(), false); assert.equal(session.hasScheduledWork(), false);
+});
 
 test("actual native cron creation retains both slash and ordinary sessions; deletion releases idle protection", async t => {
   for (const text of ["/loop 1m Check the fixture", "Check the fixture every minute"]) {
