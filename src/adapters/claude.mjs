@@ -11,6 +11,7 @@ import { ClaudeTextStream } from "../claude-text-stream.mjs";
 import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR, ClaudeControlChannel, runClaudeMcpCommand } from "../claude-mcp.mjs";
 import { ClaudeSession, claudeCallResult, CLAUDE_SCHEDULE_DIAGNOSTICS } from "../claude-session.mjs";
 import { claudePluginReloadRequest, reloadClaudePlugins, CLAUDE_PLUGIN_PRIVATE_ERROR } from "../claude-plugins.mjs";
+import { claudeDebugRequest, CLAUDE_DEBUG_PRIVATE_ERROR } from "../claude-debug.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch, now = Date.now }) {
@@ -73,6 +74,7 @@ export class ClaudeAdapter {
     const fastRequest = claudeFastRequest(text);
     const mcpRequest = claudeMcpRequest(text);
     const pluginReload = claudePluginReloadRequest(text);
+    const debugRequest = claudeDebugRequest(text);
     // The native review handler checkpoints its journal only when it returns.
     // Keep its SDK input open so Stop can cancel the query and let it flush.
     const reviewRequest = /^\/code-review(?:\s|$)/.test(text.trimStart());
@@ -80,11 +82,12 @@ export class ClaudeAdapter {
     const interactive = this.config.claude.authMode === "gateway" && Boolean(this.hooks.onRequest);
     if (mcpRequest?.action && this.config.claude.authMode !== "gateway") throw new Error(CLAUDE_MCP_PRIVATE_ERROR);
     if (pluginReload && this.config.claude.authMode !== "gateway") throw Error(CLAUDE_PLUGIN_PRIVATE_ERROR);
+    if (debugRequest && this.config.claude.authMode !== "gateway") throw Error(CLAUDE_DEBUG_PRIVATE_ERROR);
     if (fastRequest && this.config.claude.authMode !== "gateway") throw new Error("Fast changes require a private Claude profile; shared host profiles remain locked until company/profile isolation is complete.");
     if (configuration?.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
     const nativeMode = Object.keys(CLAUDE_PERMISSION_MODES).find(key => CLAUDE_PERMISSION_MODES[key] === mode);
     if (!nativeMode) throw new Error("Unsupported Claude permission mode");
-    if (this.child || this.settingsInspection || this.fastInspection) throw new Error("A Claude turn is already running for this chat");
+    if (this.child || this.settingsInspection || this.fastInspection || this.debugInspection) throw new Error("A Claude turn is already running for this chat");
     if (this.stopped || (this.config.claude.authMode === "gateway" && !this.capability)) await this.start();
     this.assertCapability();
 
@@ -129,7 +132,7 @@ export class ClaudeAdapter {
     const sessionId = this.sessionId || this.applicationSession?.sessionId || randomUUID();
     // These native handlers create a resumable journal only on completion.
     // Preflight, startup and forced-stop failures must not retain a missing ID.
-    const provisionalSession = isNew && (mcpRequest?.action || reviewRequest || applicationRequest || pluginReload);
+    const provisionalSession = isNew && (mcpRequest?.action || reviewRequest || applicationRequest || pluginReload || debugRequest);
     if (isNew && !provisionalSession && !interactive && !settingsPrompt) {
       this.sessionId = sessionId;
       await this.hooks.onSessionId?.(sessionId);
@@ -156,7 +159,7 @@ export class ClaudeAdapter {
     await ensureDirectory(uploads);
     // SDK sessions can clear effort natively. A startup environment override
     // would otherwise pin Auto and silently defeat all later picker changes.
-    const usesSession = interactive || applicationRequest || pluginReload || settingsPrompt || this.applicationSession && !this.applicationSession.ended;
+    const usesSession = interactive || applicationRequest || pluginReload || settingsPrompt || debugRequest || this.applicationSession && !this.applicationSession.ended;
     if (resetEffort && !usesSession) env.CLAUDE_CODE_EFFORT_LEVEL = "auto";
     if (usesSession && env.CLAUDE_CODE_EFFORT_LEVEL && !this.effortEnvironmentNotified) {
       this.hooks.onEvent?.({ type: "notice", text: "Claude's worker environment sets CLAUDE_CODE_EFFORT_LEVEL. It may override the web effort selection; use /effort status to check the effective native level." });
@@ -203,9 +206,9 @@ export class ClaudeAdapter {
       "--print",
       "--verbose",
       "--output-format", "stream-json",
-      ...(mcpRequest?.action || reviewRequest || interactive || pluginReload || settingsPrompt ? ["--input-format", "stream-json"] : []),
+      ...(mcpRequest?.action || reviewRequest || interactive || pluginReload || settingsPrompt || debugRequest ? ["--input-format", "stream-json"] : []),
       ...(interactive ? ["--permission-prompt-tool", "stdio"] : []),
-      ...(interactive ? CLAUDE_SCHEDULE_DIAGNOSTICS : []),
+      ...(this.config.claude.authMode === "gateway" && usesSession ? CLAUDE_SCHEDULE_DIAGNOSTICS : []),
       "--include-partial-messages",
       "--permission-mode", nativeMode,
       "--prompt-suggestions", "false",
@@ -239,7 +242,7 @@ export class ClaudeAdapter {
     const previousModeObserver = this.modeObserver;
     const modeObserver = { sessionId, version, onPermissionMode };
     this.modeObserver = modeObserver;
-    let child, managed;
+    let child, managed, startedDebugCapture = false;
     const spawn = launchArgs => this.executor
       ? this.executor.spawn(this.config.claude.bin, launchArgs, {
           cwd: this.workspace,
@@ -274,12 +277,26 @@ export class ClaudeAdapter {
         const launchArgs = args.includes("--input-format") ? args : [...args, "--input-format", "stream-json"];
         this.applicationSession = manage(launchArgs);
       }
-      managed = this.applicationSession || (interactive || pluginReload || settingsPrompt ? manage(args) : null);
+      managed = this.applicationSession || (interactive || pluginReload || settingsPrompt || debugRequest ? manage(args) : null);
       this.turnSession = managed;
       child = managed ? await managed.open(args, env, { resetEffort }) : spawn(args);
       if (version !== this.sendVersion) throw Error("Claude turn interrupted");
       this.assertCapability();
       if (settingsPrompt) beforeNativeSettings = await inspectNative(managed);
+      if (debugRequest) {
+        const controller = new AbortController(); this.debugInspection = controller;
+        startedDebugCapture = !managed.debugLog || Boolean(managed.debugLog.error);
+        try {
+          await managed.enableDebug({ runtimeHome: this.runtimeHome, executor: this.executor, isolation: this.config.processIsolation, signal: controller.signal,
+            onError: error => { if (!this.stopped && [this.applicationSession, this.turnSession].includes(managed)) this.hooks.onEvent?.({ type: "notice", text: error.message }); } });
+          if (version !== this.sendVersion) throw Error("Claude turn interrupted");
+          this.assertCapability();
+          // Debugging must continue into the reproduction turn, even when no
+          // application is running. Idle sleep or explicit Stop still closes it.
+          this.applicationSession = managed;
+          if (startedDebugCapture) this.hooks.onEvent?.({ type: "notice", text: "Private debug logging is active for this native process from this point onward (up to 2 MiB). Earlier diagnostics from this process were not recorded by Relay. Stop ends this capture." });
+        } finally { if (this.debugInspection === controller) this.debugInspection = null; }
+      }
       // No user input exists during SDK initialization/reset. Do not publish
       // a resume ID for a first turn that fails before those controls finish.
       if (isNew && !provisionalSession && (interactive || settingsPrompt)) {
@@ -289,6 +306,7 @@ export class ClaudeAdapter {
         this.assertCapability();
       }
     } catch (error) {
+      if (startedDebugCapture && managed?.debugLog) { await managed.debugLog.close(); managed.debugLog = null; }
       finishObservation();
       if (this.modeObserver === modeObserver) this.modeObserver = previousModeObserver;
       if (child && managed?.active === child && !child.commandUuid) managed.finish(child, 1, null);
@@ -351,7 +369,7 @@ export class ClaudeAdapter {
     let mcpOutcome = null, mcpError = null;
     if (!mcpControl && !reviewControl) {
       const input = fastRequest ? "/fast on" : text;
-      child.stdin.end(interactive || settingsPrompt ? `${JSON.stringify({ type: "user", message: { role: "user", content: input } })}\n` : input);
+      child.stdin.end(interactive || settingsPrompt || debugRequest ? `${JSON.stringify({ type: "user", message: { role: "user", content: input } })}\n` : input);
     }
 
     const output = new ClaudeTextStream(delta => this.hooks.onEvent?.({ type: "assistant_delta", delta }));
@@ -477,7 +495,7 @@ export class ClaudeAdapter {
         const checkpointed = resultMessage?.subtype === "success" && resultMessage.is_error !== true;
         // Application prompts journal their interrupted query as a native
         // error result (unlike the bundled review's success checkpoint).
-        const applicationCheckpoint = applicationRequest && version !== this.sendVersion && resultMessage?.subtype === "error_during_execution" && resultMessage.session_id === sessionId;
+        const applicationCheckpoint = (applicationRequest || debugRequest) && version !== this.sendVersion && resultMessage?.subtype === "error_during_execution" && resultMessage.session_id === sessionId;
         if (provisionalSession) {
           // Graceful review cancellation still returns and saves its journal.
           // Preserve that checkpoint even though the running turn was stopped.
@@ -580,6 +598,7 @@ export class ClaudeAdapter {
     this.modeObserver = null;
     (this.turnSession?.requests || this.applicationSession?.requests)?.cancel();
     this.settingsInspection?.abort();
+    this.debugInspection?.abort();
     this.fastInspection?.abort();
     this.providerObservation?.(); this.providerObservation = null;
     // Application turns are logical children: interrupt their native query,
@@ -603,6 +622,7 @@ export class ClaudeAdapter {
     this.sendVersion += 1;
     this.modeObserver = null;
     this.settingsInspection?.abort();
+    this.debugInspection?.abort();
     this.fastInspection?.abort();
     this.providerObservation?.(); this.providerObservation = null;
     this.stopped = true;

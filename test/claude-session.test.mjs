@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter, once } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, rename, symlink, writeFile } from "node:fs/promises";
 import { ClaudeSession, claudeCallResult, CLAUDE_SCHEDULE_DIAGNOSTICS } from "../src/claude-session.mjs";
 import { ClaudeAdapter } from "../src/adapters/claude.mjs";
 import { ChatStore } from "../src/store.mjs";
@@ -60,10 +60,11 @@ function transport(f) {
         (f.permissionReplies ||= []).push(packet);
       } else {
         f.inputs.push(packet);
-        setImmediate(() => {
+        const started = () => {
           f.emit({ type: "command_lifecycle", command_uuid: packet.uuid, state: "started" });
           if (!f.block) f.complete(f.reply, f.failResult);
-        });
+        };
+        if (f.startDelayMs) setTimeout(started, f.startDelayMs); else setImmediate(started);
       }
     }
   });
@@ -84,6 +85,92 @@ async function fixture(t, { interactive = false } = {}) {
   t.after(() => adapter.stop());
   return Object.assign(f, { adapter, config, broker, chat, store });
 }
+
+test("debug captures only opted-in native diagnostics and retains the native owner for reproduction until Stop", async t => {
+  for (const interactive of [false, true]) {
+    const f = await fixture(t, { interactive }); f.block = true;
+    const text = "/debug Diagnose this private fixture\nPreserve ação", running = f.adapter.send(text);
+    await waitFor(() => f.adapter.turnSession?.active?.started);
+    const log = f.adapter.turnSession.debugLog, filename = `${f.store.runtimeHome(f.chat.id)}/claude/debug/${f.nativeSession}.txt`;
+    f.child.stderr.write("2026-09-17T13:00:00.000Z [DEBUG] Actual private diagnostic ação\n"); await log.flush();
+    assert.match(await readFile(filename, "utf8"), /Actual private diagnostic ação/);
+    assert.equal(f.inputs[0].message.content, text); f.complete(); const result = await running;
+    assert.equal(log.ended, undefined); assert.doesNotMatch(JSON.stringify([result, f.events]), /Actual private diagnostic/);
+    f.block = false; await f.adapter.send("Reproduce the problem in the same session"); assert.equal(f.launches.length, 1);
+    f.child.stderr.write("2026-09-17T13:00:00.000Z [DEBUG] Reproduced after the debug reply\n"); await log.flush();
+    assert.match(await readFile(filename, "utf8"), /Reproduced after the debug reply/);
+    await f.adapter.stop(); assert.equal(log.ended, true);
+  }
+});
+
+test("debug opt-in does not replace a retained app, never records earlier diagnostics, and Stop closes capture", async t => {
+  for (const interactive of [false, true]) {
+    const f = await fixture(t, { interactive }); await f.adapter.send("/run Start the fixture");
+    const session = f.adapter.applicationSession, filename = `${f.store.runtimeHome(f.chat.id)}/claude/debug/${f.nativeSession}.txt`;
+    f.child.stderr.write("2026-09-17T13:00:00.000Z [DEBUG] Before opt-in; must not be recorded\n");
+    await assert.rejects(readFile(filename), { code: "ENOENT" });
+    await f.adapter.send("/debug Investigate this app");
+    assert.equal(f.adapter.applicationSession, session); assert.equal(f.launches.length, 1);
+    f.child.stderr.write("2026-09-17T13:00:00.000Z [DEBUG] After opt-in\n"); await session.debugLog.flush();
+    assert.match(await readFile(filename, "utf8"), /After opt-in/); assert.doesNotMatch(await readFile(filename, "utf8"), /Before opt-in/);
+    await f.adapter.send("Continue normally"); assert.equal(f.launches.length, 1);
+    await f.adapter.stop(); assert.equal(session.debugLog.ended, true);
+    const saved = await readFile(filename, "utf8");
+    assert.equal(await readFile(filename, "utf8"), saved);
+  }
+});
+
+test("failed debug setup preserves the running app and cannot publish a missing first journal or read host logs", async t => {
+  for (const retained of [false, true]) {
+    const f = await fixture(t, { interactive: true });
+    if (retained) await f.adapter.send("/run Start the fixture");
+    const outside = await temporaryDirectory(t), runtime = f.store.runtimeHome(f.chat.id);
+    await mkdir(`${runtime}/claude`, { recursive: true }); await symlink(outside, `${runtime}/claude/debug`);
+    await assert.rejects(f.adapter.send("/debug"), /Cannot safely enable/);
+    assert.equal(f.inputs.length, retained ? 1 : 0); assert.equal(f.launches.length, 1);
+    if (retained) { assert.equal(f.child.exitCode, null); assert.equal(f.child.signalCode, null); }
+    else { assert.equal(f.adapter.sessionId, null); assert.deepEqual(f.sessions, []); }
+  }
+  const host = await fixture(t); host.config.claude.authMode = "host";
+  await assert.rejects(host.adapter.send("/debug --help"), /Shared host logs/); assert.equal(host.launches.length, 0);
+});
+
+test("interruption after debug startup closes new capture without sending input or replacing the app", async t => {
+  const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Start the fixture");
+  const session = f.adapter.applicationSession, enable = session.enableDebug.bind(session); let log;
+  session.enableDebug = async options => {
+    await enable(options); log = session.debugLog;
+    await new Promise(resolve => options.signal.addEventListener("abort", resolve, { once: true }));
+  };
+  const running = f.adapter.send("/debug Investigate the app"), rejected = assert.rejects(running, /interrupted/);
+  await waitFor(() => log); await f.adapter.interrupt(); await rejected;
+  assert.equal(log.ended, true); assert.equal(session.debugLog, null);
+  assert.equal(f.launches.length, 1); assert.equal(f.inputs.length, 1); assert.equal(f.child.exitCode, null);
+  await f.adapter.send("Continue in the same app"); assert.equal(f.launches.length, 1);
+});
+
+test("interrupting the first native debug query retains its checkpoint and owner for Send now", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true; f.failInterrupt = true;
+  const running = f.adapter.send("/debug Investigate the current session"), rejected = assert.rejects(running, /interrupted/);
+  await waitFor(() => f.adapter.turnSession?.active?.started); const session = f.adapter.applicationSession;
+  await f.adapter.interrupt(); await rejected;
+  assert.equal(f.adapter.sessionId, f.nativeSession); assert.equal(f.sessions.at(-1), f.nativeSession);
+  assert.equal(f.child.exitCode, null); assert.equal(session.debugLog.ended, undefined);
+  f.block = false; await f.adapter.send("The selected queued input"); assert.equal(f.launches.length, 1);
+  await f.adapter.stop(); assert.equal(session.debugLog.ended, true);
+});
+
+test("debug capture failures between replies are visible without stopping the app or exposing private log text", async t => {
+  const f = await fixture(t, { interactive: true }); await f.adapter.send("/run Start the fixture"); await f.adapter.send("/debug Investigate");
+  const session = f.adapter.applicationSession, filename = `${f.store.runtimeHome(f.chat.id)}/claude/debug/${f.nativeSession}.txt`;
+  await rename(filename, `${filename}.original`); await writeFile(filename, "Preserve replacement");
+  f.child.stderr.write("2026-09-17T13:00:00.000Z [DEBUG] private failure detail\n");
+  await assert.rejects(session.debugLog.flush(), /capture stopped/); await session.debugLog.close();
+  assert.equal(f.events.filter(event => event.type === "notice" && /capture stopped/.test(event.text)).length, 1);
+  assert.doesNotMatch(JSON.stringify(f.events), /private failure detail/);
+  assert.equal(f.child.exitCode, null); assert.equal(f.launches.length, 1);
+  assert.equal(await readFile(filename, "utf8"), "Preserve replacement");
+});
 
 test("settings prompts reconcile the native merged configuration before closing one-shot or retained owners", { timeout: 10000 }, async t => {
   for (const [retained, interactive] of [[false, false], [false, true], [true, true]]) {
@@ -164,7 +251,7 @@ function nativeWorkflowReport(f, { start = true, finish = true, id = "workflow-r
 
 test("native workflows retain their owner and stay busy until the SDK notification report completes", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("/deep-research Preserve the real workflow"); await waitFor(() => f.inputs?.length);
+  const running = f.adapter.send("/deep-research Preserve the real workflow"); await nativeTurnStarted(f);
   const notification = nativeWorkflow(f); f.complete("Research started."); await running;
   assert.equal(f.child.exitCode, null); assert.equal(f.adapter.isBackgroundBusy(), true); assert.equal(f.adapter.hasScheduledWork(), false);
   f.emit(notification); assert.equal(f.adapter.isBackgroundBusy(), true);
@@ -179,7 +266,7 @@ test("native workflows retain their owner and stay busy until the SDK notificati
 
 test("a workflow completion during another notification report waits for its own native report", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("Start two native workflows"); await waitFor(() => f.inputs?.length);
+  const running = f.adapter.send("Start two native workflows"); await nativeTurnStarted(f);
   const first = nativeWorkflow(f), second = nativeWorkflow(f, "workflow-two", "call-two"); f.complete(); await running;
   f.emit(first); nativeWorkflowReport(f, { finish: false }); f.emit(second);
   nativeWorkflowReport(f, { start: false });
@@ -190,7 +277,7 @@ test("a workflow completion during another notification report waits for its own
 
 test("a workflow finishing before its launching reply still waits for the separate native report", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("Run and report immediately"); await waitFor(() => f.inputs?.length);
+  const running = f.adapter.send("Run and report immediately"); await nativeTurnStarted(f);
   f.emit(nativeWorkflow(f)); f.complete(); await running;
   assert.equal(f.adapter.isBackgroundBusy(), true);
   f.emit({ type: "command_lifecycle", session_id: f.nativeSession, command_uuid: f.inputs[0].uuid, state: "completed" });
@@ -202,7 +289,7 @@ test("a workflow finishing before its launching reply still waits for the separa
 test("quoted, unbound, denied, foreign, child and malformed workflow events cannot retain an ordinary worker", async t => {
   for (const variant of ["quoted", "unbound", "denied", "foreign", "child", "malformed"]) {
     const f = await fixture(t, { interactive: true }); f.block = true;
-    const running = f.adapter.send("Inspect this input"); await waitFor(() => f.inputs?.length);
+    const running = f.adapter.send("Inspect this input"); await nativeTurnStarted(f);
     const base = { session_id: f.nativeSession, ...(variant === "foreign" ? { session_id: "other-session" } : {}), ...(variant === "child" ? { parent_tool_use_id: "child-call" } : {}) };
     if (variant !== "unbound") f.emit({ ...base, type: "assistant", message: { content: variant === "quoted" ? [{ type: "text", text: 'Workflow task_started {"task_type":"local_workflow"}' }] : [{ type: "tool_use", id: "call", name: "Workflow" }] } });
     if (variant === "denied") f.emit({ ...base, type: "user", message: { content: [{ type: "tool_result", tool_use_id: "call", is_error: true, content: "Native permission denied" }] } });
@@ -215,7 +302,7 @@ test("quoted, unbound, denied, foreign, child and malformed workflow events cann
 
 test("Send now waits for the exact native workflow stop receipt and preserves the owning worker", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("/deep-research Test native cancellation"); await waitFor(() => f.inputs?.length);
+  const running = f.adapter.send("/deep-research Test native cancellation"); await nativeTurnStarted(f);
   const notification = nativeWorkflow(f); f.complete(); await running;
   f.hold = "stop_task"; const stopping = f.adapter.interrupt(); let settled = false; void stopping.then(() => { settled = true; });
   await waitFor(() => f.controls.some(packet => packet.request.subtype === "stop_task"));
@@ -230,7 +317,7 @@ test("Send now waits for the exact native workflow stop receipt and preserves th
 test("refused and unacknowledged native workflow cancellation stay busy without faking success", async t => {
   for (const refused of [true, false]) {
     const f = await fixture(t, { interactive: true }); f.block = true;
-    const running = f.adapter.send("Start a workflow"); await waitFor(() => f.inputs?.length);
+    const running = f.adapter.send("Start a workflow"); await nativeTurnStarted(f);
     const notification = nativeWorkflow(f); f.complete(); await running;
     f.adapter.applicationSession.controlTimeoutMs = 25;
     if (refused) f.refuse = "stop_task";
@@ -243,7 +330,7 @@ test("refused and unacknowledged native workflow cancellation stay busy without 
 
 test("Send now cancels an in-flight native report before its first token without showing a false failure", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("Start the native research"); await waitFor(() => f.inputs?.length);
+  const running = f.adapter.send("Start the native research"); await nativeTurnStarted(f);
   const notification = nativeWorkflow(f); f.complete(); await running; f.emit(notification);
   f.hold = "interrupt";
   const stopping = f.adapter.interrupt(); await waitFor(() => f.controls.some(packet => packet.request.subtype === "interrupt"));
@@ -261,7 +348,7 @@ test("Send now cancels an in-flight native report before its first token without
 test("failed native research reports remain visible errors and release their completed task", async t => {
   for (const streaming of [false, true]) {
     const f = await fixture(t, { interactive: true }); f.block = true;
-    const running = f.adapter.send("Start research"); await waitFor(() => f.inputs?.length);
+    const running = f.adapter.send("Start research"); await nativeTurnStarted(f);
     const notification = nativeWorkflow(f); f.complete(); await running; f.emit({ ...notification, status: "failed" });
     if (streaming) nativeWorkflowReport(f, { finish: false });
     else f.emit({ type: "assistant", session_id: f.nativeSession, message: { id: "failed-research", content: [{ type: "text", text: "Native fixture provider failed" }] } });
@@ -274,7 +361,7 @@ test("failed native research reports remain visible errors and release their com
 
 test("workflow completion racing stop_task also waits for cancellation of its newly queued report", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("Start the native workflow"); await waitFor(() => f.inputs?.length);
+  const running = f.adapter.send("Start the native workflow"); await nativeTurnStarted(f);
   const notification = nativeWorkflow(f); f.complete(); await running;
   f.hold = "stop_task"; const stopping = f.adapter.interrupt();
   await waitFor(() => f.controls.some(packet => packet.request.subtype === "stop_task"));
@@ -292,7 +379,7 @@ test("workflow completion racing stop_task also waits for cancellation of its ne
 test("private ordinary turns use live native approvals and close their transport after the reply", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
   const running = f.adapter.send("Write the fixture recipe", { mode: "default" });
-  await waitFor(() => f.inputs?.length);
+  await nativeTurnStarted(f);
   assert(f.launches[0].args.includes("--permission-prompt-tool"));
   assert.equal(f.launches[0].args[f.launches[0].args.indexOf("--permission-mode") + 1], "default");
   assert.equal(f.controls[0].request.subtype, "initialize");
@@ -304,7 +391,7 @@ test("private ordinary turns use live native approvals and close their transport
   assert.notEqual(f.child.exitCode ?? f.child.signalCode, null); assert.equal(f.adapter.turnSession, null); assert.equal(f.adapter.applicationSession, undefined);
   await assert.rejects(f.adapter.respond(f.requests[0].requestId, { decision: "accept" }), /no longer active/);
   const next = f.adapter.send("Ask again"), rejected = assert.rejects(next, /interrupted/);
-  await waitFor(() => f.inputs.length === 2);
+  await nativeTurnStarted(f, 2);
   f.emit({ type: "control_request", request_id: "native-again", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "node fixture.mjs" } } });
   await waitFor(() => f.requests.length === 2);
   await f.adapter.stop(); await rejected;
@@ -406,7 +493,7 @@ test("native mode observations follow the current main session, survive retained
   const f = await fixture(t, { interactive: true }), first = [], second = [];
   f.block = true;
   const running = f.adapter.send("/run Start the fixture", { onPermissionMode: mode => first.push(mode) });
-  await waitFor(() => f.inputs?.length);
+  await nativeTurnStarted(f);
   const status = permissionMode => ({ type: "system", subtype: "status", status: null, session_id: f.nativeSession, permissionMode });
   f.emit(status("plan")); await waitFor(() => first.length === 1);
   f.emit({ ...status("default"), session_id: "foreign-session" }); f.emit({ ...status("default"), parent_tool_use_id: "child" });
@@ -414,7 +501,7 @@ test("native mode observations follow the current main session, survive retained
   f.emit(status("acceptEdits")); await waitFor(() => first.length === 2);
   assert.deepEqual(first, ["plan", "accept_edits"]);
   const next = f.adapter.send("/verify Verify the fixture", { onPermissionMode: mode => second.push(mode) });
-  const rejected = assert.rejects(next, /interrupted/); await waitFor(() => f.inputs.length === 2);
+  const rejected = assert.rejects(next, /interrupted/); await nativeTurnStarted(f, 2);
   f.emit(status("plan")); await waitFor(() => second.length === 1);
   await f.adapter.interrupt(); await rejected;
   f.emit(status("default")); await new Promise(resolve => setImmediate(resolve));
@@ -427,7 +514,7 @@ test("failed native-mode synchronization reaches the runtime fatal handler witho
     f.adapter.hooks.onFatal = error => { errors.push(error.message); void f.adapter.stop(); };
     const onPermissionMode = () => { if (asynchronous) return Promise.reject(Error("Private persistence error")); throw Error("Private persistence error"); };
     const running = f.adapter.send("/run Start the fixture", { onPermissionMode }), rejected = assert.rejects(running, /interrupted/);
-    await waitFor(() => f.inputs?.length);
+    await nativeTurnStarted(f);
     f.emit({ type: "system", subtype: "status", status: null, session_id: f.nativeSession, permissionMode: "plan" });
     await rejected; assert.equal(errors.length, 1); assert.match(errors[0], /could not be synchronized/);
     assert.doesNotMatch(errors[0], /Private persistence/);
@@ -439,14 +526,16 @@ const scheduleCall = (f, name, id = "cron-call", input = {}) => f.emit({ type: "
 const scheduleResult = (f, data, { id = "cron-call", failed = false, ...extra } = {}) => f.emit({ type: "user", session_id: f.nativeSession,
   message: { content: [{ type: "tool_result", tool_use_id: id, content: "Native scheduling result", is_error: failed }] }, tool_use_result: data, ...extra });
 const schedule = { id: "abcdef12", recurring: true, humanSchedule: "Every minute", durable: false };
-const scheduledTurnStarted = (f, count = 1) => waitFor(() => f.inputs?.length === count && f.adapter.turnSession?.active?.started);
+// Delivery into the fake stdin precedes its asynchronous native lifecycle
+// acknowledgement. Do not emit a reply before it can belong to that turn.
+const nativeTurnStarted = (f, count = 1) => waitFor(() => f.inputs?.length === count && f.adapter.turnSession?.active?.started);
 const scheduleDiagnostic = text => `2026-09-17T10:21:52.177Z [DEBUG] ${text}\n`;
 const wakeup = { scheduledFor: 1789641540000, clampedDelaySeconds: 60, wasClamped: false };
 const stopWakeup = { scheduledFor: 0, clampedDelaySeconds: 0, wasClamped: false, stopped: true, cancelledWakeups: 1 };
 
 test("a bound dynamic wakeup retains the native worker before its first scheduler poll and stops without another input", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("/loop Watch the fixture"); await scheduledTurnStarted(f);
+  const running = f.adapter.send("/loop Watch the fixture"); await nativeTurnStarted(f);
   scheduleCall(f, "ScheduleWakeup"); scheduleResult(f, wakeup); f.complete(); await running;
   assert.equal(f.adapter.hasScheduledWork(), true); assert.equal(f.child.exitCode, null);
   assert.equal(f.adapter.applicationSession.scheduledJobs.size, 0);
@@ -459,7 +548,7 @@ test("a bound dynamic wakeup retains the native worker before its first schedule
 
 test("dynamic replacement, native snapshots and cancellation preserve ordinary and restored schedules", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("Schedule several checks"); await scheduledTurnStarted(f);
+  const running = f.adapter.send("Schedule several checks"); await nativeTurnStarted(f);
   f.child.stderr.write(scheduleDiagnostic("resume: resurrected 1 session cron task(s)"));
   f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled 11111111 for 2026-09-17T10:39:00.000Z"));
   scheduleCall(f, "CronCreate", "fixed"); scheduleResult(f, schedule, { id: "fixed" });
@@ -483,7 +572,7 @@ test("dynamic replacement, native snapshots and cancellation preserve ordinary a
 
 test("native dynamic firing, empty snapshots and Stop reconcile without leaving a phantom schedule", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("/loop Watch"); await scheduledTurnStarted(f);
+  const running = f.adapter.send("/loop Watch"); await nativeTurnStarted(f);
   scheduleCall(f, "ScheduleWakeup"); scheduleResult(f, wakeup); f.complete(); await running;
   f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled abcdef12 for 2026-09-17T10:39:00.000Z"));
   f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] firing abcdef12"));
@@ -497,7 +586,7 @@ test("native dynamic firing, empty snapshots and Stop reconcile without leaving 
 
 test("ambiguous new native job IDs are never guessed to belong to a dynamic loop", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("Inspect scheduling"); await scheduledTurnStarted(f);
+  const running = f.adapter.send("Inspect scheduling"); await nativeTurnStarted(f);
   scheduleCall(f, "ScheduleWakeup"); scheduleResult(f, wakeup);
   scheduleCall(f, "CronList", "ambiguous"); scheduleResult(f, { jobs: [{ id: "11111111" }, { id: "22222222" }] }, { id: "ambiguous" });
   assert.equal(f.adapter.applicationSession.dynamicWakeup.id, null);
@@ -510,7 +599,7 @@ test("ambiguous new native job IDs are never guessed to belong to a dynamic loop
 test("failed, foreign, quoted, unbound, zero and malformed wakeup receipts cannot retain an ordinary worker", async t => {
   for (const variant of ["failed", "foreign", "child", "quoted", "unbound", "zero", "malformed"]) {
     const f = await fixture(t, { interactive: true }); f.block = true;
-    const running = f.adapter.send("Inspect only"); await scheduledTurnStarted(f);
+    const running = f.adapter.send("Inspect only"); await nativeTurnStarted(f);
     if (variant !== "unbound") scheduleCall(f, "ScheduleWakeup");
     if (variant === "quoted") f.emit({ type: "assistant", session_id: f.nativeSession, message: { content: [{ type: "text", text: JSON.stringify(wakeup) }] } });
     else scheduleResult(f, variant === "zero" ? { ...wakeup, scheduledFor: 0, clampedDelaySeconds: 0 } : variant === "malformed" ? { ...wakeup, scheduledFor: "soon" } : wakeup,
@@ -522,7 +611,7 @@ test("failed, foreign, quoted, unbound, zero and malformed wakeup receipts canno
 
 test("a denied or unavailable reschedule cannot erase an existing native wakeup; late success cannot survive cancellation", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("/loop Inspect"); await scheduledTurnStarted(f);
+  const running = f.adapter.send("/loop Inspect"); await nativeTurnStarted(f);
   scheduleCall(f, "ScheduleWakeup"); scheduleResult(f, wakeup);
   f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled abcdef12 for 2026-09-17T10:39:00.000Z"));
   scheduleCall(f, "ScheduleWakeup", "denied", { stop: true }); scheduleResult(f, stopWakeup, { id: "denied", failed: true });
@@ -562,7 +651,7 @@ test("native restored schedules retain an ordinary resume without synthetic turn
 
 test("native one-shot fire and recurring expiry release only their own sleep protection", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("Schedule two checks"); await scheduledTurnStarted(f);
+  const running = f.adapter.send("Schedule two checks"); await nativeTurnStarted(f);
   scheduleCall(f, "CronList"); scheduleResult(f, { jobs: [schedule, { ...schedule, id: "12345678", recurring: false }] });
   f.complete(); await running;
   f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] firing 12345678"));
@@ -578,7 +667,7 @@ test("native one-shot fire and recurring expiry release only their own sleep pro
 test("native deletion or empty readback before the first scheduler poll clears restored pending counts", async t => {
   for (const action of ["delete", "list", "never"]) {
     const f = await fixture(t, { interactive: true }); f.block = true;
-    const running = f.adapter.send("Inspect restored schedules"); await scheduledTurnStarted(f);
+    const running = f.adapter.send("Inspect restored schedules"); await nativeTurnStarted(f);
     f.child.stderr.write(scheduleDiagnostic("resume: resurrected 1 session cron task(s)"));
     if (action === "delete") { scheduleCall(f, "CronDelete", "delete", { id: schedule.id }); scheduleResult(f, { id: schedule.id }, { id: "delete" }); }
     else if (action === "list") { scheduleCall(f, "CronList"); scheduleResult(f, { jobs: [] }); }
@@ -592,7 +681,7 @@ test("native deletion or empty readback before the first scheduler poll clears r
 
 test("quoted, malformed and oversized diagnostics cannot retain a worker or leak debug text", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("No scheduling"); await scheduledTurnStarted(f);
+  const running = f.adapter.send("No scheduling"); await nativeTurnStarted(f);
   const line = scheduleDiagnostic("[ScheduledTasks] scheduled abcdef12 for 2026-09-17T10:22:24.844Z");
   f.emit({ type: "assistant", session_id: f.nativeSession, message: { content: [{ type: "text", text: `Quoted: ${line}` }] } });
   f.child.stderr.write(`Quoted: ${line}`);
@@ -610,7 +699,7 @@ test("quoted, malformed and oversized diagnostics cannot retain a worker or leak
 test("native scheduling diagnostics from an interrupted or stopped worker cannot resurrect it", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true; f.hold = "interrupt";
   const running = f.adapter.send("Schedule a check"), rejected = assert.rejects(running, /interrupted/);
-  await scheduledTurnStarted(f);
+  await nativeTurnStarted(f);
   const session = f.adapter.turnSession, interrupting = f.adapter.interrupt();
   await waitFor(() => f.controls.some(control => control.request.subtype === "interrupt"));
   f.child.stderr.write(scheduleDiagnostic("resume: resurrected 1 session cron task(s)"));
@@ -624,11 +713,11 @@ test("native scheduling diagnostics from an interrupted or stopped worker cannot
 test("actual native cron creation retains both slash and ordinary sessions; deletion releases idle protection", async t => {
   for (const text of ["/loop 1m Check the fixture", "Check the fixture every minute"]) {
     const f = await fixture(t, { interactive: true }); f.block = true;
-    const running = f.adapter.send(text); await scheduledTurnStarted(f);
+    const running = f.adapter.send(text); await nativeTurnStarted(f);
     scheduleCall(f, "CronCreate"); scheduleResult(f, schedule); f.complete(); await running;
     assert.equal(f.adapter.hasScheduledWork(), true); assert.equal(f.child.exitCode, null);
     assert(f.events.some(event => event.type === "scheduled_work"));
-    const next = f.adapter.send("Cancel that schedule"); await scheduledTurnStarted(f, 2);
+    const next = f.adapter.send("Cancel that schedule"); await nativeTurnStarted(f, 2);
     scheduleCall(f, "CronDelete", "delete", { id: schedule.id }); scheduleResult(f, { id: schedule.id }, { id: "delete" });
     f.complete(); await next;
     assert.equal(f.adapter.hasScheduledWork(), false); assert.equal(f.launches.length, 1);
@@ -640,7 +729,7 @@ test("actual native cron creation retains both slash and ordinary sessions; dele
 test("quoted, failed, foreign, child, unbound and malformed cron results cannot retain a worker", async t => {
   for (const variant of ["quoted", "failed", "foreign", "child", "unbound", "malformed", "missing", "child-call"]) {
     const f = await fixture(t, { interactive: true }); f.block = true;
-    const running = f.adapter.send("Inspect only"); await scheduledTurnStarted(f);
+    const running = f.adapter.send("Inspect only"); await nativeTurnStarted(f);
     if (variant === "child-call") f.emit({ type: "assistant", session_id: f.nativeSession, parent_tool_use_id: "child",
       message: { content: [{ type: "tool_use", id: "cron-call", name: "CronCreate", input: {} }] } });
     else if (variant !== "unbound") scheduleCall(f, "CronCreate");
@@ -656,7 +745,7 @@ test("quoted, failed, foreign, child, unbound and malformed cron results cannot 
 
 test("cron snapshots and background cancellation reconcile state without trusting failed or mismatched deletions", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("List restored schedules"); await scheduledTurnStarted(f);
+  const running = f.adapter.send("List restored schedules"); await nativeTurnStarted(f);
   scheduleCall(f, "CronList"); scheduleResult(f, { jobs: [schedule, { ...schedule, id: "12345678" }] });
   f.complete(); await running;
   assert.equal(f.adapter.applicationSession.scheduledJobs.size, 2);
@@ -676,7 +765,7 @@ test("interrupted or completed cron calls cannot promote a late success", async 
   for (const completed of [false, true]) {
     const f = await fixture(t, { interactive: true }); f.block = true; f.hold = "interrupt";
     const running = f.adapter.send("Create a schedule"), rejected = assert.rejects(running, /interrupted/);
-    await scheduledTurnStarted(f);
+    await nativeTurnStarted(f);
     scheduleCall(f, "CronCreate");
     if (completed) scheduleResult(f, {}, { failed: true });
     const interrupting = f.adapter.interrupt(); await waitFor(() => f.controls.some(control => control.request.subtype === "interrupt"));
@@ -689,7 +778,7 @@ test("interrupted or completed cron calls cannot promote a late success", async 
 
 test("native scheduled lifecycle is busy between replies and interruption waits for its own cancellation receipt", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
-  const running = f.adapter.send("/loop 1m Check"); await scheduledTurnStarted(f);
+  const running = f.adapter.send("/loop 1m Check"); await nativeTurnStarted(f);
   scheduleCall(f, "CronCreate"); scheduleResult(f, schedule); f.complete(); await running;
   const lifecycle = { type: "command_lifecycle", session_id: f.nativeSession, command_uuid: "scheduled-tick", state: "started" };
   f.emit({ ...lifecycle, session_id: "foreign" }); f.emit({ ...lifecycle, parent_tool_use_id: "child" });
@@ -713,7 +802,7 @@ test("native scheduled lifecycle is busy between replies and interruption waits 
 test("a native background Bash task retains an ordinary or generated-skill session without replaying input", async t => {
   for (const text of ["Start this project's HTTP app", "/run-fixture Start the generated recipe"]) {
     const f = await fixture(t, { interactive: true }); f.block = true;
-    const running = f.adapter.send(text); await waitFor(() => f.inputs?.length === 1);
+    const running = f.adapter.send(text); await nativeTurnStarted(f);
     f.emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "shell-app", name: "Bash", input: { command: "node server.mjs", run_in_background: true } }] } });
     f.emit({ type: "system", subtype: "task_started", session_id: f.nativeSession, task_type: "local_bash", task_id: "native-app", tool_use_id: "shell-app" });
     f.complete(); await running;
@@ -733,7 +822,7 @@ test("only a bound live native Bash task can retain a private ordinary session",
   ];
   for (const change of changes) {
     const f = await fixture(t, { interactive: true }); f.block = true;
-    const running = f.adapter.send("Do not retain unrelated activity"); await waitFor(() => f.inputs?.length === 1);
+    const running = f.adapter.send("Do not retain unrelated activity"); await nativeTurnStarted(f);
     f.emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "shell-app", name: "Bash", input: { command: "node server.mjs" } }] } });
     f.emit({ type: "system", subtype: "task_started", session_id: f.nativeSession, task_type: "local_bash", task_id: "native-app", tool_use_id: "shell-app", ...change });
     f.complete(); await running;
@@ -744,7 +833,7 @@ test("only a bound live native Bash task can retain a private ordinary session",
 test("interruption cannot promote a late background task or keep an ordinary session alive", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true; f.hold = "interrupt";
   const running = f.adapter.send("Start a task"), rejected = assert.rejects(running, /interrupted/);
-  await waitFor(() => f.inputs?.length === 1);
+  await nativeTurnStarted(f);
   f.emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "shell-app", name: "Bash", input: {} }] } });
   const interrupting = f.adapter.interrupt(); await waitFor(() => f.controls.some(control => control.request.subtype === "interrupt"));
   f.emit({ type: "system", subtype: "task_started", session_id: f.nativeSession, task_type: "local_bash", task_id: "late-app", tool_use_id: "shell-app" });
@@ -753,10 +842,10 @@ test("interruption cannot promote a late background task or keep an ordinary ses
   assert.equal(f.adapter.applicationSession, undefined); assert.notEqual(f.child.exitCode ?? f.child.signalCode, null);
 });
 
-test("child tools, completed calls and quoted task metadata do not promote an ordinary session", async t => {
+test("child tools, completed calls and quoted task metadata do not promote an ordinary session", { timeout: 10000 }, async t => {
   for (const variant of ["child", "read", "completed", "text", "missing-id"]) {
-    const f = await fixture(t, { interactive: true }); f.block = true;
-    const running = f.adapter.send("Do not retain unsupported activity"); await waitFor(() => f.inputs?.length === 1);
+    const f = await fixture(t, { interactive: true }); f.block = true; f.startDelayMs = 30;
+    const running = f.adapter.send("Do not retain unsupported activity"); await nativeTurnStarted(f);
     const task = { type: "system", subtype: "task_started", session_id: f.nativeSession, task_type: "local_bash", task_id: "native-app", tool_use_id: variant === "missing-id" ? undefined : "shell-app" };
     f.emit({ type: "assistant", ...(variant === "child" ? { parent_tool_use_id: "child-agent" } : {}), message: { content: [variant === "text"
       ? { type: "text", text: JSON.stringify(task) }
@@ -941,7 +1030,7 @@ test("Stop or rejection during the first native effort reset leaves no input, ap
 test("Send now interruption checkpoints the first application turn and retains its CLI and capability", async t => {
   const f = await fixture(t); f.block = true; f.failInterrupt = true;
   const running = f.adapter.send("/run Launch app"), rejected = assert.rejects(running, /interrupted/);
-  await waitFor(() => f.inputs?.length); const capability = f.adapter.capability;
+  await nativeTurnStarted(f); const capability = f.adapter.capability;
   assert.deepEqual(f.sessions, []);
   await f.adapter.interrupt(); await rejected;
   assert.equal(f.child.exitCode, null); assert.deepEqual(f.signals, []); assert.equal(f.sessions.length, 1);
@@ -1092,7 +1181,7 @@ test("failed native disable after account refusal cannot claim Fast was switched
 test("a native process exiting cleanly without a result cannot report a successful run", async t => {
   const f = await fixture(t); f.block = true;
   const running = f.adapter.send("/run Launch app"), rejected = assert.rejects(running, /worker exited 1/);
-  await waitFor(() => f.inputs?.length); f.child.stdin.end(); await rejected;
+  await nativeTurnStarted(f); f.child.stdin.end(); await rejected;
   assert.equal(f.adapter.sessionId, null); assert.deepEqual(f.sessions, []);
 });
 

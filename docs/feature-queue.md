@@ -68,6 +68,26 @@ feature or turn an external verification gate into a passing result.
 
 ## Verification ledger
 
+- 20: reproduced `/debug` advertising a nonexistent log because native
+  diagnostics were category-filtered and redirected to stderr. Explicit debug
+  now records subsequent actual diagnostics in a bounded, credential-redacted
+  private worker file; ordinary use stores no pre-opt-in diagnostic history.
+  Its native SDK owner survives the reply for reproduction without restarting
+  an existing application. Capture closes on Stop/sleep/process exit; linked,
+  replaced or oversized targets fail closed, and shared-host logs are blocked
+  before startup/queue writes. Cancellation preserves the native checkpoint,
+  queued input and existing app; capture errors are visible without raw logs.
+  Installed **2.1.222** verifies native file creation/Read and following turns,
+  retained HTTP app/PID/data and same-history Stop/resume (**3/5/6** authored
+  main replies). Twelve unit/session/controller additions and one browser
+  addition; syntax/unit **552/552**, full browser **208/208**. A stalled unit
+  fixture was corrected to wait for the actual native lifecycle-start event,
+  with delayed-start coverage; production event guards were not weakened.
+  Native regressions pass: loop ordinary resume/timed fire **11**, dynamic
+  cancellation **7**, first-app Send now **8**, retained local configuration
+  Stop/resume **7** replies. Other commands/company/account/live gates remain;
+  queue count/order unchanged. Commit/push to PR #2, no deployment, merge,
+  live-service restart, personal-profile reads or live-chat changes.
 - 20: reproduced and fixed `/update-config` missing project/local configuration
   changes. Native SDK `get_settings` now supplies the real effective merge
   before/after the unchanged prompt; only model/default mode are returned,

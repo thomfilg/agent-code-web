@@ -4,7 +4,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, readdir, rm, writeFile } from "node:fs/promises";
 import { loadConfig } from "../src/config.mjs";
 import { RuntimeManager } from "../src/runtime-manager.mjs";
 import { ClaudeAdapter } from "../src/adapters/claude.mjs";
@@ -18,12 +18,16 @@ import { ModelCatalog } from "../src/models.mjs";
 // Only model replies/data are authored. No real accounts, network, uploads,
 // feature-flag overrides, live services or existing chats are used.
 const exec = promisify(execFile);
-for (const option of process.argv.slice(2)) assert(["--network-isolated", "--trace", "--design-sync", "--update-config", "--deny", "--resume", "--project", "--local", "--application", "--shadowed"].includes(option));
+for (const option of process.argv.slice(2)) assert(["--network-isolated", "--trace", "--design-sync", "--update-config", "--debug", "--deny", "--resume", "--project", "--local", "--application", "--shadowed"].includes(option));
+assert(process.argv.filter(option => ["--design-sync", "--update-config", "--debug"].includes(option)).length <= 1);
 assert(!process.argv.includes("--design-sync") || !process.argv.includes("--deny") && !process.argv.includes("--resume"));
 assert(!process.argv.includes("--design-sync") || !process.argv.includes("--update-config"));
 assert(!process.argv.includes("--project") && !process.argv.includes("--local") || process.argv.includes("--update-config"));
 assert(!process.argv.includes("--project") || !process.argv.includes("--local"));
-assert(!process.argv.includes("--application") && !process.argv.includes("--shadowed") || process.argv.includes("--update-config"));
+assert(!process.argv.includes("--application") || process.argv.includes("--update-config") || process.argv.includes("--debug"));
+assert(!process.argv.includes("--shadowed") || process.argv.includes("--update-config"));
+assert(!process.argv.includes("--debug") || !process.argv.includes("--deny"));
+assert(!process.argv.includes("--debug") || !process.argv.includes("--application") || !process.argv.includes("--resume"));
 assert(!process.argv.includes("--shadowed") || !process.argv.includes("--local"));
 if (!process.argv.includes("--network-isolated")) {
   const result = await exec("/usr/bin/unshare", ["--user", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", "--", process.execPath, process.argv[1], ...process.argv.slice(2), "--network-isolated"], { timeout: 90000, killSignal: "SIGKILL", maxBuffer: 30000 }).catch(error => {
@@ -34,12 +38,13 @@ if (!process.argv.includes("--network-isolated")) {
   await exec("/usr/bin/ip", ["link", "set", "lo", "up"]);
   assert.deepEqual(JSON.parse((await exec("/usr/bin/ip", ["-j", "link", "show"])).stdout).map(item => item.ifname), ["lo"]);
   assert.equal((await exec("/usr/bin/ip", ["route", "show"])).stdout.trim(), "");
-  const root = await mkdtemp("/tmp/relay-claude-bundled-"), requests = [], assetRoots = [], approvals = [];
+  const root = await mkdtemp("/tmp/relay-claude-bundled-"), requests = [], assetRoots = [], approvals = [], nativeOwners = [];
   const trace = process.argv.includes("--trace"), design = process.argv.includes("--design-sync"), deny = process.argv.includes("--deny");
   const resume = process.argv.includes("--resume"), configuration = process.argv.includes("--update-config");
+  const debug = process.argv.includes("--debug");
   const configScope = process.argv.includes("--local") ? "local" : process.argv.includes("--project") ? "project" : "user";
   const application = process.argv.includes("--application"), shadowed = process.argv.includes("--shadowed");
-  const question = configuration ? `Update only this private ${configScope} settings file: use Sonnet and Plan mode, set RELAY_BUNDLED_FLAG=yes, and preserve the existing env entry.\nPreserve ação; no shared profiles.` : "Use only authored fixture data: Ação 7, Beta 12, Gamma 5.\nKeep this second line; do not upload anything.";
+  const question = configuration ? `Update only this private ${configScope} settings file: use Sonnet and Plan mode, set RELAY_BUNDLED_FLAG=yes, and preserve the existing env entry.\nPreserve ação; no shared profiles.` : debug ? "Diagnose only this private disposable session's debug log.\nPreserve ação and the running app; do not inspect other profiles." : "Use only authored fixture data: Ação 7, Beta 12, Gamma 5.\nKeep this second line; do not upload anything.";
   const environmentCommand = "node -p 'JSON.stringify({keep:process.env.RELAY_BUNDLED_KEEP,flag:process.env.RELAY_BUNDLED_FLAG})'";
   const initialSettings = { model: "opus[1m]", permissions: { defaultMode: "acceptEdits", allow: [`Bash(${environmentCommand})`, ...(application ? ["Bash(node server.mjs)"] : [])] }, env: { RELAY_BUNDLED_KEEP: "ação" } };
   const updatedSettings = { ...initialSettings, model: "sonnet", permissions: { ...initialSettings.permissions, defaultMode: "plan" }, env: { ...initialSettings.env, RELAY_BUNDLED_FLAG: "yes" } };
@@ -100,6 +105,18 @@ body{margin:24px;background:var(--surface);color:var(--ink);font:16px system-ui}
           check(/ação/); if (shadowed) check(/higher/); else if (deny) assert.doesNotMatch(JSON.stringify(result), /yes/); else check(/yes/);
           content = done("The following native turn used the selected model and actual fixture environment settings.");
         } else throw Error(`Unexpected update-config step ${step}`);
+      } else if (debug) {
+        if (step === 0) {
+          assert(text.includes(question)); assert.match(text, /# Debug Skill/);
+          const log = [...text.matchAll(/The debug log for the current session is at: `([^`]+)`/g)].at(-1)?.[1];
+          assert(log?.startsWith(`${store.runtimeHome(chat.id)}/claude/debug/`));
+          const recorded = await readFile(log, "utf8");
+          assert.match(recorded, /\[DEBUG\]/, "The real native log advertised by /debug must exist");
+          assert(recorded.split("\n").some(line => line.includes("[DEBUG]") && !/ScheduledTasks|resume:|loop\/dynamic/.test(line)), "Full diagnostics must not be restricted to scheduler categories");
+          content = tool("Read", { file_path: log, limit: 20 });
+        } else if (step === 1) { check(/\[DEBUG\]/); content = done("The native private-session debug log exists and was read successfully."); }
+        else if (step === 2) { assert.match(text, /Continue diagnostic capture/); content = done("The diagnostic reproduction turn used the same native process."); }
+        else throw Error(`Unexpected debug step ${step}`);
       } else if (step === 0) {
         assert(text.includes(question));
         assetRoot = [...text.matchAll(/Base directory for this skill: ([^\n]+)/g)].at(-1)?.[1];
@@ -164,7 +181,7 @@ body{margin:24px;background:var(--surface);color:var(--ink);font:16px system-ui}
       workspace: current.workspace, runtimeHome: store.runtimeHome(current.id), metadata: { backend: "local" }, mkdir: directory => mkdir(directory, { recursive: true, mode: 0o700 }),
       spawn(command, args, options) {
         assert(!JSON.stringify([args, options.env]).includes(config.claude.providerKey));
-        return spawnWorker(command, args, options);
+        const child = spawnWorker(command, args, options); if (command === config.claude.bin) nativeOwners.push(child.pid); return child;
       },
     }) };
     // The picker inventory is fixture input, not a model-discovery test. All
@@ -221,6 +238,7 @@ body{margin:24px;background:var(--surface);color:var(--ink);font:16px system-ui}
         catch { appUrl = null; await delay(25); }
       }
       assert(appUrl);
+      if (debug) assert.deepEqual(await readdir(`${store.runtimeHome(chat.id)}/claude/debug`).catch(error => { if (error.code === "ENOENT") return []; throw error; }), [], "No debug file is stored before the user's opt-in");
     }
     const checkApp = async () => { if (application) assert.deepEqual(await (await fetch(appUrl, { signal: AbortSignal.timeout(1000) })).json(), appState); };
     if (configuration) {
@@ -243,19 +261,28 @@ body{margin:24px;background:var(--surface);color:var(--ink);font:16px system-ui}
       if (application) await assert.rejects(fetch(appUrl, { signal: AbortSignal.timeout(1000) }));
     } else for (round = 0; round < (resume ? 2 : 1); round++) {
       step = 0;
-      await submit(`/${design ? "design-sync" : "dataviz"} ${question}`);
-      assert.equal(step, design ? (deferredDesign ? 4 : 3) : deny ? 4 : 7);
+      await submit(`/${debug ? "debug" : design ? "design-sync" : "dataviz"} ${question}`);
+      assert.equal(step, debug ? 2 : design ? (deferredDesign ? 4 : 3) : deny ? 4 : 7);
+      await checkApp();
       assert.equal(store.get(chat.id).agentSessionId, session ||= store.get(chat.id).agentSessionId);
       assert(!manager.isBusy(chat.id));
-      if (!design && !deny) assert.equal(await readFile(`${chat.workspace}/chart-${round}.html`, "utf8"), chart);
+      if (debug) {
+        const filename = `${store.runtimeHome(chat.id)}/claude/debug/${session}.txt`, before = await readFile(filename, "utf8"), owners = [...nativeOwners];
+        await submit("Continue diagnostic capture in the same process without changing any files.");
+        assert.equal(step, 3); assert.deepEqual(nativeOwners, owners, "The native process must survive /debug so the user can reproduce the problem");
+        assert((await readFile(filename, "utf8")).length > before.length, "The reproduction turn must add actual native diagnostics");
+        await checkApp();
+      }
+      if (!debug && !design && !deny) assert.equal(await readFile(`${chat.workspace}/chart-${round}.html`, "utf8"), chart);
       else await assert.rejects(readFile(`${chat.workspace}/chart-${round}.html`), { code: "ENOENT" });
       await manager.stop(chat.id);
     }
     assert.equal(new Set(assetRoots).size, assetRoots.length, "A resumed process must extract fresh private resource paths");
     assert.equal(store.get(other.id).messages.length, 0);
+    if (debug) await assert.rejects(readdir(`${store.runtimeHome(other.id)}/claude/debug`), { code: "ENOENT" });
     await assert.rejects(readFile(`${other.workspace}/chart-0.html`), { code: "ENOENT" });
     assert(!store.get(chat.id).messages.some(message => message.kind === "error"), JSON.stringify(store.get(chat.id).messages));
-    console.log(`PASS: native ${configuration ? `update-config ${configScope} ${deny ? "denial and unchanged settings" : "private settings write, model/mode readback and subsequent environment effects"}` : design ? "design-sync resource extraction and anonymous authorization refusal; no upload" : `dataviz resources, ${deny ? "native validation denial and no output file" : "real light/dark palette validation, invalid palette rejection and HTML/SVG file creation"}`}${resume ? `; same-history Stop/resume${configuration ? "" : " with fresh private assets"}` : ""}${shadowed ? "; higher-priority local settings preserved" : ""}${application ? "; real app/PID/data retained until explicit Stop" : ""}; unrelated chat unchanged; ${requests.length} authored main replies, ${titles} titles, ${approvals.length} one-time tool decisions.`);
+    console.log(`PASS: native ${debug ? "debug private log creation and native Read" : configuration ? `update-config ${configScope} ${deny ? "denial and unchanged settings" : "private settings write, model/mode readback and subsequent environment effects"}` : design ? "design-sync resource extraction and anonymous authorization refusal; no upload" : `dataviz resources, ${deny ? "native validation denial and no output file" : "real light/dark palette validation, invalid palette rejection and HTML/SVG file creation"}`}${resume ? `; same-history Stop/resume${configuration || debug ? "" : " with fresh private assets"}` : ""}${shadowed ? "; higher-priority local settings preserved" : ""}${application ? "; real app/PID/data retained until explicit Stop" : ""}; unrelated chat unchanged; ${requests.length} authored main replies, ${titles} titles, ${approvals.length} one-time tool decisions.`);
   } finally {
     await (shutdown ||= manager?.shutdown()); server.closeAllConnections(); gatewayServer?.closeAllConnections();
     await new Promise(resolve => server.close(resolve)); if (gatewayServer) await new Promise(resolve => gatewayServer.close(resolve));

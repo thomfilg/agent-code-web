@@ -6,14 +6,17 @@ import readline from "node:readline";
 import { ClaudeControlChannel } from "./claude-mcp.mjs";
 import { terminateWorker } from "./worker-process.mjs";
 import { ClaudeRequests } from "./claude-requests.mjs";
+import { ClaudeDebugLog } from "./claude-debug.mjs";
 
 const flag = (args, name) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
 
-// The SDK has no scheduled-task snapshot/change control. These filtered native
+// The SDK has no scheduled-task snapshot/change control. Native
 // diagnostics report restoration, automatic deletion and expiry without an
 // extra user turn, model call, transcript replay or controller-side scheduler.
-// Keep them on the owned process pipe, not in debug files or chat messages.
-export const CLAUDE_SCHEDULE_DIAGNOSTICS = ["--debug=ScheduledTasks,resume,loop/dynamic", "--debug-to-stderr"];
+// Do not apply an immutable category filter: /debug must see full diagnostics
+// in the same running process. Discard them unless the user opts into a private
+// debug file; never put the internal stream into chat messages automatically.
+export const CLAUDE_SCHEDULE_DIAGNOSTICS = ["--debug-to-stderr"];
 
 // A Claude application session outlives individual replies. Each turn exposes
 // the same stream contract as the one-shot adapter, but a result closes only
@@ -63,7 +66,8 @@ export class ClaudeSession {
     const diagnostics = CLAUDE_SCHEDULE_DIAGNOSTICS.every(argument => args.includes(argument));
     const decoder = new StringDecoder("utf8"); let stderr = "", dropping = false;
     const stderrLine = line => {
-      if (/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z \[DEBUG\] /.test(line)) this.trackScheduleDiagnostic(line);
+      this.debugLog?.append(line);
+      if (/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z \[(?:DEBUG|INFO|WARN|ERROR|VERBOSE)\] /.test(line)) this.trackScheduleDiagnostic(line);
       else this.active?.stderr.write(`${line}\n`);
     };
     child.stderr.on("data", chunk => {
@@ -96,8 +100,21 @@ export class ClaudeSession {
       // A logical reply is successful only after its native result. An empty
       // clean process exit must not masquerade as a completed application run.
       if (this.active) this.finish(this.active, code === 0 ? 1 : code, signal);
-      this.resolveClosed();
+      void (this.debugLog?.close() || Promise.resolve()).finally(() => this.resolveClosed());
     });
+  }
+
+  async enableDebug(options) {
+    if (this.debugLog?.error) { await this.debugLog.close(); this.debugLog = null; }
+    const existing = this.debugLog;
+    try {
+      if (!this.debugLog) this.debugLog = await ClaudeDebugLog.open({ ...options, sessionId: this.sessionId });
+      await this.debugLog.flush();
+      if (this.ended || this.stopping || options.signal?.aborted) throw Error("Private debug logging interrupted");
+    } catch (error) {
+      if (!existing && this.debugLog) { await this.debugLog.close(); this.debugLog = null; }
+      throw error;
+    }
   }
 
   finishBackground() {
@@ -407,7 +424,7 @@ export class ClaudeSession {
   }
 
   async stop() {
-    if (this.ended) return;
+    if (this.ended) { await this.closed; return; }
     this.stopping ||= (async () => {
       this.requests?.cancel();
       this.child.stdin.end();

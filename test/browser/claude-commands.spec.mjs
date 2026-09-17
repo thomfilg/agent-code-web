@@ -23,6 +23,21 @@ async function fixture(page) {
 const requestEvent = (page, id, event) => page.evaluate(({ id, event }) => window.fixtureSources.find(source => source.url.includes(`/chats/${id}/events`))
   .dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) })), { id, event });
 
+test("native debug is selectable, queues intact while busy, and keeps the draft after a private-profile refusal", async ({ page }) => {
+  const f = await fixture(page), input = page.locator("#message-input");
+  f.catalog = [{ name: "debug", description: "Turn on debug logging and investigate problems" }];
+  f.snapshot.status = "running"; await f.emit();
+  await input.fill("/deb"); await page.locator("#slash-options [role=option]").filter({ hasText: "/debug" }).click();
+  await expect(input).toHaveValue("/debug "); expect(f.calls).toEqual([]);
+  const text = "/debug Diagnose this session\nPreserve ação and the running app.";
+  f.responseStatus = 400; f.responseError = "Debugging requires this chat's private Claude profile. Shared host logs remain locked.";
+  await input.fill(text); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect(page.locator("#toasts")).toContainText("Shared host logs"); await expect(input).toHaveValue(text);
+  f.responseStatus = 202; await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect.poll(() => f.calls.length).toBe(2);
+  expect(f.calls[1]).toEqual({ tail: "queue", text, attachments: [] }); await expect(input).toHaveValue(""); expect(f.errors).toEqual([]);
+});
+
 for (const width of [1280, 320]) test(`native research at ${width}px stays running after launch and keeps draft/files on a failed Send now`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page), input = page.locator("#message-input"), actions = [];

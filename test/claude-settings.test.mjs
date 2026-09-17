@@ -279,6 +279,21 @@ test("update-config refuses shared-host changes before startup, including empty/
   assert.deepEqual(f.store.get(f.chat.id).queuedMessages || [], []);
 });
 
+test("debug rejects host-log access before startup or queue writes while private prompts keep normal FIFO", async t => {
+  const host = await fixture(t, { fake: true, host: true });
+  for (const text of ["/debug", "/debug --help", "/debug Diagnose the setup"]) for (const method of ["submit", "enqueue", "send"]) {
+    await assert.rejects(host.manager[method](host.chat.id, text), /Shared host logs/);
+  }
+  assert.equal(host.starts, 0); assert.equal(host.calls.length, 0); assert.equal(host.store.get(host.chat.id).messages.length, 0);
+  assert.deepEqual(host.store.get(host.chat.id).queuedMessages || [], []);
+  const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+  const running = f.manager.send(f.chat.id, "Current work"); await waitFor(() => f.calls.length === 1);
+  const text = "/debug Diagnose only this session\nKeep ação"; await f.manager.enqueue(f.chat.id, text);
+  await f.manager.enqueue(f.chat.id, "After debug"); f.gate.resolve(); await running;
+  await waitFor(() => f.calls.length === 3 && !f.manager.isBusy(f.chat.id));
+  assert.deepEqual(f.calls.map(call => call.text), ["Current work", text, "After debug"]);
+});
+
 test("update-config readback reaches FIFO without losing the prompt and newer web choices still win", async t => {
   const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
   const text = "/update-config Change only my private model to Sonnet and default mode to Plan.\nPreserve ação.";

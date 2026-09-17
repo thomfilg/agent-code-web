@@ -109,7 +109,7 @@ Do not treat removing entries from autocomplete as implementing them.
   added only in newer documentation.
 
 - The fresh installed **2.1.222** SDK catalog also advertises these entries
-  without effect-level evidence in this ledger: `/debug`, `/batch`, `/fewer-permission-prompts`,
+  without effect-level evidence in this ledger: `/batch`, `/fewer-permission-prompts`,
   `/doctor`, `/claude-api`, `/agents`, `/color`, `/heapdump`,
   `/workflow-launch-exec`, `/security-review`, `/insights`, `/recap`, `/design`,
   `/design-consent`, `/design-revoke` and `/team-onboarding`. Next classify their
@@ -117,12 +117,61 @@ Do not treat removing entries from autocomplete as implementing them.
   the first entries. This is explicit inventory within item 20, not new feature
   requests or an increased queue count. Discovery is not effect acceptance.
 
-- `/dataviz` resource/tool integration is accepted below. `/design-sync` has
+- `/debug` private capture/reproduction and `/dataviz` resource/tool integration
+  are accepted below. `/design-sync` has
   only private unauthenticated refusal acceptance: upload/account authorization
   remains an item-21 gate. `/update-config` private user/project/local settings,
   precedence and retained-owner integration are accepted below. Shared-host
   account/company isolation and live activation remain external gates; they
   are not enabled by these private fixture results.
+
+### Claude private debug capture checkpoint
+
+Installed **2.1.222** reproduced `/debug` advertising a nonexistent file:
+Relay's scheduler diagnostics used an immutable category filter and redirected
+native logs exclusively to stderr. The native debug skill still tried to read
+its usual private session file. Successful prompt dispatch was not enough.
+
+Private SDK owners now use unfiltered native stderr, with bounded parsing and
+the same scheduling observations. Diagnostics are discarded by default, not
+retained as pre-opt-in history, saved as chat messages or supplied to an agent automatically. Explicit
+`/debug` creates a worker-owned writer for that native session's private log;
+only subsequent actual native diagnostics are recorded. Common credential
+patterns are redacted; individual lines are bounded and the file is limited to 2 MiB. Linked
+profiles/directories/files, hardlinks, replaced targets and oversized existing
+files fail closed. The writer also runs through the owning executor for remote
+workers; its environment contains no account/gateway credentials.
+
+The original native prompt and Read tool remain responsible for diagnosis.
+Its SDK owner survives the reply so the user can reproduce the problem in the
+same process, including when no application was previously running. Existing
+HTTP app PID/data remain unchanged. Stop, idle sleep or native process exit
+ends capture; a later ordinary resume does not silently opt in again. Explicit
+`/debug` can append to the same native history's existing private log. Interrupted
+startup cannot submit late input, leak a writer or kill a retained app; first
+query cancellation preserves the native checkpoint for Send now. Capture
+failures are visible without publishing raw diagnostic text or inventing a
+successful result. Shared-host `/debug`, including empty/help inputs, is blocked
+before startup, acceptance or queue writes pending the company/profile gate.
+
+`scripts/smoke-real-claude-bundled.mjs --debug` verifies real native file creation,
+Read and a following reproduction turn without replacing the SDK process
+(**3** authored main replies). `--debug --application` preserves the actual HTTP
+app/PID/data (**5** replies); `--debug --resume` verifies the same native history
+and actual subsequent capture (**6** replies). Unrelated chats are unchanged.
+All use fresh private profiles and loopback-only authored inference, not real
+accounts, personal logs or a claim about model diagnostic quality.
+
+Unit/session/controller checks cover scope, redaction, limits, writer lifecycle,
+failure/cancellation and FIFO. The browser checks discovery, busy queueing and
+draft retention after refusal. Syntax/unit **552/552** and full browser
+**208/208** pass. A full unit run exposed an existing test-double
+race: input delivery was mistaken for `command_lifecycle: started`; fixture
+completions now wait for that event, including a deliberately delayed start.
+Native scheduling regressions pass: ordinary resume/timed fire **11** replies,
+dynamic waiting cancellation **7**; first-app Send now **8**, and retained local
+`/update-config` plus Stop/resume **7**. Remaining commands, company/account gates
+and live activation are still open; this checkpoint does not close item 20.
 
 ### Claude effective settings merge checkpoint
 
