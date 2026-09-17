@@ -11,7 +11,7 @@ async function fixture(page) {
   await page.route(`**/api/chats/${chat.id}`, route => route.fulfill({ json: { chat: f.snapshot } }));
   await page.route(`**/api/chats/${chat.id}/events*`, route => route.fulfill({ contentType: "text/event-stream", body: ": fixture\n\n" }));
   await page.route(`**/api/chats/${chat.id}/commands`, async route => { f.reads++; const commands = [...webCommands("claude"), { name: "reload-skills" }, ...f.catalog]; await f.gate; await route.fulfill({ json: { commands } }); });
-  for (const tail of ["messages", "queue"]) await page.route(`**/api/chats/${chat.id}/${tail}`, route => { f.calls.push({ tail, ...route.request().postDataJSON() }); return route.fulfill({ status: f.responseStatus, json: f.responseStatus === 202 ? {} : { error: "/config and /settings do not accept attachments. Remove them or send them in a separate message." } }); });
+  for (const tail of ["messages", "queue"]) await page.route(`**/api/chats/${chat.id}/${tail}`, route => { f.calls.push({ tail, ...route.request().postDataJSON() }); return route.fulfill({ status: f.responseStatus, json: f.responseStatus === 202 ? {} : { error: f.responseError || "/config and /settings do not accept attachments. Remove them or send them in a separate message." } }); });
   await page.goto(`/#chat=${chat.id}`); await expect(page.locator("#chat-title")).toHaveText(chat.title);
   f.emit = async () => {
     f.snapshot = { ...f.snapshot, revision: f.snapshot.revision + 1, commandCatalogRevision: f.snapshot.commandCatalogRevision + 1 };
@@ -113,4 +113,24 @@ test("Claude Manual and Deny prompts controls save through the real API without 
   await expect(page.locator(".effort-auto-note")).toBeVisible(); await expect(page.getByRole("slider", { name: "Effort level" })).toBeHidden();
   await page.getByLabel("Chat effort", { exact: true }).selectOption("high");
   await expect(page.getByRole("slider", { name: "Effort level" })).toBeVisible();
+});
+
+test("auto-compaction discovery inserts without sending, busy commands queue literally, and rejected files retain the draft", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input");
+  f.catalog = [{ name: "autocompact", description: "Set the native auto-compact window" }]; f.snapshot.status = "running"; await f.emit();
+  await input.fill("/autocomp"); await page.locator("#slash-options [role=option]").filter({ hasText: "/autocompact" }).click();
+  await expect(input).toHaveValue("/autocompact "); expect(f.calls).toEqual([]);
+  await input.fill("/autocompact 100k"); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect.poll(() => f.calls.length).toBe(1); expect(f.calls[0]).toEqual({ tail: "queue", text: "/autocompact 100k", attachments: [] });
+  f.snapshot.status = "idle"; await f.emit();
+  await input.fill("/autocompact"); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect.poll(() => f.calls.length).toBe(2); expect(f.calls[1]).toEqual({ tail: "messages", text: "/autocompact", attachments: [] });
+  await page.locator("#attachment-input").setInputFiles({ name: "keep-window.txt", mimeType: "text/plain", buffer: Buffer.from("Unsent compaction fixture") });
+  await expect(page.locator("#attachment-chips")).toContainText("keep-window.txt");
+  f.responseStatus = 400; f.responseError = "/autocompact does not accept attachments. Remove them or send them in a separate message.";
+  await input.fill("/autocompact auto"); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect(page.locator("#toasts")).toContainText("does not accept attachments");
+  await expect(input).toHaveValue("/autocompact auto"); await expect(page.locator("#attachment-chips")).toContainText("keep-window.txt");
+  expect(f.errors).toEqual([]); expect(f.calls).toHaveLength(3);
 });

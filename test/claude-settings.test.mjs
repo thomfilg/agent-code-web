@@ -174,3 +174,51 @@ test("reselecting the same web values is still newer than an in-flight native co
   assert.equal(f.store.get(f.chat.id).model, f.chat.model); assert.equal(f.store.get(f.chat.id).mode, f.chat.mode);
   assert(f.store.get(f.chat.id).messages.some(message => /newer web choices/.test(message.text)));
 });
+
+test("auto-compaction is a native private-profile command, not an inferred model prompt or attachment target", async t => {
+  assert.deepEqual(claudeConfigRequest("/autocompact"), { mutate: false, values: {} });
+  assert.deepEqual(claudeConfigRequest("/autocompact 100k"), { mutate: true, values: {} });
+  assert.deepEqual(messageCommand("claude", "/autocompact auto"), { type: "claudeConfig", prompt: "/autocompact auto" });
+  assert.equal(messageCommand("codex", "/autocompact 100k"), null);
+  const f = await fixture(t, { fake: true }), host = await fixture(t, { fake: true, host: true });
+  for (const text of ["/autocompact", "/autocompact 100k", "/autocompact auto"]) {
+    await assert.rejects(f.manager.submit(f.chat.id, text, ["file"]), /does not accept attachments/);
+    await assert.rejects(f.manager.enqueue(f.chat.id, text, ["file"]), /does not accept attachments/);
+  }
+  for (const text of ["/autocompact 100k", "/autocompact auto"]) {
+    await assert.rejects(host.manager.submit(host.chat.id, text), /shared host profile/);
+    await assert.rejects(host.manager.enqueue(host.chat.id, text), /shared host profile/);
+  }
+  assert.equal(f.starts, 0); assert.equal(host.starts, 0);
+  assert.equal(f.store.get(f.chat.id).messages.length, 0); assert.equal(host.store.get(host.chat.id).messages.length, 0);
+  await host.manager.send(host.chat.id, "/autocompact"); assert.equal(host.calls[0].text, "/autocompact");
+  const adapter = new ClaudeAdapter({ chat: host.chat, store: host.store, config: host.config, broker: host.broker, hooks: {} });
+  await assert.rejects(adapter.send("/autocompact 100k"), /shared host profile/); assert.equal(adapter.child, null);
+});
+
+test("native auto-compaction windows persist, preserve disabled state and unrelated choices, and reset without touching other chats", async t => {
+  const f = await fixture(t), sibling = await f.manager.createChat({ agent: "claude", title: "Sibling auto-compact" });
+  const saved = () => readFile(path.join(f.store.runtimeHome(f.chat.id), "claude/settings.json"), "utf8").then(JSON.parse);
+  await f.manager.send(f.chat.id, "/config autoCompact=false");
+  await f.manager.send(f.chat.id, "/autocompact 100k");
+  assert.equal((await saved()).autoCompactWindow, 100000); assert.equal((await saved()).autoCompactEnabled, false);
+  assert.equal(f.store.get(f.chat.id).model, f.chat.model); assert.equal(f.store.get(f.chat.id).mode, f.chat.mode);
+  const session = f.store.get(f.chat.id).agentSessionId; await f.manager.stop(f.chat.id); await f.manager.send(f.chat.id, "/autocompact");
+  assert.equal(f.store.get(f.chat.id).agentSessionId, session); assert.match(f.store.get(f.chat.id).messages.at(-1).text, /100000/);
+  await f.manager.send(f.chat.id, "/autocompact 99k"); assert.match(f.store.get(f.chat.id).messages.at(-1).text, /Couldn't parse/); assert.equal((await saved()).autoCompactWindow, 100000);
+  await f.manager.send(f.chat.id, "/autocompact auto"); assert.equal((await saved()).autoCompactWindow, undefined); assert.equal((await saved()).autoCompactEnabled, false);
+  await assert.rejects(readFile(path.join(f.store.runtimeHome(sibling.id), "claude/settings.json")), { code: "ENOENT" });
+});
+
+test("queued auto-compaction stays in FIFO order and cannot overwrite a linked profile file", async t => {
+  const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+  const pending = f.manager.send(f.chat.id, "Active task"); await waitFor(() => f.calls.length === 1);
+  await f.manager.enqueue(f.chat.id, "/autocompact 200k"); await f.manager.enqueue(f.chat.id, "Later task");
+  f.gate.resolve(); await pending; await waitFor(() => f.calls.length === 3 && !f.manager.isBusy(f.chat.id));
+  assert.deepEqual(f.calls.map(call => call.text), ["Active task", "/autocompact 200k", "Later task"]);
+  const linked = await fixture(t), directory = path.join(linked.store.runtimeHome(linked.chat.id), "claude"), target = path.join(linked.root, "outside-settings.json");
+  await mkdir(directory); await writeFile(target, '{"autoCompactWindow":300000}'); await symlink(target, path.join(directory, "settings.json"));
+  await linked.manager.send(linked.chat.id, "/autocompact 100k");
+  assert.equal(await readFile(target, "utf8"), '{"autoCompactWindow":300000}');
+  assert(linked.store.get(linked.chat.id).messages.some(message => message.kind === "error" && /safely verify/.test(message.text)));
+});

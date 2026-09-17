@@ -39,7 +39,7 @@ export class ClaudeAdapter {
   async send(text, { model, effort, resetEffort, mode = "accept_edits", systemPrompt } = {}) {
     const version = this.sendVersion;
     const configuration = claudeConfigRequest(text);
-    if (configuration?.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native /config changes require a private Claude profile. This worker uses a shared host profile; use this chat's model and mode controls instead.");
+    if (configuration?.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
     const nativeMode = Object.keys(CLAUDE_PERMISSION_MODES).find(key => CLAUDE_PERMISSION_MODES[key] === mode);
     if (!nativeMode) throw new Error("Unsupported Claude permission mode");
     if (this.child || this.settingsInspection) throw new Error("A Claude turn is already running for this chat");

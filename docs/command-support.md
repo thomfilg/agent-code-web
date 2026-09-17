@@ -42,6 +42,7 @@ and remain at the beginning of native stream-json input.
 | Installed Codex skills | `skills/list` plus structured skill input. No fake terminal entries substituted for skills. |
 | Installed Claude commands / plugin aliases | Native input prefix retained, not hidden behind Relay system/handoff instructions. Real CLI verifies command-first continuation, custom-command/skill expansion, local aliases and same-session resume. Native catalog changes and successful skill reloads refresh both menu caches immediately. Remaining stateful commands, bundled workflows and account-backed acceptance are listed below. |
 | `/config key=value`, `/settings key=value` (Claude) | Native private-profile settings, with verified model/mode readback into Relay and subsequent-turn/Stop persistence. Partial native results remain visible; newer web selections win over late readback. Shared host mutations stay locked on item 21. Attachments are rejected before accepting/queueing the command. |
+| `/autocompact [auto/tokens]` (Claude) | Native current-window inspection, private-profile threshold persistence and reset. Actual automatic summary/compact-boundary and same-session Stop/resume verified; disabled state and native environment precedence retained. Shared host mutation and linked files fail closed; attached input is rejected before sending/queueing. Live activation pending. |
 | `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. |
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
 | `/fast [on/off]`, `/personality [friendly/pragmatic/none]` | Catalog-driven, persisted per-chat settings, applied in FIFO order to later turns. Stop/model-change guards, retryable personality picker and draft/attachment protection. Controller/browser checks and actual installed-CLI parameter/resume verification pass; live activation remains pending. |
@@ -85,13 +86,64 @@ Do not treat removing entries from autocomplete as implementing them.
   Windows worker is introduced.
 - Claude acceptance below covers the command transport, native local results,
   custom expansion, configuration readback, reload and resume, not every command's effect. Next verify
-  stateful `/fast`, `/autocompact` and `/goal` across actual
+  stateful `/fast` and `/goal` across actual
   Relay turn settings and worker restarts, plus native MCP actions, bundled
   workflows and installed plugin namespaces. Account-backed commands and shared
   host-profile writes also need the company-isolation gate in item 21. Do not
   infer support from a catalog entry or treat a native removal notice as a
   working replacement. Use the installed version's capabilities, not commands
   added only in newer documentation.
+
+### Claude automatic compaction and Fast-mode findings
+
+Installed Claude **2.1.222** already persists `/autocompact` values correctly;
+acceptance now verifies its effects, not just the command acknowledgement.
+The [native window contract](https://code.claude.com/docs/en/model-config#set-the-auto-compact-window)
+describes saved windows, reset and environment precedence. Relay preserves this
+native behavior and now applies its private-profile mutation and linked-file
+checks to `/autocompact`, too. Previously this command could write a shared host
+profile outside the company-scoped controls. Bare status remains read-only;
+mutations are gated until item 21's host-profile isolation is complete. Attached
+files are rejected before accepting/queueing input, so they cannot become native
+arguments and the composer retains the draft/files. No custom token-size parser,
+fake summarizer or forced compaction is introduced into production.
+
+`node scripts/smoke-real-claude-commands.mjs --autocompact` uses the real manager,
+adapter and installed CLI with deterministic loopback model responses. A saved
+95k-token usage sample fits the 200k setting; after lowering the setting to 100k
+and explicitly stopping, the same native session requests an automatic summary,
+emits its actual automatic `compact_boundary`, and continues the task. `auto`
+removes the saved threshold. Five loopback replies; no external inference or
+large fabricated history in a real user chat.
+
+The `--autocompact-disabled` variant verifies that setting a window does not
+enable disabled auto-compaction, including actual no-summary continuation after
+Stop. Invalid `99k` retains the previous setting; a worker's explicit
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` override is reported natively and prevents the
+command from pretending to apply its argument. Two loopback replies. The first
+environment-precedence fixture lacked an executor because this smoke normally
+uses the adapter directly; it now supplies the ordinary local-executor contract
+without rewriting native arguments or changing the model/effort baseline.
+
+Three new unit/controller tests cover private/host routing, literal FIFO input,
+disabled-state persistence, reset/invalid values, sibling isolation and linked
+files. One 320px browser case covers discovery without sending, busy/idle
+dispatch and draft/attachment retention. Final unit/controller suite **394/394**;
+related browser cases **19/19**. The earlier configuration native smoke still
+passes; no live service/account/profile or approval was changed.
+
+Fast mode remains an implementation/acceptance gap, not a completed feature.
+A separate disposable-profile probe in a loopback-only network/PID namespace
+confirmed that `/fast`, `/fast off` and `/fast on` currently return the native
+Agent-SDK-unavailable result with Relay's ordinary launch. The documented
+[non-interactive opt-in](https://code.claude.com/docs/en/fast-mode#toggle-fast-mode)
+requires startup settings; adding `--settings '{"fastMode":true}'` to that
+isolated probe clears the SDK gate but then reports organization-disabled with
+the dummy account. No organization/network checks were bypassed, no personal
+credentials were supplied, and the probe could not reach external services.
+Next work must implement actual per-chat opt-in/persistence and verify native
+request behavior under allowed and denied account conditions. A native denial,
+an opt-in flag alone or a lower effort setting is not Fast-mode completion.
 
 ### Claude configuration effects and persistence
 

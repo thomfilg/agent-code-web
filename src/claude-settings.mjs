@@ -5,10 +5,13 @@ export const CLAUDE_PERMISSION_MODES = Object.freeze({ auto: "auto", acceptEdits
 // Only identify requested keys here. The native CLI still parses and executes
 // the original command, including validation and partial-success reporting.
 export function claudeConfigRequest(text) {
-  const match = /^\/(?:config|settings)(?:\s+([\s\S]*))?$/.exec(text.trim());
+  const match = /^\/(config|settings|autocompact)(?:\s+([\s\S]*))?$/.exec(text.trim());
   if (!match) return null;
-  const argument = (match[1] || "").trim();
+  const argument = (match[2] || "").trim();
   if (!argument || argument === "--help") return { mutate: false, values: {} };
+  // This native control writes the same private settings file. Leave its
+  // token-size parsing, precedence and persistence to the installed CLI.
+  if (match[1] === "autocompact") return { mutate: true, values: {} };
   const words = []; let word = "", quote = "", escape = false;
   for (const character of argument) {
     if (escape) { word += character; escape = false; }

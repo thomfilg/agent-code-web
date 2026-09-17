@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import path from "node:path";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { RuntimeManager } from "../src/runtime-manager.mjs";
 import { ClaudeAdapter } from "../src/adapters/claude.mjs";
 import { ChatStore } from "../src/store.mjs";
@@ -9,19 +9,24 @@ import { CapabilityBroker } from "../src/capabilities.mjs";
 import { CommandCatalog } from "../src/command-catalog.mjs";
 import { ModelCatalog } from "../src/models.mjs";
 import { loadConfig } from "../src/config.mjs";
+import { spawnWorker } from "../src/worker-process.mjs";
 
 // Installed CLI and actual command expansion, with disposable profiles and
 // deterministic loopback model replies. No personal settings or real inference.
 const directory = await mkdtemp("/tmp/relay-claude-commands-");
 const requests = [];
 const settingsOnly = process.argv.includes("--settings");
+const autocompactOnly = process.argv.includes("--autocompact");
+const autocompactDisabled = process.argv.includes("--autocompact-disabled");
+const adapters = new Map();
+let inputTokens = 100;
 let manager, timer;
 const server = http.createServer(async (request, response) => {
   let raw = ""; for await (const chunk of request) raw += chunk;
   if (request.url.includes("count_tokens")) { response.writeHead(200, { "content-type": "application/json" }); response.end('{"input_tokens":100}'); return; }
   if (request.method !== "POST" || !/\/messages(?:\?|$)/.test(request.url)) { response.writeHead(404); response.end(); return; }
   const body = JSON.parse(raw), index = requests.push(body), text = "Local command integration fixture completed.";
-  const message = { id: `msg_fixture_${index}`, type: "message", role: "assistant", model: body.model, content: [{ type: "text", text }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 100, output_tokens: 20 } };
+  const message = { id: `msg_fixture_${index}`, type: "message", role: "assistant", model: body.model, content: [{ type: "text", text }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: inputTokens, output_tokens: 20 } };
   if (!body.stream) { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(message)); return; }
   response.writeHead(200, { "content-type": "text/event-stream" });
   for (const event of [
@@ -39,7 +44,13 @@ try {
   const config = loadConfig({ AGENT_DATA_DIR: directory, AGENT_DATABASE_MODE: "memory", AGENT_PROCESS_ISOLATION: "none", AGENT_IDLE_TIMEOUT_MS: "60000", CLAUDE_AUTH_MODE: "gateway", ANTHROPIC_API_KEY: "fixture-only" });
   const store = new ChatStore(directory); await store.initialize();
   const catalog = new CommandCatalog(config), broker = new CapabilityBroker({ ttlMs: 120000 }), gatewayOrigin = `http://127.0.0.1:${server.address().port}`;
-  manager = new RuntimeManager({ store, config, broker, gatewayOrigin, commands: catalog, models: new ModelCatalog(config), adapterFactory: params => new ClaudeAdapter({ ...params, store, config, broker, gatewayOrigin }) });
+  manager = new RuntimeManager({ store, config, broker, gatewayOrigin, commands: catalog, models: new ModelCatalog(config), adapterFactory: params => {
+    // This fixture normally uses the local adapter directly, without a worker
+    // backend. Supply the same local executor contract for the environment
+    // precedence case; do not rewrite CLI flags or bypass native policy.
+    const executor = autocompactDisabled ? { workspace: params.chat.workspace, runtimeHome: store.runtimeHome(params.chat.id), metadata: { backend: "local" }, environmentVariables: {}, mkdir: directory => mkdir(directory, { recursive: true, mode: 0o700 }), spawn: spawnWorker } : params.executor;
+    const adapter = new ClaudeAdapter({ ...params, store, config, broker, gatewayOrigin, executor }); adapters.set(params.chat.id, adapter); return adapter;
+  } });
   timer = setTimeout(() => { void manager.shutdown(); server.closeAllConnections(); }, 60000);
   const chat = await manager.createChat({ agent: "claude", title: "Disposable native commands" });
   const submit = async text => {
@@ -52,7 +63,43 @@ try {
     assert.doesNotMatch(result, /Unknown command|Couldn't parse|No conversation found/i);
     return result;
   };
-  if (settingsOnly) {
+  if (autocompactDisabled) {
+    const saved = () => readFile(path.join(store.runtimeHome(chat.id), "claude/settings.json"), "utf8").then(JSON.parse);
+    await submit("/config autoCompact=false"); await submit("/autocompact 100k");
+    assert.equal((await saved()).autoCompactEnabled, false, "Changing the threshold must not enable disabled auto-compaction");
+    inputTokens = 95000; await submit("Seed high usage while automatic compaction is disabled."); inputTokens = 100;
+    await manager.stop(chat.id); const before = requests.length;
+    await submit("Continue without compacting the high-usage fixture.");
+    assert.equal(requests.length, before + 1); assert(!store.get(chat.id).messages.some(message => /Context compacted automatically/.test(message.text)));
+    await manager.send(chat.id, "/autocompact 99k");
+    assert.match(store.get(chat.id).messages.at(-1).text, /Couldn't parse/); assert.equal((await saved()).autoCompactWindow, 100000);
+    const executor = adapters.get(chat.id).executor;
+    executor.environmentVariables = { ...executor.environmentVariables, CLAUDE_CODE_AUTO_COMPACT_WINDOW: "300000" };
+    const overridden = await submit("/autocompact 200k"); assert.match(overridden, /CLAUDE_CODE_AUTO_COMPACT_WINDOW/);
+    assert.equal((await saved()).autoCompactWindow, 100000, "Native environment precedence must not be bypassed or reported as an applied setting");
+    assert.equal(requests.length, before + 1, "Queries, invalid values and overridden settings must not turn into inference");
+    console.log(`PASS: installed Claude disabled auto-compaction, actual no-summary continuation after Stop, invalid values and environment precedence. ${requests.length} loopback replies; no external inference or personal profiles.`);
+  } else if (autocompactOnly) {
+    const saved = () => readFile(path.join(store.runtimeHome(chat.id), "claude/settings.json"), "utf8").then(JSON.parse);
+    const compacted = () => store.get(chat.id).messages.filter(message => /Context compacted automatically/.test(message.text));
+    await submit("/autocompact 200k"); assert.equal((await saved()).autoCompactWindow, 200000);
+    inputTokens = 95000; await submit("Seed the disposable context-usage fixture.");
+    inputTokens = 100;
+    const before = requests.length;
+    await submit("This should fit within the configured 200k window.");
+    assert.equal(requests.length, before + 1); assert.equal(compacted().length, 0);
+    inputTokens = 95000; await submit("Seed another usage sample for the lower boundary."); inputTokens = 100;
+    await submit("/autocompact 100k"); assert.equal((await saved()).autoCompactWindow, 100000);
+    assert.match(await submit("/autocompact"), /100k/);
+    const sessionId = store.get(chat.id).agentSessionId;
+    await manager.stop(chat.id); const checkpoint = requests.length;
+    await submit("Continue after Stop and automatically compact the saved high-usage context.");
+    assert.equal(store.get(chat.id).agentSessionId, sessionId);
+    assert(compacted().length > 0, "Native automatic compaction must emit its actual compact_boundary, not just acknowledge a setting");
+    assert(requests.length > checkpoint + 1, "Native compaction must request a summary before continuing");
+    await submit("/autocompact auto"); assert.equal((await saved()).autoCompactWindow, undefined);
+    console.log(`PASS: installed Claude auto-compaction threshold, actual native summary/boundary, reset and same-session Stop persistence. ${requests.length} loopback replies; no external inference or personal profiles.`);
+  } else if (settingsOnly) {
     await submit("/config model=sonnet permissionMode=plan thinking=false");
     assert.equal(requests.length, 0, "Native configuration must not become a model prompt");
     assert.equal(store.get(chat.id).model, "sonnet", "Relay must reflect the native model choice");

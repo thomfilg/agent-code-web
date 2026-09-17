@@ -454,6 +454,13 @@ Claude's Manual and Deny prompts modes are selectable; Relay cannot yet answer
 native Claude manual approvals. Switching either Claude-only mode to Codex
 falls back to Plan, never to a broader permission mode.
 
+Claude `/autocompact` reports its effective native threshold; an argument such
+as `100k` saves the private profile's threshold and `auto` resets it. This
+survives Stop/resume and does not re-enable auto-compaction disabled through
+`/config autoCompact=false`. Native environment overrides remain in force.
+The same private-profile, linked-file and attachment checks apply; shared
+host-profile changes remain locked pending company isolation.
+
 The composer agent selector switches an idle chat between Codex and Claude.
 Stop active work first. Its chat ID, files, repositories, title, pins, groups,
 and visible transcript stay intact. Switching starts a fresh provider-native

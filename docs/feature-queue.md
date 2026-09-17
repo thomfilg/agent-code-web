@@ -62,6 +62,23 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: `/autocompact` now has effect-level native acceptance and private-profile
+  mutation protection. Verified real automatic summary/compact-boundary after
+  changing 200k to 100k and Stop/resume, reset, retained disabled state, invalid
+  values and native environment precedence. Five + two loopback replies; no
+  fabricated live history or external inference. Shared host writes and linked
+  files fail closed, and attachments cannot become command arguments. Three
+  new unit/controller cases and one mobile browser case; normal suite **394/394**,
+  related browser regressions **19/19**, prior native settings smoke still green.
+  The environment-precedence fixture was corrected to supply its missing local
+  executor; no production semantics or assertions were weakened. Separately,
+  a network/PID-isolated `/fast` probe proved that native print mode needs startup
+  opt-in and then still enforces the dummy account's organization restriction.
+  Fast remains unimplemented/unaccepted; no bypass flags or personal credentials
+  were used. Next safe item-20 work: per-chat native Fast opt-in/state and account
+  gates, then Claude goals and remaining installed commands. Original queue
+  order/count and live/account gates remain unchanged. Save to PR #2, no deploy
+  or merge.
 - 20: fixed Claude `/config`/`/settings` effects being overwritten by Relay's
   stale next-turn model and permission flags. Private-profile readback now
   reconciles actually applied values, including partial failures and same-value

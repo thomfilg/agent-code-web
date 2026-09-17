@@ -683,8 +683,8 @@ export class RuntimeManager extends EventEmitter {
     const request = claudeConfigRequest(text);
     if (/^\/effort\s+status$/.test(text.trim()) && attachments.length) throw new Error("/effort status does not accept attachments. Remove them or send them in a separate message.");
     if (!request) return;
-    if (attachments.length) throw new Error("/config and /settings do not accept attachments. Remove them or send them in a separate message.");
-    if (request.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native /config changes require a private Claude profile. This worker uses a shared host profile; use this chat's model and mode controls instead.");
+    if (attachments.length) throw new Error(`${/^\/autocompact(?:\s|$)/.test(text) ? "/autocompact does" : "/config and /settings do"} not accept attachments. Remove them or send them in a separate message.`);
+    if (request.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
   }
 
   async #syncClaudeConfiguration(chatId, native, original, guard) {
