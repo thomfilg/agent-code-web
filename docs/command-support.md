@@ -16,7 +16,7 @@ and remain at the beginning of native stream-json input.
 | --- | --- |
 | `/goal`, objective, `edit`, `pause`, `resume`, `clear` | Persisted native thread goals; resume queues when busy; objective edits preserve multiline text. Real CLI protocol checks pass; new edit/queue browser check passes. |
 | `/goal [condition\|clear]` (Claude) | Actual native evaluator loop, status, native clear aliases and active-goal Stop/resume verified in private profiles. Literal commands retain FIFO ordering; evaluation failures are visible and streamed goal steps retain their boundaries. Uses Claude semantics, not fabricated Codex pause/resume/state APIs. Hook policies still apply; live activation pending. |
-| `/plan [task]` | Native Plan collaboration/read-only mode; busy requests queue. Unit and browser checks pass. |
+| `/plan [task]` | Native Plan collaboration/read-only mode; busy requests queue. Claude's native Enter/ExitPlanMode transitions now update the selector and subsequent turns, without overwriting a newer web selection. Unit, browser and installed-CLI checks pass. |
 | `/compact` | Native compaction, FIFO while busy, wakes stopped worker. Real Codex/Claude adapters tested with local API fixtures. |
 | `/review [--base branch / --commit SHA / instructions]` | Native `review/start`, not an ordinary prompt. Tracks both inner execution and outer completion IDs. Real adapter completion and interruption pass. |
 | `/code-review [level] [--fix] [target]` (Claude) | Native bundled review with actual diff/read/findings and explicit file-fix verification. Findings survive Stop/resume; Plan blocks edits. SDK interruption checkpoints the first review for Stop and Send now; flags, targets, FIFO, drafts and remaining queued inputs are retained. GitHub `--comment` and live activation are not covered by this acceptance. |
@@ -129,7 +129,8 @@ The implementation follows the native
   denies the tool with an explicit instruction not to invent answers.
 - Unsupported native dialogs and malformed questions fail closed. Native
   rich option previews, persistent approval choices, shared-host replies and
-  `ExitPlanMode`/classifier state reconciliation are not claimed as supported.
+  shell permission-classifier acceptance are not claimed as supported.
+  Native `ExitPlanMode` state reconciliation is verified separately below.
 
 `node scripts/smoke-real-claude-run.mjs --approve-recipe --questions` uses the
 actual installed **2.1.222** CLI, controller and gateway in disposable
@@ -157,12 +158,64 @@ browser run reproduced and fixed approval cards overflowing on long paths;
 their contents now wrap without truncating the action being approved. Manual
 mode copy now accurately distinguishes private profiles from shared hosts.
 
-Normal syntax/unit suite: **458/458**; combined Claude-command/conversation
-browser suite: **53/53**. Native command, MCP, review-fix, goal and Fast
+Approval checkpoint: normal syntax/unit suite **458/458**; combined
+Claude-command/conversation browser suite **53/53**. Native command, MCP, review-fix, goal and Fast
 regressions pass. Item 20 remains active: `/run-skill-generator`, other bundled
 workflows/plugin namespaces, retained-session interoperability and live
 activation remain separate gates. No deployment, merge, real approval,
 personal Chrome/profile or company credential changes.
+
+### Claude native Plan-mode transitions
+
+Installed Claude **2.1.222** reproduced a stale web selector: its actual
+`EnterPlanMode` tool entered Plan while Relay still showed Edits. Ignoring the
+reverse transition could also put the next turn back into Plan after an
+explicitly approved native `ExitPlanMode` restored the previous mode.
+
+Relay now reconciles the main native session's structured
+`system/status.permissionMode` events. Tool names, assistant prose, child
+events, foreign session IDs and unknown mode values never change the selector.
+This observes native state; it does not approve a tool, grant persistent
+permissions or bypass native policy. Clicking Approve once does not
+optimistically change the mode before the native CLI confirms its transition.
+
+The observer covers foreground replies and retained-session background events.
+Updates are scoped to the owning chat/profile and current turn generation;
+Stop and later turns invalidate old observers. Duplicate status events do not
+rewrite the chat. Native changes and `/config` readback share the same ordered
+event queue so one native update is not mistaken for a newer web selection.
+An actual newer web choice, including selecting Plan again, wins for the next
+turn and produces one explanatory notice. Synchronization errors stop the
+runtime through its existing fatal handler, without exposing private errors or
+leaving an unhandled rejection. Saved mode survives Stop and controller reload.
+
+`node scripts/smoke-real-claude-run.mjs` adds four disposable loopback variants:
+
+- `--plan-workflow`: real EnterPlanMode, denied Write while planning, explicit
+  ExitPlanMode approval, actual implementation-file creation and a subsequent
+  edit using the restored mode: **14** local model requests.
+- `--plan-reject`: denied plan exit creates no implementation file and leaves
+  the following turn in Plan: **13** requests.
+- `--plan-stop`: Stop while plan approval is pending invalidates the old
+  request, writes no implementation and resumes the same native history in
+  Plan: **9** requests.
+- `--plan-web-choice`: reselecting Plan before approval preserves that newer
+  choice for the following turn, even though the explicitly approved current
+  plan executes: **14** requests.
+
+All variants use the actual CLI/tools and retain the disposable HTTP app/data
+until Stop. Model replies are authored locally; no real inference, personal
+accounts or live chats are involved. These prove native Plan transitions and
+file-permission effects, not the separate shell classifier contract.
+
+Seven new unit/controller/adapter cases and two desktop/320px browser cases
+cover the above guards, settings ordering, failure handling and unsent
+draft/files. Current syntax/unit suite: **465/465**; combined Claude-command
+and conversation browser suite: **55/55**. Installed native settings and
+approval/question regressions also pass (**3** and **13** local replies).
+Item 20 remains active; the remaining application-session gates below and
+other bundled workflows/plugin namespaces are not marked complete. No merge,
+deployment, live approval or shared-host/company credential changes.
 
 ### Claude application sessions and native usage
 
@@ -215,10 +268,11 @@ Remaining gates are explicit:
   The default smoke still exercises denial and separately supplied recipe
   reuse; `--approve-recipe` verifies actual native creation. Shared-host replies
   and the complete `/run-skill-generator` workflow remain open.
-- The additional application-session Plan/permission-classifier scenario was
-  not accepted: native classifier requests need their own fixture contract.
-  Earlier bundled-review Plan acceptance does not establish this case. Native
-  policy was not bypassed and no classifier approval was fabricated.
+- Application-session Plan entry/exit, explicit approval/denial, subsequent
+  file permissions and Stop are now accepted in the four variants above.
+  Native shell permission-classifier requests still need their own fixture
+  contract; file-tool acceptance does not establish that separate case.
+  Native policy was not bypassed and no classifier approval was fabricated.
 - Appended system instructions and initial Fast compatibility environment
   cannot be replaced by these native controls. Such changes fail before input,
   with an explicit Stop/retry notice; running apps are not silently terminated.

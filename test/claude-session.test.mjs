@@ -105,6 +105,38 @@ test("Stop during private ordinary SDK initialization sends no user input and re
   assert.equal(f.broker.validate(capability, "anthropic"), null);
 });
 
+test("native mode observations follow the current main session, survive retained replies and stop with interruption", async t => {
+  const f = await fixture(t, { interactive: true }), first = [], second = [];
+  f.block = true;
+  const running = f.adapter.send("/run Start the fixture", { onPermissionMode: mode => first.push(mode) });
+  await waitFor(() => f.inputs?.length);
+  const status = permissionMode => ({ type: "system", subtype: "status", status: null, session_id: f.nativeSession, permissionMode });
+  f.emit(status("plan")); await waitFor(() => first.length === 1);
+  f.emit({ ...status("default"), session_id: "foreign-session" }); f.emit({ ...status("default"), parent_tool_use_id: "child" });
+  f.complete(); await running;
+  f.emit(status("acceptEdits")); await waitFor(() => first.length === 2);
+  assert.deepEqual(first, ["plan", "accept_edits"]);
+  const next = f.adapter.send("/verify Verify the fixture", { onPermissionMode: mode => second.push(mode) });
+  const rejected = assert.rejects(next, /interrupted/); await waitFor(() => f.inputs.length === 2);
+  f.emit(status("plan")); await waitFor(() => second.length === 1);
+  await f.adapter.interrupt(); await rejected;
+  f.emit(status("default")); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(second, ["plan"]); assert.deepEqual(first, ["plan", "accept_edits"]);
+});
+
+test("failed native-mode synchronization reaches the runtime fatal handler without an unhandled rejection", async t => {
+  for (const asynchronous of [false, true]) {
+    const f = await fixture(t, { interactive: true }), errors = []; f.block = true;
+    f.adapter.hooks.onFatal = error => { errors.push(error.message); void f.adapter.stop(); };
+    const onPermissionMode = () => { if (asynchronous) return Promise.reject(Error("Private persistence error")); throw Error("Private persistence error"); };
+    const running = f.adapter.send("/run Start the fixture", { onPermissionMode }), rejected = assert.rejects(running, /interrupted/);
+    await waitFor(() => f.inputs?.length);
+    f.emit({ type: "system", subtype: "status", status: null, session_id: f.nativeSession, permissionMode: "plan" });
+    await rejected; assert.equal(errors.length, 1); assert.match(errors[0], /could not be synchronized/);
+    assert.doesNotMatch(errors[0], /Private persistence/);
+  }
+});
+
 test("application replies retain one CLI and apply next-turn mode/model/effort without rewriting literal inputs", async t => {
   const f = await fixture(t), text = "/run Start ação\nand keep the server running";
   await f.adapter.send(text, { mode: "accept_edits", model: "sonnet", effort: "high" });

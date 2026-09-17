@@ -2,6 +2,15 @@ import { spawnWorker, terminateWorker } from "./worker-process.mjs";
 
 export const CLAUDE_PERMISSION_MODES = Object.freeze({ auto: "auto", acceptEdits: "accept_edits", plan: "plan", default: "default", dontAsk: "dont_ask" });
 
+// Only the main session's structured SDK status is authoritative. Tool names,
+// prose, child-agent events and a different native session are not mode changes.
+export function claudePermissionMode(event, sessionId) {
+  if (event?.type !== "system" || event.subtype !== "status" || event.parent_tool_use_id
+    || typeof sessionId !== "string" || !sessionId || event.session_id !== sessionId
+    || typeof event.permissionMode !== "string" || !Object.hasOwn(CLAUDE_PERMISSION_MODES, event.permissionMode)) return null;
+  return CLAUDE_PERMISSION_MODES[event.permissionMode];
+}
+
 // Only identify requested keys here. The native CLI still parses and executes
 // the original command, including validation and partial-success reporting.
 export function claudeConfigRequest(text) {

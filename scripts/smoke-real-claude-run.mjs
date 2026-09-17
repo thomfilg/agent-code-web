@@ -16,7 +16,7 @@ import { ModelCatalog } from "../src/models.mjs";
 // Installed Claude and a disposable HTTP application. The model is authored;
 // the native tools, application process and requests are real and loopback-only.
 const exec = promisify(execFile);
-const options = new Set(["--network-isolated", "--trace", "--background-exit", "--send-now", "--first-send-now", "--approve-recipe", "--questions", "--skip-questions", "--stop-approval"]);
+const options = new Set(["--network-isolated", "--trace", "--background-exit", "--send-now", "--first-send-now", "--approve-recipe", "--questions", "--skip-questions", "--stop-approval", "--plan-workflow", "--plan-reject", "--plan-stop", "--plan-web-choice"]);
 for (const argument of process.argv.slice(2)) assert(options.has(argument), `Unsupported fixture option: ${argument}`);
 if (!process.argv.includes("--network-isolated")) {
   const result = await exec("/usr/bin/unshare", ["--user", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", "--", process.execPath, process.argv[1], ...process.argv.slice(2), "--network-isolated"], { timeout: 90000, maxBuffer: 60000 }).catch(error => {
@@ -33,6 +33,9 @@ if (!process.argv.includes("--network-isolated")) {
   const approveRecipe = process.argv.includes("--approve-recipe");
   const stopApproval = process.argv.includes("--stop-approval"), skipQuestions = process.argv.includes("--skip-questions");
   const askQuestions = skipQuestions || process.argv.includes("--questions");
+  const planReject = process.argv.includes("--plan-reject"), planStop = process.argv.includes("--plan-stop"), planChoice = process.argv.includes("--plan-web-choice");
+  assert([planReject, planStop, planChoice].filter(Boolean).length <= 1, "Select one plan variant");
+  const planWorkflow = planReject || planStop || planChoice || process.argv.includes("--plan-workflow"), nativeModes = [];
   const held = Promise.withResolvers(), release = Promise.withResolvers();
   const recipe = "---\nname: verify\ndescription: Drive the fixture HTTP app\ndisable-model-invocation: true\n---\nRELAY_HTTP_RECIPE_CANARY\nRead package.json. Start node server.mjs in the background if .runtime.json is not reachable. Run node verify.mjs to probe the actual HTTP route. Report response statuses and bodies.\n";
   let manager, gatewayServer, chat, fixtureError, failureStop, nativeSession, phase = "run", step = 0, titleRequests = 0;
@@ -71,6 +74,32 @@ if (!process.argv.includes("--network-isolated")) {
           }
           content = [{ type: "text", text: "Saved application context retained after Stop; the server has not been restarted." }];
         }
+      } else if (phase === "plan") {
+        if (step === 0) content = tool("EnterPlanMode", {});
+        else if (step === 1) {
+          assert(!results.at(-1).is_error); assert.match(JSON.stringify(results.at(-1)), /Entered plan mode/);
+          content = tool("Write", { file_path: `${chat.workspace}/plan-denied.txt`, content: "Do not write this without consent" });
+        } else if (step === 2) {
+          assert.equal(results.at(-1).is_error, true); assert.match(JSON.stringify(results.at(-1)), /denied/i);
+          content = tool("ExitPlanMode", { plan: "Create plan-approved.txt in the fixture workspace. Keep the running HTTP application and its data intact." });
+        } else if (step === 3) {
+          if (planReject || planStop) {
+            assert.equal(results.at(-1).is_error, true); assert.match(JSON.stringify(results.at(-1)), /denied|interrupted/i);
+            content = [{ type: "text", text: "The plan was not approved. No implementation file was written." }];
+          } else {
+            assert(!results.at(-1).is_error, JSON.stringify(results.at(-1)));
+            content = tool("Write", { file_path: `${chat.workspace}/plan-approved.txt`, content: "Approved native plan executed" });
+          }
+        } else if (step === 4) {
+          assert(!results.at(-1).is_error, JSON.stringify(results.at(-1)));
+          content = [{ type: "text", text: "The approved plan created its fixture file and retained the running app." }];
+        } else throw Error(`Unexpected plan step ${step}`);
+      } else if (phase === "plan-followup") {
+        if (step === 0) content = tool("Write", { file_path: `${chat.workspace}/plan-followup.txt`, content: "The next turn kept the approved mode" });
+        else if (step === 1) {
+          assert.equal(results.at(-1).is_error === true, planReject || planChoice, JSON.stringify(results.at(-1)));
+          content = [{ type: "text", text: "The following turn retained the native permission mode." }];
+        } else throw Error(`Unexpected follow-up step ${step}`);
       } else if (phase === "continue") {
         assert(text.includes("Verify now without stopping the app"), "The native query must include the selected follow-up");
         if (step === 0) content = tool("Bash", { command: "node verify.mjs", description: "Drive the same app after Send now interrupted the previous query" });
@@ -153,10 +182,17 @@ if (!process.argv.includes("--network-isolated")) {
         assert(!JSON.stringify([args, options.env]).includes(config.claude.providerKey));
         if (args.includes("--session-id")) nativeSession = args[args.indexOf("--session-id") + 1];
         const child = spawnWorker(command, args, options);
-        if (process.argv.includes("--trace")) {
+        {
           let buffer = ""; child.stdout.on("data", chunk => {
             buffer += chunk; const lines = buffer.split("\n"); buffer = lines.pop();
-            for (const line of lines) { try { const event = JSON.parse(line); if (event.type === "command_lifecycle") console.log(JSON.stringify({ phase, lifecycle: event })); else if (event.type === "result") console.log(JSON.stringify({ phase, subtype: event.subtype, usage: event.usage, models: event.modelUsage, cost: event.total_cost_usd })); } catch {} }
+            for (const line of lines) { try {
+              const event = JSON.parse(line);
+              if (event.type === "system" && event.subtype === "status" && event.permissionMode) nativeModes.push(event.permissionMode);
+              if (process.argv.includes("--trace")) {
+                if (event.type === "command_lifecycle") console.log(JSON.stringify({ phase, lifecycle: event }));
+                else if (event.type === "result") console.log(JSON.stringify({ phase, subtype: event.subtype, usage: event.usage, models: event.modelUsage, cost: event.total_cost_usd }));
+              }
+            } catch {} }
           });
         }
         return child;
@@ -254,6 +290,49 @@ responses.push({items:await (await fetch(origin+'/items')).json()}); console.log
       assert.equal(store.get(chat.id).usage.totals.inputTokens, 500);
       assert.equal(store.get(chat.id).usage.totals.outputTokens, 50);
       await manager.stop(chat.id);
+    } else if (planWorkflow) {
+      phase = "plan"; step = 0;
+      const planning = manager.send(chat.id, "Enter plan mode, review the running application, and ask before implementing the plan.");
+      const pending = async () => {
+        const deadline = Date.now() + 15000;
+        while (!store.get(chat.id).pendingRequest && !fixtureError && Date.now() < deadline) await delay(25);
+        if (fixtureError) throw fixtureError;
+        const request = store.get(chat.id).pendingRequest; assert(request, "A native plan request must reach the controller"); return request;
+      };
+      const write = await pending();
+      assert.match(write.prompt, /Write/); assert.match(write.command, /plan-denied.txt/);
+      assert.equal(nativeModes.at(-1), "plan", "The native CLI must actually have entered Plan");
+      assert.equal(store.get(chat.id).mode, "plan", "The web selection must follow the actual native EnterPlanMode transition");
+      await manager.respond(chat.id, write.requestId, { decision: "decline" });
+      const exit = await pending(); assert.match(exit.prompt, /ExitPlanMode/); assert.match(exit.command, /plan-approved.txt/);
+      await assert.rejects(readFile(`${chat.workspace}/plan-denied.txt`, "utf8"), { code: "ENOENT" });
+      if (planChoice) await manager.setMode(chat.id, "plan"); // Same-value reselection is still a newer explicit choice.
+      if (planStop) await manager.stop(chat.id);
+      else await manager.respond(chat.id, exit.requestId, { decision: planReject ? "decline" : "accept" });
+      await planning; if (fixtureError) throw fixtureError;
+      await assert.rejects(manager.respond(chat.id, exit.requestId, { decision: "accept" }), /not active|no longer active/);
+      assert.equal(nativeModes.at(-1), planReject || planStop ? "plan" : "acceptEdits", "Only an approved native tool restores its pre-plan mode");
+      const expectedMode = planReject || planStop || planChoice ? "plan" : "accept_edits";
+      assert.equal(store.get(chat.id).mode, expectedMode, "The selector must reflect the native mode without replacing a newer web selection");
+      if (planReject || planStop) await assert.rejects(readFile(`${chat.workspace}/plan-approved.txt`, "utf8"), { code: "ENOENT" });
+      else assert.equal(await readFile(`${chat.workspace}/plan-approved.txt`, "utf8"), "Approved native plan executed");
+      if (!planStop) {
+        phase = "plan-followup"; step = 0;
+        let timer;
+        try {
+          const following = manager.send(chat.id, "Create the next fixture file using the selected mode.");
+          if (planReject || planChoice) {
+            const request = await pending(); assert.match(request.command, /plan-followup.txt/);
+            await manager.respond(chat.id, request.requestId, { decision: "decline" });
+          }
+          await Promise.race([following, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("The following turn did not retain the selected mode")), 15000); })]);
+        } finally { clearTimeout(timer); }
+        if (fixtureError) throw fixtureError;
+        if (planReject || planChoice) await assert.rejects(readFile(`${chat.workspace}/plan-followup.txt`, "utf8"), { code: "ENOENT" });
+        else assert.equal(await readFile(`${chat.workspace}/plan-followup.txt`, "utf8"), "The next turn kept the approved mode");
+        assert.deepEqual(await (await fetch(`http://127.0.0.1:${port}/items`)).json(), items);
+        await manager.stop(chat.id);
+      }
     } else {
       phase = "verify"; step = 0;
       const verification = manager.send(chat.id, "/verify Check the new POST /items validation and preserved item listing.");
@@ -318,11 +397,12 @@ responses.push({items:await (await fetch(origin+'/items')).json()}); console.log
     }
     await resumed; if (fixtureError) throw fixtureError;
     assert.equal(store.get(chat.id).agentSessionId, session);
+    if (planWorkflow) assert.equal(store.get(chat.id).mode, planReject || planStop || planChoice ? "plan" : "accept_edits", "Stop/resume must keep the selected mode");
     assert.match(store.get(chat.id).messages.at(-1).text, /Saved application context retained after Stop/);
     assert.equal(store.get(chat.id).usage.totals.inputTokens, (requests.length - (sendNow ? 1 : 0)) * 100);
     await assert.rejects(fetch(`http://127.0.0.1:${port}/items`, { signal: AbortSignal.timeout(3000) }));
     if (stopApproval) await assert.rejects(readFile(`${chat.workspace}/.claude/skills/verify/SKILL.md`, "utf8"), { code: "ENOENT" });
-    console.log(`PASS: ${sendNow ? `native ${firstSendNow ? "first-command " : ""}Send now retained the running app/data and unselected queue entry` : backgroundExit ? "native background completion saved one independent answer, without synthetic user input" : stopApproval ? "Stop canceled the native approval without creating its recipe or consuming queued input" : `native run/verify drove the actual HTTP app across replies, changed model and ${approveRecipe ? "created/reused its recipe only after explicit approval" : "honored denial and reused a separately supplied recipe"}`}; Stop closed the app and restored the same native context without restarting it.${askQuestions ? ` Native questions ${skipQuestions ? "were skipped without invented answers" : "returned selected options and literal text"}.` : ""} ${requests.length} loopback requests; usage counted once.`);
+    console.log(`PASS: ${sendNow ? `native ${firstSendNow ? "first-command " : ""}Send now retained the running app/data and unselected queue entry` : backgroundExit ? "native background completion saved one independent answer, without synthetic user input" : planWorkflow ? `native Enter/ExitPlanMode ${planStop ? "was canceled by Stop without a plan-exit grant" : planReject ? "honored denial and kept Plan for the following turn" : planChoice ? "retained a newer same-value web selection for the following turn" : "synchronized the selector and next turn"}, with actual file/policy effects` : stopApproval ? "Stop canceled the native approval without creating its recipe or consuming queued input" : `native run/verify drove the actual HTTP app across replies, changed model and ${approveRecipe ? "created/reused its recipe only after explicit approval" : "honored denial and reused a separately supplied recipe"}`}; Stop closed the app and restored the same native context without restarting it.${askQuestions ? ` Native questions ${skipQuestions ? "were skipped without invented answers" : "returned selected options and literal text"}.` : ""} ${requests.length} loopback requests; usage counted once.`);
   } finally {
     release.resolve(); await failureStop; await manager?.shutdown(); server.closeAllConnections(); gatewayServer?.closeAllConnections();
     await Promise.all([new Promise(resolve => server.close(resolve)), ...(gatewayServer ? [new Promise(resolve => gatewayServer.close(resolve))] : [])]);

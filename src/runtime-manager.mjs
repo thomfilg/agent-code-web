@@ -729,6 +729,33 @@ export class RuntimeManager extends EventEmitter {
       const message = await this.store.appendMessage(chatId, { role: "system", kind: "notice", text: `The native command saved its profile settings, but newer web choices for ${conflicts.join(" and ")} were kept for subsequent turns.` });
       this.#emit(chatId, { type: "message", message });
     }
+    return Object.hasOwn(native, "mode") && !conflicts.includes("permission mode") ? updated : null;
+  }
+
+  async #syncClaudePermissionMode(chatId, mode, state, active) {
+    if (!Object.values(CLAUDE_PERMISSION_MODES).includes(mode) || !active()) return;
+    const scope = chat => JSON.stringify([chat.agent, chat.ownerId, chat.environmentId, chat.workspace, companyForChat(chat)]);
+    const current = this.store.get(chatId);
+    if (!current || scope(current) !== scope(state.original) || current.mode === mode) return;
+    let changed = false, conflict = false;
+    const updated = await this.store.update(chatId, current => {
+      if (!active() || scope(current) !== scope(state.original)) return {};
+      if (current.mode !== state.mode || current.modeSettingsRevision !== state.revision) { conflict = true; return {}; }
+      if (current.mode === mode) return {};
+      changed = true;
+      return { mode, modeSettingsRevision: (current.modeSettingsRevision || 0) + 1 };
+    });
+    if (changed) {
+      state.mode = updated.mode; state.revision = updated.modeSettingsRevision;
+    }
+    const latest = this.store.get(chatId);
+    if (!active() || !latest || scope(latest) !== scope(state.original)) return;
+    if (changed) this.publishChat(updated);
+    if (conflict && !state.conflict && active()) {
+      state.conflict = true;
+      const message = await this.store.appendMessage(chatId, { role: "system", kind: "notice", text: "Claude changed its current permission mode, but your newer web selection was kept for the next turn." });
+      this.#emit(chatId, { type: "message", message });
+    }
   }
 
   async #retainClaudeFastConstraint(chatId, value, original) {
@@ -1174,11 +1201,18 @@ export class RuntimeManager extends EventEmitter {
       // Keep Claude slash commands at the beginning of the user input. Relay's
       // metadata/handoff instructions belong in the appended system prompt.
       const claude = currentChat.agent === "claude";
+      const modeState = { original: currentChat, mode: currentChat.mode, revision: currentChat.modeSettingsRevision };
+      const modeActive = () => !turn.cancelled && runtime.generation === generation && this.#runtimes.get(chatId) === runtime;
       const send = () => runtime.adapter.send(claude ? raw : metadata ? responsePrompt(prompt, automaticTitle) : prompt, {
         ...settings, ...explicitContext, appReferences: appReferencesForTurn(currentChat, files, companyForChat(currentChat)), ...(skill ? { skills: [skill] } : {}),
         ...(commandAction?.type === "review" ? { reviewTarget: commandAction.target } : {}),
         ...(commandAction?.type === "goal" ? { goalDirective: commandAction } : currentChat.forkGoalPending && currentChat.mode !== "plan" && commandAction?.type !== "review" ? { goalDirective: { action: "resume", fork: true } } : {}),
         ...(claude ? { systemPrompt: responsePrompt("", automaticTitle) + (currentChat.needsAgentHandoff ? handoffPrompt(currentChat, "") : "") + browserPrompt,
+          onPermissionMode: mode => {
+            if (!modeActive()) return runtime.eventQueue;
+            runtime.eventQueue = runtime.eventQueue.then(() => this.#syncClaudePermissionMode(chatId, mode, modeState, modeActive));
+            return runtime.eventQueue;
+          },
           onFastConstraint: value => {
             if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
             runtime.eventQueue = runtime.eventQueue.then(() => this.#retainClaudeFastConstraint(chatId, value, settingsChat));
@@ -1187,10 +1221,20 @@ export class RuntimeManager extends EventEmitter {
       const checkConfiguration = () => {
         if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) throw Object.assign(new Error("Settings command cancelled"), { name: "AbortError" });
       };
+      const syncConfiguration = async native => {
+        // Serialize readback with live SDK changes. Our own mode transitions
+        // must not look like a newer user choice, and vice versa.
+        const task = runtime.eventQueue.then(async () => {
+          const updated = await this.#syncClaudeConfiguration(chatId, native, { ...currentChat, mode: modeState.mode, modeSettingsRevision: modeState.revision }, checkConfiguration);
+          if (updated) { modeState.mode = updated.mode; modeState.revision = updated.modeSettingsRevision; }
+        });
+        runtime.eventQueue = task.catch(() => {});
+        await task;
+      };
       const nativeSend = async () => {
         try { return await send(); }
         catch (error) {
-          if (commandAction?.type === "claudeConfig") await this.#syncClaudeConfiguration(chatId, error.nativeSettings, currentChat, checkConfiguration);
+          if (commandAction?.type === "claudeConfig") await syncConfiguration(error.nativeSettings);
           if (claude) await this.#syncClaudeFast(chatId, error, settingsChat, checkConfiguration);
           throw error;
         }
@@ -1202,7 +1246,7 @@ export class RuntimeManager extends EventEmitter {
       if (turn.cancelled || runtime.generation !== generation) return;
       runtime.titleStream?.flush();
       await runtime.eventQueue;
-      if (commandAction?.type === "claudeConfig") await this.#syncClaudeConfiguration(chatId, result.nativeSettings, currentChat, checkConfiguration);
+      if (commandAction?.type === "claudeConfig") await syncConfiguration(result.nativeSettings);
       if (claude) await this.#syncClaudeFast(chatId, result, settingsChat, checkConfiguration);
       if (claude && /^\/reload-(?:skills|plugins)(?:\s|$)/.test(text)) await this.#refreshCommandCatalog(chatId);
       if (!result.turnsHandled) {

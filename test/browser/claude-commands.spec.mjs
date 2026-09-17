@@ -23,6 +23,33 @@ async function fixture(page) {
 const requestEvent = (page, id, event) => page.evaluate(({ id, event }) => window.fixtureSources.find(source => source.url.includes(`/chats/${id}/events`))
   .dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) })), { id, event });
 
+for (const width of [1280, 320]) test(`native Plan transitions at ${width}px update the selector without guessing approval results or losing drafts`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input"), card = page.locator("#approval-card");
+  await page.locator("#attachment-input").setInputFiles({ name: "plan-context.txt", mimeType: "text/plain", buffer: Buffer.from("Unsent plan context") });
+  await expect(page.locator("#attachment-chips")).toContainText("plan-context.txt");
+  await input.fill("Keep this next task");
+  const request = { requestId: "native-plan-approval", method: "claude/tool/requestApproval", prompt: "Claude requests permission to use ExitPlanMode",
+    command: JSON.stringify({ plan: "Change only the fixture file" }), availableDecisions: ["accept", "decline"] };
+  f.snapshot = { ...f.snapshot, status: "running", mode: "plan", pendingRequest: request }; await f.emit();
+  await expect(page.locator("#mode-label")).toHaveText("Plan"); await expect(card.locator("code")).toContainText("Change only the fixture file");
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  await page.route(`**/api/chats/${f.snapshot.id}/requests/${request.requestId}/respond`, async route => {
+    expect(route.request().postDataJSON()).toEqual({ decision: "accept" }); await gate; await route.fulfill({ json: { resolved: true } });
+  });
+  await card.getByRole("button", { name: "Approve once", exact: true }).click();
+  await expect(card.getByRole("button", { name: "Approve once", exact: true })).toBeDisabled();
+  await expect(page.locator("#mode-label")).toHaveText("Plan");
+  f.snapshot = { ...f.snapshot, mode: "accept_edits", pendingRequest: null }; await f.emit();
+  release(); await expect(page.locator("#mode-label")).toHaveText("Edits"); await expect(card).not.toBeVisible();
+  await expect(input).toHaveValue("Keep this next task"); await expect(page.locator("#attachment-chips")).toContainText("plan-context.txt");
+  f.snapshot = { ...f.snapshot, mode: "plan", messages: [{ id: "mode-conflict", role: "system", kind: "notice", text: "Claude changed its current permission mode, but your newer web selection was kept for the next turn." }] }; await f.emit();
+  await expect(page.locator("#mode-label")).toHaveText("Plan"); await expect(page.locator("#messages")).toContainText("your newer web selection was kept");
+  await page.reload(); await expect(page.locator("#mode-label")).toHaveText("Plan");
+  expect(f.calls).toEqual([]); expect(f.errors).toEqual([]);
+});
+
 for (const width of [1280, 320]) test(`Claude approvals at ${width}px stay literal, offer only native decisions and preserve the next request and draft`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page), input = page.locator("#message-input"), card = page.locator("#approval-card");

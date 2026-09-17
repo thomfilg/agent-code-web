@@ -62,6 +62,22 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: reproduced and fixed Claude's native Enter/ExitPlanMode leaving Relay's
+  selector and subsequent-turn mode stale. Only allowlisted structured status
+  from the current main session is reconciled; stale/foreign/child events and
+  changed owners/profiles cannot alter it. Native configuration readback and
+  live mode events are serialized. Newer web choices, including same-value
+  reselection, remain authoritative for the next turn; Stop invalidates old
+  callbacks, duplicate status is a no-op, and persistence failure stops safely.
+  Installed-CLI acceptance covers explicit plan approval, denial, Stop while
+  awaiting approval and newer web Plan selection, with real file/policy and
+  retained HTTP app/data effects (**14/13/9/14** loopback requests). Seven new
+  unit/adapter cases and two responsive browser cases; syntax/unit suite
+  **465/465**, combined Claude-command/conversation browser suite **55/55**.
+  Native settings and approval/question regressions pass (**3/13** requests).
+  The separate shell classifier, long-lived capabilities/startup settings,
+  retained-session interop and other workflows remain open. Item 20/order/count
+  unchanged; save to PR #2 without merge, deployment, live-data or account changes.
 - 20: private Claude profiles now support native once-approval, denial and
   `AskUserQuestion` through the live SDK channel, including ordinary turns and
   retained application sessions. Original tool inputs stay controller-side;

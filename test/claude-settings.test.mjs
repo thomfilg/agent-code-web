@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import { mkdir, writeFile, readFile, symlink, link } from "node:fs/promises";
-import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings, readPrivateClaudeSettings } from "../src/claude-settings.mjs";
+import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings, readPrivateClaudeSettings, claudePermissionMode } from "../src/claude-settings.mjs";
 import { ClaudeAdapter } from "../src/adapters/claude.mjs";
 import { RuntimeManager } from "../src/runtime-manager.mjs";
 import { ChatStore } from "../src/store.mjs";
@@ -11,6 +11,16 @@ import { CapabilityBroker } from "../src/capabilities.mjs";
 import { spawnWorker, terminateWorker } from "../src/worker-process.mjs";
 import { messageCommand } from "../src/message-command.mjs";
 import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
+
+test("permission mode comes only from an allowlisted main-session native status, never prose or a child", () => {
+  const event = { type: "system", subtype: "status", status: null, permissionMode: "plan", session_id: "native-session" };
+  for (const [native, mode] of Object.entries(CLAUDE_PERMISSION_MODES)) assert.equal(claudePermissionMode({ ...event, permissionMode: native }, "native-session"), mode);
+  for (const invalid of [null, {}, { ...event, type: "assistant" }, { ...event, subtype: "init" }, { ...event, session_id: "different" },
+    { ...event, parent_tool_use_id: "child" }, ...["bypassPermissions", "__proto__", "toString", null, { toString: "not callable" }].map(permissionMode => ({ ...event, permissionMode }))]) {
+    assert.equal(claudePermissionMode(invalid, "native-session"), null);
+  }
+  assert.equal(claudePermissionMode({ ...event, session_id: undefined }, undefined), null);
+});
 
 test("config parsing leaves native text intact and only reconciles applied or explicitly confirmed values", () => {
   assert.equal(claudeConfigRequest("Explain /config"), null);
@@ -86,6 +96,65 @@ async function fixture(t, { fake = false, host = false } = {}) {
   const chat = await manager.createChat({ agent: "claude", title: "Private configuration test" });
   return Object.assign(f, { root, store, config, models, broker, manager, chat });
 }
+
+test("native modes update immediately and between replies, persist through Stop, and drive the next queued turn", async t => {
+  const f = await fixture(t, { fake: true }), other = await f.manager.createChat({ agent: "claude", title: "Other native session" });
+  f.gate = Promise.withResolvers();
+  const running = f.manager.send(f.chat.id, "Plan the change"); await waitFor(() => f.calls.length === 1);
+  const report = f.calls[0].settings.onPermissionMode;
+  await report("plan"); assert.equal(f.store.get(f.chat.id).mode, "plan");
+  const revision = f.store.get(f.chat.id).modeSettingsRevision, chatRevision = f.store.get(f.chat.id).revision;
+  await report("plan"); assert.equal(f.store.get(f.chat.id).modeSettingsRevision, revision, "Duplicate SDK status is not a new selection");
+  assert.equal(f.store.get(f.chat.id).revision, chatRevision, "Unchanged native status must not rewrite the stored conversation");
+  await report("accept_edits"); assert.equal(f.store.get(f.chat.id).mode, "accept_edits");
+  await f.manager.enqueue(f.chat.id, "Continue after approval");
+  f.gate.resolve(); await running; await waitFor(() => f.calls.length === 2 && !f.manager.isBusy(f.chat.id));
+  assert.equal(f.calls[1].settings.mode, "accept_edits");
+  await report("plan"); assert.equal(f.store.get(f.chat.id).mode, "accept_edits", "An older turn cannot publish into a newer one");
+  await f.calls[1].settings.onPermissionMode("default");
+  assert.equal(f.store.get(f.chat.id).mode, "default", "A retained session can change mode between replies");
+  assert.equal(f.store.get(other.id).mode, other.mode);
+  await f.manager.stop(f.chat.id);
+  await f.calls[1].settings.onPermissionMode("plan"); assert.equal(f.store.get(f.chat.id).mode, "default");
+  const restored = new ChatStore(f.root); await restored.initialize(); assert.equal(restored.get(f.chat.id).mode, "default");
+  assert(!f.store.get(f.chat.id).messages.some(message => message.kind === "notice"));
+});
+
+test("newer web choices, including the same mode, beat live native transitions without repeated notices", async t => {
+  for (const selection of ["dont_ask", "plan"]) {
+    const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+    const running = f.manager.send(f.chat.id, "Plan the change"); await waitFor(() => f.calls.length === 1);
+    const report = f.calls[0].settings.onPermissionMode; await report("plan");
+    await f.manager.setMode(f.chat.id, selection); const revision = f.store.get(f.chat.id).modeSettingsRevision;
+    await report("accept_edits"); await report("default");
+    assert.equal(f.store.get(f.chat.id).mode, selection); assert.equal(f.store.get(f.chat.id).modeSettingsRevision, revision);
+    assert.equal(f.store.get(f.chat.id).messages.filter(message => message.kind === "notice" && /newer web selection/.test(message.text)).length, 1);
+    f.gate.resolve(); await running;
+    await f.manager.send(f.chat.id, "Use my selection"); assert.equal(f.calls[1].settings.mode, selection);
+  }
+});
+
+test("live native changes and config readback are serialized without confusing our updates with user choices", async t => {
+  const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+  const running = f.manager.send(f.chat.id, "/config model=sonnet permissionMode=plan"); await waitFor(() => f.calls.length === 1);
+  const report = f.calls[0].settings.onPermissionMode;
+  await report("plan"); f.gate.resolve(); await running;
+  assert.equal(f.store.get(f.chat.id).mode, "plan"); assert.equal(f.store.get(f.chat.id).model, "sonnet");
+  await report("accept_edits"); assert.equal(f.store.get(f.chat.id).mode, "accept_edits");
+  assert(!f.store.get(f.chat.id).messages.some(message => message.kind === "notice"));
+});
+
+test("Stop, ownership and company changes reject stale native mode callbacks", async t => {
+  for (const action of ["stop", "owner", "company"]) {
+    const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+    const running = f.manager.send(f.chat.id, "Keep this task running"); await waitFor(() => f.calls.length === 1);
+    if (action === "stop") await f.manager.stop(f.chat.id);
+    else await f.store.update(f.chat.id, action === "owner" ? { ownerId: "different-owner" } : { repositories: [{ fullName: "other-company/project" }] });
+    await f.calls[0].settings.onPermissionMode("plan"); f.gate.resolve(); await running;
+    assert.equal(f.store.get(f.chat.id).mode, f.chat.mode);
+    assert(!f.store.get(f.chat.id).messages.some(message => /newer web selection/.test(message.text)));
+  }
+});
 
 test("native saved settings reach following turns and survive Stop without changing other chats", async t => {
   const f = await fixture(t), other = await f.manager.createChat({ agent: "claude", title: "Other company" });

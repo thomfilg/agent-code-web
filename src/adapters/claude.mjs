@@ -5,7 +5,7 @@ import path from "node:path";
 import { buildWorkerEnvironment, spawnWorker, terminateWorker } from "../worker-process.mjs";
 import { errorMessage, redact } from "../utils.mjs";
 import { claudeUsage, claudeContext, claudeRateLimits, safeSessionDetails } from "../session-info.mjs";
-import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings } from "../claude-settings.mjs";
+import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings, claudePermissionMode } from "../claude-settings.mjs";
 import { claudeFastRequest, claudeFastState, claudeFastCredential, checkClaudeFastAvailability, claudeFastUnavailable } from "../claude-fast.mjs";
 import { ClaudeTextStream } from "../claude-text-stream.mjs";
 import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR, ClaudeControlChannel, runClaudeMcpCommand } from "../claude-mcp.mjs";
@@ -43,7 +43,7 @@ export class ClaudeAdapter {
     this.stopped = false;
   }
 
-  async send(text, { model, effort, resetEffort, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, mode = "accept_edits", systemPrompt } = {}) {
+  async send(text, { model, effort, resetEffort, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, onPermissionMode, mode = "accept_edits", systemPrompt } = {}) {
     const version = this.sendVersion;
     const configuration = claudeConfigRequest(text);
     const fastRequest = claudeFastRequest(text);
@@ -187,6 +187,9 @@ export class ClaudeAdapter {
     }) : () => {};
     this.providerObservation = unobserve;
     const finishObservation = () => { unobserve(); if (this.providerObservation === unobserve) this.providerObservation = null; };
+    const previousModeObserver = this.modeObserver;
+    const modeObserver = { sessionId, version, onPermissionMode };
+    this.modeObserver = modeObserver;
     let child, managed;
     const spawn = launchArgs => this.executor
       ? this.executor.spawn(this.config.claude.bin, launchArgs, {
@@ -214,6 +217,7 @@ export class ClaudeAdapter {
       if (version !== this.sendVersion) throw Error("Claude turn interrupted");
     } catch (error) {
       finishObservation();
+      if (this.modeObserver === modeObserver) this.modeObserver = previousModeObserver;
       if (managed && managed !== this.applicationSession) await managed.stop();
       if (this.turnSession === managed) this.turnSession = null;
       // Failed first initialization must not leave a live, unaddressable CLI
@@ -268,6 +272,7 @@ export class ClaudeAdapter {
       try { event = JSON.parse(line); } catch { return; }
       mcpControl?.accept(event);
       reviewControl?.accept(event);
+      this.permissionMode(event);
       if (!mcpControl) output.accept(event);
       if (event.type === "system" && event.subtype === "notification" && ["fast-mode-overage-rejected", "fast-mode-org-changed", "fast-mode-cooldown-started", "fast-mode-cooldown-expired", "stop-hook-error"].includes(event.key) && typeof event.text === "string" && !notifications.has(event.key)) {
         notifications.add(event.key);
@@ -336,6 +341,7 @@ export class ClaudeAdapter {
       child.once("close", (code, signal) => { void (async () => {
         finishObservation();
         if (managed && managed !== this.applicationSession) await managed.stop();
+        if ((!managed || managed !== this.applicationSession) && this.modeObserver === modeObserver) this.modeObserver = null;
         if (this.turnSession === managed) this.turnSession = null;
         if (spawnFailed) return;
         mcpControl?.close();
@@ -397,7 +403,22 @@ export class ClaudeAdapter {
     await requests.respond(requestId, payload);
   }
 
+  permissionMode(event) {
+    const observer = this.modeObserver;
+    if (this.stopped || !observer || observer.version !== this.sendVersion) return;
+    const mode = claudePermissionMode(event, observer.sessionId);
+    if (!mode) return;
+    const failed = () => {
+      if (!this.stopped && this.modeObserver === observer && observer.version === this.sendVersion) {
+        this.hooks.onFatal?.(Error("Claude permission-mode state could not be synchronized. Recheck the selected mode before continuing."));
+      }
+    };
+    try { void Promise.resolve(observer.onPermissionMode?.(mode)).catch(failed); }
+    catch { failed(); }
+  }
+
   backgroundEvent(event) {
+    this.permissionMode(event);
     if (this.stopped || !["assistant", "stream_event", "result"].includes(event.type)) return;
     this.backgroundOutput ||= new ClaudeTextStream(() => {});
     this.backgroundOutput.accept(event);
@@ -413,6 +434,7 @@ export class ClaudeAdapter {
 
   async interrupt() {
     this.sendVersion += 1;
+    this.modeObserver = null;
     (this.turnSession?.requests || this.applicationSession?.requests)?.cancel();
     this.settingsInspection?.abort();
     this.fastInspection?.abort();
@@ -427,6 +449,7 @@ export class ClaudeAdapter {
 
   async stop() {
     this.sendVersion += 1;
+    this.modeObserver = null;
     this.settingsInspection?.abort();
     this.fastInspection?.abort();
     this.providerObservation?.(); this.providerObservation = null;
