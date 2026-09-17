@@ -22,6 +22,11 @@ Preserve unrelated changes; do not treat this as permission to merge, deploy,
 restart live services or alter live user data/accounts. This delivery step does
 not reorder the feature queue.
 
+Restart authorization (2026-09-17): the user explicitly said not to ask again
+and to restart Relay for the current Codex activation. Preserve existing data
+and use the configured Doppler project. This authorizes the requested controlled
+restart, not OAuth consent, automatic real model prompts or an AWS deployment.
+
 Priority clarification (2026-09-17): finish and test already-started work before
 starting an unimplemented feature. Work on one complete feature at a time,
 commit and push its verified changes, then move to the next. Keep the original
@@ -55,8 +60,10 @@ environment, preference and encryption-check records were unchanged. That
 database already contained zero chats before this activation. The earlier
 510-message acceptance remains historical evidence, not the current chat count;
 this activation did not delete those messages. No worker or real model turn
-was started. Codex/Claude are still disabled, and neither Google sign-in nor a
-saved GitHub/MCP connection establishes successful provider onboarding.
+was started. The subsequent authorized Codex activation below now serves the
+named-account onboarding UI. Codex remains disabled until this user connects an
+account; Claude is still unimplemented. Neither Google sign-in nor a saved
+GitHub/MCP connection establishes successful provider onboarding.
 Do not silently adopt host credentials or count native integration gates as
 passed. Tests run one suite at a time with inherited two-CPU affinity and
 nice 10. This correction supersedes historical completion/count statements;
@@ -227,6 +234,22 @@ References inspected for this request:
 | 45 | Provide a repeatable AWS deployment script for the complete Relay application, following future-pay's deployment guidance; add reusable AWS support to `12-apps/ci` and keep Relay a thin application-specific consumer | MVP blocker: references reviewed and acceptance criteria recorded above. Shared registry currently has only DigitalOcean/Cloudflare; existing Relay EC2 worker scaffolding is not a complete controller deployment. No AWS provisioning or deployment performed |
 
 ## Verification ledger
+
+- Authorized Codex activation (2026-09-17): stopped the original Relay and
+  embedded PostgreSQL cleanly, copied both the control database/credential
+  directory and application data into the private local backup
+  `relay-before-codex-WlhgAG`, and verified the copies before restarting.
+  Relay now runs the current branch at `http://localhost:8787` through the
+  repository's Doppler launcher (`code-web/dev`), with the same data paths,
+  PostgreSQL port 55438, namespace isolation, no mock provider, CPU affinity
+  0–1 and nice 10. All **10 encrypted record payloads** and the local credential
+  file retained identical fingerprints; all records decrypt successfully.
+  Google reports configured, the served account module matches the current
+  source, and anonymous account API access returns 401. These are live backend
+  and static-serving checks, not a claim of authenticated UI acceptance.
+  The user must still authorize a Codex account, exercise a consented real turn
+  and verify that account/chat resumes after restart. No model turn or account
+  authorization was performed automatically.
 
 - Codex native follow-up (2026-09-17): the production controller client and
   installed Codex 0.154.0 successfully requested a real device-code URL/code
