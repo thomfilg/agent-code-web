@@ -46,7 +46,7 @@ and remain at the beginning of native stream-json input.
 | `/model [id/default]`, `/effort [level/default]`, `/reasoning [level/default]` | Picker without arguments; queued validated settings with arguments. Model changes reset previous effort. Claude also supports explicit Auto effort, native `/effort status`, and its account-default model separately from Relay defaults. |
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
 | `/fast [on/off]`, `/personality [friendly/pragmatic/none]` (Codex) | Catalog-driven, persisted per-chat settings, applied in FIFO order to later turns. Stop/model-change guards, retryable personality picker and draft/attachment protection. Controller/browser checks and actual installed-CLI parameter/resume verification pass; live activation remains pending. |
-| `/fast [on/off]` (Claude) | Per-chat private-gateway opt-in, fresh authenticated account checks, structured native status, FIFO and same-session Stop/resume. Actual native Fast/standard requests, model changes and account/native-policy denials verified. No provider key in workers. Host profiles, custom upstreams, live activation and additional native rate-limit/configuration cases remain gated below. |
+| `/fast [on/off]` (Claude) | Per-chat private-gateway opt-in, fresh authenticated account checks, structured native status, FIFO and same-session Stop/resume. Native Fast/standard requests, credits, API denials, persisted cooldowns, configuration/model interop and managed-policy enforcement verified. No provider key in workers. Host profiles, custom upstreams, native managed-policy limitations and live activation remain gated below. |
 | `/usage`, `/status`, `/context` | Existing session/usage inspection. |
 | `/diff`, `/mcp`, `/skills`, `/help` | Workspace diff, connection manager, installed-command picker. |
 | `/new`, `/clear`, `/resume` | New-chat flow or searchable saved-chat picker; never implicitly delete the old conversation. |
@@ -87,7 +87,7 @@ Do not treat removing entries from autocomplete as implementing them.
   Windows worker is introduced.
 - Claude acceptance below covers the command transport, native local results,
   custom expansion, configuration readback, reload and resume, not every command's effect. Next verify
-  further `/fast` rate-limit/configuration cases and stateful `/goal` across
+  stateful Claude `/goal` across
   actual Relay turn settings and worker restarts, plus native MCP actions, bundled
   workflows and installed plugin namespaces. Account-backed commands and shared
   host-profile writes also need the company-isolation gate in item 21. Do not
@@ -145,13 +145,76 @@ the exact new typed command, retaining the unrelated native dispatch assertion.
 The native Sonnet inconsistency was reproduced before the launch-model fix; no
 success assertion was relaxed. Final test totals are recorded in the queue.
 
-Remaining Fast acceptance: native API rejection/cooldown/credit-exhaustion
-behavior across print-process boundaries, `/config`/`/settings` Fast preference
-interop, and managed per-session-opt-in behavior. Shared host profiles still
-need item 21 isolation; custom gateways need their own authenticated availability
-integration. Live backend activation is not performed by this checkpoint.
-Keep item 20 open and continue these cases before Claude goals and remaining
-installed commands; this is not a claim that every command is complete.
+The follow-up rejection/cooldown/configuration checkpoint below covers the
+additional native cases. Shared host profiles still need item 21 isolation;
+custom gateways need their own authenticated availability integration. Live
+backend activation is not performed by these checkpoints. Keep item 20 open and
+continue Claude goals and remaining installed commands; this is not a claim
+that every command is complete.
+
+### Claude Fast provider feedback and restart persistence
+
+Actual Claude **2.1.222**, through the real Relay provider gateway, reproduced
+two further defects: native cooldowns are process-local and disappear between
+print turns; after a Fast API entitlement rejection, the gateway compatibility
+flag can leave the native result reporting `on` even though it fell back to
+standard speed. Relay now observes the authoritative API rejection rather than
+mistaking that stale result for a successful Fast request.
+
+The gateway forwards request/response bytes unchanged. A bounded streaming
+inspector reads only the root `speed` field, ignoring prompt/tool content and
+the Fast beta header (which also appears on standard-speed requests). Only
+400 error inspection buffers a body, capped at 4 KiB. Capability-bound,
+request-time observer snapshots deliver sanitized reason/deadline metadata,
+never provider keys, raw errors, prompts or headers. Revoked/expired capabilities,
+other chats/providers and late responses to a previous turn cannot deliver it.
+
+Provider cooldowns retain their native retry deadline: native sub-20-second
+retries are left alone; longer limits use the installed minimum ten minutes or
+default thirty minutes. The desired Fast preference stays on while subsequent
+turns run at standard speed; after expiry, a fresh account check precedes the
+next Fast request. Organization/extra-usage disablement instead clears the
+preference. A rejection received before Stop is saved even when that turn is
+interrupted or a newer model is chosen, without replacing the newer choice or
+crossing credential/owner/environment boundaries. A newer Fast-off stays off.
+
+Credit exhaustion is distinct: as documented for current headless stream-json
+in the [native Fast contract](https://code.claude.com/docs/en/fast-mode), the
+installed CLI retains the opt-in and retries at standard speed for that turn.
+Relay now displays its native credit notification once per turn rather than
+silently dropping it or permanently disabling Fast.
+
+Verification uses disposable profiles and network/PID namespaces with only
+loopback, dummy keys and deterministic native model replies:
+
+- Base `node scripts/smoke-real-claude-fast.mjs`: seven actual model requests and
+  twelve account checks, preserving previous model/policy/resume assertions.
+- `--limits`: twenty-one actual requests across credit exhaustion, API 400
+  organization rejection, extra-usage disablement, rate-limit and overload
+  cooldowns. Asserts saved/reloaded deadlines, native identity after Stop,
+  independent chats, off/toggle behavior and expiry. Expiry advances only
+  Relay's injected clock; it does not claim to have waited out the CLI's real
+  ten-minute timer or change native clock/rate-limit semantics.
+- `--settings`: three actual requests prove `/config model=sonnet`,
+  `/settings model=opus`, saved opt-in, explicit off and Stop/resume work
+  together. Native `fastMode` and `fastModePerSessionOptIn` are **not** valid
+  `/config` keys in this installation; native rejection must preserve the
+  preference and never become inference.
+- `--policy`: an additionally private mount namespace supplies real native
+  managed settings without editing host `/etc`. Installed print-mode
+  `fastModePerSessionOptIn:true` returns stale ON prose with structured `off`;
+  Relay refuses activation, and two subsequent requests stay standard across
+  Stop. The policy is not bypassed or edited. This verifies safe enforcement,
+  **not** successful Fast activation under that native managed-policy limit.
+  Supporting activation there requires a native-capable session path; it remains
+  an explicit limitation, not a fabricated success.
+
+Eight additional unit/controller tests cover chunk/escape boundaries, nested
+input, large prompts, bounded errors, capability isolation, interrupted turns,
+newer models, native failure and changed scope. Normal unit suite **415/415**;
+related browser regressions **22/22**. The isolated smoke runner also requires
+its final assertion marker, not merely exit code zero. No personal credentials,
+real inference, live chat/profile changes, deployment or live service restart.
 
 ### Claude automatic compaction and earlier Fast-mode findings
 

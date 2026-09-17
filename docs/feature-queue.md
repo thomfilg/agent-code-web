@@ -62,6 +62,21 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: native Claude Fast credits, API rejection/cooldown and `/config`/`/settings`
+  interoperability are now verified. Fixed lost native credit notices and
+  process-local cooldown loss; authoritative API denials override stale native
+  ON state. Scoped gateway observations retain deadlines before Stop, including
+  interrupted turns/newer model choices, without leaking prompts/keys or
+  crossing credentials/profiles. Eight added tests; normal suite **415/415**,
+  related browser suite **22/22**. Actual CLI/gateway loopback smokes: base seven
+  model requests/twelve account checks, limits twenty-one, settings three,
+  managed policy two standard replies. Expiry uses an injected Relay clock;
+  managed policy uses a private mount namespace, never host-policy writes.
+  Installed native managed per-session opt-in still cannot activate Fast in
+  this print-mode path: enforced and documented, not claimed as supported.
+  Host/custom-gateway/live activation gates remain open. Next safe item-20 work:
+  Claude goals and remaining installed commands, retaining all explicit command
+  limitations. Queue order/count unchanged; no merge/deploy/live-data changes.
 - 20: Claude `/fast` now has private-gateway per-chat opt-in/state, native
   request-level acceptance and same-session Stop/resume. Fresh controller-side
   account checks keep provider keys out of workers; the documented bearer-token

@@ -29,7 +29,7 @@ import { CodexFeedback } from "./codex-feedback.mjs";
 import { CodexLogout } from "./codex-logout.mjs";
 import { desktopBinding, desktopInfo } from "./desktop-handoff.mjs";
 import { CLAUDE_PERMISSION_MODES, claudeConfigRequest } from "./claude-settings.mjs";
-import { claudeFastRequest, claudeFastScope } from "./claude-fast.mjs";
+import { claudeFastRequest, claudeFastScope, claudeFastCredential } from "./claude-fast.mjs";
 
 const ADAPTERS = {
   codex: CodexAdapter,
@@ -725,8 +725,30 @@ export class RuntimeManager extends EventEmitter {
     }
   }
 
+  async #retainClaudeFastConstraint(chatId, value, original) {
+    // A provider rejection observed before Stop is still true after Stop.
+    // Unlike a positive command acknowledgement, a newer model choice must not
+    // erase it. Never transfer it to a changed account/profile or re-enable Fast.
+    if (!["disabled", "cooldown"].includes(value.type)) return;
+    if (value.type === "disabled" && !["preference", "extra_usage_disabled"].includes(value.reason)) return;
+    if (value.type === "cooldown" && (!Number.isSafeInteger(value.until) || !["rate_limit", "overloaded"].includes(value.reason))) return;
+    const updated = await this.store.update(chatId, current => {
+      if (claudeFastScope(current) !== claudeFastScope(original) || !current.claudeFastMode || current.claudeFastCredential !== value.credential || claudeFastCredential(this.config.claude) !== value.credential) return {};
+      const disabled = value.type === "disabled";
+      const patch = disabled
+        ? { claudeFastMode: false, claudeFastCredential: null, claudeFastCooldown: null, modelSettingsRevision: (current.modelSettingsRevision || 0) + 1 }
+        : { claudeFastCooldown: { until: Math.max(current.claudeFastCooldown?.until || 0, value.until), reason: value.reason } };
+      patch.claudeFastStatus = { state: disabled ? "off" : "cooldown", ...(disabled ? { disabledReason: value.reason } : {}), checkedAt: new Date().toISOString(),
+        ...(current.modelSettingsRevision === original.modelSettingsRevision ? { selectionRevision: patch.modelSettingsRevision ?? current.modelSettingsRevision ?? 0 } : {}) };
+      return patch;
+    });
+    if (updated) this.publishChat(updated);
+  }
+
   async #syncClaudeFast(chatId, result, original, guard) {
-    if (!result.nativeFast) return;
+    // Already queued at receipt, including the interrupted-turn path. Do not
+    // overwrite a saved rejection with the CLI's stale "on" result afterward.
+    if (!result.nativeFast || result.fastConstraintObserved) return;
     guard();
     let conflict = false;
     const updated = await this.store.update(chatId, current => {
@@ -734,6 +756,7 @@ export class RuntimeManager extends EventEmitter {
       if (claudeFastScope(current) !== claudeFastScope(original)) throw new Error("The chat's profile changed while Fast was being checked. Retry in the current profile.");
       if (current.modelSettingsRevision !== original.modelSettingsRevision || current.claudeFastMode !== original.claudeFastMode) { conflict = true; return {}; }
       const patch = { claudeFastStatus: { ...result.nativeFast, checkedAt: new Date().toISOString() } };
+      if (Object.hasOwn(result, "fastCooldown")) patch.claudeFastCooldown = result.fastCooldown;
       if (typeof result.fastPreference === "boolean") {
         patch.claudeFastMode = result.fastPreference;
         patch.claudeFastScope = claudeFastScope(current);
@@ -1149,7 +1172,11 @@ export class RuntimeManager extends EventEmitter {
         ...settings, ...explicitContext, appReferences: appReferencesForTurn(currentChat, files, companyForChat(currentChat)), ...(skill ? { skills: [skill] } : {}),
         ...(commandAction?.type === "review" ? { reviewTarget: commandAction.target } : {}),
         ...(commandAction?.type === "goal" ? { goalDirective: commandAction } : currentChat.forkGoalPending && currentChat.mode !== "plan" && commandAction?.type !== "review" ? { goalDirective: { action: "resume", fork: true } } : {}),
-        ...(claude ? { systemPrompt: responsePrompt("", automaticTitle) + (currentChat.needsAgentHandoff ? handoffPrompt(currentChat, "") : "") + browserPrompt } : {}),
+        ...(claude ? { systemPrompt: responsePrompt("", automaticTitle) + (currentChat.needsAgentHandoff ? handoffPrompt(currentChat, "") : "") + browserPrompt,
+          onFastConstraint: value => {
+            if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
+            runtime.eventQueue = runtime.eventQueue.then(() => this.#retainClaudeFastConstraint(chatId, value, settingsChat));
+          } } : {}),
         mode: currentChat.mode || "accept_edits", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) });
       const checkConfiguration = () => {
         if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) throw Object.assign(new Error("Settings command cancelled"), { name: "AbortError" });

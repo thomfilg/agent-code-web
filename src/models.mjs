@@ -99,7 +99,7 @@ export class ModelCatalog {
     if (target && !selected) throw fail(`Model ${target} is not available. Choose another model before sending a message.`);
     const effort = chat.agent === "claude" && chat.effort === "auto" ? null : chat.effort || (selected?.efforts.includes(catalog.configuredDefaultEffort) ? catalog.configuredDefaultEffort : selected?.defaultEffort) || null;
     return { model: chat.model || catalog.configuredDefault || selected?.id || (chat.agent === "claude" ? "default" : null), effort, resetEffort: !effort,
-      ...(chat.agent === "claude" && typeof chat.claudeFastMode === "boolean" ? { fastMode: chat.claudeFastMode && chat.claudeFastScope === claudeFastScope(chat), fastCredential: chat.claudeFastCredential,
+      ...(chat.agent === "claude" && typeof chat.claudeFastMode === "boolean" ? { fastMode: chat.claudeFastMode && chat.claudeFastScope === claudeFastScope(chat), fastCredential: chat.claudeFastCredential, fastCooldown: chat.claudeFastCooldown,
         ...(chat.claudeFastStatus?.selectionRevision === chat.modelSettingsRevision ? { fastState: chat.claudeFastStatus?.state } : {}) } : {}),
       ...(chat.agent === "codex" && Object.hasOwn(chat, "serviceTier") ? { serviceTier: selected?.serviceTiers?.some(tier => tier.id === chat.serviceTier) ? chat.serviceTier : null } : {}),
       ...(chat.agent === "codex" && chat.personality ? { personality: selected?.supportsPersonality ? chat.personality : "none" } : {}) };

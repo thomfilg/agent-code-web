@@ -9,7 +9,7 @@ import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, in
 import { claudeFastRequest, claudeFastState, claudeFastCredential, checkClaudeFastAvailability, claudeFastUnavailable } from "../claude-fast.mjs";
 
 export class ClaudeAdapter {
-  constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch }) {
+  constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch, now = Date.now }) {
     this.chat = chat;
     this.store = store;
     this.config = config;
@@ -25,6 +25,7 @@ export class ClaudeAdapter {
     this.stopped = false;
     this.sendVersion = 0;
     this.fetchImpl = fetchImpl;
+    this.now = now;
   }
 
   async start() {
@@ -38,7 +39,7 @@ export class ClaudeAdapter {
     this.stopped = false;
   }
 
-  async send(text, { model, effort, resetEffort, fastMode, fastCredential, fastState, mode = "accept_edits", systemPrompt } = {}) {
+  async send(text, { model, effort, resetEffort, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, mode = "accept_edits", systemPrompt } = {}) {
     const version = this.sendVersion;
     const configuration = claudeConfigRequest(text);
     const fastRequest = claudeFastRequest(text);
@@ -57,13 +58,15 @@ export class ClaudeAdapter {
     // Turning it off must always work, including after account access is lost.
     // The following turn explicitly starts with fastMode:false; no inference,
     // account lookup or global Claude settings write is needed for this action.
-    if (fastRequest && !enableFast) return { text: "Fast mode OFF (this chat only).", status: "completed", nativeFast: { state: "off" }, fastPreference: false };
+    if (fastRequest && !enableFast) return { text: "Fast mode OFF (this chat only).", status: "completed", nativeFast: { state: "off" }, fastPreference: false, fastCooldown: null };
+    const heldCooldown = !enableFast && fastMode === true && sameAccount && Number.isSafeInteger(fastCooldown?.until) && fastCooldown.until > this.now() && ["rate_limit", "overloaded"].includes(fastCooldown.reason) ? fastCooldown : null;
+    if (heldCooldown) this.hooks.onEvent?.({ type: "notice", text: "Claude Fast is cooling down. This turn uses standard speed until the saved provider retry time; /fast off disables Fast." });
     let availability, fastFallback = null;
     if (fastMode === true && !sameAccount && !enableFast) {
       fastMode = false; fastFallback = { state: "off", disabledReason: "unknown" };
       this.hooks.onEvent?.({ type: "notice", text: "Claude credentials changed. Fast is off for this chat; use /fast on to authorize it for the current account." });
     }
-    if (enableFast || fastMode === true) {
+    if (enableFast || fastMode === true && !heldCooldown) {
       const controller = new AbortController(); this.fastInspection = controller;
       try {
         availability = await checkClaudeFastAvailability(this.config.claude, { signal: controller.signal, fetchImpl: this.fetchImpl });
@@ -140,13 +143,28 @@ export class ClaudeAdapter {
       ...(isNew ? ["--session-id", this.sessionId] : ["--resume", this.sessionId]),
       ...(launchModel ? ["--model", launchModel] : []),
       ...(effort ? ["--effort", effort] : []),
-      ...(enableFast || typeof fastMode === "boolean" ? ["--settings", JSON.stringify({ fastMode: enableFast || fastMode })] : []),
+      ...(enableFast || typeof fastMode === "boolean" ? ["--settings", JSON.stringify({ fastMode: enableFast || fastMode && !heldCooldown })] : []),
     ];
 
     if (version !== this.sendVersion) throw new Error("Claude turn interrupted");
     if (availability?.enabled && credential !== claudeFastCredential(this.config.claude)) throw new Error("Claude credentials changed during the Fast availability check. Retry with the current account.");
 
-    const child = this.executor
+    let feedback = null;
+    const unobserve = this.config.claude.authMode === "gateway" ? this.broker.observeProvider(this.capability, "anthropic", value => {
+      if (version !== this.sendVersion || value.credential !== credential) return;
+      if (value.type === "disabled" && feedback?.type !== "disabled") {
+        feedback = value;
+        onFastConstraint?.(value);
+        this.hooks.onEvent?.({ type: "notice", text: `${claudeFastUnavailable(value.reason)} Continuing at standard speed; use /fast on after account access is restored.` });
+      } else if (value.type === "cooldown" && feedback?.type !== "disabled") {
+        if (!feedback) this.hooks.onEvent?.({ type: "notice", text: "Claude Fast reached a provider limit. Continuing at standard speed; the cooldown will be retained for subsequent turns." });
+        if (!feedback || value.until > feedback.until) { feedback = value; onFastConstraint?.(value); }
+      }
+    }) : () => {};
+    this.providerObservation = unobserve;
+    const finishObservation = () => { unobserve(); if (this.providerObservation === unobserve) this.providerObservation = null; };
+    let child;
+    try { child = this.executor
       ? this.executor.spawn(this.config.claude.bin, args, {
           cwd: this.workspace,
           env,
@@ -157,7 +175,7 @@ export class ClaudeAdapter {
           cwd: this.workspace,
           env,
           stdio: ["pipe", "pipe", "pipe"],
-        });
+        }); } catch (error) { finishObservation(); throw error; }
     this.child = child;
     child.stdin.end(fastRequest ? "/fast on" : text);
 
@@ -165,6 +183,7 @@ export class ClaudeAdapter {
     let fallback = "";
     let resultMessage = null;
     let nativeFast = null;
+    const notifications = new Set();
     let compacted = false;
     let lastRequest = null;
     const sampleId = randomUUID();
@@ -180,6 +199,10 @@ export class ClaudeAdapter {
     lines.on("line", (line) => {
       let event;
       try { event = JSON.parse(line); } catch { return; }
+      if (event.type === "system" && event.subtype === "notification" && ["fast-mode-overage-rejected", "fast-mode-org-changed", "fast-mode-cooldown-started", "fast-mode-cooldown-expired"].includes(event.key) && typeof event.text === "string" && !notifications.has(event.key)) {
+        notifications.add(event.key);
+        this.hooks.onEvent?.({ type: "notice", text: redact(event.text).slice(0, 1500) });
+      }
       if (event.type === "system" && event.subtype === "compact_boundary") {
         compacted = true;
         this.hooks.onEvent?.({ type: "notice", text: event.compact_metadata?.trigger === "manual" ? "Context compacted." : "Context compacted automatically." });
@@ -239,10 +262,12 @@ export class ClaudeAdapter {
       let spawnFailed = false;
       child.once("error", (error) => {
         spawnFailed = true;
+        finishObservation();
         if (this.child === child) this.child = null;
         reject(error);
       });
       child.once("close", (code, signal) => { void (async () => {
+        finishObservation();
         if (spawnFailed) return;
         if (this.child === child) this.child = null;
         if (version !== this.sendVersion) throw new Error("Claude turn interrupted");
@@ -251,12 +276,19 @@ export class ClaudeAdapter {
           resultMessage.is_error === true ||
           (resultMessage.subtype && resultMessage.subtype !== "success")
         );
+        const confirmedFast = enableFast && code === 0 && !resultFailed && nativeFast && nativeFast.state !== "off" && !nativeFast.disabledReason;
+        let fastResult = { ...(nativeFast || fastFallback ? { nativeFast: fastFallback || nativeFast } : {}), fastCooldown: null,
+          ...(confirmedFast ? { fastPreference: true, fastModel: launchModel, fastCredential: credential } : fastFallback ? { fastPreference: false } : {}) };
+        if (feedback?.type === "disabled") fastResult = { nativeFast: { state: "off", disabledReason: feedback.reason }, fastPreference: false, fastCooldown: null };
+        else if (feedback?.type === "cooldown" || heldCooldown) {
+          const cooldown = feedback?.type === "cooldown" ? { until: feedback.until, reason: feedback.reason } : heldCooldown;
+          fastResult = { ...fastResult, nativeFast: { state: "cooldown" }, fastCooldown: cooldown };
+        }
         if (code === 0 && !resultFailed) {
           if (enableFast && (!nativeFast || nativeFast.state === "off" || nativeFast.disabledReason)) throw Object.assign(new Error(claudeFastUnavailable(nativeFast?.disabledReason)), { nativeFast });
-          resolve({ text: streamed || fallback, status: "completed", compacted, ...(nativeSettings ? { nativeSettings } : {}), ...(nativeFast || fastFallback ? { nativeFast: fastFallback || nativeFast } : {}),
-            ...(enableFast ? { fastPreference: true, fastModel: launchModel, fastCredential: credential } : fastFallback ? { fastPreference: false } : {}) });
+          resolve({ text: streamed || fallback, status: "completed", compacted, ...(nativeSettings ? { nativeSettings } : {}), ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) });
         } else {
-          reject(Object.assign(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`), { nativeSettings, nativeFast }));
+          reject(Object.assign(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`), { nativeSettings, ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) }));
         }
       })().catch(reject); });
     });
@@ -270,6 +302,7 @@ export class ClaudeAdapter {
     this.sendVersion += 1;
     this.settingsInspection?.abort();
     this.fastInspection?.abort();
+    this.providerObservation?.(); this.providerObservation = null;
     // Claude print mode is one child per turn. Keep its resume ID, capability,
     // worker lease and browser; only terminate this turn's CLI process.
     const child = this.child;
@@ -280,6 +313,7 @@ export class ClaudeAdapter {
     this.sendVersion += 1;
     this.settingsInspection?.abort();
     this.fastInspection?.abort();
+    this.providerObservation?.(); this.providerObservation = null;
     this.stopped = true;
     const child = this.child;
     this.child = null;

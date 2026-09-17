@@ -60,7 +60,12 @@ async function fixture(t, { fake = false, host = false } = {}) {
       return { text: "Native fixture completed", nativeFast: { state: command ? on ? "on" : "off" : settings.fastMode ? "on" : "off" }, ...(command ? { fastPreference: on, fastModel: /^opus/.test(settings.model) ? settings.model : "opus", fastCredential: claudeFastCredential(config.claude) } : {}) };
     } };
     const executor = { workspace: params.chat.workspace, runtimeHome: store.runtimeHome(params.chat.id), environmentVariables: f.env, mkdir: directory => mkdir(directory, { recursive: true, mode: 0o700 }),
-      spawn(command, args, options) { f.launches.push({ args, env: options.env }); return spawnWorker(command, args, options); } };
+      spawn(command, args, options) {
+        f.launches.push({ args, env: options.env });
+        f.providerFeedback = broker.captureProviderObserver(options.env.ANTHROPIC_AUTH_TOKEN, "anthropic");
+        if (f.feedbackOnSpawn) f.providerFeedback(f.feedbackOnSpawn);
+        return spawnWorker(command, args, options);
+      } };
     return new ClaudeAdapter({ ...params, store, config, broker, gatewayOrigin: "http://127.0.0.1:9", executor,
       fetchImpl: async (_, { signal }) => { f.lookups++; await f.lookupGate?.promise; signal.throwIfAborted(); return Response.json({ enabled: f.allowed, disabled_reason: "preference" }); } });
   } });
@@ -174,4 +179,50 @@ test("a newer selection made during turn-settings resolution also defeats a stal
   await f.manager.setModel(f.chat.id, { model: "sonnet", effort: "high" }); lookup.resolve(); await pending;
   assert.equal(f.store.get(f.chat.id).model, "sonnet"); assert.notEqual(f.store.get(f.chat.id).claudeFastMode, true);
   assert(f.store.get(f.chat.id).messages.some(message => /Newer model\/Fast choices were kept/.test(message.text)));
+});
+
+test("provider cooldowns survive an interrupted turn and newer model choices without affecting other chats", async t => {
+  const f = await fixture(t), other = await f.manager.createChat({ agent: "claude", title: "Other" });
+  await f.manager.send(f.chat.id, "/fast on");
+  const launches = f.launches.length, pending = f.manager.send(f.chat.id, "wait for interruption");
+  await waitFor(() => f.launches.length > launches);
+  await f.manager.setModel(f.chat.id, { model: "sonnet", effort: "high" });
+  const until = Date.now() + 600000, notify = f.providerFeedback;
+  notify({ type: "cooldown", reason: "rate_limit", until, credential: claudeFastCredential(f.config.claude) });
+  await waitFor(() => f.store.get(f.chat.id).claudeFastCooldown?.until === until);
+  await f.manager.stop(f.chat.id); await pending;
+  const state = f.store.get(f.chat.id); assert.equal(state.model, "sonnet"); assert.equal(state.claudeFastMode, true);
+  assert.equal(f.store.get(other.id).claudeFastCooldown, undefined);
+  const restored = new ChatStore(f.root); await restored.initialize(); assert.deepEqual(restored.get(f.chat.id).claudeFastCooldown, { until, reason: "rate_limit" });
+  notify({ type: "disabled", reason: "preference", credential: state.claudeFastCredential });
+  assert.equal(f.store.get(f.chat.id).claudeFastMode, true, "A response arriving after Stop cannot change state");
+  const lookups = f.lookups; await f.manager.send(f.chat.id, "inspect-settings");
+  assert.equal(JSON.parse(f.store.get(f.chat.id).messages.at(-1).text).fast, false); assert.equal(f.lookups, lookups);
+  assert.equal(f.store.get(f.chat.id).claudeFastCooldown.until, until);
+  await f.manager.send(f.chat.id, "/fast off"); assert.equal(f.store.get(f.chat.id).claudeFastCooldown, null); assert.equal(f.store.get(f.chat.id).claudeFastMode, false);
+});
+
+test("API entitlement denial overrides stale native success and remains saved after native failure", async t => {
+  for (const text of ["inspect-settings", "force failure"]) {
+    const f = await fixture(t); await f.manager.send(f.chat.id, "/fast on");
+    f.feedbackOnSpawn = { type: "disabled", reason: "preference", credential: claudeFastCredential(f.config.claude) };
+    await f.manager.send(f.chat.id, text);
+    assert.equal(f.store.get(f.chat.id).claudeFastMode, false); assert.equal(f.store.get(f.chat.id).claudeFastStatus.state, "off");
+    assert.equal(f.store.get(f.chat.id).claudeFastStatus.disabledReason, "preference");
+    assert.equal(f.store.get(f.chat.id).claudeFastCooldown, null);
+    assert(!f.store.get(f.chat.id).messages.some(message => /Newer model\/Fast choices were kept/.test(message.text)), "A provider denial is not a user-selection conflict");
+  }
+});
+
+test("provider constraints cannot cross a changed credential, owner, environment or explicit Fast-off", async t => {
+  for (const action of ["credential", "owner", "environment", "off"]) {
+    const f = await fixture(t); await f.manager.send(f.chat.id, "/fast on");
+    const credential = claudeFastCredential(f.config.claude), launches = f.launches.length;
+    const pending = f.manager.send(f.chat.id, "wait for interruption"); await waitFor(() => f.launches.length > launches);
+    if (action === "credential") f.config.claude.providerKey = "another-account";
+    else await f.store.update(f.chat.id, action === "owner" ? { ownerId: "another-owner" } : action === "environment" ? { environmentId: "another-environment" } : { claudeFastMode: false });
+    f.providerFeedback({ type: "cooldown", reason: "rate_limit", until: Date.now() + 600000, credential });
+    await f.manager.stop(f.chat.id); await pending;
+    assert.equal(f.store.get(f.chat.id).claudeFastCooldown, null); assert.equal(f.store.get(f.chat.id).claudeFastMode, action !== "off");
+  }
 });
