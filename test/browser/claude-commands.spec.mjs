@@ -20,6 +20,84 @@ async function fixture(page) {
   return f;
 }
 
+const requestEvent = (page, id, event) => page.evaluate(({ id, event }) => window.fixtureSources.find(source => source.url.includes(`/chats/${id}/events`))
+  .dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) })), { id, event });
+
+for (const width of [1280, 320]) test(`Claude approvals at ${width}px stay literal, offer only native decisions and preserve the next request and draft`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input"), card = page.locator("#approval-card");
+  await page.locator("#attachment-input").setInputFiles({ name: "context.txt", mimeType: "text/plain", buffer: Buffer.from("Keep my unsent file") });
+  await expect(page.locator("#attachment-chips")).toContainText("context.txt");
+  await input.fill("Keep my unsent prompt");
+  const first = { requestId: "claude-approval-one", method: "claude/tool/requestApproval", prompt: "Claude requests permission to use Write",
+    command: JSON.stringify({ file_path: `/fixture/${"nested_".repeat(65)}/SKILL.md`, content: '<img src=x onerror="window.fixtureUnsafe=true">' }, null, 2), availableDecisions: ["accept", "decline"] };
+  f.snapshot = { ...f.snapshot, status: "running", pendingRequest: first }; await f.emit();
+  await expect(card.getByRole("button", { name: "Approve once", exact: true })).toBeEnabled();
+  await expect(card.getByRole("button", { name: "For this session", exact: true })).toHaveCount(0);
+  await expect(card.locator("code")).toHaveText(first.command); await expect(card.locator("img")).toHaveCount(0);
+  expect(await card.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  let fail = true, release, payload;
+  const gate = new Promise(resolve => { release = resolve; });
+  await page.route(`**/api/chats/${f.snapshot.id}/requests/${first.requestId}/respond`, async route => {
+    payload = route.request().postDataJSON();
+    if (fail) return route.fulfill({ status: 503, json: { error: "Approval transport unavailable" } });
+    await gate; await route.fulfill({ json: { resolved: true } });
+  });
+  await card.getByRole("button", { name: "Approve once", exact: true }).click();
+  await expect(page.locator("#toasts")).toContainText("Approval transport unavailable");
+  expect(payload).toEqual({ decision: "accept" });
+  await expect(card.getByRole("button", { name: "Deny", exact: true })).toBeEnabled();
+  fail = false; await card.getByRole("button", { name: "Deny", exact: true }).click();
+  await expect.poll(() => payload).toEqual({ decision: "decline" });
+  await expect(card.getByRole("button", { name: "Approve once", exact: true })).toBeDisabled();
+  const next = { ...first, requestId: "claude-approval-two", command: "A different native request" };
+  await requestEvent(page, f.snapshot.id, { type: "request", request: next });
+  await requestEvent(page, f.snapshot.id, { type: "request_resolved", requestId: first.requestId });
+  release(); await expect(card.locator("code")).toHaveText(next.command);
+  await expect(card.getByRole("button", { name: "Approve once", exact: true })).toBeEnabled();
+  await requestEvent(page, f.snapshot.id, { type: "request_resolved", requestId: next.requestId });
+  await expect(card).not.toBeVisible(); await expect(input).toHaveValue("Keep my unsent prompt");
+  await expect(page.locator("#attachment-chips")).toContainText("context.txt");
+  expect(f.calls).toEqual([]); expect(f.errors).toEqual([]);
+});
+
+for (const width of [1280, 320]) test(`Claude questions at ${width}px support multiple choices, literal text and skipping without losing focus or drafts`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input"), card = page.locator("#approval-card");
+  const request = { requestId: "claude-question-one", method: "claude/tool/requestUserInput", prompt: "Claude needs your answers", questions: [
+    { id: "question_1", header: "Sections", question: "Which sections?", multiSelect: true, options: [{ label: "Intro" }, { label: "Conclusion" }] },
+    { id: "question_2", header: "Name", question: "Which name?", options: [{ label: "Fixture" }, { label: "Sample" }] },
+  ] };
+  f.snapshot = { ...f.snapshot, status: "running", pendingRequest: request }; await f.emit();
+  await input.fill("Keep this prompt"); await page.keyboard.press("Alt+ArrowUp");
+  await expect(card.getByRole("checkbox", { name: "Intro", exact: true })).toBeFocused();
+  await page.keyboard.press("Space"); await card.getByRole("checkbox", { name: "Conclusion", exact: true }).check();
+  await card.getByRole("radio", { name: "Fixture", exact: true }).check();
+  const answer = card.getByRole("textbox", { name: "Name — your answer", exact: true });
+  await answer.fill("ação\nKeep it literal"); await f.emit();
+  await expect(answer).toBeFocused(); await expect(answer).toHaveValue("ação\nKeep it literal");
+  await expect(card.getByRole("radio", { name: "Fixture", exact: true })).not.toBeChecked();
+  await expect(card.getByRole("checkbox", { name: "Intro", exact: true })).toBeChecked();
+  await expect(card.getByRole("checkbox", { name: "Conclusion", exact: true })).toBeChecked();
+  let received;
+  await page.route(`**/api/chats/${f.snapshot.id}/requests/${request.requestId}/respond`, route => {
+    received = route.request().postDataJSON(); return route.fulfill({ json: { resolved: true } });
+  });
+  await card.getByRole("button", { name: "Send answers", exact: true }).click();
+  await expect.poll(() => received).toEqual({ answers: { question_1: ["Intro", "Conclusion"], question_2: "ação\nKeep it literal" } });
+  await expect(card).not.toBeVisible();
+  await requestEvent(page, f.snapshot.id, { type: "request", request: { ...request, requestId: "claude-question-two" } });
+  await card.getByRole("checkbox", { name: "Intro", exact: true }).check();
+  await card.getByRole("textbox", { name: "Sections — your answer", exact: true }).fill("A custom section");
+  await expect(card.getByRole("checkbox", { name: "Intro", exact: true })).not.toBeChecked();
+  await page.route(`**/api/chats/${f.snapshot.id}/requests/claude-question-two/respond`, route => {
+    received = route.request().postDataJSON(); return route.fulfill({ json: { resolved: true } });
+  });
+  await card.getByRole("button", { name: "Skip questions", exact: true }).click();
+  await expect.poll(() => received).toEqual({ answers: {} }); await expect(card).not.toBeVisible();
+  await expect(input).toHaveValue("Keep this prompt"); expect(f.calls).toEqual([]); expect(f.errors).toEqual([]);
+});
+
 test("native skill reload refreshes an open slash menu immediately without changing the query or sending it", async ({ page }) => {
   const f = await fixture(page), input = page.locator("#message-input");
   await input.fill("/fixture"); await expect(page.locator("#slash-options")).toContainText("/fixture-old");
@@ -228,7 +306,8 @@ for (const width of [1280, 320]) test(`native configuration at ${width}px stays 
   await expect(page.locator("#mode-label")).toHaveText("Deny prompts");
   await page.locator("#mode-label").click();
   await expect(page.locator('[data-agent-mode="default"]')).toBeVisible();
-  await expect(page.locator("#mode-provider-note")).toContainText("cannot yet be answered");
+  await expect(page.locator("#mode-provider-note")).toContainText("Private Claude profiles support Approve once and Deny here");
+  await expect(page.locator("#mode-provider-note")).toContainText("Shared host profiles do not support approval replies");
   await page.keyboard.press("Escape");
   f.snapshot = { ...f.snapshot, model: "default", mode: "default" }; await f.emit();
   await expect(page.getByRole("combobox", { name: "Chat model", exact: true })).toHaveValue("default");
@@ -257,6 +336,10 @@ test("Claude Manual and Deny prompts controls save through the real API without 
   await page.setViewportSize({ width: 320, height: 800 });
   const { chat } = await (await page.request.post("/api/chats", { data: { agent: "claude", title: "Native permission controls" } })).json(); created.set(page, [chat.id]);
   await page.goto(`/#chat=${chat.id}`); await expect(page.locator("#chat-title")).toHaveText(chat.title);
+  await page.locator("#mode-label").click();
+  await expect(page.locator("#mode-provider-note")).toContainText("Private Claude profiles support Approve once and Deny here");
+  await expect(page.locator("#mode-provider-note")).toContainText("Shared host profiles do not support approval replies");
+  await page.locator("#mode-label").click();
   for (const [mode, label] of [["default", "Manual"], ["dont_ask", "Deny prompts"]]) {
     await page.locator("#mode-label").click(); await page.locator(`[data-agent-mode="${mode}"]`).click();
     await expect(page.locator("#mode-label")).toHaveText(label);

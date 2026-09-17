@@ -7,11 +7,12 @@ export function publicRequest(request) {
     prompt: redact(params.reason || params.command || "Agent needs your input"),
     command: params.command ? redact(params.command) : null, cwd: params.cwd || null,
     permissions: params.permissions && typeof params.permissions === "object" ? params.permissions : null,
+    ...(Array.isArray(params.availableDecisions) ? { availableDecisions: params.availableDecisions.filter(value => ["accept", "acceptForSession", "decline", "cancel"].includes(value)) } : {}),
     questions: Array.isArray(params.questions) ? params.questions : null };
 }
 
 export function responseFor(request, input = {}) {
-  if (request.method === "item/tool/requestUserInput") {
+  if (["item/tool/requestUserInput", "claude/tool/requestUserInput"].includes(request.method)) {
     if (!input.answers || typeof input.answers !== "object" || Array.isArray(input.answers)) throw new Error("answers object required");
     const ids = new Set((request.questions || []).map(question => question.id));
     return { answers: Object.fromEntries(Object.entries(input.answers).map(([key, answer]) => {
@@ -21,6 +22,7 @@ export function responseFor(request, input = {}) {
     })) };
   }
   const decision = input.decision;
+  if (request.availableDecisions && !request.availableDecisions.includes(decision)) throw new Error("This approval decision is not available for the request");
   if (!["accept", "acceptForSession", "decline", "cancel"].includes(decision)) throw new Error("decision must be accept, acceptForSession, decline, or cancel");
   if (request.method === "item/permissions/requestApproval") return decision === "accept" || decision === "acceptForSession"
     ? { permissions: request.permissions || {}, scope: decision === "acceptForSession" ? "session" : "turn" }

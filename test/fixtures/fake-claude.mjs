@@ -3,15 +3,35 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 let prompt = "";
+let timer;
+const streaming = process.argv[process.argv.indexOf("--input-format") + 1] === "stream-json";
 process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => { prompt += chunk; });
-process.stdin.on("end", async () => {
+process.stdin.on("data", chunk => {
+  prompt += chunk;
+  if (!streaming) return;
+  const lines = prompt.split("\n"); prompt = lines.pop();
+  for (const line of lines) {
+    const packet = JSON.parse(line);
+    if (packet.type === "control_request") {
+      process.stdout.write(`${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: packet.request_id, response: {} } })}\n`);
+      if (packet.request.subtype === "interrupt") {
+        clearInterval(timer);
+        process.stdout.write(`${JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: "Interrupted" })}\n`);
+      }
+    } else if (packet.type === "user") {
+      process.stdout.write(`${JSON.stringify({ type: "command_lifecycle", state: "started", command_uuid: packet.uuid })}\n`);
+      void run(packet.message.content);
+    }
+  }
+});
+process.stdin.on("end", () => { if (!streaming) void run(prompt); else clearInterval(timer); });
+async function run(prompt) {
   const flag = name => { const i = process.argv.indexOf(name); return i < 0 ? null : process.argv[i + 1]; };
   const fast = JSON.parse(flag("--settings") || "{}").fastMode;
   const fastAllowed = process.env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK === "1" && process.env.CLAUDE_CODE_DISABLE_FAST_MODE !== "1";
   const send = (message) => process.stdout.write(`${JSON.stringify({ ...message, ...(message.type === "result" && typeof fast === "boolean" && !process.env.CLAUDE_FIXTURE_OMIT_FAST_STATE ? { fast_mode_state: fast && fastAllowed ? "on" : "off", ...(!fastAllowed && fast ? { fast_mode_disabled_reason: "disabled_by_env" } : {}) } : {}) })}\n`);
   send({ type: "system", subtype: "init", session_id: "fixture", model: "fixture-claude", claude_code_version: "2.1.0-fixture" });
-  if (prompt === "wait for interruption") { setInterval(() => {}, 1000); return; }
+  if (prompt === "wait for interruption") { timer = setInterval(() => {}, 1000); return; }
   if (prompt === "/fast on") { send({ type: "result", subtype: "success", result: fastAllowed ? "Fast mode ON (this session only)" : "Fast mode unavailable" }); return; }
   if (prompt === "goal hook error fixture") {
     for (let index = 0; index < 2; index++) send({ type: "system", subtype: "notification", key: "stop-hook-error", text: "Stop hook error occurred · ctrl+o to see" });
@@ -61,4 +81,4 @@ process.stdin.on("end", async () => {
   send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "claude " } } });
   send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: `received ${prompt}` } } });
   send({ type: "result", subtype: "success", result: `claude received ${prompt}`, session_id: "fixture" });
-});
+}

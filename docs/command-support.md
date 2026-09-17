@@ -20,7 +20,7 @@ and remain at the beginning of native stream-json input.
 | `/compact` | Native compaction, FIFO while busy, wakes stopped worker. Real Codex/Claude adapters tested with local API fixtures. |
 | `/review [--base branch / --commit SHA / instructions]` | Native `review/start`, not an ordinary prompt. Tracks both inner execution and outer completion IDs. Real adapter completion and interruption pass. |
 | `/code-review [level] [--fix] [target]` (Claude) | Native bundled review with actual diff/read/findings and explicit file-fix verification. Findings survive Stop/resume; Plan blocks edits. SDK interruption checkpoints the first review for Stop and Send now; flags, targets, FIFO, drafts and remaining queued inputs are retained. GitHub `--comment` and live activation are not covered by this acceptance. |
-| `/run`, `/verify` (Claude) | Actual native tools drive an HTTP application that remains available between replies. Native Send now preserves it, including interruption of the first command; Stop terminates it and the same native history resumes. Existing project recipes reload and run. Protected recipe creation still needs native approval support; this is not full workflow acceptance. |
+| `/run`, `/verify` (Claude) | Actual native tools drive an HTTP application that remains available between replies. Native Send now preserves it, including interruption of the first command; Stop terminates it and the same native history resumes. Private-profile native approvals now support explicit recipe creation, denial and cancellation; saved recipes reload and run. Remaining classifier, shared-host and retained-session gates are documented below. |
 | `/side [question]`, `/btw [question]` | Native ephemeral Codex fork on the same worker, separate third-column transcript/questions, scoped attachments and independent stop. Parent context/goal/turn are retained; no copied chat folder or injected main messages. Real installed CLI verified concurrent turns, inherited context, active-goal isolation, cancellation and parent survival. Controller/browser checks pass; live backend activation pending. |
 | `/fork [title]` (Codex) | Independent chat, workspace, native history and attachment records. Same company/environment/settings, without queued inputs, approval state or browser grants. Active-source and nested-fork native tests pass; goals remain paused until explicit input. Empty chats need no fabricated native turn. Controller and browser retry/draft/navigation checks pass; live activation pending. Workspace portability limits are below. |
 | `/agent`, `/subagents` (Codex) | Native descendant picker, separate conversation/composer/approvals, direct replies or active-turn steering, and child-only interruption. Bounded history pages and controller-owned snapshots remain readable while asleep. Verified with the installed CLI using synthetic stored sessions and loopback responses, plus controller and desktop/mobile browser tests. Live activation pending. |
@@ -101,6 +101,69 @@ Do not treat removing entries from autocomplete as implementing them.
   working replacement. Use the installed version's capabilities, not commands
   added only in newer documentation.
 
+### Claude native approvals and questions
+
+Private gateway profiles now launch the installed Claude with a live SDK
+permission channel (`--permission-prompt-tool stdio`). Both ordinary turns and
+retained application sessions route native `can_use_tool` requests to the
+owning chat's approval card. This replaces the previous unconditional
+print-mode denial for protected `.claude/skills` writes; it does not bypass
+native permission rules, managed policy or account restrictions.
+
+The implementation follows the native
+[permission callback](https://code.claude.com/docs/en/agent-sdk/permissions) and
+[user-input contract](https://code.claude.com/docs/en/agent-sdk/user-input):
+
+- Approve once returns the original controller-held tool arguments. The
+  browser sends only an opaque live request ID and a decision; it cannot
+  replace the command, file contents or native permission suggestions.
+- Deny sends a native denial. Session-wide grants are not offered or accepted;
+  no permission rules are persisted. Shared host-profile callbacks remain
+  disabled pending the company/profile isolation audit.
+- Simultaneous requests appear in order. Canceled, foreign, resolved and
+  already-submitting IDs cannot grant another action. Stop/Send now invalidate
+  outstanding requests; late requests during interruption are denied. An
+  ambiguous transport write is never automatically repeated.
+- Native `AskUserQuestion` supports single or multiple choices, literal text
+  and skipping. Answers map only to the exact native question text. Skipping
+  denies the tool with an explicit instruction not to invent answers.
+- Unsupported native dialogs and malformed questions fail closed. Native
+  rich option previews, persistent approval choices, shared-host replies and
+  `ExitPlanMode`/classifier state reconciliation are not claimed as supported.
+
+`node scripts/smoke-real-claude-run.mjs --approve-recipe --questions` uses the
+actual installed **2.1.222** CLI, controller and gateway in disposable
+loopback-only network/PID namespaces. Its real Write tool creates the exact
+verification recipe **only after** the controller's explicit once-approval,
+then reloads/reuses it. After Stop, an ordinary resumed turn asks two real
+native questions and receives multiple selections plus multiline Unicode
+text: **13** local model requests. No fixture-side recipe write occurs in this
+variant. The default denial variant still verifies the file stays absent,
+then separately installs a supplied fixture recipe for reuse: **12** requests.
+
+`--stop-approval --skip-questions` cancels a pending native Write, rejects its
+old ID, retains queued input and keeps the file absent through same-session
+resume. The resumed native question is explicitly skipped, without fabricated
+answers: **10** requests. Existing Send now acceptance remains **10** requests.
+These are authored local model responses, not real inference or live accounts.
+
+Seven request/controller tests cover argument binding, private redaction,
+FIFO, cancellation, stale/cross-chat IDs, ambiguous writes and question payloads.
+Two adapter tests cover ordinary-turn transport cleanup and Stop during SDK
+initialization. Four desktop/320px browser additions cover literal content,
+native-only decisions, transport retry, old-response/new-request ordering,
+multiple selections, keyboard focus, skipping and unsent drafts/files. The
+browser run reproduced and fixed approval cards overflowing on long paths;
+their contents now wrap without truncating the action being approved. Manual
+mode copy now accurately distinguishes private profiles from shared hosts.
+
+Normal syntax/unit suite: **458/458**; combined Claude-command/conversation
+browser suite: **53/53**. Native command, MCP, review-fix, goal and Fast
+regressions pass. Item 20 remains active: `/run-skill-generator`, other bundled
+workflows/plugin namespaces, retained-session interoperability and live
+activation remain separate gates. No deployment, merge, real approval,
+personal Chrome/profile or company credential changes.
+
 ### Claude application sessions and native usage
 
 The previous one-process-per-reply transport reproduced `ECONNREFUSED` after a
@@ -147,11 +210,11 @@ native command, MCP and review Send now regression smokes also pass.
 
 Remaining gates are explicit:
 
-- Protected `.claude/skills` creation is denied by the installed native CLI in
-  this path. Scoped allow-rule/private-hook attempts did not establish approval
-  support. The smoke proves the denial, then installs a **separate authored
-  fixture recipe**; it does not claim the agent created it. Production Claude
-  interactive approvals and `/run-skill-generator` remain open.
+- The original protected `.claude/skills` write gate is now cleared for private
+  profiles through the explicit native approval channel described above.
+  The default smoke still exercises denial and separately supplied recipe
+  reuse; `--approve-recipe` verifies actual native creation. Shared-host replies
+  and the complete `/run-skill-generator` workflow remain open.
 - The additional application-session Plan/permission-classifier scenario was
   not accepted: native classifier requests need their own fixture contract.
   Earlier bundled-review Plan acceptance does not establish this case. Native
@@ -531,8 +594,9 @@ updates; per-control revisions retain newer web selections, even reselection
 of the original value, with a visible conflict notice.
 
 All five native permission modes round-trip; Manual and Deny prompts are
-Claude-only controls and pass their actual CLI flags. Manual approval replies
-are not implemented and are explicitly labelled. Switching either mode to
+Claude-only controls and pass their actual CLI flags. Private-profile Manual
+approval replies now use the native channel described above; shared host
+profiles remain unsupported and are explicitly labelled. Switching either mode to
 Codex defaults to Plan. Native model aliases include the Claude account default,
 distinct from Relay's configured default. Unsupported old effort is cleared
 when changing models. `/effort auto` explicitly resets native effort, rather

@@ -62,6 +62,23 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: private Claude profiles now support native once-approval, denial and
+  `AskUserQuestion` through the live SDK channel, including ordinary turns and
+  retained application sessions. Original tool inputs stay controller-side;
+  the browser cannot widen arguments/permissions. Concurrent requests are
+  serialized, stale/cross-chat IDs and session grants rejected, Stop cancels
+  pending/late actions and ambiguous transport writes are never replayed.
+  Installed-CLI acceptance proves actual protected recipe creation/reuse after
+  approval, denial without writing, Stop with retained queued input, and native
+  multiple-choice/text/skip questions (13/12/10 loopback requests). Ordinary
+  transport startup/cleanup, nine unit/controller additions and four responsive
+  browser additions pass. Long approval paths now wrap; Manual-mode help no
+  longer incorrectly says all replies are unsupported. Syntax/unit suite
+  **458/458**, combined Claude-command/conversation browser suite **53/53**;
+  native command/MCP/review-fix/goal/Fast and application Send now regressions
+  pass. Shared hosts, classifier/Plan transitions, other workflows and live
+  activation remain open. Item 20/order/count unchanged; save to PR #2 without
+  merge, deployment, live-data or account changes.
 - 20: fixed native Claude `/run` servers dying when a reply ended. Retained
   application sessions now preserve real HTTP apps/data across replies and Send
   now, including first-command interruption; Stop closes them and native history

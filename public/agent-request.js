@@ -26,9 +26,15 @@ export function renderAgentRequest(host, request, key, respond) {
       const options = node("div", "question-options");
       for (const option of question.options || []) {
         const label = node("label", "question-option"), radio = node("input", ""), copy = node("span", "");
-        radio.type = "radio"; radio.name = `${key}-question-${index}`; radio.value = option.label;
+        radio.type = question.multiSelect ? "checkbox" : "radio"; radio.name = `${key}-question-${index}`; radio.value = option.label;
         copy.append(node("strong", "", option.label)); if (option.description) copy.append(node("small", "", option.description));
-        radio.onchange = () => { if (radio.checked) { answers[question.id] = option.label; input.value = ""; } };
+        radio.onchange = () => {
+          input.value = "";
+          if (question.multiSelect) {
+            const selected = [...options.querySelectorAll("input:checked")].map(option => option.value);
+            if (selected.length) answers[question.id] = selected; else delete answers[question.id];
+          } else if (radio.checked) answers[question.id] = option.label;
+        };
         label.append(radio, copy); options.append(label);
       }
       input.addEventListener("input", () => { for (const radio of options.querySelectorAll("input")) radio.checked = false; if (input.value.trim()) answers[question.id] = input.value; else delete answers[question.id]; });
@@ -39,6 +45,7 @@ export function renderAgentRequest(host, request, key, respond) {
     }
   } else {
     for (const [label, decision, style] of [["Approve once", "accept", "approve"], ["For this session", "acceptForSession", "secondary-button"], ["Deny", "decline", "deny"]]) {
+      if (request.availableDecisions && !request.availableDecisions.includes(decision)) continue;
       const button = node("button", style, label); button.type = "button"; button.onclick = () => respond({ decision }); actions.append(button);
     }
   }

@@ -16,7 +16,7 @@ import { ModelCatalog } from "../src/models.mjs";
 // Installed Claude and a disposable HTTP application. The model is authored;
 // the native tools, application process and requests are real and loopback-only.
 const exec = promisify(execFile);
-const options = new Set(["--network-isolated", "--trace", "--background-exit", "--send-now", "--first-send-now"]);
+const options = new Set(["--network-isolated", "--trace", "--background-exit", "--send-now", "--first-send-now", "--approve-recipe", "--questions", "--skip-questions", "--stop-approval"]);
 for (const argument of process.argv.slice(2)) assert(options.has(argument), `Unsupported fixture option: ${argument}`);
 if (!process.argv.includes("--network-isolated")) {
   const result = await exec("/usr/bin/unshare", ["--user", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", "--", process.execPath, process.argv[1], ...process.argv.slice(2), "--network-isolated"], { timeout: 90000, maxBuffer: 60000 }).catch(error => {
@@ -30,6 +30,9 @@ if (!process.argv.includes("--network-isolated")) {
   assert.equal((await exec("/usr/bin/ip", ["route", "show"])).stdout.trim(), "");
   const root = await mkdtemp("/tmp/relay-claude-run-"), requests = [];
   const backgroundExit = process.argv.includes("--background-exit"), firstSendNow = process.argv.includes("--first-send-now"), sendNow = firstSendNow || process.argv.includes("--send-now");
+  const approveRecipe = process.argv.includes("--approve-recipe");
+  const stopApproval = process.argv.includes("--stop-approval"), skipQuestions = process.argv.includes("--skip-questions");
+  const askQuestions = skipQuestions || process.argv.includes("--questions");
   const held = Promise.withResolvers(), release = Promise.withResolvers();
   const recipe = "---\nname: verify\ndescription: Drive the fixture HTTP app\ndisable-model-invocation: true\n---\nRELAY_HTTP_RECIPE_CANARY\nRead package.json. Start node server.mjs in the background if .runtime.json is not reachable. Run node verify.mjs to probe the actual HTTP route. Report response statuses and bodies.\n";
   let manager, gatewayServer, chat, fixtureError, failureStop, nativeSession, phase = "run", step = 0, titleRequests = 0;
@@ -54,7 +57,20 @@ if (!process.argv.includes("--network-isolated")) {
       const tool = (name, input) => [{ type: "tool_use", id: `tool_run_${index}`, name, input }];
       if (phase === "resume") {
         assert(text.includes("Start the HTTP app and create an item titled ação."), "Stop/resume must retain the original native application context");
-        content = [{ type: "text", text: "Saved application context retained after Stop; the server has not been restarted." }];
+        if (askQuestions && step === 0) {
+          assert(body.tools.some(tool => tool.name === "AskUserQuestion"), "Interactive native questions must be available");
+          content = tool("AskUserQuestion", { questions: [
+            { question: "Which sections?", header: "Sections", multiSelect: true, options: [{ label: "Intro", description: "Include the introduction" }, { label: "Conclusion", description: "Include the conclusion" }] },
+            { question: "Which name?", header: "Name", multiSelect: false, options: [{ label: "Fixture", description: "Use the fixture name" }, { label: "Sample", description: "Use the sample name" }] },
+          ] });
+        } else {
+          if (askQuestions) {
+            assert.equal(step, 1); assert.equal(results.at(-1).is_error === true, skipQuestions, JSON.stringify(results.at(-1)));
+            if (skipQuestions) assert.match(JSON.stringify(results.at(-1)), /skipped/);
+            else { assert.match(JSON.stringify(results.at(-1)), /Intro, Conclusion/); assert.match(JSON.stringify(results.at(-1)), /ação/); }
+          }
+          content = [{ type: "text", text: "Saved application context retained after Stop; the server has not been restarted." }];
+        }
       } else if (phase === "continue") {
         assert(text.includes("Verify now without stopping the app"), "The native query must include the selected follow-up");
         if (step === 0) content = tool("Bash", { command: "node verify.mjs", description: "Drive the same app after Send now interrupted the previous query" });
@@ -76,10 +92,9 @@ if (!process.argv.includes("--network-isolated")) {
           assert(!results.at(-1).is_error); assert.match(JSON.stringify(results.at(-1)), /title_required/); assert.match(JSON.stringify(results.at(-1)), /invalid_json/); assert.match(JSON.stringify(results.at(-1)), /400/);
           content = tool("Write", { file_path: `${chat.workspace}/.claude/skills/verify/SKILL.md`, content: recipe });
         } else if (step === 4) {
-          // This is a real remaining native approval gate, not a successful
-          // recipe creation. Preserve it and report it rather than bypass it.
-          assert.equal(results.at(-1).is_error, true); assert.match(JSON.stringify(results.at(-1)), /haven't granted/);
-          content = [{ type: "text", text: "PASS: actual POST /items rejected an empty title and malformed JSON with status 400; GET /items retained ação. Recipe write needs explicit permission; no recipe was saved." }];
+          assert.equal(results.at(-1).is_error === true, !approveRecipe, JSON.stringify(results.at(-1)));
+          if (!approveRecipe) assert.match(JSON.stringify(results.at(-1)), /user denied/i);
+          content = [{ type: "text", text: `PASS: actual POST /items rejected an empty title and malformed JSON with status 400; GET /items retained ação. ${approveRecipe ? "The explicitly approved recipe was saved." : "The user denied recipe creation; no recipe was saved."}` }];
         } else throw Error(`Unexpected verify step ${step}`);
       } else if (phase === "recipe") {
         if (step === 0) {
@@ -241,33 +256,73 @@ responses.push({items:await (await fetch(origin+'/items')).json()}); console.log
       await manager.stop(chat.id);
     } else {
       phase = "verify"; step = 0;
-      await manager.send(chat.id, "/verify Check the new POST /items validation and preserved item listing."); if (fixtureError) throw fixtureError;
-      assert.match(store.get(chat.id).messages.at(-1).text, /PASS: actual POST/);
+      const verification = manager.send(chat.id, "/verify Check the new POST /items validation and preserved item listing.");
+      const deadline = Date.now() + 15000;
+      while (!store.get(chat.id).pendingRequest && !fixtureError && Date.now() < deadline) await delay(25);
+      if (fixtureError) throw fixtureError;
+      const approval = store.get(chat.id).pendingRequest;
+      assert(approval, "The actual native tool must ask before writing its protected recipe");
+      assert.equal(approval.method, "claude/tool/requestApproval");
+      assert.deepEqual(approval.availableDecisions, ["accept", "decline"]);
+      assert.match(approval.command, /\.claude\/skills\/verify\/SKILL.md/);
       await assert.rejects(readFile(`${chat.workspace}/.claude/skills/verify/SKILL.md`, "utf8"), { code: "ENOENT" });
-      assert.equal(store.get(chat.id).agentSessionId, session);
-      // Separate, explicit user-authored fixture setup. This proves reuse of
-      // an existing recipe, NOT automatic native creation/approval support.
-      await mkdir(`${chat.workspace}/.claude/skills/verify`, { recursive: true });
-      await writeFile(`${chat.workspace}/.claude/skills/verify/SKILL.md`, recipe);
-      phase = "recipe"; step = 0;
-      await manager.send(chat.id, "/reload-skills");
-      await manager.setModel(chat.id, { model: "haiku", effort: null });
-      await manager.send(chat.id, "/verify Recheck using the saved recipe."); if (fixtureError) throw fixtureError;
-      assert.match(store.get(chat.id).messages.at(-1).text, /Saved recipe reused/);
-      assert.equal(store.get(chat.id).agentSessionId, session);
-      assert.deepEqual(await (await fetch(`http://127.0.0.1:${port}/items`)).json(), items);
-      assert.equal(store.get(chat.id).usage.totals.inputTokens, requests.length * 100);
-      assert.equal(store.get(chat.id).usage.totals.outputTokens, requests.length * 10);
-      await manager.stop(chat.id);
+      await assert.rejects(manager.respond(chat.id, approval.requestId, { decision: "acceptForSession" }), /not available/);
+      if (stopApproval) {
+        await manager.enqueue(chat.id, "Retain this task after the approval is canceled");
+        await store.update(chat.id, { queuePaused: true });
+        await manager.stop(chat.id); await verification;
+        await assert.rejects(manager.respond(chat.id, approval.requestId, { decision: "accept" }), /not active|no longer active/);
+        assert.equal(store.get(chat.id).pendingRequest, null);
+        assert.deepEqual(store.get(chat.id).queuedMessages.map(item => item.text), ["Retain this task after the approval is canceled"]);
+        await assert.rejects(readFile(`${chat.workspace}/.claude/skills/verify/SKILL.md`, "utf8"), { code: "ENOENT" });
+      } else {
+        await manager.respond(chat.id, approval.requestId, { decision: approveRecipe ? "accept" : "decline" });
+        await verification; if (fixtureError) throw fixtureError;
+        await assert.rejects(manager.respond(chat.id, approval.requestId, { decision: "accept" }), /no longer active/);
+        assert.match(store.get(chat.id).messages.at(-1).text, /PASS: actual POST/);
+        if (approveRecipe) assert.equal(await readFile(`${chat.workspace}/.claude/skills/verify/SKILL.md`, "utf8"), recipe);
+        else await assert.rejects(readFile(`${chat.workspace}/.claude/skills/verify/SKILL.md`, "utf8"), { code: "ENOENT" });
+        assert.equal(store.get(chat.id).agentSessionId, session);
+        // In the denial variant only, separately install a user-authored
+        // fixture recipe. That variant proves reuse, not native creation.
+        if (!approveRecipe) {
+          await mkdir(`${chat.workspace}/.claude/skills/verify`, { recursive: true });
+          await writeFile(`${chat.workspace}/.claude/skills/verify/SKILL.md`, recipe);
+        }
+        phase = "recipe"; step = 0;
+        await manager.send(chat.id, "/reload-skills");
+        await manager.setModel(chat.id, { model: "haiku", effort: null });
+        await manager.send(chat.id, "/verify Recheck using the saved recipe."); if (fixtureError) throw fixtureError;
+        assert.match(store.get(chat.id).messages.at(-1).text, /Saved recipe reused/);
+        assert.equal(store.get(chat.id).agentSessionId, session);
+        assert.deepEqual(await (await fetch(`http://127.0.0.1:${port}/items`)).json(), items);
+        assert.equal(store.get(chat.id).usage.totals.inputTokens, requests.length * 100);
+        assert.equal(store.get(chat.id).usage.totals.outputTokens, requests.length * 10);
+        await manager.stop(chat.id);
+      }
       await assert.rejects(fetch(`http://127.0.0.1:${port}/items`, { signal: AbortSignal.timeout(3000) }));
     }
     phase = "resume"; step = 0;
-    await manager.send(chat.id, "Continue from the saved application context without restarting the server."); if (fixtureError) throw fixtureError;
+    const resumed = manager.send(chat.id, "Continue from the saved application context without restarting the server.");
+    if (askQuestions) {
+      const deadline = Date.now() + 15000;
+      while (!store.get(chat.id).pendingRequest && !fixtureError && Date.now() < deadline) await delay(25);
+      if (fixtureError) throw fixtureError;
+      const request = store.get(chat.id).pendingRequest;
+      assert(request, "Actual native AskUserQuestion must reach the controller");
+      assert.equal(request.method, "claude/tool/requestUserInput"); assert.equal(request.questions.length, 2);
+      assert.equal(request.questions[0].multiSelect, true);
+      await assert.rejects(manager.respond(chat.id, request.requestId, { answers: { foreign: "Do not answer another question" } }), /requested question/);
+      await manager.respond(chat.id, request.requestId, { answers: skipQuestions ? {} : { question_1: ["Intro", "Conclusion"], question_2: "ação\nKeep it literal" } });
+      await assert.rejects(manager.respond(chat.id, request.requestId, { answers: {} }), /no longer active/);
+    }
+    await resumed; if (fixtureError) throw fixtureError;
     assert.equal(store.get(chat.id).agentSessionId, session);
     assert.match(store.get(chat.id).messages.at(-1).text, /Saved application context retained after Stop/);
     assert.equal(store.get(chat.id).usage.totals.inputTokens, (requests.length - (sendNow ? 1 : 0)) * 100);
     await assert.rejects(fetch(`http://127.0.0.1:${port}/items`, { signal: AbortSignal.timeout(3000) }));
-    console.log(`PASS: ${sendNow ? `native ${firstSendNow ? "first-command " : ""}Send now retained the running app/data and unselected queue entry` : backgroundExit ? "native background completion saved one independent answer, without synthetic user input" : "native run/verify drove the actual HTTP app across replies, changed model and reused a separately supplied recipe; protected recipe creation remains denied"}; Stop closed the app and restored the same native context without restarting it. ${requests.length} loopback requests; usage counted once.`);
+    if (stopApproval) await assert.rejects(readFile(`${chat.workspace}/.claude/skills/verify/SKILL.md`, "utf8"), { code: "ENOENT" });
+    console.log(`PASS: ${sendNow ? `native ${firstSendNow ? "first-command " : ""}Send now retained the running app/data and unselected queue entry` : backgroundExit ? "native background completion saved one independent answer, without synthetic user input" : stopApproval ? "Stop canceled the native approval without creating its recipe or consuming queued input" : `native run/verify drove the actual HTTP app across replies, changed model and ${approveRecipe ? "created/reused its recipe only after explicit approval" : "honored denial and reused a separately supplied recipe"}`}; Stop closed the app and restored the same native context without restarting it.${askQuestions ? ` Native questions ${skipQuestions ? "were skipped without invented answers" : "returned selected options and literal text"}.` : ""} ${requests.length} loopback requests; usage counted once.`);
   } finally {
     release.resolve(); await failureStop; await manager?.shutdown(); server.closeAllConnections(); gatewayServer?.closeAllConnections();
     await Promise.all([new Promise(resolve => server.close(resolve)), ...(gatewayServer ? [new Promise(resolve => gatewayServer.close(resolve))] : [])]);

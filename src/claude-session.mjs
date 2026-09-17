@@ -5,6 +5,7 @@ import { StringDecoder } from "node:string_decoder";
 import readline from "node:readline";
 import { ClaudeControlChannel } from "./claude-mcp.mjs";
 import { terminateWorker } from "./worker-process.mjs";
+import { ClaudeRequests } from "./claude-requests.mjs";
 
 const flag = (args, name) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
 
@@ -12,15 +13,17 @@ const flag = (args, name) => { const index = args.indexOf(name); return index < 
 // the same stream contract as the one-shot adapter, but a result closes only
 // that logical turn, not the CLI which owns its background application tasks.
 export class ClaudeSession {
-  constructor(child, args, env, onBackgroundEvent = () => {}, { controlTimeoutMs = 30000 } = {}) {
+  constructor(child, args, env, onBackgroundEvent = () => {}, { controlTimeoutMs = 30000, requestHooks, cwd } = {}) {
     this.child = child; this.args = args; this.env = env; this.active = null; this.pending = false;
     this.onBackgroundEvent = onBackgroundEvent;
     this.control = new ClaudeControlChannel(child, controlTimeoutMs);
+    this.requests = requestHooks ? new ClaudeRequests(child, requestHooks, cwd) : null;
     this.closed = new Promise(resolve => { this.resolveClosed = resolve; });
     this.lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     this.lines.on("line", line => {
       let event; try { event = JSON.parse(line); } catch { return; }
       this.control.accept(event);
+      if (this.requests?.accept(event)) return;
       if (event.type === "result") {
         const previous = this.usageBaseline;
         this.usageBaseline = event;
@@ -107,10 +110,12 @@ export class ClaudeSession {
         void this.stop();
       });
       turn.kill = signal => {
+        this.requests?.cancel();
         if (signal === "SIGKILL") void terminateWorker(this.child, 0);
         else if (!turn.interrupting) turn.interrupting = this.control.request("interrupt").catch(() => terminateWorker(this.child));
       };
       this.active = turn;
+      this.requests?.resume();
       return turn;
     } finally { this.pending = false; }
   }
@@ -125,6 +130,7 @@ export class ClaudeSession {
   async stop() {
     if (this.ended) return;
     this.stopping ||= (async () => {
+      this.requests?.cancel();
       this.child.stdin.end();
       await terminateWorker(this.child);
       await this.closed;

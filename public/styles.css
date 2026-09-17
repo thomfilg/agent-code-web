@@ -126,7 +126,7 @@ button { border: 0; cursor: pointer; }
 .approve { background: var(--lime); color: #17200e; }
 .deny { background: #332320; color: #edaaa4; border: 1px solid #5a302c; }
 .question-input { width: 100%; margin-top: 8px; padding: 9px; color: var(--text); border: 1px solid var(--line-bright); border-radius: 7px; outline: 0; background: #171914; }
-.approval-card { max-height: min(50vh, 540px); overflow-y: auto; }
+.approval-card { max-height: min(50vh, 540px); overflow-y: auto; overflow-wrap: anywhere; }
 .agent-question { border: 0; padding: 0; margin: 16px 0; min-width: 0; }
 .agent-question legend { font-size: 13px; line-height: 1.5; color: var(--text); margin-bottom: 8px; }
 .question-options { display: grid; gap: 6px; }

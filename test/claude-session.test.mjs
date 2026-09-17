@@ -44,6 +44,8 @@ function transport(f) {
       if (packet.type === "control_request") {
         f.controls.push(packet);
         if (f.hold !== packet.request.subtype) setImmediate(() => f.respond(packet));
+      } else if (packet.type === "control_response") {
+        (f.permissionReplies ||= []).push(packet);
       } else {
         f.inputs.push(packet);
         setImmediate(() => {
@@ -56,20 +58,52 @@ function transport(f) {
   return child;
 }
 
-async function fixture(t) {
+async function fixture(t, { interactive = false } = {}) {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const chat = await store.create({ agent: "claude", title: "Application transport" }), config = testConfig(root);
-  const f = { launches: [], events: [], sessions: [] }, broker = new CapabilityBroker({ ttlMs: 60000 });
+  const f = { launches: [], events: [], sessions: [], requests: [] }, broker = new CapabilityBroker({ ttlMs: 60000 });
   const executor = { workspace: chat.workspace, runtimeHome: store.runtimeHome(chat.id), mkdir: directory => mkdir(directory, { recursive: true }),
     spawn(command, args, options) {
       if (f.spawnFailure) throw Error("Fixture spawn failure");
       f.launches.push({ command, args, env: options.env }); f.nativeSession = args[args.indexOf("--session-id") + 1]; return transport(f);
     } };
   const adapter = new ClaudeAdapter({ chat, store, config, executor, broker, gatewayOrigin: "http://127.0.0.1:9",
-    hooks: { onSessionId: id => f.sessions.push(id), onEvent: event => f.events.push(event) } });
+    hooks: { onSessionId: id => f.sessions.push(id), onEvent: event => f.events.push(event), ...(interactive ? { onRequest: request => f.requests.push(request) } : {}) } });
   t.after(() => adapter.stop());
   return Object.assign(f, { adapter, config, broker, chat });
 }
+
+test("private ordinary turns use live native approvals and close their transport after the reply", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Write the fixture recipe", { mode: "default" });
+  await waitFor(() => f.inputs?.length);
+  assert(f.launches[0].args.includes("--permission-prompt-tool"));
+  assert.equal(f.launches[0].args[f.launches[0].args.indexOf("--permission-mode") + 1], "default");
+  assert.equal(f.controls[0].request.subtype, "initialize");
+  f.emit({ type: "control_request", request_id: "native-write", request: { subtype: "can_use_tool", tool_name: "Write", input: { file_path: "fixture.txt", content: "Original native input" } } });
+  await waitFor(() => f.requests.length === 1);
+  await f.adapter.respond(f.requests[0].requestId, { decision: "accept" });
+  assert.deepEqual(f.permissionReplies[0].response.response, { behavior: "allow", updatedInput: { file_path: "fixture.txt", content: "Original native input" } });
+  f.complete(); await running;
+  assert.notEqual(f.child.exitCode ?? f.child.signalCode, null); assert.equal(f.adapter.turnSession, null); assert.equal(f.adapter.applicationSession, undefined);
+  await assert.rejects(f.adapter.respond(f.requests[0].requestId, { decision: "accept" }), /no longer active/);
+  const next = f.adapter.send("Ask again"), rejected = assert.rejects(next, /interrupted/);
+  await waitFor(() => f.inputs.length === 2);
+  f.emit({ type: "control_request", request_id: "native-again", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "node fixture.mjs" } } });
+  await waitFor(() => f.requests.length === 2);
+  await f.adapter.stop(); await rejected;
+  assert.equal(f.permissionReplies.at(-1).response.response.behavior, "deny");
+  await assert.rejects(f.adapter.respond(f.requests[1].requestId, { decision: "accept" }), /no longer active/);
+});
+
+test("Stop during private ordinary SDK initialization sends no user input and revokes the gateway capability", async t => {
+  const f = await fixture(t, { interactive: true }); f.hold = "initialize";
+  const running = f.adapter.send("Do not send this after Stop"), rejected = assert.rejects(running, /stopped|closed|interrupted/);
+  await waitFor(() => f.controls?.length); const capability = f.adapter.capability;
+  await f.adapter.stop(); await rejected;
+  assert.deepEqual(f.inputs, []); assert.deepEqual(f.requests, []); assert.equal(f.adapter.turnSession, null);
+  assert.equal(f.broker.validate(capability, "anthropic"), null);
+});
 
 test("application replies retain one CLI and apply next-turn mode/model/effort without rewriting literal inputs", async t => {
   const f = await fixture(t), text = "/run Start ação\nand keep the server running";

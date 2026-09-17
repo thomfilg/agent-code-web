@@ -24,6 +24,7 @@ export class ClaudeAdapter {
     this.hooks = hooks;
     this.sessionId = chat.agentSessionId;
     this.child = null;
+    this.turnSession = null;
     this.capability = "";
     this.stopped = false;
     this.sendVersion = 0;
@@ -51,6 +52,7 @@ export class ClaudeAdapter {
     // Keep its SDK input open so Stop can cancel the query and let it flush.
     const reviewRequest = /^\/code-review(?:\s|$)/.test(text.trimStart());
     const applicationRequest = /^\/(?:run|verify)(?:\s|$)/.test(text.trimStart());
+    const interactive = this.config.claude.authMode === "gateway" && Boolean(this.hooks.onRequest);
     if (mcpRequest?.action && this.config.claude.authMode !== "gateway") throw new Error(CLAUDE_MCP_PRIVATE_ERROR);
     if (fastRequest && this.config.claude.authMode !== "gateway") throw new Error("Fast changes require a private Claude profile; shared host profiles remain locked until company/profile isolation is complete.");
     if (configuration?.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
@@ -154,7 +156,8 @@ export class ClaudeAdapter {
       "--print",
       "--verbose",
       "--output-format", "stream-json",
-      ...(mcpRequest?.action || reviewRequest ? ["--input-format", "stream-json"] : []),
+      ...(mcpRequest?.action || reviewRequest || interactive ? ["--input-format", "stream-json"] : []),
+      ...(interactive ? ["--permission-prompt-tool", "stdio"] : []),
       "--include-partial-messages",
       "--permission-mode", nativeMode,
       "--prompt-suggestions", "false",
@@ -184,7 +187,7 @@ export class ClaudeAdapter {
     }) : () => {};
     this.providerObservation = unobserve;
     const finishObservation = () => { unobserve(); if (this.providerObservation === unobserve) this.providerObservation = null; };
-    let child;
+    let child, managed;
     const spawn = launchArgs => this.executor
       ? this.executor.spawn(this.config.claude.bin, launchArgs, {
           cwd: this.workspace,
@@ -199,14 +202,20 @@ export class ClaudeAdapter {
         });
     try {
       if (this.applicationSession?.ended) this.applicationSession = null;
+      const manage = launchArgs => new ClaudeSession(spawn(launchArgs), args, env, event => this.backgroundEvent(event),
+        interactive ? { requestHooks: this.hooks, cwd: this.workspace } : {});
       if (!this.applicationSession && applicationRequest) {
         const launchArgs = args.includes("--input-format") ? args : [...args, "--input-format", "stream-json"];
-        this.applicationSession = new ClaudeSession(spawn(launchArgs), args, env, event => this.backgroundEvent(event));
+        this.applicationSession = manage(launchArgs);
       }
-      child = this.applicationSession ? await this.applicationSession.open(args, env) : spawn(args);
+      managed = this.applicationSession || (interactive ? manage(args) : null);
+      this.turnSession = managed;
+      child = managed ? await managed.open(args, env) : spawn(args);
       if (version !== this.sendVersion) throw Error("Claude turn interrupted");
     } catch (error) {
       finishObservation();
+      if (managed && managed !== this.applicationSession) await managed.stop();
+      if (this.turnSession === managed) this.turnSession = null;
       // Failed first initialization must not leave a live, unaddressable CLI
       // or retry a provisional session whose journal was never checkpointed.
       if (provisionalSession && !this.sessionId) {
@@ -232,7 +241,10 @@ export class ClaudeAdapter {
       child.stdin.write(`${JSON.stringify({ type: "user", message: { role: "user", content: text } })}\n`);
     }
     let mcpOutcome = null, mcpError = null;
-    if (!mcpControl && !reviewControl) child.stdin.end(fastRequest ? "/fast on" : text);
+    if (!mcpControl && !reviewControl) {
+      const input = fastRequest ? "/fast on" : text;
+      child.stdin.end(interactive ? `${JSON.stringify({ type: "user", message: { role: "user", content: input } })}\n` : input);
+    }
 
     const output = new ClaudeTextStream(delta => this.hooks.onEvent?.({ type: "assistant_delta", delta }));
     let resultMessage = null;
@@ -300,7 +312,7 @@ export class ClaudeAdapter {
         // Resuming a stopped background task can emit an empty local result
         // before the actual model reply, even in one-shot mode. Each native
         // result needs its own sample; process totals still need deltas.
-        const usageResult = this.applicationSession ? event : claudeCallResult(event, resultBaseline);
+        const usageResult = managed ? event : claudeCallResult(event, resultBaseline);
         resultBaseline = event;
         this.hooks.onEvent?.({ type: "usage", usage: claudeUsage(usageResult, lastRequest, `${sampleId}:${event.uuid || ++resultCount}`) });
         for (const itemId of activeTools.keys()) completeTool(itemId, "", false, true);
@@ -323,6 +335,8 @@ export class ClaudeAdapter {
       });
       child.once("close", (code, signal) => { void (async () => {
         finishObservation();
+        if (managed && managed !== this.applicationSession) await managed.stop();
+        if (this.turnSession === managed) this.turnSession = null;
         if (spawnFailed) return;
         mcpControl?.close();
         reviewControl?.close();
@@ -366,7 +380,7 @@ export class ClaudeAdapter {
           reject(Object.assign(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`), { nativeSettings, ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) }));
         }
       })().catch(reject); });
-      if (mcpControl) void runClaudeMcpCommand(mcpControl, mcpRequest, { initialize: !this.applicationSession }).then(outcome => {
+      if (mcpControl) void runClaudeMcpCommand(mcpControl, mcpRequest, { initialize: !managed }).then(outcome => {
         if (version !== this.sendVersion) throw Error("Claude turn interrupted");
         mcpOutcome = outcome;
         // A local status command checkpoints the native session journal after
@@ -377,8 +391,10 @@ export class ClaudeAdapter {
     });
   }
 
-  async respond() {
-    throw new Error("Interactive approval responses are currently implemented for Codex only");
+  async respond(requestId, payload) {
+    const requests = this.turnSession?.requests || this.applicationSession?.requests;
+    if (!requests || this.stopped) throw Object.assign(Error("Claude request is no longer active"), { statusCode: 409 });
+    await requests.respond(requestId, payload);
   }
 
   backgroundEvent(event) {
@@ -397,6 +413,7 @@ export class ClaudeAdapter {
 
   async interrupt() {
     this.sendVersion += 1;
+    (this.turnSession?.requests || this.applicationSession?.requests)?.cancel();
     this.settingsInspection?.abort();
     this.fastInspection?.abort();
     this.providerObservation?.(); this.providerObservation = null;
@@ -405,7 +422,7 @@ export class ClaudeAdapter {
     const child = this.child;
     await this.reviewInterruption?.();
     if (child) await terminateWorker(child);
-    else if (this.applicationSession?.pending) await this.applicationSession.stop();
+    else if (this.turnSession?.pending) await this.turnSession.stop();
   }
 
   async stop() {
@@ -414,10 +431,12 @@ export class ClaudeAdapter {
     this.fastInspection?.abort();
     this.providerObservation?.(); this.providerObservation = null;
     this.stopped = true;
+    (this.turnSession?.requests || this.applicationSession?.requests)?.cancel();
     const child = this.child;
     this.child = null;
     await this.reviewInterruption?.();
     if (child) await terminateWorker(child);
+    await this.turnSession?.stop(); this.turnSession = null;
     await this.applicationSession?.stop(); this.applicationSession = null;
     this.broker.revokeChat(this.chat.id);
     this.capability = "";
