@@ -155,6 +155,102 @@ const scheduleResult = (f, data, { id = "cron-call", failed = false, ...extra } 
 const schedule = { id: "abcdef12", recurring: true, humanSchedule: "Every minute", durable: false };
 const scheduledTurnStarted = (f, count = 1) => waitFor(() => f.inputs?.length === count && f.adapter.turnSession?.active?.started);
 const scheduleDiagnostic = text => `2026-09-17T10:21:52.177Z [DEBUG] ${text}\n`;
+const wakeup = { scheduledFor: 1789641540000, clampedDelaySeconds: 60, wasClamped: false };
+const stopWakeup = { scheduledFor: 0, clampedDelaySeconds: 0, wasClamped: false, stopped: true, cancelledWakeups: 1 };
+
+test("a bound dynamic wakeup retains the native worker before its first scheduler poll and stops without another input", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("/loop Watch the fixture"); await scheduledTurnStarted(f);
+  scheduleCall(f, "ScheduleWakeup"); scheduleResult(f, wakeup); f.complete(); await running;
+  assert.equal(f.adapter.hasScheduledWork(), true); assert.equal(f.child.exitCode, null);
+  assert.equal(f.adapter.applicationSession.scheduledJobs.size, 0);
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled abcdef12 for 2026-09-17T10:39:00.000Z"));
+  assert.equal(f.adapter.applicationSession.dynamicWakeup.id, "abcdef12");
+  scheduleCall(f, "ScheduleWakeup", "stop", { stop: true }); scheduleResult(f, stopWakeup, { id: "stop" });
+  assert.equal(f.adapter.hasScheduledWork(), false); assert.equal(f.adapter.applicationSession.scheduledJobs.size, 0);
+  assert.deepEqual(f.inputs.map(input => input.message.content), ["/loop Watch the fixture"]);
+});
+
+test("dynamic replacement, native snapshots and cancellation preserve ordinary and restored schedules", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Schedule several checks"); await scheduledTurnStarted(f);
+  f.child.stderr.write(scheduleDiagnostic("resume: resurrected 1 session cron task(s)"));
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled 11111111 for 2026-09-17T10:39:00.000Z"));
+  scheduleCall(f, "CronCreate", "fixed"); scheduleResult(f, schedule, { id: "fixed" });
+  scheduleCall(f, "ScheduleWakeup", "first"); scheduleResult(f, wakeup, { id: "first" });
+  // CronList can identify the new pending ID before the scheduler polls it.
+  scheduleCall(f, "CronList", "list"); scheduleResult(f, { jobs: [{ id: "11111111" }, schedule, { id: "22222222" }] }, { id: "list" });
+  assert.equal(f.adapter.applicationSession.dynamicWakeup.id, "22222222");
+  scheduleCall(f, "ScheduleWakeup", "replacement");
+  // stderr and stdout are independent pipes: native scheduling may arrive
+  // before the structured receipt, but is not a second fixed-interval job.
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled 33333333 for 2026-09-17T10:40:00.000Z"));
+  scheduleResult(f, { ...wakeup, scheduledFor: wakeup.scheduledFor + 60000 }, { id: "replacement" });
+  assert.equal(f.adapter.applicationSession.dynamicWakeup.id, "33333333");
+  assert(!f.adapter.applicationSession.scheduledJobs.has("22222222"));
+  f.child.stderr.write(scheduleDiagnostic("[loop/dynamic] cancelled 1 pending loop wakeup(s) on user abort"));
+  assert.equal(f.adapter.applicationSession.dynamicWakeup, null);
+  assert.deepEqual([...f.adapter.applicationSession.scheduledJobs].sort(), ["11111111", schedule.id]);
+  assert.equal(f.adapter.hasScheduledWork(), true);
+  f.complete(); await running;
+});
+
+test("native dynamic firing, empty snapshots and Stop reconcile without leaving a phantom schedule", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("/loop Watch"); await scheduledTurnStarted(f);
+  scheduleCall(f, "ScheduleWakeup"); scheduleResult(f, wakeup); f.complete(); await running;
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled abcdef12 for 2026-09-17T10:39:00.000Z"));
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] firing abcdef12"));
+  assert.equal(f.adapter.hasScheduledWork(), false);
+  scheduleCall(f, "ScheduleWakeup", "again"); scheduleResult(f, wakeup, { id: "again" });
+  scheduleCall(f, "CronList", "empty"); scheduleResult(f, { jobs: [] }, { id: "empty" });
+  assert.equal(f.adapter.hasScheduledWork(), false);
+  scheduleCall(f, "ScheduleWakeup", "last"); scheduleResult(f, wakeup, { id: "last" });
+  await f.adapter.stop(); assert.equal(f.adapter.hasScheduledWork(), false);
+});
+
+test("ambiguous new native job IDs are never guessed to belong to a dynamic loop", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Inspect scheduling"); await scheduledTurnStarted(f);
+  scheduleCall(f, "ScheduleWakeup"); scheduleResult(f, wakeup);
+  scheduleCall(f, "CronList", "ambiguous"); scheduleResult(f, { jobs: [{ id: "11111111" }, { id: "22222222" }] }, { id: "ambiguous" });
+  assert.equal(f.adapter.applicationSession.dynamicWakeup.id, null);
+  scheduleCall(f, "ScheduleWakeup", "stop", { stop: true }); scheduleResult(f, stopWakeup, { id: "stop" });
+  assert.deepEqual([...f.adapter.applicationSession.scheduledJobs], ["11111111", "22222222"]);
+  scheduleCall(f, "CronList", "reconcile"); scheduleResult(f, { jobs: [] }, { id: "reconcile" });
+  assert.equal(f.adapter.hasScheduledWork(), false); f.complete(); await running;
+});
+
+test("failed, foreign, quoted, unbound, zero and malformed wakeup receipts cannot retain an ordinary worker", async t => {
+  for (const variant of ["failed", "foreign", "child", "quoted", "unbound", "zero", "malformed"]) {
+    const f = await fixture(t, { interactive: true }); f.block = true;
+    const running = f.adapter.send("Inspect only"); await scheduledTurnStarted(f);
+    if (variant !== "unbound") scheduleCall(f, "ScheduleWakeup");
+    if (variant === "quoted") f.emit({ type: "assistant", session_id: f.nativeSession, message: { content: [{ type: "text", text: JSON.stringify(wakeup) }] } });
+    else scheduleResult(f, variant === "zero" ? { ...wakeup, scheduledFor: 0, clampedDelaySeconds: 0 } : variant === "malformed" ? { ...wakeup, scheduledFor: "soon" } : wakeup,
+      { ...(variant === "failed" ? { failed: true } : {}), ...(variant === "foreign" ? { session_id: "foreign" } : {}), ...(variant === "child" ? { parent_tool_use_id: "child" } : {}) });
+    f.complete(); await running;
+    assert.equal(f.adapter.hasScheduledWork(), false); assert.equal(f.adapter.applicationSession, undefined);
+  }
+});
+
+test("a denied or unavailable reschedule cannot erase an existing native wakeup; late success cannot survive cancellation", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("/loop Inspect"); await scheduledTurnStarted(f);
+  scheduleCall(f, "ScheduleWakeup"); scheduleResult(f, wakeup);
+  f.child.stderr.write(scheduleDiagnostic("[ScheduledTasks] scheduled abcdef12 for 2026-09-17T10:39:00.000Z"));
+  scheduleCall(f, "ScheduleWakeup", "denied", { stop: true }); scheduleResult(f, stopWakeup, { id: "denied", failed: true });
+  scheduleCall(f, "ScheduleWakeup", "unavailable"); scheduleResult(f, { ...wakeup, scheduledFor: 0, clampedDelaySeconds: 0 }, { id: "unavailable" });
+  assert.equal(f.adapter.applicationSession.dynamicWakeup.id, "abcdef12");
+  f.hold = "interrupt"; const rejected = assert.rejects(running, /interrupted/);
+  scheduleCall(f, "ScheduleWakeup", "late");
+  const interrupting = f.adapter.interrupt(); await waitFor(() => f.controls.some(control => control.request.subtype === "interrupt"));
+  f.child.stderr.write(scheduleDiagnostic("[loop/dynamic] cancelled 1 pending loop wakeup(s) on user abort"));
+  scheduleResult(f, wakeup, { id: "late" });
+  f.respond(f.controls.find(control => control.request.subtype === "interrupt"));
+  await interrupting; await rejected;
+  assert.equal(f.adapter.hasScheduledWork(), false);
+});
 
 test("native restored schedules retain an ordinary resume without synthetic turns or readback tools", async t => {
   const f = await fixture(t, { interactive: true }); f.hold = "initialize";

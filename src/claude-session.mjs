@@ -13,7 +13,7 @@ const flag = (args, name) => { const index = args.indexOf(name); return index < 
 // diagnostics report restoration, automatic deletion and expiry without an
 // extra user turn, model call, transcript replay or controller-side scheduler.
 // Keep them on the owned process pipe, not in debug files or chat messages.
-export const CLAUDE_SCHEDULE_DIAGNOSTICS = ["--debug=ScheduledTasks,resume", "--debug-to-stderr"];
+export const CLAUDE_SCHEDULE_DIAGNOSTICS = ["--debug=ScheduledTasks,resume,loop/dynamic", "--debug-to-stderr"];
 
 // A Claude application session outlives individual replies. Each turn exposes
 // the same stream contract as the one-shot adapter, but a result closes only
@@ -25,6 +25,7 @@ export class ClaudeSession {
     this.controlTimeoutMs = controlTimeoutMs;
     this.scheduledJobs = new Set(); this.scheduleCalls = new Map(); this.onSchedulesChanged = onSchedulesChanged;
     this.restoredJobs = 0;
+    this.fixedJobs = new Set(); this.reportedJobs = new Set(); this.dynamicWakeup = null;
     this.onBackgroundEvent = onBackgroundEvent;
     this.control = new ClaudeControlChannel(child, controlTimeoutMs);
     this.requests = requestHooks ? new ClaudeRequests(child, requestHooks, cwd) : null;
@@ -78,7 +79,9 @@ export class ClaudeSession {
       this.ended = true; this.control.close(); this.lines.close();
       this.finishBackground();
       this.scheduleCalls.clear();
-      if (this.hasScheduledWork()) { this.scheduledJobs.clear(); this.restoredJobs = 0; this.onSchedulesChanged(); }
+      const scheduled = this.hasScheduledWork();
+      this.scheduledJobs.clear(); this.fixedJobs.clear(); this.reportedJobs.clear(); this.restoredJobs = 0; this.dynamicWakeup = null;
+      if (scheduled) this.onSchedulesChanged();
       // A logical reply is successful only after its native result. An empty
       // clean process exit must not masquerade as a completed application run.
       if (this.active) this.finish(this.active, code === 0 ? 1 : code, signal);
@@ -103,7 +106,35 @@ export class ClaudeSession {
     } finally { clearTimeout(timer); }
   }
 
-  hasScheduledWork() { return Boolean(this.scheduledJobs.size || this.restoredJobs); }
+  hasScheduledWork() { return Boolean(this.scheduledJobs.size || this.restoredJobs || this.dynamicWakeup); }
+
+  scheduleState() { return `${this.restoredJobs}:${this.dynamicWakeup?.id || (this.dynamicWakeup ? "pending" : "")}:${[...this.scheduledJobs].sort().join(",")}`; }
+
+  clearDynamicWakeup() {
+    if (this.dynamicWakeup?.id) {
+      this.scheduledJobs.delete(this.dynamicWakeup.id); this.reportedJobs.delete(this.dynamicWakeup.id);
+    }
+    this.dynamicWakeup = null;
+  }
+
+  bindDynamicWakeup() {
+    if (!this.dynamicWakeup) return;
+    // Keep an already-observed identity while a replacement is being armed.
+    // A later scheduling record must not erase the old ID before its native
+    // replacement receipt lets us remove it from the observed pending set.
+    if (this.dynamicWakeup.id && this.reportedJobs.has(this.dynamicWakeup.id) && !this.fixedJobs.has(this.dynamicWakeup.id)) return;
+    // Native wakeup results have no ID. Pair only a unique new native job
+    // since that bound tool call; existing/restored/CronCreate jobs cannot be
+    // cancelled with the dynamic loop. Ambiguous IDs stay conservatively
+    // awake until a native snapshot/deletion resolves them; never guess.
+    const candidates = [...this.reportedJobs].filter(id => !this.fixedJobs.has(id) && !this.dynamicWakeup.existing.has(id));
+    this.dynamicWakeup.id = candidates.length === 1 ? candidates[0] : null;
+  }
+
+  removeSchedule(id) {
+    this.scheduledJobs.delete(id); this.fixedJobs.delete(id); this.reportedJobs.delete(id);
+    if (this.dynamicWakeup?.id === id) this.dynamicWakeup = null;
+  }
 
   trackScheduleDiagnostic(line) {
     if (this.ended || this.stopping) return;
@@ -114,16 +145,22 @@ export class ClaudeSession {
     const scheduled = /^\[ScheduledTasks\] scheduled ([a-f0-9]{8}) for (never|\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z)$/.exec(text);
     const fired = /^\[ScheduledTasks\] firing ([a-f0-9]{8})( \(recurring\))?$/.exec(text);
     const expired = /^\[ScheduledTasks\] recurring task ([a-f0-9]{8}) aged out \(\d+h since creation\), deleting after final fire$/.exec(text);
+    const cancelled = /^\[loop\/dynamic\] cancelled \d+ pending loop wakeup\(s\) on user abort(?: \(tick in flight\))?$/.test(text);
     if (restored && !this.restorationObserved && Number(restored[1]) <= 50 && !this.active?.interrupting && !this.requests?.suspended) {
       this.restorationObserved = true; this.restoredJobs = Number(restored[1]);
     }
     if (scheduled && !this.active?.interrupting && !this.requests?.suspended) {
+      const fixed = this.restoredJobs || !this.dynamicWakeup && ![...this.scheduleCalls.values()].some(call => call.name === "ScheduleWakeup");
       if (!this.scheduledJobs.has(scheduled[1])) this.restoredJobs = Math.max(0, this.restoredJobs - 1);
-      if (scheduled[2] === "never") this.scheduledJobs.delete(scheduled[1]);
-      else if (this.scheduledJobs.size < 50) this.scheduledJobs.add(scheduled[1]);
+      if (scheduled[2] === "never") this.removeSchedule(scheduled[1]);
+      else if (this.scheduledJobs.has(scheduled[1]) || this.scheduledJobs.size < 50) {
+        if (fixed) this.fixedJobs.add(scheduled[1]);
+        this.scheduledJobs.add(scheduled[1]); this.reportedJobs.add(scheduled[1]); this.bindDynamicWakeup();
+      }
     }
-    if (fired && !fired[2]) this.scheduledJobs.delete(fired[1]);
-    if (expired) this.scheduledJobs.delete(expired[1]);
+    if (fired && !fired[2]) this.removeSchedule(fired[1]);
+    if (expired) this.removeSchedule(expired[1]);
+    if (cancelled) this.clearDynamicWakeup();
     if (before !== this.hasScheduledWork()) this.onSchedulesChanged();
   }
 
@@ -136,7 +173,9 @@ export class ClaudeSession {
     const blocks = event.message?.content;
     if (event.type === "assistant" && Array.isArray(blocks)) {
       for (const block of blocks) if (block.type === "tool_use" && typeof block.id === "string" && block.id
-        && ["CronCreate", "CronDelete", "CronList"].includes(block.name)) this.scheduleCalls.set(block.id, block);
+        && ["CronCreate", "CronDelete", "CronList", "ScheduleWakeup"].includes(block.name)) this.scheduleCalls.set(block.id, {
+          ...block, ...(block.name === "ScheduleWakeup" ? { existing: new Set([...this.scheduledJobs, ...this.reportedJobs]) } : {}),
+        });
     } else if (event.type === "user" && Array.isArray(blocks)) {
       const results = blocks.filter(block => block.type === "tool_result");
       if (results.length !== 1) return;
@@ -144,15 +183,33 @@ export class ClaudeSession {
       this.scheduleCalls.delete(result.tool_use_id);
       const data = event.tool_use_result, validId = id => typeof id === "string" && /^[a-f0-9]{8}$/.test(id);
       if (!call || result.is_error || !data || typeof data !== "object" || Array.isArray(data)) return;
-      const before = `${this.restoredJobs}:${[...this.scheduledJobs].sort().join(",")}`;
-      if (call.name === "CronCreate" && validId(data.id) && typeof data.recurring === "boolean" && typeof data.humanSchedule === "string") this.scheduledJobs.add(data.id);
+      const before = this.scheduleState();
+      if (call.name === "CronCreate" && validId(data.id) && typeof data.recurring === "boolean" && typeof data.humanSchedule === "string") {
+        this.scheduledJobs.add(data.id); this.fixedJobs.add(data.id); this.bindDynamicWakeup();
+      }
       if (call.name === "CronDelete" && validId(data.id) && data.id === call.input?.id) {
-        if (!this.scheduledJobs.delete(data.id)) this.restoredJobs = Math.max(0, this.restoredJobs - 1);
+        if (!this.scheduledJobs.has(data.id)) this.restoredJobs = Math.max(0, this.restoredJobs - 1);
+        this.removeSchedule(data.id);
       }
       if (call.name === "CronList" && Array.isArray(data.jobs) && data.jobs.length <= 50 && data.jobs.every(job => job && validId(job.id))) {
         this.scheduledJobs = new Set(data.jobs.map(job => job.id)); this.restoredJobs = 0;
+        this.reportedJobs = new Set(this.scheduledJobs);
+        this.fixedJobs = new Set([...this.fixedJobs].filter(id => this.scheduledJobs.has(id)));
+        if ((this.dynamicWakeup?.id && !this.scheduledJobs.has(this.dynamicWakeup.id)) || !data.jobs.length) this.clearDynamicWakeup();
+        else if (this.dynamicWakeup) this.bindDynamicWakeup();
+        else this.fixedJobs = new Set(this.scheduledJobs);
       }
-      if (before !== `${this.restoredJobs}:${[...this.scheduledJobs].sort().join(",")}`) this.onSchedulesChanged();
+      if (call.name === "ScheduleWakeup" && Number.isSafeInteger(data.scheduledFor) && data.scheduledFor >= 0
+        && typeof data.wasClamped === "boolean" && Number.isInteger(data.clampedDelaySeconds)
+        && (data.scheduledFor === 0 && data.clampedDelaySeconds === 0 && (call.input?.stop === true ? data.stopped === true : data.stopped !== true)
+          || call.input?.stop !== true && data.stopped !== true && data.scheduledFor > 0 && data.clampedDelaySeconds >= 60 && data.clampedDelaySeconds <= 3600)) {
+        // A zero non-stop result means no NEW wakeup (gate off or expiry),
+        // not proof that an already-pending native job was removed. A fired
+        // job, explicit stop or native list supplies that removal evidence.
+        if (data.stopped === true || data.scheduledFor > 0) this.clearDynamicWakeup();
+        if (data.scheduledFor > 0) { this.dynamicWakeup = { id: null, existing: call.existing }; this.bindDynamicWakeup(); }
+      }
+      if (before !== this.scheduleState()) this.onSchedulesChanged();
     } else if (event.type === "result") this.scheduleCalls.clear();
   }
 

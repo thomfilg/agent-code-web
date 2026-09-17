@@ -16,7 +16,7 @@ import { spawnWorker } from "../src/worker-process.mjs";
 // No personal profiles, accounts, external traffic or accelerated native clock.
 const exec = promisify(execFile);
 if (!process.argv.includes("--network-isolated")) {
-  const result = await exec("/usr/bin/unshare", ["--user", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", "--", process.execPath, process.argv[1], ...process.argv.slice(2), "--network-isolated"], { timeout: 180000, killSignal: "SIGKILL", maxBuffer: 40000 }).catch(error => {
+  const result = await exec("/usr/bin/unshare", ["--user", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", "--", process.execPath, process.argv[1], ...process.argv.slice(2), "--network-isolated"], { timeout: process.argv.includes("--replace-wakeup") ? 260000 : 180000, killSignal: "SIGKILL", maxBuffer: 40000 }).catch(error => {
     process.stdout.write(error.stdout || ""); process.stderr.write(error.stderr || error.message); process.exit(1);
   });
   process.stdout.write(result.stdout); process.stderr.write(result.stderr); assert.match(result.stdout, /^PASS:/m);
@@ -29,6 +29,9 @@ if (!process.argv.includes("--network-isolated")) {
   const resumePlain = process.argv.includes("--resume-plain");
   const oneShot = process.argv.includes("--one-shot"), expiredResume = process.argv.includes("--expired-resume");
   const expiredFire = process.argv.includes("--expired-fire");
+  const dynamic = process.argv.includes("--dynamic"), unavailable = process.argv.includes("--unavailable");
+  const cancelWaiting = process.argv.includes("--cancel-waiting"), replaceWakeup = process.argv.includes("--replace-wakeup");
+  const mixed = process.argv.includes("--mixed"), noRearm = process.argv.includes("--no-rearm");
   assert(!(sendNow && stop));
   let held = false;
   let manager, gatewayServer, chat, fixtureError, jobId, step = 0, phase = "create";
@@ -49,7 +52,25 @@ if (!process.argv.includes("--network-isolated")) {
       const done = value => [{ type: "text", text: value }];
       if (process.argv.includes("--trace")) console.log("QUERY", phase, step, last.slice(-600));
       if (phase === "create") {
-        if (step === 0) {
+        if (dynamic) {
+          const dynamicStep = step - (mixed ? 1 : 0);
+          if (mixed && step === 0) content = tool("CronCreate", { cron: "0 0 1 1 *", prompt: "Unrelated fixture schedule; do not cancel with the dynamic loop", recurring: true, durable: false });
+          else if (dynamicStep === 0) {
+            if (mixed) { check(); jobId = JSON.stringify(result.content).match(/\b[a-f0-9]{8}\b/)?.[0]; assert(jobId); }
+            assert(body.tools.some(tool => tool.name === "ScheduleWakeup"));
+            if (!unavailable) assert.match(text, /self.pace|dynamic/);
+            content = tool("Bash", { command: "node tick.mjs", description: "Execute the dynamic loop's first check" });
+          } else if (dynamicStep === 1) {
+            check(/counter.*1/);
+            content = tool("ScheduleWakeup", { delaySeconds: 60, reason: "Wait for the next fixture check", prompt });
+          } else if (dynamicStep === 2 && replaceWakeup) {
+            check(/Next wakeup scheduled/);
+            content = tool("ScheduleWakeup", { delaySeconds: 120, reason: "Replace the previous pending check", prompt });
+          } else {
+            check(unavailable ? /Wakeup not scheduled/ : /Next wakeup scheduled/);
+            content = done(`${unavailable ? "Dynamic scheduling unavailable" : "Dynamic wakeup confirmed"}; initial check returned counter 1.`);
+          }
+        } else if (step === 0) {
           if (!oneShot) assert.match(text, /schedule a recurring prompt/);
           assert.match(last, /RELAY_LOOP_TICK/);
           assert(body.tools.some(tool => tool.name === "CronCreate"));
@@ -64,7 +85,20 @@ if (!process.argv.includes("--network-isolated")) {
         assert.match(text, /RELAY_LOOP_TICK/);
         if (sendNow && step === 0) { held = true; await release.promise; response.end(); return; }
         if (step === 0) content = tool("Bash", { command: "node tick.mjs", description: "Execute an actual native scheduled fire" });
-        else { check(/counter.*2/); content = done("Scheduled fire completed with counter 2."); }
+        else if (dynamic && !noRearm && step === 1) { check(/counter.*2/); content = tool("ScheduleWakeup", { stop: true }); }
+        else { check(dynamic && !noRearm ? /Loop stopped/ : /counter.*2/); content = done("Scheduled fire completed with counter 2."); }
+        step++;
+      } else if (phase === "dynamic_cancel") {
+        if (step === 0) content = tool("ScheduleWakeup", { stop: true });
+        else { check(/Loop stopped/); content = done("The dynamic fixture loop was cancelled."); }
+        step++;
+      } else if (phase === "dynamic_resume") {
+        if (step === 0) content = tool("CronList", {});
+        else { check(/No scheduled jobs/); content = done("Dynamic schedules are not restored on resume; no jobs recreated."); }
+        step++;
+      } else if (phase === "dynamic_inspect") {
+        if (step === 0) content = tool("CronList", {});
+        else { check(/No scheduled jobs/); content = done("Native SDK list confirms no fallback was scheduled."); }
         step++;
       } else if (phase === "delete") {
         if (step === 0) content = tool("CronList", {});
@@ -135,13 +169,77 @@ if (!process.argv.includes("--network-isolated")) {
     await manager.setMode(chat.id, "accept_edits");
     await mkdir(`${store.runtimeHome(chat.id)}/claude`, { recursive: true });
     await writeFile(`${store.runtimeHome(chat.id)}/claude/settings.json`, JSON.stringify({ permissions: { allow: ["Bash(node tick.mjs)"] } }));
+    // Only a new disposable profile gets this synthetic rollout cache. This
+    // exercises the installed native feature in both rollout states; it does
+    // not alter real accounts, permission/classifier policy or the CLI clock.
+    if (dynamic && !unavailable) await writeFile(`${store.runtimeHome(chat.id)}/claude/.claude.json`, JSON.stringify({ cachedGrowthBookFeatures: { tengu_kairos_loop_dynamic: true, ...(noRearm ? { tengu_kairos_loop_keepalive: true } : {}) } }));
     await writeFile(`${chat.workspace}/tick.mjs`, "import {readFile,writeFile} from 'node:fs/promises';\nlet counter=0;try{counter=JSON.parse(await readFile('.counter.json','utf8')).counter}catch{}\nconst value={counter:counter+1};await writeFile('.counter.json',JSON.stringify(value));console.log(JSON.stringify(value));\n");
-    await manager.send(chat.id, oneShot ? `Schedule one check for the next minute, then check now too: ${prompt}` : `/loop 1m ${prompt}`); if (fixtureError) throw fixtureError;
+    await manager.send(chat.id, dynamic ? `/loop ${prompt}` : oneShot ? `Schedule one check for the next minute, then check now too: ${prompt}` : `/loop 1m ${prompt}`); if (fixtureError) throw fixtureError;
     const session = store.get(chat.id).agentSessionId;
     assert.equal(JSON.parse(await readFile(`${chat.workspace}/.counter.json`, "utf8")).counter, 1);
-    assert.equal(launches[0].exitCode, null, "The native scheduler must survive its initial reply");
-    assert.equal(launches[0].signalCode, null, "The native scheduler must not be terminated after scheduling");
-    verification: if (expiredResume) {
+    if (!unavailable) {
+      assert.equal(launches[0].exitCode, null, "The native scheduler must survive its initial reply");
+      assert.equal(launches[0].signalCode, null, "The native scheduler must not be terminated after scheduling");
+    }
+    verification: if (dynamic) {
+      if (unavailable) {
+        assert.notEqual(launches[0].exitCode ?? launches[0].signalCode, null);
+        assert.match(store.get(chat.id).messages.at(-1).text, /Dynamic scheduling unavailable/);
+      } else if (stop) await manager.stop(chat.id);
+      else {
+        if (cancelWaiting) {
+          await delay(1500); // The native scheduler must first observe the pending ID.
+          phase = "dynamic_cancel"; step = 0;
+          await manager.send(chat.id, "Cancel the pending dynamic loop.");
+        } else {
+          phase = "fire"; step = 0;
+          const deadline = Date.now() + (replaceWakeup ? 200000 : 140000);
+          while (!(sendNow ? held : !manager.isBusy(chat.id) && store.get(chat.id).messages.some(message => message.text?.includes("Scheduled fire completed with counter 2"))) && Date.now() < deadline) {
+            if (fixtureError) throw fixtureError;
+            assert.equal(launches[0].exitCode ?? launches[0].signalCode, null, "Idle sleep must not end a pending dynamic wakeup");
+            await delay(100);
+          }
+          if (sendNow) {
+            assert(held); assert.equal(manager.isBusy(chat.id), true);
+            await store.update(chat.id, { queuePaused: true });
+            await manager.enqueue(chat.id, "Keep this unrelated queued input");
+            const selected = await manager.enqueue(chat.id, "Cancel the dynamic loop now.");
+            phase = "dynamic_cancel"; step = 0;
+            await manager.sendQueuedNow(chat.id, selected.queuedMessages.at(-1).id); release.resolve();
+            const done = Date.now() + 15000;
+            while (manager.isBusy(chat.id) && Date.now() < done) await delay(25);
+            assert.equal(manager.isBusy(chat.id), false);
+            assert.deepEqual(store.get(chat.id).queuedMessages.map(item => item.text), ["Keep this unrelated queued input"]);
+          } else {
+            assert(store.get(chat.id).messages.some(message => message.text?.includes("Scheduled fire completed with counter 2")));
+            if (noRearm) {
+              // 2.1.222 arms its optional keepalive only in the interactive
+              // React loop, not the SDK. Verify actual native state while the
+              // same process is still alive; never invent a Relay fallback.
+              phase = "dynamic_inspect"; step = 0;
+              await manager.send(chat.id, "List native jobs after that tick without rearming or cancelling anything.");
+              assert.equal(launches.length, 1);
+            }
+          }
+        }
+        if (mixed) {
+          assert.equal(store.get(chat.id).idleKeepAwakeReason, "schedule", "Dynamic cancellation must preserve the unrelated ordinary schedule");
+          assert.equal(launches[0].exitCode ?? launches[0].signalCode, null);
+          phase = "delete"; step = 0;
+          await manager.send(chat.id, "List the remaining ordinary job, explicitly cancel it, and confirm the list is empty.");
+        }
+        assert.notEqual(store.get(chat.id).idleKeepAwakeReason, "schedule");
+        const idleDeadline = Date.now() + 12000;
+        while (launches[0].exitCode === null && launches[0].signalCode === null && Date.now() < idleDeadline) await delay(50);
+        assert.notEqual(launches[0].exitCode ?? launches[0].signalCode, null, "A cancelled/completed dynamic loop must release idle sleep");
+      }
+      assert.equal(JSON.parse(await readFile(`${chat.workspace}/.counter.json`, "utf8")).counter, stop || unavailable || cancelWaiting || sendNow ? 1 : 2);
+      phase = "dynamic_resume"; step = 0;
+      await manager.send(chat.id, "Inspect scheduled tasks after the previous worker ended; do not recreate any."); if (fixtureError) throw fixtureError;
+      assert.equal(store.get(chat.id).agentSessionId, session); assert.equal(launches.length, 2);
+      assert.match(store.get(chat.id).messages.at(-1).text, /Dynamic schedules are not restored/);
+      console.log(`PASS: native dynamic loop ${unavailable ? "unavailable" : stop ? "Stop" : cancelWaiting ? "waiting cancellation" : sendNow ? "Send now" : noRearm ? "timed fire without rearm (native SDK list confirms no fallback)" : "timed fire and completion"}${mixed ? " with unrelated cron preserved" : ""}${replaceWakeup ? " after replacing its wakeup" : ""}, counter effects, idle lifetime and no schedule restoration; ${requests.length} authored main replies.`);
+    } else if (expiredResume) {
       await manager.stop(chat.id);
       const projects = `${store.runtimeHome(chat.id)}/claude/projects`;
       const journals = (await readdir(projects, { recursive: true })).filter(file => file.endsWith(`/${session}.jsonl`));

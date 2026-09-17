@@ -21,7 +21,7 @@ and remain at the beginning of native stream-json input.
 | `/review [--base branch / --commit SHA / instructions]` | Native `review/start`, not an ordinary prompt. Tracks both inner execution and outer completion IDs. Real adapter completion and interruption pass. |
 | `/code-review [level] [--fix] [target]` (Claude) | Native bundled review with actual diff/read/findings and explicit file-fix verification. Findings survive Stop/resume; Plan blocks edits. SDK interruption checkpoints the first review for Stop and Send now; flags, targets, FIFO, drafts and remaining queued inputs are retained. GitHub `--comment` and live activation are not covered by this acceptance. |
 | `/simplify [target]` (Claude) | Native cleanup instructions reach the CLI; actual diff/read/edit/run preserves behavior. Empty diffs, refused Plan exceptions, Stop, Send now and retained applications verified with authored inference. This is integration acceptance, not a model-review-quality or parallel-reviewer claim. |
-| `/loop [interval] prompt` (Claude) | Native schedules survive replies and ordinary resume without a readback turn. Real timed fire, visible response, running state, Send now, list/delete and Stop verified. One-shot completion and recurring expiry release idle protection; expired history does not replay. Dynamic `ScheduleWakeup` remains below. |
+| `/loop [interval] prompt` (Claude) | Fixed schedules survive replies and ordinary resume without a readback turn. Dynamic `ScheduleWakeup` retains its pending native worker, reconciles replacement/fire/cancellation and preserves unrelated jobs. Timed effects, Send now, Stop, unavailable rollout and idle release verified. Fixed expiry does not replay; dynamic jobs do not restore after Stop. Installed-version fallback limits are below. |
 | `/run`, `/verify` (Claude) | Actual native tools drive an HTTP application that remains available between replies. Native Send now preserves it, including interruption of the first command; Stop terminates it and the same native history resumes. Private-profile native approvals support recipe creation, denial and cancellation; saved recipes reload and run. Native shell-classifier routing, refusals and cancellation are accepted below; remaining workflow/shared-host gates are explicit. |
 | `/run-skill-generator`, generated project run skills (Claude) | Native generation creates the driver and recipe through explicit protected-file approval after actual HTTP interaction. Reload/discovery, direct invocation, `/run` reuse and `/verify` all execute against the app. Native background Bash ownership now retains apps launched by any private SDK input, not just those two built-in command names. Denial, Stop, Send now and saved-context resume pass. |
 | `/side [question]`, `/btw [question]` | Native ephemeral Codex fork on the same worker, separate third-column transcript/questions, scoped attachments and independent stop. Parent context/goal/turn are retained; no copied chat folder or injected main messages. Real installed CLI verified concurrent turns, inherited context, active-goal isolation, cancellation and parent survival. Controller/browser checks pass; live backend activation pending. |
@@ -96,8 +96,8 @@ Do not treat removing entries from autocomplete as implementing them.
   custom expansion, configuration readback, reload, Fast, goals, native MCP
   actions, bundled `/code-review`, retained applications, shell classification
   and resume, not every command's effect. `/simplify` integration and active
-  `/loop` scheduling now have effect-level acceptance below. Next finish
-  `/loop` dynamic `ScheduleWakeup` reconciliation, then installed plugin
+  `/loop` scheduling now have effect-level acceptance below, including dynamic
+  wakeups with the installed SDK's limitations. Next verify installed plugin
   namespaces. `/code-review --comment`, account-backed
   commands and shared
   host-profile writes also need the company-isolation gate in item 21. Do not
@@ -105,7 +105,59 @@ Do not treat removing entries from autocomplete as implementing them.
   working replacement. Use the installed version's capabilities, not commands
   added only in newer documentation.
 
-### Claude simplification and native scheduling checkpoint
+### Claude dynamic scheduling checkpoint
+
+Installed Claude **2.1.222** reproduced another lifetime failure: a successful
+`ScheduleWakeup` result was followed by Relay killing the native worker before
+its first scheduler poll. Bound main-session structured results now retain the
+process immediately, without waiting for an ID that this native tool does not
+return. Filtered native diagnostics or `CronList` can associate a unique new ID;
+existing fixed/restored jobs are excluded and ambiguous identities are never
+guessed. Replacement tolerates independent stdout/stderr ordering. Native
+fire, explicit cancellation, empty snapshots and Stop release pending state;
+a denied or unavailable reschedule cannot erase an existing native job.
+
+The real installed-CLI fixture (`scripts/smoke-real-claude-loop.mjs`) uses
+`--dynamic`, with optional variants:
+
+- Default: actual counter writes 1 then 2 on a native timed fire, explicit
+  loop completion, idle sleep and history resume (**8** authored main replies).
+- `--cancel-waiting`: cancel after the scheduler has observed its real ID;
+  no second counter write, idle release and resume (**7** replies).
+- `--send-now`: interrupt an actual scheduled inference call, send the selected
+  cancellation and preserve the other queued input/counter (**8** replies).
+- `--stop`: explicit worker termination; the resumed native `CronList` is empty
+  and the initial counter is not replayed (**5** replies).
+- `--unavailable`: a native zero/unavailable result does not retain a worker or
+  invent a timer; no dynamic job appears on resume (**5** replies).
+- `--replace-wakeup`: replace the first pending wakeup with a later one and
+  observe only the expected next counter write (**9** replies).
+- `--mixed --cancel-waiting`: cancelling a dynamic loop retains an unrelated
+  ordinary cron job and idle protection until explicit native deletion
+  (**12** replies).
+- `--no-rearm`: complete a real tick without scheduling another. The same
+  live SDK process reports no remaining jobs through native `CronList`, then
+  releases idle sleep and resumes history without recreating jobs (**9** replies).
+
+Dynamic availability is tested using a synthetic rollout cache in a newly
+created disposable native profile; unavailable cases leave that cache absent.
+This is not a real-account entitlement claim or a production override.
+The installed SDK path does not arm the optional terminal keepalive fallback,
+even when its rollout flag is present in the disposable profile. Relay does not
+invent a replacement timer or claim terminal/SDK parity. Dynamic jobs are not
+restored from history, unlike this version's ordinary fixed schedules.
+
+Six session tests cover bound results, replacement ordering, ordinary/restored
+job preservation, fire/snapshots/Stop, ambiguous IDs and failed/foreign/child/
+quoted/unbound/zero/malformed/late events. Syntax/unit **509/509** and browser
+**61/61** pass. Ordinary-resume (**11** main replies), final-expiry (**5**) and
+first-app Send-now (**8** requests) native regressions pass. All native tests
+use authored inference, private profiles and loopback-only network/PID
+namespaces, not real model calls, personal accounts or live chat state.
+Item 20 remains active for installed plugin namespaces and the existing
+shared-host/company/account/live gates; queue order/count are unchanged.
+
+### Claude simplification and fixed native scheduling checkpoint
 
 Follow-up: an ordinary native resume previously restored its job, then Relay
 killed that worker at the end of the reply because no `CronList` had run.
@@ -141,7 +193,8 @@ and first-app Send-now (**8** requests) regressions also pass.
 These checks use authored loopback inference and private namespaces, not live
 accounts, real model inference or production chat data. The diagnostic format
 is an installed-version integration contract, not an invented SDK endpoint.
-Dynamic scheduling and plugin namespaces remain the next item-20 work.
+Dynamic scheduling is covered in the newer checkpoint above; installed plugin
+namespaces remain the next item-20 work.
 
 Two native scheduling defects reproduced with installed Claude **2.1.222**:
 the scheduler exited with code 143 immediately after confirming a new job;
@@ -174,8 +227,9 @@ claim that the job was deleted. This matches the current
 [scheduled-task documentation](https://code.claude.com/docs/en/scheduled-tasks).
 Retention uses observed native scheduling state, not a new controller
 scheduler. Ordinary resume and one-shot completion/expiry are covered in the
-follow-up above. Dynamic `ScheduleWakeup` reconciliation remains open; the
-tested fixed-interval path does not establish dynamic-loop acceptance.
+follow-up above. The fixed-interval path alone does not establish dynamic-loop
+acceptance; the separate dynamic checkpoint above records those effects and
+installed-SDK limitations.
 
 `node scripts/smoke-real-claude-workflows.mjs --simplify` checks native target
 and cleanup instructions plus actual diff/read/edit/CLI effects, with identical

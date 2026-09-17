@@ -62,6 +62,21 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: fixed dynamic `/loop` lifetime: a successful native `ScheduleWakeup`
+  receipt retains its SDK process before the scheduler reports an ID. Native
+  replacement, firing and cancellation reconcile that pending job without
+  deleting unrelated fixed/restored jobs; failed/unavailable/foreign/late
+  results cannot invent or erase a schedule. Installed Claude **2.1.222**
+  verifies timed counter writes, waiting cancellation, Send now, Stop,
+  unavailable rollout, wakeup replacement and unrelated-cron preservation
+  (**8/7/8/5/5/9/12** authored main replies). A completed tick without rearming
+  leaves no native SDK fallback: same-process `CronList`, idle release and
+  history resume pass (**9** replies); no controller timer is substituted.
+  Rollout caches exist only in new disposable fixtures, never real accounts.
+  Six session cases; syntax/unit **509/509**, browser **61/61**; ordinary
+  resume/final-expiry and retained-app Send-now regressions pass. Next:
+  installed plugin namespaces; existing shared-host/company/account/live gates
+  remain. Queue order/count unchanged. Save to PR #2 without merge/deployment.
 - 20: fixed ordinary `/loop` resume without `CronList` and automatic schedule
   completion/expiry. A bounded reader of the private native process's filtered
   scheduling diagnostics observes actual restoration/fire/expiry, without
