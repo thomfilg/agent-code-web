@@ -1,10 +1,13 @@
 # Feature queue — original request order
 
 Active objective: implement **all** features requested in this conversation,
-one at a time, first to last. New reports go at the end and are automatically
-worked through; they do not require another permission request or interrupt the
-current item. Repeated reports below remain evidence that an earlier fix needs
-verification, not permission to skip it.
+one at a time, in original order unless an explicit priority update below says
+otherwise. New reports append without interrupting the current item. Repeated
+reports remain evidence that an earlier fix needs verification, not permission
+to skip it. Queued work proceeds under the existing implementation authorization;
+adding an item does not require another request to resume in-scope work.
+The latest request is to update this document with the MVP release gate below;
+this documentation change does not implement or deploy those items.
 
 This queue supersedes the narrower gap list in `remaining-goal.md`. Existing
 source changes are retained, but are not treated as deployed merely because
@@ -22,15 +25,17 @@ commit and push its verified changes, then move to the next. Keep the original
 scope and order; a checkpoint saves progress but does not close an unfinished
 feature or turn an external verification gate into a passing result.
 
-Delivery correction (2026-09-17, latest user priority): finish the **18 previously
+Delivery correction (2026-09-17, earlier user priority): finish the **18 previously
 reported verified/answered items first**: 01–14 and 16–19. Pause item 20's doctor
 work and preserve its unfinished test changes. Then return to the remaining
 original queue; new requests still append at the end. The old count conflated
 implementation tests with usable delivery: item 09 is a technical answer, and
 the other **17 were reopened for delivery acceptance**, not newly discovered
 defects. After the saved-data acceptance of item 01 below, the current total is
-**1 delivered, 1 answered and 42 not fully delivered** (16 priority re-audits,
-the previous 24 open items, and two authentication requests below).
+**45 items: 1 delivered, 1 answered and 43 not fully delivered** (16 priority
+re-audits, the previous 24 open items, two authentication requests and the AWS
+deployment request below). The new MVP gate is a release requirement, not a
+claim that these open items have been completed.
 
 For each reopened item, verify its full acceptance condition on current code,
 then verify the applicable deployed UI/backend/native integration. Preserve real
@@ -38,24 +43,130 @@ messages, drafts, credentials and browser state; use disposable fixtures for
 destructive/error cases. A fixture pass is not a live-delivery pass. Record
 remaining user-only OAuth/account consent explicitly rather than counting it as
 done. Commit/push each completed item's changes before moving to the next.
-The user explicitly authorized starting the current application with existing
-data on 2026-09-17. It is now running at `http://127.0.0.1:8787` with the existing
-encrypted PostgreSQL database on 55438, after an offline encrypted backup.
-All 510 saved messages, the empty queue and the workspace reference survived
-startup unchanged; no worker or real model turn was started. Both provider
-gateway keys are absent in this launch configuration, so Codex/Claude execution
-is not enabled. Do not silently adopt host credentials or count provider/native
-integration gates as passed. Tests run one suite at a time with inherited
-two-CPU affinity and nice 10. This correction supersedes historical
-completion/count statements in the ledger below; their test evidence remains
-useful but is not deployment proof. The user then explicitly requested Google
-login using `12-apps/shared-packages` and per-user agent onboarding; this
-authentication prerequisite is current. Item 02 follows it; item 20 stays paused.
+Current activation checkpoint (2026-09-17): Google login is running at the
+canonical origin `http://localhost:8787`, using the existing encrypted
+PostgreSQL database on 55438 and repository-scoped Doppler `code-web/dev`.
+The user completed real Google sign-in after configuring the owner email.
+An offline backup preceded activation; the five existing connection,
+environment, preference and encryption-check records were unchanged. That
+database already contained zero chats before this activation. The earlier
+510-message acceptance remains historical evidence, not the current chat count;
+this activation did not delete those messages. No worker or real model turn
+was started. Codex/Claude are still disabled, and neither Google sign-in nor a
+saved GitHub/MCP connection establishes successful provider onboarding.
+Do not silently adopt host credentials or count native integration gates as
+passed. Tests run one suite at a time with inherited two-CPU affinity and
+nice 10. This correction supersedes historical completion/count statements;
+their test evidence remains useful but is not deployment proof. Authentication
+is the current prerequisite; item 20's unfinished doctor work stays paused.
+
+## MVP release gate — 2026-09-17
+
+The user explicitly requires working **Codex, Claude, GitHub and Linear
+authentication**, plus **a script to deploy Relay on AWS**, before the MVP is
+usable. These requirements take priority over starting unrelated features;
+the remaining queue and its unfinished acceptance checks are retained.
+Google authenticates the Relay user only: it does not authenticate any of the
+four integrations. A saved configuration, displayed login button, successful
+mock or unauthenticated MCP handshake does not satisfy this gate.
+
+| Required integration | End-to-end acceptance | Queue items / current gap |
+| --- | --- | --- |
+| Codex | Detect missing authentication; show a working Connect action and the supported native browser authorization URL/code. Complete sign-in from the user's browser, select a named account for the chat, run a consented real turn and resume that account after restart. Surface expired/revoked access and reconnect without falling back to the host CLI | 43/44: provider-login UI, account-bound flow and real acceptance unfinished |
+| Claude | The same complete onboarding and reconnect path, using Claude's supported native authentication flow. The selected named personal/company account must actually be used for a consented real turn and restored after restart | 43/44: provider-login UI, account-bound flow and real acceptance unfinished |
+| GitHub | Authenticate from Relay; identify the connected account and explicitly allowed companies/repositories; list, select and clone an authorized repository and read its PR/check status. Handle denied/revoked access without borrowing another connection or the host's `gh` identity | 21: a saved legacy connection exists; current onboarding, company scope and live runtime acceptance remain open |
+| Linear | Complete real browser OAuth, discover tools and perform a non-mutating authenticated workspace read through the selected agent/environment. Support independent g2i and 12-apps connections, including the same MCP name, with no cross-company credential fallback | 02/03/04/10/21: configuration/discovery evidence is not completed OAuth or runtime acceptance |
+| AWS deployment | A documented, repeatable script deploys the complete application at a stable HTTPS URL, validates readiness, preserves data across updates and supports rollback; verify all four integrations on the deployed application | 45: reference review and requirements only; no complete controller deployment or live AWS acceptance |
+
+Common authentication acceptance:
+
+- Keep multiple named Codex and Claude accounts per Relay user, including
+  personal and company accounts. Make the selected account and availability
+  explicit; enforce user/company boundaries in the backend, not only the UI.
+  Test unauthorized cross-user/company access, restart, expiry, revocation,
+  failed consent and reconnect. Do not silently import global CLI profiles.
+- Show actionable setup errors. The reported MCP message requiring a
+  pre-registered OAuth client is an unresolved setup requirement, not a
+  successful connection. Configure the provider's client ID/secret and allowed
+  callback where required; do not assume dynamic registration is supported or
+  show “Saved” as proof of authenticated access.
+- Keep controller-managed secrets encrypted at rest and out of browser
+  responses, logs, source control and build artifacts. Describe the actual
+  native CLI credential delivery boundary: local workers share the host
+  filesystem, while isolated cloud workers provide a stronger boundary. Do not
+  promise credential isolation that the chosen native flow does not provide.
+- Record automated regression evidence separately from real OAuth consent and
+  authenticated runtime checks. The user performs account consent; do not
+  authorize accounts or send real agent prompts automatically for a test.
+  An externally blocked check remains open with its exact prerequisite.
+
+### 45 — AWS deployment ownership and acceptance
+
+The user permits adding reusable AWS support to `12-apps/ci` if appropriate.
+Reference review found only DigitalOcean and Cloudflare in that repository's
+current `main` vendor registry; there is no registered AWS deployment adapter.
+Use its vendor-extension pattern for the shared AWS implementation, with a thin
+Relay-specific consumer. This is planned work, not an assertion that AWS is
+already supported by the shared workflows.
+
+- **In `12-apps/ci`:** add a reusable AWS adapter, vendor registration and
+  explicitly enabled caller job, off by default. Consume the already-built
+  immutable image/artifact rather than rebuilding source during deployment.
+  Provide configuration/preflight validation, resource/deployment status,
+  health-gated rollout and rollback, and regression coverage preserving the
+  existing providers. Destructive cleanup must be a separate explicit action.
+- **In Relay:** provide the deploy script/entry point, application descriptor,
+  image/runtime configuration and an operator runbook, consuming the shared
+  implementation without duplicating its engine. Verify the shared workflow
+  can be consumed by this repository outside the `12-apps` organization before
+  depending on private cross-repository Actions access. Use a compatible
+  published shared-workflow revision; do not assume existing `@v2` includes AWS.
+- **Infrastructure and secrets:** document AWS account, region, network,
+  resource sizes/costs and prerequisites. Prefer least-privilege IAM roles and
+  CI OIDC over long-lived AWS keys. Scope Doppler to the intended deployment
+  environment; never reuse the local `dev` configuration implicitly for
+  production or bake OAuth/provider/Doppler credentials into images.
+- **Remote authentication and transport:** configure stable HTTPS, secure
+  cookies, canonical origin and every required registered OAuth callback.
+  Verify native agent login from the user's browser when Relay runs remotely,
+  without assuming the user can reach the server's localhost callback. Verify
+  SSE, Chrome WebSockets and chat application forwarding through the proxy.
+- **Durability and rollout:** persist the controller database, encryption key,
+  account records and conversation/attachment data independently of disposable
+  workers. Exercise backup/restore and an upgrade/rollback with retained data.
+  Gate success on real application/database readiness, not a static proxy 200
+  or an unexamined authenticated-endpoint response. Do not copy future-pay's
+  dual-instance rollout blindly: establish whether Relay's controller can run
+  concurrently, and document downtime if the safe strategy is single-instance.
+- **Delivery proof:** script validation/dry-run and regression tests first;
+  then an explicitly authorized AWS deployment, authenticated browser smoke
+  checks for the four required integrations, and worker start/stop/resume with
+  conversation preservation. Agree on the AWS account/region, costs and
+  permissions before creating billable resources. A merged workflow alone is
+  not deployed-MVP acceptance.
+
+References inspected for this request:
+
+- [future-pay root DEPLOYMENT.md](https://github.com/12-apps/future-pay/blob/main/DEPLOYMENT.md)
+  and its [CD caller](https://github.com/12-apps/future-pay/blob/main/.github/workflows/cd.yml):
+  shared `12-apps/ci` orchestration, application-specific configuration,
+  health-gated updates, rollback and runtime secret injection. The root guide,
+  not the older `docs/DEPLOYMENT.md` static-site guide, is the reference here.
+- [12-apps/ci deployment framework](https://github.com/12-apps/ci/blob/main/.github/deploy/README.md),
+  [vendor registry](https://github.com/12-apps/ci/blob/main/.github/deploy/targets.json)
+  and [consumer guide](https://github.com/12-apps/ci/blob/main/CONSUMING.md):
+  vendor adapters, prebuilt artifacts and explicitly enabled deployment jobs.
+- [Relay EC2 worker notes](../deploy/aws/README.md): existing worker/AMI
+  scaffolding, not a complete controller deployment script. Its gateway/API-key
+  examples do not demonstrate the newly required Google and native-account
+  onboarding on AWS.
+
+## Ordered feature queue
 
 | # | Request / acceptance condition | State |
 | --- | --- | --- |
 | 01 | Render Markdown and HTML; isolate snippet CSS and malformed/unclosed tags from the chat UI | Delivered: seven targeted browser checks pass; genuine saved HTML renders and survives reload on the live application at 1600/900/320px, with unchanged message hashes. Live mobile PR-bar overflow fixed and covered |
-| 02 | Sidebar MCP manager; environment selection configures the chosen agent with those servers | Next priority delivery audit: prior real Codex/Claude MCP discovery and environment/browser checks; deployed manager acceptance and provider runtime configuration still pending |
+| 02 | Sidebar MCP manager; environment selection configures the chosen agent with those servers | Required for the MVP Linear gate: prior real Codex/Claude MCP discovery and environment/browser checks; deployed manager acceptance and provider runtime configuration still pending |
 | 03 | Preconfigured development MCPs, including Linear and Atlassian | Reopened for delivery: prior seven-provider endpoint and preset UI checks; current deployed acceptance pending |
 | 04 | Custom MCPs, including browser OAuth installation of `https://paladira.com/api/mcp` | Reopened for delivery: prior live discovery and local consent fixture; actual user authorization/authenticated acceptance pending |
 | 05 | Store conversation/context usage outside disposable containers; continue viewing after stop | Reopened for delivery: prior stop/restart, real PostgreSQL reload and stopped-chat browser checks; current saved-data acceptance pending |
@@ -68,20 +179,20 @@ authentication prerequisite is current. Item 02 follows it; item 20 stays paused
 | 12 | Compact single-line sidebar chats, without the Idle/age sub-row | Reopened for delivery: prior row geometry, inline actions and accessible status checks; current deployed acceptance pending |
 | 13 | Reasonable default styling for unstyled HTML | Reopened for delivery: prior typography, table alignment and author-CSS override checks; current deployed acceptance pending |
 | 14 | Improve composer / command UI | Reopened for delivery: prior responsive controls, agent switching and command-picker interaction checks; current deployed acceptance pending |
-| 15 | Make the specified chat itself a real long-chat rendering example, not a personal-folder copy or invented messages | Awaiting real source chat/transcript; current saved target has 269 genuine and 241 historical sample records, all preserved during authorized startup. No sample cleanup was authorized or performed by that startup |
+| 15 | Make the specified chat itself a real long-chat rendering example, not a personal-folder copy or invented messages | Awaiting real source chat/transcript. The earlier startup preserved 269 genuine and 241 historical sample records; the database used for the later Google activation already had zero chats. Neither checkpoint fulfills this request |
 | 16 | Private, persisted Chrome connections per user; authenticate separately, anonymous browser by default, top-right opt-in for agent access | Reopened for delivery: prior real-extension, private-profile, consent/revocation/restart and cross-user checks; current deployed setup acceptance pending |
 | 17 | Queued follow-up questions must be clickable and answerable | Reopened for delivery: prior options/text/skip, retained-draft and stale-reply checks; current deployed acceptance pending |
 | 18 | `/plan` works from the web composer | Reopened for delivery: prior task/read-only, busy-queue and failure-preservation checks; current provider runtime configuration and deployed acceptance pending |
 | 19 | Send now on individual queued messages, retaining the rest | Reopened for delivery: prior interruption/FIFO, Stop race, retry, attachment and draft checks; current deployed acceptance pending |
 | 20 | `/goal` and every available native/installed slash command work, without unsupported-terminal placeholders | Paused for the user's priority delivery re-audit of 01–14/16–19; preserve doctor MCP work, then resume remaining gaps in `command-support.md`; provider runtime/deployed native acceptance pending |
-| 21 | GitHub, environments and MCPs have explicit multi-company availability; no credential fallback/crossover, including secondary repos | Relay scope tests pass; audit inherited host-CLI credentials/config too; live migration/scope choice pending |
+| 21 | GitHub, environments and MCPs have explicit multi-company availability; no credential fallback/crossover, including secondary repos | MVP requirement: working GitHub login plus company-scoped GitHub/Linear use. Relay scope tests pass; audit inherited host-CLI credentials/config too; live onboarding, migration and scope acceptance pending |
 | 22 | Resize sidebar, chat and third-column panels | Existing source; dedicated interaction verification pending |
 | 23 | Shared Chrome viewport presets: xxs, xs, sm, md, lg, xlg | Existing source; pending ordered verification |
 | 24 | Resizing changes the actual viewport correctly, without stretching or needing a new tab | Source fixes exist; live worker verification pending |
 | 25 | Paste cropped/copied images and files into the focused composer | Existing source; pending ordered verification |
 | 26 | Long chats mount a bounded message subset, retaining history navigation and reducing DOM memory | Source/tests exist; full verification pending, including intermittent Jump to latest detachment during automatic paging |
 | 27 | Auto mode handles the reported local IPC/tool approval without manual prompts | Source policy fix exists; exact native/live case unverified |
-| 28 | Remove invented rendering messages; do not inject browser activity into agent context; use official Playwright MCP when requested | 241 tagged records still stored; official dependency installed, integration not implemented |
+| 28 | Remove invented rendering messages; do not inject browser activity into agent context; use official Playwright MCP when requested | Earlier checkpoint retained 241 tagged records; no cleanup completion is claimed from the later empty-database checkpoint. Official dependency installed, integration not implemented |
 | 29 | Sharp, non-opaque browser output at every viewport, including sm/md/lg/xlg, after resizing | Source high-DPI fixes exist; live worker verification pending |
 | 30 | Visible chat tabs and browser interaction pause idle sleep/countdown | Source/tests exist; live verification pending |
 | 31 | Attachment images are clickable to inspect before and after sending | Existing source; pending ordered verification |
@@ -96,12 +207,34 @@ authentication prerequisite is current. Item 02 follows it; item 20 stays paused
 | 40 | Search across messages the user wrote and the AI's final answers, with conversation/result navigation. Do not store or index reasoning/chain-of-thought for this feature; exclude tool activity and intermediate responses from results | New feature appended after saved prompts; search-screen reference received; not started |
 | 41 | Deleting a worker/container must preserve the chat and its messages outside disposable storage; only explicit chat deletion removes the conversation. Reproduce actual container deletion independently of stop/restart, using disposable fixtures | New data-loss report appended; item 05 stop/restart verification does not establish container-deletion safety; not started |
 | 42 | Explore and implement a third-column panel showing the main agent's active secondary agents, with native status and supported conversation details. Selecting a secondary agent opens a popup/composer for prompts addressed to that agent, including while it is working; retain accessible keyboard navigation and keep the main agent/conversation independent. Investigate actual Claude Code/Claude web and Codex capabilities, reusing item 20's Codex descendant-navigation work where applicable. Do not invent child sessions or claim unsupported native messaging/steering | Codex feasibility confirmed read-only: descendant listing, status and direct input/steering are available, with experimental API caveats. Claude capability investigation and the requested both-provider panel/popup remain queued, not implemented |
-| 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | Native CLI commands/documentation investigated; no live authorization and no finished provider-login UI. Global prototype was not activated; implement account-bound flows under the Relay user |
-| 44 | Authenticate Relay users with Google using `@12-apps/auth`; persist data privately per user and support multiple named Claude/Codex accounts (personal/company), explicitly selected per chat with no credential fallback | Google/shared-package integration and per-user data boundaries implemented with offline OAuth/browser checks. Real Google setup/consent pending. Multiple native provider accounts, token/profile synchronization and selection are not implemented yet |
+| 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | MVP blocker: native CLI commands/documentation investigated; no live authorization and no finished provider-login UI. Global prototype was not activated; implement account-bound flows under the Relay user |
+| 44 | Authenticate Relay users with Google using `@12-apps/auth`; persist data privately per user and support multiple named Claude/Codex accounts (personal/company), explicitly selected per chat with no credential fallback | Partially implemented, not delivered: Google/shared-package integration and per-user boundary tests pass; real Google sign-in completed by the user. Multiple native provider accounts, token/profile synchronization and selection remain MVP blockers |
+| 45 | Provide a repeatable AWS deployment script for the complete Relay application, following future-pay's deployment guidance; add reusable AWS support to `12-apps/ci` and keep Relay a thin application-specific consumer | MVP blocker: references reviewed and acceptance criteria recorded above. Shared registry currently has only DigitalOcean/Cloudflare; existing Relay EC2 worker scaffolding is not a complete controller deployment. No AWS provisioning or deployment performed |
 
 ## Verification ledger
 
-- Authentication prerequisite (2026-09-17): installed the published
+- MVP scope update (2026-09-17): recorded Codex, Claude, GitHub and Linear
+  authentication as mandatory end-to-end gates and appended AWS delivery as
+  item 45. Inspected future-pay's root deployment guide and the shared CI
+  deployment contract; the remote `12-apps/ci` main vendor registry lists only
+  DigitalOcean and Cloudflare. The user permits a reusable AWS extension there.
+  This checkpoint changes requirements only: no provider login implementation,
+  CI workflow change, AWS provisioning or live deployment is claimed.
+
+- Google activation (2026-09-17, after the pre-activation checkpoint below):
+  the user supplied the owner setting in Doppler and authorized startup with
+  existing data. An offline encrypted backup preceded activation. All five
+  existing non-auth records retained their encrypted payloads, the database
+  already had zero chats, and no worker or real model turn was started.
+  The canonical origin is `http://localhost:8787`; Google is configured and
+  unauthenticated chat/configuration/environment/GitHub API requests return
+  401. The user subsequently completed real Google sign-in. The reported empty
+  Agent picker/“Invalid agent” and missing Codex/Claude Connect actions remain
+  unresolved; this is not successful agent onboarding. A reported MCP request
+  for a pre-registered OAuth client also remains an open setup gate, not proof
+  of completed Linear or other MCP authentication.
+
+- Authentication implementation, pre-activation checkpoint (2026-09-17): installed the published
   `@12-apps/auth@2.21.0` server factory, not a framework rewrite. Google login,
   stable per-user identity, revocable encrypted sessions and user-specific
   GitHub/MCP/environment/group/preference namespaces are implemented. Dedicated
@@ -110,12 +243,12 @@ authentication prerequisite is current. Item 02 follows it; item 20 stays paused
   and **8/8 legacy document/PR/Chrome browser regressions** pass. The auth build,
   changed JavaScript syntax and diff checks pass; one test worker, two CPUs,
   nice 10. Browser tests use disposable offline fixtures, not the saved database.
-  No real Google account has been authorized; the existing live process/data
-  have not been changed by this implementation. With the user's Doppler CLI
-  authorization, this repository is now scoped to `code-web/dev`; a live
-  value-redacted check confirms both Google client settings are present.
-  `AGENT_OWNER_EMAIL` is still missing, so activation awaits that explicit
-  ownership choice. `npm run start:google` / `npm run dev` use Doppler, reject
+  At that checkpoint no real Google account had been authorized and the live
+  process/data had not been changed by the implementation. With the user's
+  Doppler CLI authorization, the repository was scoped to `code-web/dev`; a
+  value-redacted check confirmed both Google client settings were present.
+  `AGENT_OWNER_EMAIL` was then missing; the later activation above resolves
+  that prerequisite. `npm run start:google` / `npm run dev` use Doppler, reject
   wrong project/config metadata and do not write secret fallback files or pass
   the Doppler token to Relay. Multiple native
   provider-account login/selection remains unfinished, not an implied result
