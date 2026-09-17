@@ -37,15 +37,16 @@ export function claudeSettingsChanges(before, after, request) {
 
 // Serializable worker-side reader. It returns two non-secret fields only,
 // never raw settings, permissions rules, hooks, environment or credentials.
-export async function readPrivateClaudeSettings(runtimeHome) {
+export async function readPrivateClaudeSettings(runtimeHome, filename = "settings.json") {
   const fs = await import("node:fs/promises"), path = await import("node:path"), { constants } = await import("node:fs");
-  const profile = path.join(runtimeHome, "claude"), filename = path.join(profile, "settings.json");
+  if (!["settings.json", ".claude.json"].includes(filename)) throw Error("Invalid private profile file");
+  const profile = path.join(runtimeHome, "claude"), filepath = path.join(profile, filename);
   const empty = { model: "default", permissionMode: "default" };
   if (await fs.realpath(runtimeHome) !== path.resolve(runtimeHome)) throw Error("Private runtime path is linked");
   try { if ((await fs.lstat(profile)).isSymbolicLink() || await fs.realpath(profile) !== path.resolve(profile)) throw Error("Private profile path is linked"); }
   catch (error) { if (error.code === "ENOENT") return empty; throw error; }
   let file;
-  try { file = await fs.open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  try { file = await fs.open(filepath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
   catch (error) { if (error.code === "ENOENT") return empty; throw error; }
   try {
     const stat = await file.stat();
@@ -60,8 +61,11 @@ export async function readPrivateClaudeSettings(runtimeHome) {
     if (bytes !== stat.size) throw Error("Settings changed during inspection");
     const data = JSON.parse(buffer.subarray(0, bytes).toString("utf8"));
     if (!data || typeof data !== "object" || Array.isArray(data)) throw Error("Invalid private settings object");
-    const after = await file.stat(), current = await fs.lstat(filename);
+    const after = await file.stat(), current = await fs.lstat(filepath);
     if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs || after.ino !== current.ino || after.dev !== current.dev || current.isSymbolicLink() || await fs.realpath(profile) !== path.resolve(profile)) throw Error("Settings changed during inspection");
+    // MCP toggles write .claude.json. Validate the private file, but never
+    // return its account metadata, auth configuration or project settings.
+    if (filename === ".claude.json") return empty;
     const model = data.model == null ? "default" : data.model, permissionMode = data.permissions?.defaultMode || "default";
     if (typeof model !== "string" || model.length > 150 || !/^[\w.\[\]-]+$/.test(model)) throw Error("Invalid native model setting");
     if (!["auto", "acceptEdits", "plan", "default", "dontAsk"].includes(permissionMode)) throw Error("Invalid native permission setting");
@@ -69,14 +73,14 @@ export async function readPrivateClaudeSettings(runtimeHome) {
   } finally { await file.close(); }
 }
 
-export async function inspectClaudeSettings({ runtimeHome, executor, isolation, signal }) {
+export async function inspectClaudeSettings({ runtimeHome, executor, isolation, signal, filename = "settings.json" }) {
   signal?.throwIfAborted();
   if (!executor || executor.metadata?.backend === "local") {
-    const result = await readPrivateClaudeSettings(runtimeHome); signal?.throwIfAborted(); return result;
+    const result = await readPrivateClaudeSettings(runtimeHome, filename); signal?.throwIfAborted(); return result;
   }
-  const script = `(${readPrivateClaudeSettings.toString()})(process.argv[1]).then(value => process.stdout.write(JSON.stringify(value))).catch(() => { process.stderr.write("Cannot safely inspect this private Claude profile"); process.exitCode = 1; });`;
+  const script = `(${readPrivateClaudeSettings.toString()})(process.argv[1],process.argv[2]).then(value => process.stdout.write(JSON.stringify(value))).catch(() => { process.stderr.write("Cannot safely inspect this private Claude profile"); process.exitCode = 1; });`;
   return new Promise((resolve, reject) => {
-    const child = (executor.spawn?.bind(executor) || spawnWorker)("node", ["-e", script, runtimeHome], { cwd: runtimeHome, env: { PATH: executor.environmentPath || process.env.PATH, HOME: runtimeHome, LANG: "C.UTF-8" }, isolation, stdio: ["ignore", "pipe", "pipe"] });
+    const child = (executor.spawn?.bind(executor) || spawnWorker)("node", ["-e", script, runtimeHome, filename], { cwd: runtimeHome, env: { PATH: executor.environmentPath || process.env.PATH, HOME: runtimeHome, LANG: "C.UTF-8" }, isolation, stdio: ["ignore", "pipe", "pipe"] });
     let output = "", settled = false;
     const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); error ? reject(error) : resolve(value); };
     const abort = () => { void terminateWorker(child); finish(Error("Claude settings inspection interrupted")); };

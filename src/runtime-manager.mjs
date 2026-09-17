@@ -30,6 +30,7 @@ import { CodexLogout } from "./codex-logout.mjs";
 import { desktopBinding, desktopInfo } from "./desktop-handoff.mjs";
 import { CLAUDE_PERMISSION_MODES, claudeConfigRequest } from "./claude-settings.mjs";
 import { claudeFastRequest, claudeFastScope, claudeFastCredential } from "./claude-fast.mjs";
+import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR } from "./claude-mcp.mjs";
 
 const ADAPTERS = {
   codex: CodexAdapter,
@@ -681,6 +682,11 @@ export class RuntimeManager extends EventEmitter {
 
   #checkClaudeConfiguration(chat, text, attachments) {
     if (chat.agent !== "claude") return;
+    const mcp = claudeMcpRequest(text);
+    if (mcp) {
+      if (attachments.length) throw new Error("/mcp does not accept attachments. Remove them or send them in a separate message.");
+      if (mcp.action && this.config.claude.authMode !== "gateway") throw new Error(CLAUDE_MCP_PRIVATE_ERROR);
+    }
     if (claudeFastRequest(text)) {
       if (attachments.length) throw new Error("/fast does not accept attachments. Remove them or send them in a separate message.");
       if (this.config.claude.authMode !== "gateway") throw new Error("Fast changes require a private Claude profile; shared host profiles remain locked until company/profile isolation is complete.");
@@ -1527,7 +1533,7 @@ export class RuntimeManager extends EventEmitter {
     }
     if (event.type === "command_catalog") { await this.#refreshCommandCatalog(chatId, { commandCatalog: event.commands }); return; }
     if (event.type === "session_capabilities") {
-      await this.#refreshCommandCatalog(chatId, { connectors: event.connectors, slashCommands: event.slashCommands }); return;
+      await this.#refreshCommandCatalog(chatId, { ...(event.connectors !== undefined ? { connectors: event.connectors } : {}), ...(event.slashCommands !== undefined ? { slashCommands: event.slashCommands } : {}) }); return;
     }
     if (["usage", "context_usage", "rate_limits", "workspace_diff"].includes(event.type)) {
       this.publishChat(await this.store.update(chatId, chat => {

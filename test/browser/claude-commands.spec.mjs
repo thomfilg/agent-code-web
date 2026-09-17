@@ -32,6 +32,40 @@ test("native skill reload refreshes an open slash menu immediately without chang
   expect(f.reads).toBe(2); expect(f.calls).toHaveLength(1); expect(f.errors).toEqual([]);
 });
 
+for (const width of [1280, 320]) test(`Claude MCP controls at ${width}px preserve manager/status dialogs and queue native actions`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input");
+  await page.route(`**/api/chats/${f.snapshot.id}/session-info`, route => route.fulfill({ json: { connectors: [{ name: "relay_one", status: "disabled" }] } }));
+  await input.fill("/mc"); await expect(page.locator("#slash-options")).toContainText("reconnect, enable or disable");
+  await page.locator("#slash-options [role=option]").click(); await expect(input).toHaveValue("/mcp "); expect(f.calls).toEqual([]);
+  await input.fill("/mcp"); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect(page.locator("#mcp-dialog")).toBeVisible(); await page.locator("#mcp-close").click();
+  await input.fill("/mcp verbose"); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect(page.locator("#controls-content")).toContainText("relay_one · disabled");
+  await page.locator("#controls-dialog").evaluate(dialog => dialog.close()); expect(f.calls).toEqual([]);
+  const commands = ["/mcp reconnect relay_one", "/mcp disable all", "/mcp enable relay_one"];
+  for (const [index, text] of commands.entries()) {
+    await input.fill(text); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+    await expect.poll(() => f.calls.length).toBe(index + 1);
+    expect(f.calls.at(-1)).toEqual({ tail: index ? "queue" : "messages", text, attachments: [] });
+    f.snapshot.status = "running"; await f.emit();
+  }
+  expect(f.errors).toEqual([]);
+});
+
+test("rejected MCP attachments keep the command and file available for retry", async ({ page }) => {
+  const f = await fixture(page), input = page.locator("#message-input");
+  f.responseStatus = 400; f.responseError = "/mcp does not accept attachments. Remove them or send them in a separate message.";
+  await page.locator("#attachment-input").setInputFiles({ name: "keep-mcp.txt", mimeType: "text/plain", buffer: Buffer.from("Unsent private file") });
+  await expect(page.locator("#attachment-chips")).toContainText("keep-mcp.txt");
+  await input.fill("/mcp disable all"); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit());
+  await expect(page.locator("#toasts")).toContainText("/mcp does not accept attachments"); await expect(input).toHaveValue("/mcp disable all");
+  await expect(page.locator("#attachment-chips")).toContainText("keep-mcp.txt");
+  await page.locator("#attachment-chips button").filter({ hasText: "×" }).click(); f.responseStatus = 202;
+  await page.locator("#composer").evaluate(form => form.requestSubmit()); await expect.poll(() => f.calls.length).toBe(2);
+  expect(f.calls.at(-1)).toEqual({ tail: "messages", text: "/mcp disable all", attachments: [] }); expect(f.errors).toEqual([]);
+});
+
 for (const width of [1280, 320]) test(`Claude Fast commands at ${width}px are discoverable, literal and queued while busy`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page), input = page.locator("#message-input");

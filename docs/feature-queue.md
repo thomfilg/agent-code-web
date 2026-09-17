@@ -62,6 +62,21 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: fixed installed Claude's print-mode `/mcp` mutation handlers returning
+  terminal-only placeholders. Native SDK reconnect/toggle now verify actual
+  status and private-profile persistence; literal single/all commands use FIFO.
+  Bare manager/status controls, drafts and installed command catalogs remain
+  intact. No model calls for MCP actions; native errors pause the queue and
+  Stop cannot leave a broken first-session resume ID. Shared host writes and
+  unsafe private files fail closed; saved credentials/selections stay unchanged.
+  Actual CLI/environment/gateway smoke verifies HTTP/stdio state and next-turn
+  tool availability with three local model replies; failure/Stop variant uses
+  zero inference. Nine unit/controller cases; three browser additions, related
+  suite **28/28**. Normal unit suite **431/431**; previous native goal smoke passes
+  with four loopback replies. Fixture-only corrections are recorded without
+  weakening effect assertions. Next safe item-20 work: bundled Claude workflows
+  and installed plugin namespaces. Original order/count and host/account/live
+  gates remain open; save to PR #2, no merge/deploy/live-data changes.
 - 20: Claude `/goal` now has actual native evaluator-loop and same-session
   Stop/resume acceptance. Four loopback requests exercise negative/positive
   evaluation; six cover interrupted evaluation, restored condition, explicit

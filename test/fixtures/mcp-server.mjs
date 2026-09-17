@@ -2,7 +2,7 @@ import http from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 
 // Actual HTTP + OAuth test server: no provider accounts or model requests.
-export async function startMcpFixture({ port = 0, requireAuth = true, anonymousInitialize = false, mcpPath = "/mcp", oauthPrefix = "", issuerParameter = true } = {}) {
+export async function startMcpFixture({ port = 0, requireAuth = true, anonymousInitialize = false, mcpPath = "/mcp", oauthPrefix = "", issuerParameter = true, beforeMcpRequest = null } = {}) {
   const codes = new Map(), clients = new Map(); let refreshes = 0, exchanges = 0, calls = 0, pkce = true, rejectTokens = false;
   let origin;
   const server = http.createServer(async (req, res) => {
@@ -35,6 +35,7 @@ export async function startMcpFixture({ port = 0, requireAuth = true, anonymousI
       if (url.pathname !== mcpPath) return json(404, { error: "not_found" });
       if (req.method !== "POST") return json(405, { error: "method_not_allowed" });
       const rpc = JSON.parse(await read());
+      await beforeMcpRequest?.(rpc);
       if ((requireAuth && req.headers.authorization !== "Bearer fixture-access-secret" || rejectTokens) && !(anonymousInitialize && ["initialize", "notifications/initialized"].includes(rpc.method))) {
         res.setHeader("www-authenticate", `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource${mcpPath}"`); return json(401, { error: "unauthorized" });
       }

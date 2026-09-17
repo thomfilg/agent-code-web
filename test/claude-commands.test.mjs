@@ -46,6 +46,9 @@ test("reported native commands invalidate cached discovery only when the catalog
   assert.deepEqual((await f.commands.list(f.store.get(f.chat.id))).commands, [{ name: "fixture-plugin:new" }]);
   const revision = f.store.get(f.chat.id).commandCatalogRevision; assert(revision > 0);
   await hooks.onEvent(event); assert.equal(f.store.get(f.chat.id).commandCatalogRevision, revision);
+  await hooks.onEvent({ type: "session_capabilities", connectors: [{ name: "relay_one", status: "disabled" }] });
+  assert.deepEqual(f.store.get(f.chat.id).slashCommands, ["fixture-plugin:new"], "A connector-only status update must not erase installed commands");
+  assert.equal(f.store.get(f.chat.id).commandCatalogRevision, revision);
   const restored = new ChatStore(f.root); await restored.initialize();
   assert.equal(restored.get(f.chat.id).commandCatalogRevision, revision);
   await hooks.onEvent({ type: "command_catalog", commands: [{ name: "fixture-plugin:new", aliases: ["fresh"], description: "Changed native metadata" }] });

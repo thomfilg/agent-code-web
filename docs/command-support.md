@@ -50,6 +50,7 @@ and remain at the beginning of native stream-json input.
 | `/fast [on/off]` (Claude) | Per-chat private-gateway opt-in, fresh authenticated account checks, structured native status, FIFO and same-session Stop/resume. Native Fast/standard requests, credits, API denials, persisted cooldowns, configuration/model interop and managed-policy enforcement verified. No provider key in workers. Host profiles, custom upstreams, native managed-policy limitations and live activation remain gated below. |
 | `/usage`, `/status`, `/context` | Existing session/usage inspection. |
 | `/diff`, `/mcp`, `/skills`, `/help` | Workspace diff, connection manager, installed-command picker. |
+| `/mcp reconnect/enable/disable [server\|all]` (Claude) | Actual native SDK controls with post-action status verification, per-chat native persistence, FIFO, error/Stop recovery and no model call. Bare `/mcp` keeps the saved-connection manager; `/mcp verbose` shows worker-reported status. Private-file preflight and host-profile mutation gates apply; live activation pending. |
 | `/new`, `/clear`, `/resume` | New-chat flow or searchable saved-chat picker; never implicitly delete the old conversation. |
 | `/rename [title]`, `/archive`, `/delete` | Existing organization APIs; deletion retains explicit target confirmation. Delayed responses preserve newer drafts. |
 | `/copy`, `/raw`, `/transcript` | Latest completed response and plain transcript preview. |
@@ -87,13 +88,66 @@ Do not treat removing entries from autocomplete as implementing them.
   current Linux worker. Native APIs still need capability/version checks if a
   Windows worker is introduced.
 - Claude acceptance below covers command transport, native local results,
-  custom expansion, configuration readback, reload, Fast, goals and resume, not
-  every command's effect. Next verify native MCP actions, bundled
-  workflows and installed plugin namespaces. Account-backed commands and shared
+  custom expansion, configuration readback, reload, Fast, goals, native MCP
+  actions and resume, not every command's effect. Next verify bundled workflows
+  and installed plugin namespaces. Account-backed commands and shared
   host-profile writes also need the company-isolation gate in item 21. Do not
   infer support from a catalog entry or treat a native removal notice as a
   working replacement. Use the installed version's capabilities, not commands
   added only in newer documentation.
+
+### Claude native MCP controls and persistence
+
+Installed Claude **2.1.222** exposes `/mcp reconnect`, `enable` and `disable`,
+but executing their slash handlers in print mode reproduced the native
+terminal-callback-unavailable response. Discovery alone was not working control.
+Relay now invokes the installed stream-json `mcp_reconnect`/`mcp_toggle` controls,
+checks the resulting `mcp_status`, and uses a local native `/mcp` status command
+to checkpoint the same session journal. These actions never become model tasks.
+Bare `/mcp` still opens Relay's saved connection manager; `/mcp verbose` shows
+the saved native server inventory. Single-server and `all` actions use the
+ordinary message/FIFO path. Native help and invalid arguments remain native.
+
+The [native MCP persistence contract](https://code.claude.com/docs/en/mcp#disable-a-server-without-removing-it)
+places server preferences in the project entry of `.claude.json`. Native code,
+not Relay JSON rewriting, owns those changes. Relay preflights the private
+file without returning account/project metadata; linked, malformed or unsafe
+files fail closed, and shared host-profile mutations stay gated on item 21.
+Saved connection credentials and environment selections are not changed.
+Attachments are rejected before acceptance/queueing, preserving the draft.
+
+Control requests have correlated IDs, bounded timeouts and Stop cancellation.
+Errors expose only bounded categories/status, not upstream URLs, headers or
+credentials. Partial failures and unverified acknowledgements are errors, not
+successful assistant replies; the queue pauses without consuming later inputs.
+Connector-only refreshes retain installed commands. The first native session
+ID remains provisional until a real journal checkpoint, including preflight,
+spawn and startup-interruption failures, so retry cannot resume a missing file.
+
+`node scripts/smoke-real-claude-mcps.mjs` uses the real installed CLI, Relay's
+environment selection and MCP/provider gateways, with private profiles in a
+network/PID namespace containing only loopback. It verifies HTTP and stdio
+connections, actual reconnect initialization, single/all enable/disable,
+command-first startup, Stop/resume, independent chats, native help/errors,
+next-turn tool removal and reintroduction, and an actual authenticated fixture
+echo invocation. Three authored loopback model replies; no real inference or
+accounts. Worker arguments/environment contain neither fixture provider nor
+MCP credentials. The failure variant (`--errors`) makes zero model requests:
+rejected reconnect/enable, honest native partial-enable persistence, recovery,
+Stop during an actual reconnect and first-connection interruption, preserving
+queued input and valid same-session resume.
+
+Initial fixtures needed their own MemoryRecords instance. After adding the
+failure hook, the initialization counter was accidentally inside an optional
+call and stopped incrementing in the base test. The unchanged effect assertion
+caught it; the counter now increments unconditionally. Neither correction
+weakens native reconnect/tool assertions. Nine unit/controller cases plus three
+browser additions cover private files, protocol errors, FIFO and desktop/320px
+manager/status/action paths. Related browser suite **28/28**; normal unit suite
+**431/431**. The previous native goal smoke remains green with four loopback
+requests. Backend activation, shared-host isolation, real account consent and
+remaining item-20 commands are not claimed complete; no merge/deployment or
+live chat/browser/account changes were made.
 
 ### Claude native goal execution and response boundaries
 

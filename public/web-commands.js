@@ -39,4 +39,4 @@ export const WEB_COMMANDS = {
 export const webCommands = (agent, capabilities = {}) => Object.entries(WEB_COMMANDS)
   .filter(([name]) => !["goal", "init", "review", "fast", "personality", "ps", "clean", "debug-config", "side", "btw", "fork", "agent", "ide", "app", "apps", "plugins", "hooks", "experimental", "memories", "import", "approve", "feedback", "logout"].includes(name) || agent === "codex")
   .filter(([name]) => !["fast", "personality"].includes(name) || capabilities[name])
-  .map(([name, description]) => ({ name, description, aliases: Object.entries(WEB_COMMAND_ALIASES).filter(([, target]) => target === name).map(([alias]) => alias), kind: "Web control", web: true }));
+  .map(([name, description]) => ({ name, description: name === "mcp" && agent === "claude" ? "Manage saved MCP connections; /mcp verbose shows status; reconnect, enable or disable [server|all] controls this chat" : description, aliases: Object.entries(WEB_COMMAND_ALIASES).filter(([, target]) => target === name).map(([alias]) => alias), kind: "Web control", web: true }));
