@@ -303,10 +303,12 @@ export class ClaudeAdapter {
     let resultBaseline = null, resultCount = 0;
     let stderr = "";
     const activeTools = new Map();
+    const backgroundCandidates = new Set();
     const completeTool = (itemId, output = "", failed = false, resultMissing = false) => {
       const tool = activeTools.get(itemId);
       if (!tool) return;
       activeTools.delete(itemId);
+      backgroundCandidates.delete(itemId);
       this.hooks.onEvent?.({ ...tool, state: "completed", failed, resultMissing, output });
     };
     const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -316,6 +318,17 @@ export class ClaudeAdapter {
       mcpControl?.accept(event);
       reviewControl?.accept(event);
       this.permissionMode(event);
+      // Any private SDK turn can launch an app, including a generated skill
+      // or ordinary prose. Retain its actual owner, not just /run and /verify.
+      // Bind the native task event to this live main-session Bash call; text,
+      // unrelated tasks and late events after interruption are not evidence.
+      if (managed && !this.applicationSession && this.turnSession === managed && this.child === child
+        && !this.stopped && version === this.sendVersion && event.type === "system" && event.subtype === "task_started"
+        && event.session_id === sessionId && !event.parent_tool_use_id && event.task_type === "local_bash"
+        && typeof event.task_id === "string" && event.task_id
+        && typeof event.tool_use_id === "string" && backgroundCandidates.has(event.tool_use_id)) {
+        this.applicationSession = managed;
+      }
       if (!mcpControl) output.accept(event);
       if (event.type === "system" && event.subtype === "notification" && ["fast-mode-overage-rejected", "fast-mode-org-changed", "fast-mode-cooldown-started", "fast-mode-cooldown-expired", "stop-hook-error"].includes(event.key) && typeof event.text === "string" && !notifications.has(event.key)) {
         notifications.add(event.key);
@@ -338,6 +351,7 @@ export class ClaudeAdapter {
       if (event.type === "assistant") {
         for (const block of event.message?.content || []) {
           if (block.type === "tool_use" && !activeTools.has(block.id)) {
+            if (!event.parent_tool_use_id && block.name === "Bash" && typeof block.id === "string" && block.id) backgroundCandidates.add(block.id);
             const input = redact(JSON.stringify(block.input || {}, null, 2)).slice(0, 16000);
             const title = redact(block.input?.command || block.input?.file_path || block.input?.pattern || block.name || "Tool call").slice(0, 500);
             const tool = { type: "tool", tool: block.name || "tool", itemId: block.id, title, input };

@@ -148,6 +148,64 @@ test("failed native-mode synchronization reaches the runtime fatal handler witho
   }
 });
 
+test("a native background Bash task retains an ordinary or generated-skill session without replaying input", async t => {
+  for (const text of ["Start this project's HTTP app", "/run-fixture Start the generated recipe"]) {
+    const f = await fixture(t, { interactive: true }); f.block = true;
+    const running = f.adapter.send(text); await waitFor(() => f.inputs?.length === 1);
+    f.emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "shell-app", name: "Bash", input: { command: "node server.mjs", run_in_background: true } }] } });
+    f.emit({ type: "system", subtype: "task_started", session_id: f.nativeSession, task_type: "local_bash", task_id: "native-app", tool_use_id: "shell-app" });
+    f.complete(); await running;
+    assert(f.adapter.applicationSession); assert.equal(f.child.exitCode, null); assert.equal(f.child.stdin.writable, true);
+    const capability = f.adapter.capability, session = f.adapter.sessionId;
+    f.block = false; await f.adapter.send("Check the same app", { mode: "plan", model: "haiku" });
+    assert.equal(f.launches.length, 1); assert.equal(f.adapter.sessionId, session);
+    assert.deepEqual(f.inputs.map(input => input.message.content), [text, "Check the same app"]);
+    await f.adapter.stop(); assert.notEqual(f.child.exitCode ?? f.child.signalCode, null); assert.equal(f.broker.validate(capability, "anthropic"), null);
+  }
+});
+
+test("only a bound live native Bash task can retain a private ordinary session", async t => {
+  const changes = [
+    { session_id: "foreign" }, { parent_tool_use_id: "child-agent" }, { task_type: "unknown" },
+    { task_id: "" }, { task_id: null }, { tool_use_id: "unreported" }, { type: "assistant" }, { subtype: "task_progress" },
+  ];
+  for (const change of changes) {
+    const f = await fixture(t, { interactive: true }); f.block = true;
+    const running = f.adapter.send("Do not retain unrelated activity"); await waitFor(() => f.inputs?.length === 1);
+    f.emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "shell-app", name: "Bash", input: { command: "node server.mjs" } }] } });
+    f.emit({ type: "system", subtype: "task_started", session_id: f.nativeSession, task_type: "local_bash", task_id: "native-app", tool_use_id: "shell-app", ...change });
+    f.complete(); await running;
+    assert.equal(f.adapter.applicationSession, undefined); assert.notEqual(f.child.exitCode ?? f.child.signalCode, null);
+  }
+});
+
+test("interruption cannot promote a late background task or keep an ordinary session alive", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true; f.hold = "interrupt";
+  const running = f.adapter.send("Start a task"), rejected = assert.rejects(running, /interrupted/);
+  await waitFor(() => f.inputs?.length === 1);
+  f.emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "shell-app", name: "Bash", input: {} }] } });
+  const interrupting = f.adapter.interrupt(); await waitFor(() => f.controls.some(control => control.request.subtype === "interrupt"));
+  f.emit({ type: "system", subtype: "task_started", session_id: f.nativeSession, task_type: "local_bash", task_id: "late-app", tool_use_id: "shell-app" });
+  f.respond(f.controls.find(control => control.request.subtype === "interrupt"));
+  await interrupting; await rejected;
+  assert.equal(f.adapter.applicationSession, undefined); assert.notEqual(f.child.exitCode ?? f.child.signalCode, null);
+});
+
+test("child tools, completed calls and quoted task metadata do not promote an ordinary session", async t => {
+  for (const variant of ["child", "read", "completed", "text", "missing-id"]) {
+    const f = await fixture(t, { interactive: true }); f.block = true;
+    const running = f.adapter.send("Do not retain unsupported activity"); await waitFor(() => f.inputs?.length === 1);
+    const task = { type: "system", subtype: "task_started", session_id: f.nativeSession, task_type: "local_bash", task_id: "native-app", tool_use_id: variant === "missing-id" ? undefined : "shell-app" };
+    f.emit({ type: "assistant", ...(variant === "child" ? { parent_tool_use_id: "child-agent" } : {}), message: { content: [variant === "text"
+      ? { type: "text", text: JSON.stringify(task) }
+      : { type: "tool_use", id: task.tool_use_id, name: variant === "read" ? "Read" : "Bash", input: {} }] } });
+    if (variant === "completed") f.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "shell-app", content: "Completed without a background task" }] } });
+    if (variant !== "text") f.emit(task);
+    f.complete(); await running;
+    assert.equal(f.adapter.applicationSession, undefined); assert.notEqual(f.child.exitCode ?? f.child.signalCode, null);
+  }
+});
+
 test("application replies retain one CLI and apply next-turn mode/model/effort without rewriting literal inputs", async t => {
   const f = await fixture(t), text = "/run Start ação\nand keep the server running";
   await f.adapter.send(text, { mode: "accept_edits", model: "sonnet", effort: "high" });

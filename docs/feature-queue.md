@@ -62,6 +62,22 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: reproduced generated `/run-fixture` losing its real HTTP app at reply
+  completion, then fixed private SDK lifetime based on a bound native main
+  Bash background-task event rather than the slash command's name. Ordinary
+  app-launch requests now retain it too; unknown/foreign/child/stale/quoted
+  events cannot. `/run-skill-generator` acceptance creates its driver and
+  recipe through native protected-file approvals, actually drives HTTP,
+  reloads/discovers the saved skill, and reuses it through direct invocation,
+  `/run` and `/verify`. Five disposable variants cover direct/plain launch,
+  denial, Stop and Send now; actual PID/data, file absence/content, unrelated
+  queue and same-native-history resume verified (**18/18/7/5/6** main replies).
+  Authored loopback inference, not real accounts or a model-quality claim.
+  Four new unit/session cases; syntax/unit **491/491**, browser **59/59**;
+  native first-run, approval/questions, classifier cancellation and review-fix
+  regressions pass. Remaining item-20 gates: `/simplify`, `/loop`, plugin
+  namespaces and shared-host/company/account/live checks. Queue order/count
+  unchanged. Save to PR #2 without merge, deployment or live-data/account edits.
 - 20: added installed-Claude native Bash/permission-classifier acceptance,
   closing that distinct private-profile test gate. **19** disposable variants
   verify Manual/Edits once-approval and repeated denial, Deny prompts,

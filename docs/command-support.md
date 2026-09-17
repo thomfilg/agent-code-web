@@ -21,6 +21,7 @@ and remain at the beginning of native stream-json input.
 | `/review [--base branch / --commit SHA / instructions]` | Native `review/start`, not an ordinary prompt. Tracks both inner execution and outer completion IDs. Real adapter completion and interruption pass. |
 | `/code-review [level] [--fix] [target]` (Claude) | Native bundled review with actual diff/read/findings and explicit file-fix verification. Findings survive Stop/resume; Plan blocks edits. SDK interruption checkpoints the first review for Stop and Send now; flags, targets, FIFO, drafts and remaining queued inputs are retained. GitHub `--comment` and live activation are not covered by this acceptance. |
 | `/run`, `/verify` (Claude) | Actual native tools drive an HTTP application that remains available between replies. Native Send now preserves it, including interruption of the first command; Stop terminates it and the same native history resumes. Private-profile native approvals support recipe creation, denial and cancellation; saved recipes reload and run. Native shell-classifier routing, refusals and cancellation are accepted below; remaining workflow/shared-host gates are explicit. |
+| `/run-skill-generator`, generated project run skills (Claude) | Native generation creates the driver and recipe through explicit protected-file approval after actual HTTP interaction. Reload/discovery, direct invocation, `/run` reuse and `/verify` all execute against the app. Native background Bash ownership now retains apps launched by any private SDK input, not just those two built-in command names. Denial, Stop, Send now and saved-context resume pass. |
 | `/side [question]`, `/btw [question]` | Native ephemeral Codex fork on the same worker, separate third-column transcript/questions, scoped attachments and independent stop. Parent context/goal/turn are retained; no copied chat folder or injected main messages. Real installed CLI verified concurrent turns, inherited context, active-goal isolation, cancellation and parent survival. Controller/browser checks pass; live backend activation pending. |
 | `/fork [title]` (Codex) | Independent chat, workspace, native history and attachment records. Same company/environment/settings, without queued inputs, approval state or browser grants. Active-source and nested-fork native tests pass; goals remain paused until explicit input. Empty chats need no fabricated native turn. Controller and browser retry/draft/navigation checks pass; live activation pending. Workspace portability limits are below. |
 | `/agent`, `/subagents` (Codex) | Native descendant picker, separate conversation/composer/approvals, direct replies or active-turn steering, and child-only interruption. Bounded history pages and controller-owned snapshots remain readable while asleep. Verified with the installed CLI using synthetic stored sessions and loopback responses, plus controller and desktop/mobile browser tests. Live activation pending. |
@@ -93,7 +94,7 @@ Do not treat removing entries from autocomplete as implementing them.
   custom expansion, configuration readback, reload, Fast, goals, native MCP
   actions, bundled `/code-review`, retained applications, shell classification
   and resume, not every command's effect. Next verify other bundled
-  workflows (`/run-skill-generator`, `/simplify`, `/loop`)
+  workflows (`/simplify`, `/loop`)
   and installed plugin namespaces. `/code-review --comment`, account-backed
   commands and shared
   host-profile writes also need the company-isolation gate in item 21. Do not
@@ -160,8 +161,8 @@ mode copy now accurately distinguishes private profiles from shared hosts.
 
 Approval checkpoint: normal syntax/unit suite **458/458**; combined
 Claude-command/conversation browser suite **53/53**. Native command, MCP, review-fix, goal and Fast
-regressions pass. Item 20 remains active: `/run-skill-generator`, other bundled
-workflows/plugin namespaces, retained-session interoperability and live
+regressions pass. Generated run recipes are accepted below. Item 20 remains
+active for other bundled workflows/plugin namespaces, retained-session gates and live
 activation remain separate gates. No deployment, merge, real approval,
 personal Chrome/profile or company credential changes.
 
@@ -221,6 +222,62 @@ All **19** native variants pass (**99** main and **38** classifier requests,
 with titles counted separately). Syntax/unit suite: **487/487**; combined
 Claude-command/conversation browser suite: **59/59**. The fixture and this
 acceptance record are the only changes in this checkpoint.
+
+### Claude generated run recipes and native background ownership
+
+Reproduced with installed Claude **2.1.222**: `/run-skill-generator` successfully
+created a real driver and skill, but invoking that new `/run-fixture` directly
+ended its running HTTP app at the end of the reply (`ECONNREFUSED`). Relay kept
+the owner CLI alive only for the literal `/run` and `/verify` commands.
+
+A private SDK turn now becomes a retained application session when Claude
+reports a native `task_started` for its live main-session Bash call. This also
+works for ordinary requests to start the app. The event must match the current
+session and tool ID, have type `local_bash`, and arrive before interruption.
+Quoted metadata, child/foreign/unknown tasks, completed calls and missing IDs
+cannot retain a process. No permission decision is inferred from this event.
+Ordinary replies without such a task still close their temporary transport;
+retained apps continue to use the existing explicit Stop and idle cleanup.
+
+`node scripts/smoke-real-claude-recipes.mjs` uses actual native prompt/skill
+expansion, Read/Write/Bash/Skill/TaskStop tools, a controller-owned gateway and
+HTTP application in disposable loopback-only network/PID namespaces:
+
+- Default: inspect the app manifest/source; launch it; write the driver only
+  after once-approval; drive actual HTTP creation (201), validation (400) and
+  retrieval; stop that test app; write the verified skill after a separate
+  approval. No fixture-side driver/recipe creation occurs. Explicit Stop then
+  reload/discovery precede a fresh direct skill invocation. `/run` loads the
+  generated skill with the native Skill tool; `/verify` reads the saved recipe
+  and executes its driver. The same PID/data survive all replies. Final Stop
+  closes the app and resumes the original native context: **18** main requests.
+- `--plain-run`: the same workflow starts its retained app from ordinary user
+  text instead of a direct slash invocation: **18** main requests.
+- `--deny`: refusal leaves both driver and recipe absent and stops the test
+  app; saved-context resume does not replay writes: **7** main requests.
+- `--stop`: cancel while the first protected write awaits approval, preserve
+  unrelated queue input, reject the old approval ID, close the app and resume
+  without creating either file: **5** main requests.
+- `--send-now`: cancel that write, actually complete the selected follow-up
+  while the original app/PID/data survive, preserve the other queue entry,
+  reject stale approval, then Stop/resume without writes: **6** main requests.
+
+These are authored loopback model replies, not real inference or an evaluation
+of generated prose quality. Native titles are separate from the counts above.
+Saved files, permissions, actual HTTP effects and session IDs are asserted.
+The fixture waits for actual app readiness and identifies the last user input
+without confusing Claude's appended system/tool catalog with the command.
+Those fixture corrections are distinct from the reproduced lifetime fix.
+
+Four new adapter/session tests cover promotion, exact input/settings/session
+reuse, Stop revocation and invalid/stale/child/quoted events. Syntax/unit suite
+**491/491**; combined Claude-command/conversation browser suite **59/59**.
+Existing native regressions pass: first-run Send now (**8** replies), approved
+recipe/questions (**13**), shell-classifier Send now (**6** main, **1** classifier
+and **3** titles), and review-fix (**7** main replies).
+This closes the private-profile generator/direct-run gate, not
+`/simplify`, `/loop`, plugin namespaces, shared-host/company/account checks or
+live activation. No real profiles/accounts, services or chat data are changed.
 
 ### Claude native Plan-mode transitions
 
@@ -525,7 +582,8 @@ Remaining gates are explicit:
   profiles through the explicit native approval channel described above.
   The default smoke still exercises denial and separately supplied recipe
   reuse; `--approve-recipe` verifies actual native creation. Shared-host replies
-  and the complete `/run-skill-generator` workflow remain open.
+  remain gated on company isolation; private `/run-skill-generator` execution
+  and its generated direct run skill are accepted above.
 - Application-session Plan entry/exit, explicit approval/denial, subsequent
   file permissions and Stop are now accepted in the four variants above.
   The separate shell-classifier fixture above now verifies native routing,
