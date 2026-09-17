@@ -20,7 +20,7 @@ and remain at the beginning of native stream-json input.
 | `/compact` | Native compaction, FIFO while busy, wakes stopped worker. Real Codex/Claude adapters tested with local API fixtures. |
 | `/review [--base branch / --commit SHA / instructions]` | Native `review/start`, not an ordinary prompt. Tracks both inner execution and outer completion IDs. Real adapter completion and interruption pass. |
 | `/code-review [level] [--fix] [target]` (Claude) | Native bundled review with actual diff/read/findings and explicit file-fix verification. Findings survive Stop/resume; Plan blocks edits. SDK interruption checkpoints the first review for Stop and Send now; flags, targets, FIFO, drafts and remaining queued inputs are retained. GitHub `--comment` and live activation are not covered by this acceptance. |
-| `/run`, `/verify` (Claude) | Actual native tools drive an HTTP application that remains available between replies. Native Send now preserves it, including interruption of the first command; Stop terminates it and the same native history resumes. Private-profile native approvals now support explicit recipe creation, denial and cancellation; saved recipes reload and run. Remaining classifier, shared-host and retained-session gates are documented below. |
+| `/run`, `/verify` (Claude) | Actual native tools drive an HTTP application that remains available between replies. Native Send now preserves it, including interruption of the first command; Stop terminates it and the same native history resumes. Private-profile native approvals support recipe creation, denial and cancellation; saved recipes reload and run. Native shell-classifier routing, refusals and cancellation are accepted below; remaining workflow/shared-host gates are explicit. |
 | `/side [question]`, `/btw [question]` | Native ephemeral Codex fork on the same worker, separate third-column transcript/questions, scoped attachments and independent stop. Parent context/goal/turn are retained; no copied chat folder or injected main messages. Real installed CLI verified concurrent turns, inherited context, active-goal isolation, cancellation and parent survival. Controller/browser checks pass; live backend activation pending. |
 | `/fork [title]` (Codex) | Independent chat, workspace, native history and attachment records. Same company/environment/settings, without queued inputs, approval state or browser grants. Active-source and nested-fork native tests pass; goals remain paused until explicit input. Empty chats need no fabricated native turn. Controller and browser retry/draft/navigation checks pass; live activation pending. Workspace portability limits are below. |
 | `/agent`, `/subagents` (Codex) | Native descendant picker, separate conversation/composer/approvals, direct replies or active-turn steering, and child-only interruption. Bounded history pages and controller-owned snapshots remain readable while asleep. Verified with the installed CLI using synthetic stored sessions and loopback responses, plus controller and desktop/mobile browser tests. Live activation pending. |
@@ -91,8 +91,8 @@ Do not treat removing entries from autocomplete as implementing them.
   Windows worker is introduced.
 - Claude acceptance below covers command transport, native local results,
   custom expansion, configuration readback, reload, Fast, goals, native MCP
-  actions, bundled `/code-review` and resume, not every command's effect.
-  Next finish the application-session gates below, then verify other bundled
+  actions, bundled `/code-review`, retained applications, shell classification
+  and resume, not every command's effect. Next verify other bundled
   workflows (`/run-skill-generator`, `/simplify`, `/loop`)
   and installed plugin namespaces. `/code-review --comment`, account-backed
   commands and shared
@@ -128,9 +128,9 @@ The implementation follows the native
   and skipping. Answers map only to the exact native question text. Skipping
   denies the tool with an explicit instruction not to invent answers.
 - Unsupported native dialogs and malformed questions fail closed. Native
-  rich option previews, persistent approval choices, shared-host replies and
-  shell permission-classifier acceptance are not claimed as supported.
-  Native `ExitPlanMode` state reconciliation is verified separately below.
+  rich option previews, persistent approval choices and shared-host replies
+  are not claimed as supported. Shell permission classification and native
+  `ExitPlanMode` state reconciliation are verified separately below.
 
 `node scripts/smoke-real-claude-run.mjs --approve-recipe --questions` uses the
 actual installed **2.1.222** CLI, controller and gateway in disposable
@@ -164,6 +164,63 @@ regressions pass. Item 20 remains active: `/run-skill-generator`, other bundled
 workflows/plugin namespaces, retained-session interoperability and live
 activation remain separate gates. No deployment, merge, real approval,
 personal Chrome/profile or company credential changes.
+
+### Claude native shell permission classification
+
+`node scripts/smoke-real-claude-shell.mjs` exercises installed Claude **2.1.222**
+through the actual Relay controller, private gateway and native Bash tool.
+The only saved allow rule starts a disposable HTTP application. The tested
+marker command is not preapproved: only the native tool can append its file.
+Each variant checks the actual command result, file contents or absence,
+unchanged HTTP app PID/data, original native session and explicit Stop/resume.
+
+These are **authored loopback model/classifier responses**, not real inference
+or an evaluation of the classifier's judgment. The fixture recognizes the
+installed security-monitor contract, binds it to the exact disposable command
+and tests both verdicts through the native parser and permission machinery.
+It does not grant Relay-wide shell access, modify native policy, use a real
+account or change live chat data. Network/PID namespaces contain only loopback;
+the profile/workspace are temporary and removed at completion.
+
+| Variant | Verified behavior | Main / classifier requests |
+| --- | --- | --- |
+| Default Manual; `--mode=accept_edits` | Explicit once-approval executes the original arguments despite a forged replacement; repeating the same command asks again and denial leaves the marker unchanged | 7 / 0 each |
+| `--mode=dont_ask` | Native denial without a user prompt or marker write | 5 / 0 |
+| Auto or Plan, `--classifier=allow` | Native first-stage allow executes exactly once, without a user prompt | 5 / 1 each |
+| Auto or Plan, `--classifier=review` | First-stage refusal reaches the second stage; its allow executes exactly once | 5 / 2 each |
+| Auto or Plan, `--classifier=block` | Both classifier stages refuse; no command execution or approval callback | 5 / 2 each |
+| Auto or Plan, `--classifier=invalid` | Malformed verdicts exhaust the installed four retries per stage and fail closed | 5 / 10 each |
+| Auto or Plan, `--classifier=error` | The classifier and native fallback model both return 403; no write or user prompt | 5 / 2 each |
+| Manual, `--stop` or `--send-now` | Cancel the pending approval; reject its old ID; retain unrelated queued input; Send now finishes the selected input and an additional probe | 4 / 0 and 6 / 0 |
+| Auto or Plan, `--classifier=allow --stop` | Stop while classification is pending; its late allow cannot execute | 4 / 1 each |
+| Auto or Plan, `--classifier=allow --send-now` | Interrupt without replacing the app; drain the late allow and finish the selected input plus another native turn before checking no write/replay | 6 / 1 each |
+
+Use `--mode=auto` or `--mode=plan` for classifier variants; Plan defaults to the
+block fixture, Auto to allow. `--trace` reports request kind/model without any
+credentials. Native title calls are counted separately. Every variant retains
+the selected mode and checks the settings file gained no persistent allow rule.
+The optional command-prefix extraction path is not exercised by these commands
+and is not counted as acceptance of prefix suggestions or persistent grants.
+
+The observed Plan classifier path matches the documented
+[permission modes](https://code.claude.com/docs/en/permissions): Plan can use
+classifier-approved commands when native Auto support is available. Therefore
+the fixture must not assume every Bash call in Plan opens a manual prompt.
+No native policy was changed to make these tests pass.
+
+Fixture corrections, not product fixes: recognize the security-monitor request
+separately from main/title queries, model its actual two-stage verdict contract,
+allow its installed ten-response malformed-output retry budget, and wait for
+the selected Send now input's actual completion rather than only submission. This
+checkpoint adds acceptance coverage; it does not claim a new runtime fix or
+close the separate reported Codex/local-IPC Auto-mode case (queue item 27).
+Bundled workflows, installed plugin namespaces, shared-host/company/account
+checks and live activation remain open under item 20.
+
+All **19** native variants pass (**99** main and **38** classifier requests,
+with titles counted separately). Syntax/unit suite: **487/487**; combined
+Claude-command/conversation browser suite: **59/59**. The fixture and this
+acceptance record are the only changes in this checkpoint.
 
 ### Claude native Plan-mode transitions
 
@@ -269,9 +326,9 @@ launches, distinguish title calls from task calls, and allow the full settings
 matrix 120 seconds rather than canceling its final command at 60 seconds after
 healthy six-second CLI replies. `--trace` now makes that overall timeout explicit;
 the command/effect assertions are unchanged. Item 20 stays active; long-lived
-capabilities are accepted below. Other retained-session interop, shell-classifier
-acceptance and remaining bundled workflows are still open. No merge, deployment
-or live data changes.
+capabilities and other retained-session interop are accepted below, and shell
+classification above. Remaining bundled workflows are still open. No merge,
+deployment or live data changes.
 
 ### Claude long-lived gateway access
 
@@ -310,8 +367,8 @@ variants. Syntax/unit suite: **476/476**; combined Claude-command/conversation
 browser suite: **59/59**. Native regressions pass for first-run Send now (**8**
 replies), first-review Stop/resume (**3**), and explicit recipe approvals plus
 questions (**13**). MCP/review and retained-session Fast interop are accepted
-below. Shell-classifier and other workflow gates remain open; this is not
-blanket acceptance of every command or a deployment.
+below, and shell classification above. Other workflow gates remain open;
+this is not blanket acceptance of every command or a deployment.
 
 ### Claude MCP and review inside a running application
 
@@ -471,9 +528,10 @@ Remaining gates are explicit:
   and the complete `/run-skill-generator` workflow remain open.
 - Application-session Plan entry/exit, explicit approval/denial, subsequent
   file permissions and Stop are now accepted in the four variants above.
-  Native shell permission-classifier requests still need their own fixture
-  contract; file-tool acceptance does not establish that separate case.
-  Native policy was not bypassed and no classifier approval was fabricated.
+  The separate shell-classifier fixture above now verifies native routing,
+  allowed/denied effects, malformed/API failures and cancellation. Its authored
+  verdicts are not a claim about real model judgment; native policy remains
+  unchanged. Prefix suggestions and persistent shell grants are not covered.
 - Appended system instructions cannot be replaced by these native controls.
   Such changes fail before input, with an explicit Stop/retry notice; running
   apps are not silently terminated. First Fast opt-in now uses native runtime

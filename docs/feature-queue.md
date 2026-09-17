@@ -62,6 +62,21 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: added installed-Claude native Bash/permission-classifier acceptance,
+  closing that distinct private-profile test gate. **19** disposable variants
+  verify Manual/Edits once-approval and repeated denial, Deny prompts,
+  Auto/Plan two-stage allow/refusal, malformed replies, API/fallback failures,
+  Stop and Send now with late verdicts. Actual marker writes/absence, original
+  arguments, unchanged app PID/data, selected-input completion, saved native
+  history and unrelated queued input are checked (**99** main and **38**
+  classifier requests, plus titles). All model/classifier replies are authored
+  on loopback: this proves integration/effects, not model judgment. No runtime
+  product change or claim that item 27's Codex/local-IPC case is fixed.
+  Fixture assumptions corrected for native Plan classification, retry budgets
+  and asynchronous Send now completion. Syntax/unit **487/487**; browser
+  **59/59**. Remaining item-20 gates: bundled workflows, plugin namespaces,
+  shared-host/company/account checks and live activation. Queue order/count
+  unchanged; save to PR #2 without merge, deployment or live-data/account edits.
 - 20: first Claude Fast opt-in now works in an already-running standard-speed
   application through native settings, after a fresh authenticated account
   check. A refused/unconfirmed activation now explicitly disables Fast in the
