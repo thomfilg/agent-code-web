@@ -66,6 +66,20 @@ test("stopping during adapter startup never starts a late turn or resurrects wor
   assert.equal(sends, 0); assert.equal(store.get(chat.id).status, "stopped"); assert.equal(store.get(chat.id).workflowState, "idle");
 });
 
+test("Stop revokes gateway access before awaiting slow persistence or worker shutdown", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const broker = new CapabilityBroker({ ttlMs: 10000 });
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker, gatewayOrigin: "http://localhost" });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "mock" }), release = Promise.withResolvers();
+  const token = broker.issue({ chatId: chat.id, provider: "anthropic", renewable: true, validWhile: () => true });
+  const update = store.update.bind(store);
+  store.update = async (...args) => { await release.promise; return update(...args); };
+  const stopping = manager.stop(chat.id);
+  try { assert.equal(broker.validate(token, "anthropic"), null); }
+  finally { release.resolve(); await stopping; }
+});
+
 test("a non-mock chat acquires, sleeps, resumes, and destroys its worker backend", async (t) => {
   const root = await temporaryDirectory(t);
   const config = testConfig(root);

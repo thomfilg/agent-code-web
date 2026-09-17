@@ -93,6 +93,15 @@ The capability itself is intentionally visible to the CLI. It is short-lived,
 scoped to one chat and one provider, revoked when the worker stops, and is not
 the long-lived provider secret.
 
+Private Claude runtimes renew that lease in the controller while the original
+chat owner, company, profile, workspace and provider account remain unchanged.
+Worker requests cannot renew it. Stop revokes access before shutdown waits;
+an expired or revoked lease is never revived. After an actual expiry (for
+example, controller suspension beyond the TTL) or account/profile change, use
+Stop and retry to get a fresh capability. This does not silently restart an app.
+Other capability types, including personal Chrome and MCP grants, retain their
+existing fixed expiry; this lease is not a wider credential-sharing grant.
+
 ## Configuration
 
 | Variable | Default | Meaning |

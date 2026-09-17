@@ -6,7 +6,7 @@ import { buildWorkerEnvironment, spawnWorker, terminateWorker } from "../worker-
 import { errorMessage, redact } from "../utils.mjs";
 import { claudeUsage, claudeContext, claudeRateLimits, safeSessionDetails } from "../session-info.mjs";
 import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings, claudePermissionMode } from "../claude-settings.mjs";
-import { claudeFastRequest, claudeFastState, claudeFastCredential, checkClaudeFastAvailability, claudeFastUnavailable } from "../claude-fast.mjs";
+import { claudeFastRequest, claudeFastState, claudeFastCredential, claudeFastScope, checkClaudeFastAvailability, claudeFastUnavailable } from "../claude-fast.mjs";
 import { ClaudeTextStream } from "../claude-text-stream.mjs";
 import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR, ClaudeControlChannel, runClaudeMcpCommand } from "../claude-mcp.mjs";
 import { ClaudeSession, claudeCallResult } from "../claude-session.mjs";
@@ -38,10 +38,23 @@ export class ClaudeAdapter {
       throw new Error("ANTHROPIC_API_KEY is required when CLAUDE_AUTH_MODE=gateway");
     }
     if (authMode === "gateway") {
-      this.capability = this.broker.issue({ chatId: this.chat.id, provider: "anthropic" });
+      const scope = claudeFastScope(this.chat), credential = claudeFastCredential(this.config.claude), upstream = this.config.claude.upstreamBaseUrl;
+      this.capability = this.broker.issue({ chatId: this.chat.id, provider: "anthropic", renewable: true, validWhile: () => {
+        const current = this.store.get(this.chat.id);
+        return !this.stopped && current && !current.archived && claudeFastScope(current) === scope
+          && claudeFastCredential(this.config.claude) === credential && this.config.claude.upstreamBaseUrl === upstream
+          && (this.executor?.workspace || this.chat.workspace) === this.workspace
+          && (this.executor?.runtimeHome || this.store.runtimeHome(this.chat.id)) === this.runtimeHome;
+      } });
     }
     this.stopped = false;
     this.effortEnvironmentNotified = false;
+  }
+
+  assertCapability() {
+    if ((this.capability || this.config.claude.authMode === "gateway") && !this.broker.validate(this.capability, "anthropic")) {
+      throw new Error("Claude's temporary gateway access expired or its account/profile changed. Stop the worker and retry to establish a new session capability; the running application has not been restarted.");
+    }
   }
 
   async send(text, { model, effort, resetEffort, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, onPermissionMode, mode = "accept_edits", systemPrompt } = {}) {
@@ -61,6 +74,7 @@ export class ClaudeAdapter {
     if (!nativeMode) throw new Error("Unsupported Claude permission mode");
     if (this.child || this.settingsInspection || this.fastInspection) throw new Error("A Claude turn is already running for this chat");
     if (this.stopped || (this.config.claude.authMode === "gateway" && !this.capability)) await this.start();
+    this.assertCapability();
 
     const credential = claudeFastCredential(this.config.claude);
     const sameAccount = fastCredential === credential;
@@ -179,6 +193,7 @@ export class ClaudeAdapter {
     ];
 
     if (version !== this.sendVersion) throw new Error("Claude turn interrupted");
+    this.assertCapability();
     if (availability?.enabled && credential !== claudeFastCredential(this.config.claude)) throw new Error("Claude credentials changed during the Fast availability check. Retry with the current account.");
 
     let feedback = null;
@@ -223,16 +238,20 @@ export class ClaudeAdapter {
       this.turnSession = managed;
       child = managed ? await managed.open(args, env, { resetEffort }) : spawn(args);
       if (version !== this.sendVersion) throw Error("Claude turn interrupted");
+      this.assertCapability();
       // No user input exists during SDK initialization/reset. Do not publish
       // a resume ID for a first turn that fails before those controls finish.
       if (isNew && !provisionalSession && interactive) {
         await this.hooks.onSessionId?.(sessionId);
         this.sessionId = sessionId;
         if (version !== this.sendVersion) throw Error("Claude turn interrupted");
+        this.assertCapability();
       }
     } catch (error) {
       finishObservation();
       if (this.modeObserver === modeObserver) this.modeObserver = previousModeObserver;
+      if (child && managed?.active === child && !child.commandUuid) managed.finish(child, 1, null);
+      if (!managed) await terminateWorker(child);
       if (managed && managed !== this.applicationSession) await managed.stop();
       if (this.turnSession === managed) this.turnSession = null;
       // Failed first initialization must not leave a live, unaddressable CLI
@@ -415,6 +434,7 @@ export class ClaudeAdapter {
   async respond(requestId, payload) {
     const requests = this.turnSession?.requests || this.applicationSession?.requests;
     if (!requests || this.stopped) throw Object.assign(Error("Claude request is no longer active"), { statusCode: 409 });
+    this.assertCapability();
     await requests.respond(requestId, payload);
   }
 
@@ -469,6 +489,10 @@ export class ClaudeAdapter {
     this.fastInspection?.abort();
     this.providerObservation?.(); this.providerObservation = null;
     this.stopped = true;
+    // Revoke synchronously, before any slow process/SDK shutdown. A stale
+    // adapter must never revoke a replacement runtime's newer capability.
+    this.broker.revoke(this.capability);
+    this.capability = "";
     (this.turnSession?.requests || this.applicationSession?.requests)?.cancel();
     const child = this.child;
     this.child = null;
@@ -476,7 +500,5 @@ export class ClaudeAdapter {
     if (child) await terminateWorker(child);
     await this.turnSession?.stop(); this.turnSession = null;
     await this.applicationSession?.stop(); this.applicationSession = null;
-    this.broker.revokeChat(this.chat.id);
-    this.capability = "";
   }
 }

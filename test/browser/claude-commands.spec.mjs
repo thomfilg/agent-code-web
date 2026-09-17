@@ -23,6 +23,27 @@ async function fixture(page) {
 const requestEvent = (page, id, event) => page.evaluate(({ id, event }) => window.fixtureSources.find(source => source.url.includes(`/chats/${id}/events`))
   .dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) })), { id, event });
 
+for (const width of [1280, 320]) test(`expired Claude access at ${width}px offers explicit Stop without sending the draft or dropping files`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 });
+  const f = await fixture(page), input = page.locator("#message-input"), stops = [];
+  await input.fill("Keep my unsent follow-up");
+  await page.locator("#attachment-input").setInputFiles({ name: "gateway-context.txt", mimeType: "text/plain", buffer: Buffer.from("Keep this draft attachment") });
+  await page.route(`**/api/chats/${f.snapshot.id}/stop`, async route => {
+    stops.push(route.request().method()); await route.fulfill({ json: {} });
+  });
+  f.snapshot = { ...f.snapshot, status: "idle", queuePaused: true, messages: [{ id: "capability-expired", role: "system", kind: "error",
+    text: "Claude's temporary gateway access expired or its account/profile changed. Stop the worker and retry to establish a new session capability; the running application has not been restarted." }] }; await f.emit();
+  await expect(page.locator("#messages")).toContainText("Stop the worker and retry");
+  await expect(page.locator("#messages")).toContainText("the running application has not been restarted");
+  expect(stops).toEqual([]); expect(f.calls).toEqual([]);
+  await page.locator('summary[aria-label="Chat actions"]').click();
+  await page.getByRole("button", { name: "Stop worker", exact: true }).click();
+  await expect.poll(() => stops).toEqual(["POST"]);
+  f.snapshot = { ...f.snapshot, status: "stopped" }; await f.emit();
+  await expect(input).toHaveValue("Keep my unsent follow-up"); await expect(page.locator("#attachment-chips")).toContainText("gateway-context.txt");
+  expect(f.calls).toEqual([]); expect(f.errors).toEqual([]);
+});
+
 for (const width of [1280, 320]) test(`Claude effort changes at ${width}px preserve the running chat, draft and files and display native override errors`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page), input = page.locator("#message-input"), changes = [], stops = [];

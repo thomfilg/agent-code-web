@@ -70,7 +70,7 @@ async function fixture(t, { interactive = false } = {}) {
   const adapter = new ClaudeAdapter({ chat, store, config, executor, broker, gatewayOrigin: "http://127.0.0.1:9",
     hooks: { onSessionId: id => f.sessions.push(id), onEvent: event => f.events.push(event), ...(interactive ? { onRequest: request => f.requests.push(request) } : {}) } });
   t.after(() => adapter.stop());
-  return Object.assign(f, { adapter, config, broker, chat });
+  return Object.assign(f, { adapter, config, broker, chat, store });
 }
 
 test("private ordinary turns use live native approvals and close their transport after the reply", async t => {
@@ -151,6 +151,70 @@ test("application replies retain one CLI and apply next-turn mode/model/effort w
   assert(!JSON.stringify(f.launches).includes(f.config.claude.providerKey));
   await f.adapter.stop(); assert.equal(f.broker.validate(capability, "anthropic"), null);
   assert.notEqual(f.child.exitCode ?? f.child.signalCode, null);
+});
+
+test("a retained application keeps gateway access past its initial capability lifetime without replacing the CLI", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: 1000000 });
+  const f = await fixture(t);
+  await f.adapter.send("/run Keep the application running");
+  const token = f.adapter.capability, initial = f.broker.validate(token, "anthropic");
+  for (let index = 0; index < 7; index++) t.mock.timers.tick(20000);
+  assert(Date.now() > initial.expiresAt);
+  await f.adapter.send("/verify Check the same application after two capability lifetimes");
+  assert.equal(f.launches.length, 1); assert.equal(f.adapter.capability, token);
+  assert(f.broker.validate(token, "anthropic"));
+  await f.adapter.stop();
+  t.mock.timers.tick(20000);
+  assert.equal(f.broker.validate(token, "anthropic"), null);
+});
+
+test("application capabilities reject changed accounts, profiles, owners and companies before any more input", async t => {
+  const changes = [
+    f => { f.config.claude.providerKey = "different-private-key"; },
+    f => { f.config.claude.upstreamBaseUrl = "https://different.invalid"; },
+    f => { f.config.claude.authMode = "host"; },
+    f => f.store.update(f.chat.id, { ownerId: "different-owner" }),
+    f => f.store.update(f.chat.id, { environmentId: "different-profile" }),
+    f => f.store.update(f.chat.id, { workspace: "/different/workspace" }),
+    f => f.store.update(f.chat.id, { repositories: [{ fullName: "other-company/repository" }] }),
+    f => f.store.update(f.chat.id, { archived: true }),
+    f => { f.adapter.executor.runtimeHome = "/different/private-profile"; },
+  ];
+  for (const change of changes) {
+    const f = await fixture(t); await f.adapter.send("/run Keep the application running");
+    const token = f.adapter.capability, controls = f.controls.length;
+    await change(f);
+    assert.equal(f.broker.validate(token, "anthropic"), null);
+    await assert.rejects(f.adapter.send("Do not cross the changed scope"), /account\/profile changed/);
+    assert.equal(f.inputs.length, 1); assert.equal(f.controls.length, controls); assert.equal(f.launches.length, 1);
+    assert.equal(f.child.exitCode, null); // No silent restart or destruction of the user's app.
+  }
+});
+
+test("expiry during native settings rejects unsubmitted input without leaving a stuck logical application turn", async t => {
+  const f = await fixture(t); await f.adapter.send("/run Keep the application running");
+  const token = f.adapter.capability;
+  f.hold = "set_model";
+  const pending = f.adapter.send("Never submit this input"), rejected = assert.rejects(pending, /temporary gateway access expired/);
+  await waitFor(() => f.controls.at(-1).request.subtype === "set_model");
+  f.broker.revoke(token); f.respond(f.controls.at(-1)); await rejected;
+  assert.equal(f.inputs.length, 1); assert.equal(f.adapter.applicationSession.active, null);
+  assert.equal(f.child.exitCode, null); assert.equal(f.launches.length, 1);
+  await f.adapter.stop(); f.hold = null;
+  await f.adapter.send("Explicit retry after Stop");
+  assert.equal(f.launches.length, 2); assert.notEqual(f.adapter.capability, token);
+  assert.equal(f.broker.validate(token, "anthropic"), null);
+});
+
+test("Stop revokes before slow shutdown and cannot revoke a replacement capability when the old shutdown finishes", async t => {
+  const f = await fixture(t); await f.adapter.send("/run Keep the application running");
+  const token = f.adapter.capability, release = Promise.withResolvers();
+  f.adapter.reviewInterruption = () => release.promise;
+  const stopping = f.adapter.stop();
+  assert.equal(f.broker.validate(token, "anthropic"), null);
+  const replacement = f.broker.issue({ chatId: f.chat.id, provider: "anthropic" });
+  release.resolve(); await stopping;
+  assert(f.broker.validate(replacement, "anthropic")); f.broker.revoke(replacement);
 });
 
 test("background output is independent of a turn waiting for native controls and usage is not counted twice", async t => {

@@ -269,9 +269,49 @@ launches, distinguish title calls from task calls, and allow the full settings
 matrix 120 seconds rather than canceling its final command at 60 seconds after
 healthy six-second CLI replies. `--trace` now makes that overall timeout explicit;
 the command/effect assertions are unchanged. Item 20 stays active; long-lived
-capabilities, other retained-session interop, shell-classifier acceptance and
-remaining bundled workflows are still open. No merge, deployment or live data
-changes.
+capabilities are accepted below. Other retained-session interop, shell-classifier
+acceptance and remaining bundled workflows are still open. No merge, deployment
+or live data changes.
+
+### Claude long-lived gateway access
+
+Reproduced: a retained `/run` process remained alive after the one-hour
+capability expired, but its next input failed before provider observation.
+Private Claude runtimes now use a controller-renewed lease, with its existing
+TTL and an unreferenced renewal timer at one third of that TTL. Validation and
+renewal both check the original owner/company/profile/workspace, provider key,
+authentication mode and upstream. A changed scope fails closed immediately on
+the next gateway request; restoring the old scope cannot resurrect its token.
+No renewal route or real provider credential is exposed to the worker.
+
+Stop revokes before persistence/process shutdown waits, clears renewal and
+observers, and does not allow a late adapter shutdown to revoke a replacement
+token. Ordinary fixed-expiry capabilities and separate MCP/Chrome grants are
+unchanged. A missed deadline (such as controller suspension beyond the TTL)
+still expires: input/approval is rejected with an explicit Stop/retry message,
+not a silent app restart or replay. Expiry during SDK configuration releases
+the unsubmitted logical turn without killing its owning application process.
+
+`node scripts/smoke-real-claude-run.mjs --capability-lifetime` uses installed
+Claude, the actual Relay gateway and real HTTP application in disposable
+loopback/PID namespaces. A ten-second TTL exercises **two real elapsed lease
+lifetimes**, retaining one native CLI, session ID and HTTP app/data. A separate
+fixed-expiry control token expires normally. Native follow-ups still reach the
+provider; a changed dummy account and Stop return 401 without upstream traffic.
+Explicit Stop/resume uses a new capability and the same saved context, with
+**9** authored loopback model replies and no real inference or accounts.
+
+Seven new broker/adapter/controller tests cover renewal, missed deadlines,
+scope errors, revocation, provider/turn observers, native-control cancellation
+and slow Stop. Two desktop/320px browser cases verify the visible error,
+explicit Stop and retained unsent text/files without automatic submission.
+The scope-change test covers nine account/profile/workspace/owner/company
+variants. Syntax/unit suite: **476/476**; combined Claude-command/conversation
+browser suite: **59/59**. Native regressions pass for first-run Send now (**8**
+replies), first-review Stop/resume (**3**), and explicit recipe approvals plus
+questions (**13**). Other retained-session account/Fast cooldown, MCP/review
+and shell-classifier workflow gates remain open; this is not blanket acceptance
+of every command or a deployment.
 
 ### Claude application sessions and native usage
 
@@ -333,9 +373,10 @@ Remaining gates are explicit:
   cannot be replaced by these native controls. Such changes fail before input,
   with an explicit Stop/retry notice; running apps are not silently terminated.
   Native effort changes and environment precedence are now accepted above.
-  Expired capabilities/long-lived renewal, account/cooldown and MCP/review interop
-  *within* a retained app session still need acceptance. Existing capability
-  expiration/revocation is not relaxed.
+  Long-lived capability renewal and account-change rejection are accepted
+  above. Native Fast entitlement/cooldown and MCP/review interop *within* a
+  retained app session still need acceptance. Missed capability deadlines and
+  revocation remain enforced.
 
 Fixture corrections: wait for the actual server's readiness; distinguish native
 title generation from the main query; Haiku does not accept an effort picker

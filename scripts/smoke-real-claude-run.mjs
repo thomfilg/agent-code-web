@@ -16,7 +16,7 @@ import { ModelCatalog } from "../src/models.mjs";
 // Installed Claude and a disposable HTTP application. The model is authored;
 // the native tools, application process and requests are real and loopback-only.
 const exec = promisify(execFile);
-const options = new Set(["--network-isolated", "--trace", "--background-exit", "--send-now", "--first-send-now", "--approve-recipe", "--questions", "--skip-questions", "--stop-approval", "--plan-workflow", "--plan-reject", "--plan-stop", "--plan-web-choice", "--effort-settings", "--effort-environment"]);
+const options = new Set(["--network-isolated", "--trace", "--background-exit", "--send-now", "--first-send-now", "--approve-recipe", "--questions", "--skip-questions", "--stop-approval", "--plan-workflow", "--plan-reject", "--plan-stop", "--plan-web-choice", "--effort-settings", "--effort-environment", "--capability-lifetime"]);
 for (const argument of process.argv.slice(2)) assert(options.has(argument), `Unsupported fixture option: ${argument}`);
 if (!process.argv.includes("--network-isolated")) {
   const result = await exec("/usr/bin/unshare", ["--user", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", "--", process.execPath, process.argv[1], ...process.argv.slice(2), "--network-isolated"], { timeout: 90000, maxBuffer: 60000 }).catch(error => {
@@ -38,11 +38,13 @@ if (!process.argv.includes("--network-isolated")) {
   const planWorkflow = planReject || planStop || planChoice || process.argv.includes("--plan-workflow"), nativeModes = [];
   const effortEnvironment = process.argv.includes("--effort-environment");
   const effortSettings = effortEnvironment || process.argv.includes("--effort-settings"), launches = [], mainRequests = [];
+  const capabilityLifetime = process.argv.includes("--capability-lifetime");
   const environmentVariables = effortEnvironment ? { CLAUDE_CODE_EFFORT_LEVEL: "medium" } : {};
   const held = Promise.withResolvers(), release = Promise.withResolvers();
   const recipe = "---\nname: verify\ndescription: Drive the fixture HTTP app\ndisable-model-invocation: true\n---\nRELAY_HTTP_RECIPE_CANARY\nRead package.json. Start node server.mjs in the background if .runtime.json is not reachable. Run node verify.mjs to probe the actual HTTP route. Report response statuses and bodies.\n";
-  let manager, gatewayServer, chat, fixtureError, failureStop, nativeSession, phase = "run", step = 0, titleRequests = 0;
+  let manager, gatewayServer, chat, fixtureError, failureStop, nativeSession, phase = "run", step = 0, titleRequests = 0, upstreamHits = 0;
   const respond = async (request, response) => {
+    upstreamHits++;
     if (request.url.includes("count_tokens")) { response.writeHead(200, { "content-type": "application/json" }); response.end('{"input_tokens":100}'); return; }
     if (request.method !== "POST" || !/\/messages(?:\?|$)/.test(request.url)) { response.writeHead(404); response.end(); return; }
     assert.equal(request.headers["x-api-key"], "controller-only-run-fixture");
@@ -80,6 +82,8 @@ if (!process.argv.includes("--network-isolated")) {
         }
       } else if (phase === "effort") {
         content = [{ type: "text", text: "Effort fixture completed without restarting the application." }];
+      } else if (phase === "capability") {
+        content = [{ type: "text", text: "The same native session can still call the provider after its initial capability lifetime." }];
       } else if (phase === "plan") {
         if (step === 0) content = tool("EnterPlanMode", {});
         else if (step === 1) {
@@ -176,7 +180,7 @@ if (!process.argv.includes("--network-isolated")) {
   try {
     await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
     const config = loadConfig({ AGENT_DATA_DIR: root, AGENT_DATABASE_MODE: "memory", AGENT_PROCESS_ISOLATION: "none", AGENT_IDLE_TIMEOUT_MS: "60000", CLAUDE_AUTH_MODE: "gateway", ANTHROPIC_API_KEY: "controller-only-run-fixture" });
-    const store = new ChatStore(root); await store.initialize(); const broker = new CapabilityBroker({ ttlMs: 120000 });
+    const store = new ChatStore(root); await store.initialize(); const broker = new CapabilityBroker({ ttlMs: capabilityLifetime ? 10000 : 120000 });
     const gateway = new ProviderGateway({ config, broker, fetchImpl: (url, options) => fetch(`http://127.0.0.1:${server.address().port}${new URL(url).pathname}${new URL(url).search}`, options) });
     gatewayServer = http.createServer((request, response) => { void gateway.handle(request, response, new URL(request.url, "http://fixture")); });
     await new Promise(resolve => gatewayServer.listen(0, "127.0.0.1", resolve));
@@ -187,7 +191,7 @@ if (!process.argv.includes("--network-isolated")) {
       mkdir: directory => mkdir(directory, { recursive: true, mode: 0o700 }),
       spawn(command, args, options) {
         assert(!JSON.stringify([args, options.env]).includes(config.claude.providerKey));
-        if (command === config.claude.bin && args.includes("--print")) launches.push({ args, effort: options.env.CLAUDE_CODE_EFFORT_LEVEL });
+        if (command === config.claude.bin && args.includes("--print")) launches.push({ args, effort: options.env.CLAUDE_CODE_EFFORT_LEVEL, capability: options.env.ANTHROPIC_AUTH_TOKEN });
         if (args.includes("--session-id")) nativeSession = args[args.indexOf("--session-id") + 1];
         const child = spawnWorker(command, args, options);
         {
@@ -264,7 +268,42 @@ responses.push({items:await (await fetch(origin+'/items')).json()}); console.log
       const items = await (await fetch(`http://127.0.0.1:${port}/items`, { signal: AbortSignal.timeout(3000) })).json();
       assert.deepEqual(items, [{ title: "ação" }]);
       if (!firstSendNow) assert.match(store.get(chat.id).messages.at(-1).text, /actual HTTP application/);
-    if (effortSettings) {
+    if (capabilityLifetime) {
+      phase = "capability"; step = 0;
+      const token = launches[0].capability, initial = broker.validate(token, "anthropic");
+      const fixed = broker.issue({ chatId: "fixed-expiry-control", provider: "anthropic" });
+      const probe = async (capability, expected) => {
+        const before = upstreamHits;
+        const response = await fetch(`${gatewayOrigin}/gateway/anthropic/v1/messages/count_tokens`, {
+          method: "POST", headers: { authorization: `Bearer ${capability}`, "content-type": "application/json" }, body: "{}",
+        });
+        await response.text(); assert.equal(response.status, expected);
+        assert.equal(upstreamHits, before + (expected === 200 ? 1 : 0), "Revoked or expired capabilities must never reach the provider");
+      };
+      for (let index = 0; index < 2; index++) {
+        await delay(11000);
+        assert(Date.now() > initial.expiresAt);
+        await probe(token, 200); await probe(fixed, 401);
+        const before = mainRequests.length;
+        await manager.send(chat.id, `Check the retained application after capability lifetime ${index + 1}.`);
+        if (fixtureError) throw fixtureError;
+        assert.equal(mainRequests.length, before + 1);
+        assert.match(store.get(chat.id).messages.at(-1).text, /same native session/);
+        assert.equal(store.get(chat.id).agentSessionId, session); assert.equal(launches.length, 1);
+        assert.deepEqual(await (await fetch(`http://127.0.0.1:${port}/items`)).json(), items);
+      }
+      config.claude.providerKey = "changed-controller-only-fixture";
+      await probe(token, 401);
+      const before = mainRequests.length;
+      await manager.send(chat.id, "Never forward this input to the changed account.");
+      assert.match(store.get(chat.id).messages.at(-1).text, /account\/profile changed/);
+      assert.equal(mainRequests.length, before); assert.equal(launches.length, 1);
+      assert.deepEqual(await (await fetch(`http://127.0.0.1:${port}/items`)).json(), items);
+      config.claude.providerKey = "controller-only-run-fixture";
+      await probe(token, 401); // Restoring the config cannot resurrect a revoked token.
+      await manager.stop(chat.id); await probe(token, 401);
+      broker.revoke(fixed);
+    } else if (effortSettings) {
       phase = "effort"; step = 0;
       const autoEffort = mainRequests.at(-1).output_config?.effort;
       assert.notEqual(autoEffort, "low", "Auto must clear the saved profile's Low selection without editing that profile");
@@ -438,12 +477,19 @@ responses.push({items:await (await fetch(origin+'/items')).json()}); console.log
     }
     await resumed; if (fixtureError) throw fixtureError;
     assert.equal(store.get(chat.id).agentSessionId, session);
+    if (capabilityLifetime) {
+      assert.equal(launches.length, 2); assert.notEqual(launches[0].capability, launches[1].capability);
+      assert.equal(broker.validate(launches[0].capability, "anthropic"), null);
+      assert(broker.validate(launches[1].capability, "anthropic"));
+      console.log(`PASS: controller renewal kept one native CLI and its real HTTP app/data alive across two capability lifetimes; fixed expiry, account changes and Stop remained closed; explicit resume used a fresh capability. ${requests.length} loopback model requests.`);
+    }
     if (effortSettings) assert.equal(mainRequests.at(-1).output_config?.effort, "high", "Stop/resume must retain the selected effort");
     if (planWorkflow) assert.equal(store.get(chat.id).mode, planReject || planStop || planChoice ? "plan" : "accept_edits", "Stop/resume must keep the selected mode");
     assert.match(store.get(chat.id).messages.at(-1).text, /Saved application context retained after Stop/);
     assert.equal(store.get(chat.id).usage.totals.inputTokens, (requests.length - (sendNow ? 1 : 0)) * 100);
     await assert.rejects(fetch(`http://127.0.0.1:${port}/items`, { signal: AbortSignal.timeout(3000) }));
     if (stopApproval) await assert.rejects(readFile(`${chat.workspace}/.claude/skills/verify/SKILL.md`, "utf8"), { code: "ENOENT" });
+    if (!capabilityLifetime)
     console.log(`PASS: ${effortSettings ? effortEnvironment ? "native effort environment precedence stayed visible and unchanged; changed startup environment rejected input without stopping the app" : "native effort changes affected actual requests without replacing the CLI or running HTTP app/data" : sendNow ? `native ${firstSendNow ? "first-command " : ""}Send now retained the running app/data and unselected queue entry` : backgroundExit ? "native background completion saved one independent answer, without synthetic user input" : planWorkflow ? `native Enter/ExitPlanMode ${planStop ? "was canceled by Stop without a plan-exit grant" : planReject ? "honored denial and kept Plan for the following turn" : planChoice ? "retained a newer same-value web selection for the following turn" : "synchronized the selector and next turn"}, with actual file/policy effects` : stopApproval ? "Stop canceled the native approval without creating its recipe or consuming queued input" : `native run/verify drove the actual HTTP app across replies, changed model and ${approveRecipe ? "created/reused its recipe only after explicit approval" : "honored denial and reused a separately supplied recipe"}`}; Stop closed the app and restored the same native context without restarting it.${askQuestions ? ` Native questions ${skipQuestions ? "were skipped without invented answers" : "returned selected options and literal text"}.` : ""} ${requests.length} loopback requests; usage counted once.`);
   } finally {
     release.resolve(); await failureStop; await manager?.shutdown(); server.closeAllConnections(); gatewayServer?.closeAllConnections();

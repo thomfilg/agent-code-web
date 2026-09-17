@@ -109,6 +109,11 @@ test("account and native policy denials cannot claim success; disabling remains 
 test("credential rotation requires a fresh opt-in and never inherits Fast from the previous account", async t => {
   const f = await fixture(t); await f.manager.send(f.chat.id, "/fast on");
   const before = f.lookups; f.config.claude.providerKey = "rotated-private-controller-key";
+  const launches = f.launches.length;
+  await f.manager.send(f.chat.id, "inspect-settings");
+  assert.equal(f.lookups, before); assert.equal(f.launches.length, launches);
+  assert.match(f.store.get(f.chat.id).messages.at(-1).text, /account\/profile changed/);
+  await f.manager.stop(f.chat.id);
   await f.manager.send(f.chat.id, "inspect-settings"); assert.equal(f.lookups, before);
   assert.equal(f.store.get(f.chat.id).claudeFastMode, false); assert.equal(JSON.parse(f.store.get(f.chat.id).messages.at(-1).text).fast, false);
   assert(f.store.get(f.chat.id).messages.some(message => /credentials changed/.test(message.text)));

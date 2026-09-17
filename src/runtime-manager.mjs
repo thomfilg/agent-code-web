@@ -1296,6 +1296,9 @@ export class RuntimeManager extends EventEmitter {
     this.workspacePresence.remove(chatId);
     clearTimeout(this.#workspaceIdleTimers.get(chatId)); this.#workspaceIdleTimers.delete(chatId);
     this.#forking.get(chatId)?.controller.abort(Object.assign(new Error("Fork cancelled because the source chat stopped"), { name: "AbortError", statusCode: 409 }));
+    // Gateway access ends at Stop, not after slow persistence, side-chat or
+    // worker shutdown. Native interruption can still checkpoint its journal.
+    this.broker.revokeChat(chatId);
     this.mcps?.revokeChat(chatId);
     this.publishChat(await this.store.update(chatId, { queuePaused: true, ...(reason === "manual" ? { forkGoalPending: false } : {}) }));
     const runtime = this.#runtimes.get(chatId);

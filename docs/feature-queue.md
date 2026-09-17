@@ -62,6 +62,21 @@ not reorder the feature queue.
 
 ## Verification ledger
 
+- 20: reproduced and fixed retained Claude sessions losing gateway access at
+  their initial capability deadline. Controller-owned renewal now keeps the
+  original scoped session alive; expiry, changed owner/company/profile/account
+  and Stop still deny access. Workers cannot renew or resurrect tokens. Stop
+  revokes before slow persistence/shutdown, and canceled pre-input SDK controls
+  cannot leave a stuck logical turn or replay input. Installed-CLI acceptance
+  crosses two actual lease lifetimes with the same CLI and HTTP app/data,
+  checks a fixed-expiry control, rejects account changes before upstream traffic
+  and resumes saved context with a fresh token (**9** loopback model replies).
+  Seven broker/adapter/controller additions and two responsive browser cases;
+  syntax/unit **476/476**, combined browser **59/59**. Native first-run Send now,
+  review Stop/resume and approvals/questions regressions pass (**8/3/13** replies).
+  Item 20/order/count unchanged. Remaining work includes retained-session
+  Fast/MCP/review interop, classifier and bundled workflows.
+  Save to PR #2 without merge, deployment, live-data or account changes.
 - 20: reproduced and fixed native Claude Auto pinning the process environment
   so later High/Low choices changed the web selector but not actual requests.
   SDK sessions now reset effort natively before input and apply later choices
