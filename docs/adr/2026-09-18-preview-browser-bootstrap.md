@@ -80,3 +80,17 @@ readable preview grant.
 
 Tests use synthetic users and local fixtures only. They are not evidence of
 Google/provider consent, deployed CloudFront forwarding, or MVP completion.
+
+## Real-browser fixture receipt
+
+`taskset -c 0,1 nice -n 10 node scripts/smoke-preview-bootstrap-mcp.mjs`
+passed through the official Playwright MCP with isolated Chrome and two distinct
+HTTPS sites on loopback. A root-scope hostile service worker first demonstrably
+intercepted a same-origin bootstrap-path control request, then remained active
+during initial and repeated successful opens from Relay without intercepting
+their CORS bootstrap requests. Original path/query/fragment and HttpOnly grant
+invisibility passed. Chromium's actual third-party-cookie restriction then
+caused the explicit fail-closed privacy explanation, without navigating to the
+app. TLS keys, cookies, users and hostnames were disposable fixtures; no provider
+consent, model prompt or AWS call occurred. This proves the browser mechanism,
+not deployed CloudFront/session/runtime integration.
