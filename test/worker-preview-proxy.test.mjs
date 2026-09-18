@@ -62,7 +62,7 @@ test("HTTP preserves binary upload/raw path and app auth while removing all Rela
     forwarded: "host=evil", "x-forwarded-host": "evil", "x-forwarded-proto": "http", "x-forwarded-for": "private",
     "x-real-ip": "private", connection: "close, x-private-hop", "x-private-hop": "private",
     origin: "https://" + f.hostname,
-    cookie: "app=kept; agent_web_session=PRIVATE; relay_browser_identity=PRIVATE; relay_mcp_token=PRIVATE; relay.auth.state=PRIVATE; __Host-relay.auth.sessionToken.0=PRIVATE; __Host-relay-preview=PRIVATE",
+    cookie: "app=kept; agent_web_session=PRIVATE; relay_browser_identity=PRIVATE; relay_mcp_token=PRIVATE; relay.auth.state=PRIVATE; __Host-relay.auth.sessionToken.0=PRIVATE; __Host-relay-preview=PRIVATE; __Host-relay-preview-browser-flow=PRIVATE",
   } });
   assert.equal(result.status, 200); assert.deepEqual(result.body, body); assert.equal(observed.path, "/raw%2fpath?x=%26one");
   assert.equal(observed.headers.authorization, "Basic APP-AUTH"); assert.equal(observed.headers.cookie, "app=kept");
@@ -96,7 +96,7 @@ test("Set-Cookie reserves platform names, removes only exact/localhost Domain, a
     res.setHeader("set-cookie", req.url === "/hop" ? ["app=no; Path=/"] : [
       "app=one; Domain=one.preview.example; Path=/; HttpOnly",
       "local=two; Domain=localhost; Path=/", "foreign=no; Domain=preview.example; Path=/",
-      "other=no; Domain=other.preview.example; Path=/", "__Host-relay-preview=PRIVATE; Secure; Path=/",
+      "other=no; Domain=other.preview.example; Path=/", "__Host-relay-preview=PRIVATE; Secure; Path=/", "__Host-relay-preview-browser-flow=PRIVATE; Secure; Path=/",
       "agent_web_session=PRIVATE; Path=/", "relay_browser_identity=PRIVATE; Path=/", "relay_mcp_test=PRIVATE; Path=/",
       "relay.auth.state=PRIVATE; Path=/", "__Host-relay.auth.sessionToken.1=PRIVATE; Path=/",
       "duplicate=no; Domain=localhost; Domain=one.preview.example", "__Host-app=three; Path=/",
