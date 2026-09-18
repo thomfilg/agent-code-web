@@ -85,6 +85,34 @@ does not satisfy the requested direct, fully functioning app URL.
 
 ## Work and acceptance estimate
 
+### Unresolved bootstrap/service-worker boundary
+
+A reserved bootstrap URL on the application's own origin is not sufficient to
+keep that bootstrap trusted. A previously installed root-scope service worker
+can intercept a later navigation to that path, supply its own document/script,
+and read the new bootstrap fragment. Never reusing a hostname across chats or
+owners prevents cross-chat origin reuse, but does not address this repeat-open
+case within the same chat. See the [service-worker fetch handling
+model](https://w3c.github.io/ServiceWorker/#handle-fetch).
+
+The smallest proposed initial policy is to start only on fresh origins and
+explicitly reject application service-worker script requests (the browser's
+`Service-Worker: script` request), across all proxy paths and methods, before
+upstream forwarding. This would intentionally exclude app service-worker/PWA
+registration from that first preview version; it is a product limitation that
+must be accepted and documented, not silently introduced. Keeping a bootstrap
+path out of app routing or stripping `Service-Worker-Allowed` alone is not a
+substitute. If service workers must work, design and review a bootstrap that
+cannot be intercepted by the app's worker instead.
+
+This is an unresolved design and real-browser acceptance gate: there is no
+active route or service-worker restriction in this ADR or the dormant proxy.
+Before activation, verify first/repeated opens, script-request rejection and
+redirect variants, hostile root-scope registration attempts, reserved bootstrap
+handling, logout/expiry and two-user/two-chat isolation in real Chrome. Do not
+claim that bootstrap cookies or service-worker safety follow from the tested
+HTTP/WebSocket transport alone.
+
 This is a bounded security-sensitive feature, not just adding a distribution.
 It has four implementation units: (1) grant/host lifecycle and isolated routing,
 (2) HTTP/SSE/WS SSH bridge, (3) UI open/revoke plus worker-presence integration,
