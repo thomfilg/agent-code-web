@@ -82,13 +82,17 @@ is the current prerequisite; item 20's unfinished doctor work stays paused.
 
 ## MVP release gate — 2026-09-17
 
-Latest activation (2026-09-18 04:47 UTC): the post-consent Codex readiness fix is
-active on `http://localhost:8787`, preserving all 12 current encrypted records
-and the local credential file byte-for-byte. Personal and umg are disconnected;
-fresh consent and the authorized real-turn/resume gate are still open. The
-older connected-Personal checkpoint above is historical. Claude, GitHub and
-Linear implementations are now integrated from reviewed isolated worktrees
-under ADR 0001; this running local process has not yet been restarted to them.
+Latest local activation (2026-09-18 06:56 UTC): the integrated Codex/Claude,
+GitHub/Linear and account-deletion version is active on `http://localhost:8787`
+(revision `049de8a`). A cold private checkpoint preceded the restart; all 12
+encrypted records and the credential file remained byte-for-byte identical.
+Personal and umg are disconnected; fresh consent and the authorized real-turn/
+resume gate are still open. The older connected-Personal checkpoint above is
+historical. Startup reused already-loaded Doppler `code-web/dev` settings in
+memory, not a fresh download or a new token. The old private login bus closed;
+future fresh Doppler CLI operations may require sign-in again. No account was
+authorized or chat created by the restart. Official Playwright MCP verified the
+live local login page at 1600/390/320 pixels and anonymous chat access denial.
 AWS provisioning is now explicitly authorized for profile `code-web`, account
 `456808212788`, region `us-east-2`. Stack `agent-relay-mvp` reached
 `CREATE_COMPLETE`; the private controller booted with its encrypted data volume
@@ -106,10 +110,10 @@ AWS checkpoint (2026-09-18 06:44 UTC):
   encrypted records and zero attachments, was unmounted and removed, and the
   original controller recovered. This small empty-account dataset is not a
   claim of large-volume recovery testing. Run `775be65e-3184-4822-b9f1-7e919d96d076`.
-- The initial app image is running; a reviewed update through revision
-  `f0692eb` has built successfully and its rollout is in progress. Integration
+- The reviewed application update through revision `f0692eb` is healthy in AWS
+  (immutable digest `sha256:d00cf873d34af1676f52b954fc06218f265326c9c172003f51f957a16feb9bb1`). Integration
   tests passed 783/783, plus 21 isolated-native/SSH tests. A passing build is
-  not counted as a completed update/rollback gate.
+  not counted as a completed rollback gate.
 - Worker AMI `ami-0511b35c0d21d5ee0` was built and finalized, but fresh boot
   acceptance failed an internal image-audit flag after SSH connected. Both
   disposable verification workers were confirmed terminated. Safe boolean
@@ -118,6 +122,15 @@ AWS checkpoint (2026-09-18 06:44 UTC):
   `https://d20atclccf8cku.cloudfront.net/api/auth/callback/google`.
   Fresh product consent for Codex/Claude/GitHub/Linear, worker/native acceptance,
   deployed authenticated transports, and rollback remain explicit open gates.
+- Deployed WSS transport passed a real 101 upgrade and bidirectional frames,
+  followed by the expected unauthenticated rejection/close 1008 on the existing
+  extension endpoint. No pairing, database user, Chrome or model was started.
+  Protected SSE correctly returns 401 anonymously; SSE 200/heartbeat and an
+  authenticated live-browser session still require a legitimate Google session.
+- Official Playwright MCP also exercised disposable account fixtures: missing
+  agent onboarding, separately scoped Personal/Company login links, deleting
+  pending Company consent, and completing Claude's returned-code flow. Screen
+  widths 320/390/1600 fit. This is UX evidence, not real provider authorization.
 
 Parallel implementation checkpoint (2026-09-18):
 
@@ -139,12 +152,13 @@ Parallel implementation checkpoint (2026-09-18):
 - AWS: controller template/image/readiness/drain, private deployment-scoped
   worker baker, separate Doppler `code-web/stg_aws_mvp` secrets and immutable
   build/deploy scripts implemented. Actual HTTPS rollout and cold backup/restore
-  pass as recorded above; worker image acceptance, update/rollback and deployed
+  pass as recorded above; worker image acceptance, failed-rollout recovery and deployed
   authenticated integration checks remain open.
 - Account deletion: reviewed backend/UI implementation removes a selected
   account without deleting its conversations. Integrated focused checks: 18
-  deletion/API tests and 20 account/Google browser tests passed. Live activation
-  is still pending; existing local credentials/data are preserved.
+  deletion/API tests and 20 account/Google browser tests passed. Current local
+  and AWS application versions include it; real accounts/data were not deleted
+  for acceptance. The MCP fixture deletion is recorded separately above.
 - Shared AWS CI: reviewed engine is pinned to `12-apps/ci` commit `848182b` in
   draft PR #98; its remote checks passed. Relay's opt-in, manual consumer is in
   PR #8 and integrated into PR #4. It remains disabled; no CI IAM role or GitHub
