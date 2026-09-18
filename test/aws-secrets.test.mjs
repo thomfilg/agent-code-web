@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { environmentFor, assertWorkerKey, assertWorkerOnlyUpdate, publishWorkerOnlyUpdate, parsePublishedEnvironment } from "../scripts/aws-secrets.mjs";
+import { environmentFor, assertWorkerKey, assertWorkerOnlyUpdate, publishWorkerOnlyUpdate, parsePublishedEnvironment, initializeWorkerKey } from "../scripts/aws-secrets.mjs";
 const secrets = { GOOGLE_CLIENT_ID: "google-fixture", GOOGLE_CLIENT_SECRET: "google-secret-fixture", AGENT_OWNER_EMAIL: "owner@example.test", AUTH_SECRET: "x".repeat(48), AGENT_ENCRYPTION_KEY: Buffer.alloc(32).toString("base64"), DOPPLER_TOKEN: "DO-NOT-COPY", OPENAI_API_KEY: "DO-NOT-COPY", ANTHROPIC_API_KEY: "DO-NOT-COPY" };
 const outputs = { PublicUrl: "https://example.cloudfront.net", WorkerSubnetId: "subnet-fixture", WorkerSecurityGroupId: "sg-fixture", WorkerKeyName: "deployment-key" };
-const image = { ImageId: "ami-fixture", State: "available", Architecture: "x86_64", Tags: Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: "agent-relay-mvp", AgentRelayWorkerKey: "deployment-key", CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" }).map(([Key, Value]) => ({ Key, Value })) };
+const image = { ImageId: "ami-aaaaaaaaaaaaaaaaa", OwnerId: "456808212788", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true } }], State: "available", Architecture: "x86_64", Tags: Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: "agent-relay-mvp", AgentRelayWorkerKey: "deployment-key", CodexVersion: "0.154.0", ClaudeVersion: "2.1.222", AgentRelayAcceptance: "verified-v1", AgentRelayAcceptanceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }).map(([Key, Value]) => ({ Key, Value })) };
 const key = "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-test-key\n-----END OPENSSH PRIVATE KEY-----\n";
 
 test("AWS environment copies only Google/encryption settings and uses IAM plus isolated workers", () => {
@@ -35,6 +35,15 @@ test("secret publication requires the private transport key to match the deploye
   assert.throws(() => assertWorkerKey(key, pair, "different-deployment"));
   assert.throws(() => assertWorkerKey("ssh-ed25519 ZGlmZmVyZW50", pair, "deployment-key"));
   assert.throws(() => assertWorkerKey("invalid", pair, "deployment-key"));
+});
+
+test("both secret publication paths require accepted private owned encrypted AMI metadata", () => {
+  for (const change of [
+    { Public: true }, { OwnerId: "999999999999" }, { BlockDeviceMappings: [] },
+    { Tags: image.Tags.filter(tag => !tag.Key.startsWith("AgentRelayAcceptance")) },
+    { Tags: image.Tags.map(tag => tag.Key === "AgentRelayAcceptance" ? { ...tag, Value: "verified-v2" } : tag) },
+    { Tags: image.Tags.map(tag => tag.Key === "AgentRelayAcceptanceId" ? { ...tag, Value: "not-a-verification-uuid" } : tag) },
+  ]) assert.throws(() => environmentFor(secrets, outputs, { ...image, ...change }, key), /verified image|acceptance/);
 });
 
 test("worker metadata updates cannot alter or remove any existing setting or credential", () => {
@@ -106,4 +115,64 @@ test("malformed private snapshots cannot expose JSON input in operator diagnosti
     version, secretFile: async (_env, fn) => fn("/private/fixture.json"),
     awsCall: async op => op[1] === "get-secret-value" ? { ARN: "owned", VersionId: version, SecretString: 'secret-prefix-leak' } : { ARN: "owned", VersionId: version },
   }), error => error.message === "Published AWS environment is malformed; private contents suppressed");
+});
+
+function bootstrapFixture({ existing, concurrent = false, readback = null, metadata = null } = {}) {
+  const arn = "arn:aws:secretsmanager:us-east-2:456808212788:secret:fixture";
+  const version = "11111111-2222-4333-8444-555555555555", old = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", calls = [];
+  let candidate, currentId = existing === undefined ? null : old;
+  const awsCall = async (operation, args) => {
+    calls.push([operation, args]);
+    const flag = key => args[args.indexOf(key) + 1];
+    if (operation[1] === "describe-secret") return metadata || { ARN: arn, ...(existing === undefined ? {} : { VersionIdsToStages: { [old]: ["AWSCURRENT"] } }) };
+    if (operation[1] === "get-secret-value") return { ARN: arn, VersionId: args.includes("--version-id") ? old : version, VersionStages: ["AWSCURRENT"], SecretString: JSON.stringify(args.includes("--version-id") ? existing : readback || candidate) };
+    if (operation[1] === "put-secret-value") {
+      assert.equal(flag("--version-stages"), `relay-worker-bootstrap-${version}`);
+      assert.equal(flag("--secret-string"), "file:///private-tmpfs/fixture.json");
+      if (!currentId) currentId = version; // Actual AWS first-version behavior.
+      if (concurrent) currentId = "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa";
+      return { ARN: arn, VersionId: version, VersionStages: currentId === version ? ["AWSCURRENT"] : [] };
+    }
+    if (flag("--version-stage") === "AWSCURRENT") {
+      assert.equal(args.includes("--remove-from-version-id"), existing !== undefined);
+      if (existing !== undefined) assert.equal(flag("--remove-from-version-id"), old);
+      if (currentId !== version && currentId !== (args.includes("--remove-from-version-id") ? flag("--remove-from-version-id") : null)) throw Error("PRIVATE-CONCURRENT-WRITER");
+      currentId = version;
+    }
+    return {};
+  };
+  return { calls, run: () => initializeWorkerKey(arn, key, { awsCall, version, secretFile: async (value, fn) => { candidate = value; assert.deepEqual(Object.keys(value), ["AGENT_WORKER_SSH_KEY_BASE64"]); return fn("/private-tmpfs/fixture.json"); } }) };
+}
+
+test("initial transport bootstrap permits empty secrets only and never publishes an environment", async () => {
+  for (const existing of [undefined, {}]) {
+    const f = bootstrapFixture({ existing });
+    assert.deepEqual(await f.run(), { changed: true });
+    assert.equal(f.calls.filter(([op]) => op[1] === "put-secret-value").length, 1);
+    assert.doesNotMatch(JSON.stringify(f.calls), /fake-test-key|GOOGLE_CLIENT|AGENT_EC2_AMI|DOPPLER/);
+    assert.ok(f.calls.at(-1)[1].includes("relay-worker-bootstrap-11111111-2222-4333-8444-555555555555"));
+  }
+  const same = bootstrapFixture({ existing: { AGENT_WORKER_SSH_KEY_BASE64: Buffer.from(key).toString("base64") } });
+  assert.deepEqual(await same.run(), { changed: false });
+  assert.equal(same.calls.some(([op]) => op[1] === "put-secret-value"), false);
+});
+
+test("transport bootstrap refuses existing configuration, different key or uncertain secret versions", async () => {
+  for (const existing of [{ GOOGLE_CLIENT_SECRET: "PRIVATE" }, { AGENT_WORKER_SSH_KEY_BASE64: "different" }, { AGENT_WORKER_SSH_KEY_BASE64: Buffer.from(key).toString("base64"), AGENT_EC2_AMI_ID: image.ImageId }]) {
+    const f = bootstrapFixture({ existing }); await assert.rejects(f.run(), /never overwrites/);
+    assert.equal(f.calls.some(([op]) => op[1] === "put-secret-value"), false);
+  }
+  for (const metadata of [{ ARN: "foreign" }, { ARN: "arn:aws:secretsmanager:us-east-2:456808212788:secret:fixture", VersionIdsToStages: { "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee": ["pending"] } }]) {
+    const f = bootstrapFixture({ metadata }); await assert.rejects(f.run());
+    assert.equal(f.calls.some(([op]) => op[1] === "put-secret-value"), false);
+  }
+});
+
+test("transport bootstrap conditional promotion detects concurrent publication and wrong readback safely", async () => {
+  for (const existing of [undefined, {}]) for (const fault of [{ concurrent: true }, { readback: { GOOGLE_CLIENT_SECRET: "PRIVATE" } }]) {
+    const f = bootstrapFixture({ existing, ...fault });
+    await assert.rejects(f.run(), error => /not confirmed/.test(error.message) && !error.message.includes("PRIVATE"));
+    assert.equal(f.calls.filter(([op, args]) => op[1] === "update-secret-version-stage" && args.includes("AWSCURRENT")).length, 1);
+    assert.ok(f.calls.at(-1)[1].includes("relay-worker-bootstrap-11111111-2222-4333-8444-555555555555"));
+  }
 });

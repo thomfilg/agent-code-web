@@ -14,9 +14,9 @@ function receipt(payload) {
     audit: { schema: 1, valid: true, finalized: true, cloudInitDisabled: true, ssmDisabled: true, credentialsAbsent: true, transportKeyMatches: true, freshIdentity: true, heartbeatEnabled: true, watchdogActive: true, metadataReachable: false, machine: "a".repeat(64), hostKeys: { "ssh_host_ed25519_key.pub": "b".repeat(64) } } };
 }
 
-function fixture({ account = "123456789012", stackOutputs = outputs, controllerOverride = {}, imageOverride = {}, networkOverride = {}, workerOverride = {}, mutateReceipt = r => r, commandFailed = false, driftAfterLaunch = false, noCleanup = false, detachedShutdown = false, shutdownBeforeCleanup = false, driftDuringCleanup = false } = {}) {
+function fixture({ account = "123456789012", stackOutputs = outputs, controllerOverride = {}, imageOverride = {}, networkOverride = {}, workerOverride = {}, mutateReceipt = r => r, commandFailed = false, driftAfterLaunch = false, noCleanup = false, detachedShutdown = false, shutdownBeforeCleanup = false, driftDuringCleanup = false, markerFailure = false, markerReadbackFailure = false, imageDrift = {}, volumeStuck = false, volumeDrift = false } = {}) {
   const calls = [], requests = [];
-  let workerTags, state = "running", result;
+  let workerTags, state = "running", result, acceptanceTags = [], imageReads = 0;
   const run = async args => {
     calls.push(args);
     const reply = value => JSON.stringify(value);
@@ -25,13 +25,21 @@ function fixture({ account = "123456789012", stackOutputs = outputs, controllerO
     if (args.includes("list-stack-resources")) return reply(resources);
     if (args.includes("describe-subnets")) return reply([{ SubnetId: outputs.WorkerSubnetId, OwnerId: account, Tags: infrastructureTags, MapPublicIpOnLaunch: false, VpcId: "vpc-fixture", ...networkOverride }]);
     if (args.includes("describe-security-groups")) return reply([{ GroupId: outputs.WorkerSecurityGroupId, OwnerId: account, Tags: infrastructureTags, VpcId: "vpc-fixture", IpPermissions: [{ IpProtocol: "tcp", FromPort: 22, ToPort: 22, UserIdGroupPairs: [{ GroupId: "sg-ccccccccccccccccc" }] }] }]);
-    if (args.includes("describe-images")) return reply([{ ImageId: options.imageId, OwnerId: account, State: "available", Architecture: "x86_64", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true, VolumeSize: 20 } }], Tags: Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: "relay-fixture", AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" }).map(([Key, Value]) => ({ Key, Value })), ...imageOverride }]);
+    if (args.includes("describe-images")) return reply([{ ImageId: options.imageId, OwnerId: account, State: "available", Architecture: "x86_64", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true, VolumeSize: 20 } }], Tags: [...Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: "relay-fixture", AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" }).map(([Key, Value]) => ({ Key, Value })), ...acceptanceTags], ...imageOverride, ...(imageReads++ > 0 ? imageDrift : {}) }]);
+    if (args.includes("create-tags")) {
+      assert.equal(state, "terminated");
+      assert.equal(args[args.indexOf("--resources") + 1], options.imageId);
+      if (markerFailure) throw Error("PRIVATE MARKER FAILURE");
+      if (!markerReadbackFailure) acceptanceTags = JSON.parse(args[args.indexOf("--tags") + 1]);
+      return "";
+    }
+    if (args.includes("describe-volumes")) return reply(state === "terminated" && !volumeStuck ? [] : [{ VolumeId: "vol-aaaaaaaaaaaaaaaaa", Encrypted: true, Tags: volumeDrift ? [] : workerTags, Attachments: [{ InstanceId: workerId }] }]);
     if (args.includes("describe-key-pairs")) return reply([{ KeyName: outputs.WorkerKeyName, Tags: infrastructureTags, PublicKey: "ssh-ed25519 AAAAFixturePublicKey comment\n" }]);
     if (args.includes("describe-instances")) {
       if (args.includes(controllerId)) return reply([{ InstanceId: controllerId, State: { Name: "running" }, Tags: infrastructureTags, SubnetId: "subnet-ccccccccccccccccc", SecurityGroups: [{ GroupId: "sg-ccccccccccccccccc" }], IamInstanceProfile: { Arn: "arn:aws:iam::123456789012:instance-profile/fixture-controller" }, ...controllerOverride }]);
       const base = { InstanceId: workerId, ImageId: options.imageId, State: { Name: state }, Tags: driftAfterLaunch || driftDuringCleanup && state === "shutting-down" ? [] : workerTags, ...workerOverride };
       if (["shutting-down", "terminated"].includes(state)) { if (state === "shutting-down") state = "terminated"; return reply([base]); }
-      return reply([{ ...base, SubnetId: outputs.WorkerSubnetId, SecurityGroups: [{ GroupId: outputs.WorkerSecurityGroupId }], KeyName: outputs.WorkerKeyName, MetadataOptions: { HttpEndpoint: "disabled" }, PrivateIpAddress: "10.84.2.22", ...workerOverride }]);
+      return reply([{ ...base, SubnetId: outputs.WorkerSubnetId, SecurityGroups: [{ GroupId: outputs.WorkerSecurityGroupId }], KeyName: outputs.WorkerKeyName, MetadataOptions: { HttpEndpoint: "disabled" }, PrivateIpAddress: "10.84.2.22", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { VolumeId: "vol-aaaaaaaaaaaaaaaaa", DeleteOnTermination: true } }], ...workerOverride }]);
     }
     if (args.includes("run-instances")) { workerTags = JSON.parse(args[args.indexOf("--tag-specifications") + 1])[0].Tags; return reply(workerId); }
     if (args.includes("send-command")) {
@@ -79,6 +87,8 @@ test("fresh acceptance proves isolated boot, stop/start persistence, pinned host
   assert.equal(result.cleanedUp, true);
   assert.equal(result.promptsSent, false);
   assert.equal(result.accountImports, false);
+  assert.deepEqual(result.acceptance, { version: "verified-v1", verificationId: result.verificationId, confirmed: true });
+  assert.equal(result.volumesRemoved, 1);
   assert.ok(Object.values(result.checks).every(value => value === true));
   assert.deepEqual(f.requests.map(p => p.phase), ["fresh", "resumed"]);
   assert.equal(f.requests[1].knownHosts, receipt(f.requests[0]).knownHosts);
@@ -96,6 +106,9 @@ test("fresh acceptance proves isolated boot, stop/start persistence, pinned host
   assert.deepEqual(parameters.executionTimeout, ["420"]);
   assert.doesNotMatch(JSON.stringify(result) + logs.join(""), /PRIVATE OUTPUT|SecretString|knownHosts/);
   assert.equal(JSON.stringify(result).includes(f.requests[0].sentinel), false);
+  const markerIndex = f.calls.findIndex(call => call.includes("create-tags"));
+  assert.ok(markerIndex > f.calls.findIndex(call => call.includes("terminate-instances")));
+  assert.ok(f.calls.slice(0, markerIndex).some(call => call.includes("describe-volumes")));
 });
 
 test("acceptance refuses foreign identity/network/image/controller/secret before creating resources", async () => {
@@ -112,6 +125,7 @@ test("failed/malformed audits never claim acceptance and terminate only the veri
     await assert.rejects(verifyWorkerImage(options, { run: f.run, sleep: async () => {} }), error => !error.message.includes("DO NOT PRINT"));
     assert.equal(f.calls.filter(c => c.includes("terminate-instances")).length, 1);
     assert.equal(f.calls.find(c => c.includes("terminate-instances")).at(-1), workerId);
+    assert.equal(f.calls.some(c => c.includes("create-tags")), false);
   }
 });
 
@@ -121,6 +135,33 @@ test("changed ownership blocks mutation; cleanup timeout cannot produce a succes
   assert.equal(foreign.calls.some(c => c.includes("terminate-instances") || c.includes("send-command")), false);
   const stuck = fixture({ noCleanup: true });
   await assert.rejects(verifyWorkerImage(options, { run: stuck.run, sleep: async () => {}, pollLimit: 2 }), /test worker termination/);
+  assert.equal(stuck.calls.some(call => call.includes("create-tags")), false);
+});
+
+test("acceptance marker requires confirmed encrypted-volume cleanup and unchanged image identity", async () => {
+  for (const change of [
+    { volumeStuck: true }, { volumeDrift: true },
+    { imageDrift: { OwnerId: "999999999999" } }, { imageDrift: { Public: true } },
+    { imageDrift: { Tags: [] } }, { imageDrift: { ImageId: "ami-bbbbbbbbbbbbbbbbb" } },
+    { imageDrift: { BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true, VolumeSize: 20, SnapshotId: "snap-changed" } }] } },
+  ]) {
+    const f = fixture(change);
+    await assert.rejects(verifyWorkerImage(options, { run: f.run, sleep: async () => {}, pollLimit: 2 }));
+    assert.equal(f.calls.some(call => call.includes("create-tags")), false);
+    assert.equal(f.calls.filter(call => call.includes("terminate-instances")).length, 1);
+  }
+});
+
+test("marker write or readback failure never returns accepted receipt or leaks provider output", async () => {
+  for (const change of [{ markerFailure: true }, { markerReadbackFailure: true }]) {
+    const f = fixture(change);
+    await assert.rejects(verifyWorkerImage(options, { run: f.run, sleep: async () => {} }), error => {
+      assert.match(error.message, /acceptance marker was not confirmed/);
+      assert.doesNotMatch(error.message, /PRIVATE MARKER/); return true;
+    });
+    assert.equal(f.calls.filter(call => call.includes("create-tags")).length, 1);
+    assert.equal(f.calls.filter(call => call.includes("terminate-instances")).length, 1);
+  }
 });
 
 test("termination observation tolerates detached interfaces only for an exactly owned shutting-down worker", async () => {
@@ -181,6 +222,20 @@ test("receipt validation compares identity values independently of object key or
   first.audit.hostKeys["ssh_host_rsa_key.pub"] = "c".repeat(64);
   const second = { ...first, phase: "resumed", audit: { ...first.audit, hostKeys: Object.fromEntries(Object.entries(first.audit.hostKeys).reverse()) } };
   assert.equal(verifyReceipt(second, { ...context, phase: "resumed", previous: first }), second);
+});
+
+test("probe failure details expose only fixed stages/classes and bounded helper line", async () => {
+  for (const valid of [true, false]) {
+    const diagnostic = { stage: "worker-probe", category: "invalid-receipt", probeStage: valid ? "image-audit-json" : "PRIVATE_STAGE", exceptionClass: valid ? "JSONDecodeError" : "PRIVATE_EXCEPTION", helperExceptionClass: valid ? "NameError" : "PRIVATE_HELPER", helperLine: valid ? 142 : 10001 };
+    const f = fixture({ commandFailed: true, mutateReceipt: () => ({ diagnostic }) });
+    await assert.rejects(verifyWorkerImage(options, { run: f.run, sleep: async () => {} }), error => {
+      assert.doesNotMatch(error.message, /PRIVATE|10001/);
+      assert.equal(error.message.includes("probe stage: image-audit-json"), valid);
+      assert.equal(error.message.includes("exceptionClass=JSONDecodeError"), valid);
+      assert.equal(error.message.includes("helperExceptionClass=NameError"), valid);
+      assert.equal(error.message.includes("helper line: 142"), valid); return true;
+    });
+  }
 });
 
 test("controller probe keeps key retrieval and root-only temporary files local and isolates known hosts", async () => {

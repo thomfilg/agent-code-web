@@ -123,6 +123,9 @@ AWS_PROFILE=
 
 Only the controller stores the SSH private key. `AGENT_EC2_USE_PUBLIC_IP=1` is
 now rejected. An old AMI without deployment/key/version tags must be rebaked.
+Every AMI also needs the verifier-issued `AgentRelayAcceptance=verified-v1`
+and verification UUID tags. Image availability or bake tags alone cannot admit
+new or existing workers, publish an environment, or start native acceptance.
 Provider `host` authentication mode is also rejected for remote workers.
 
 ## Acceptance gate (not satisfied by local fixtures)
@@ -145,11 +148,26 @@ taskset -c 0,1 nice -n 10 node --test --test-concurrency=1 \
 
 ### Fresh worker acceptance operator
 
-After baking, publish the preliminary controller environment/SSH key to the
-stack's existing application secret. The application itself need not be running;
-the controller bootstrap and its SSM agent must be ready. Publishing preliminary
-configuration does **not** make an image accepted. Do not start real chats until
-the operator below succeeds:
+The stack's existing application secret must already contain the deployment
+SSH key, and the controller bootstrap/SSM agent must be ready; the application
+itself need not be running. Full environment publication rejects an unaccepted
+image, including preliminary configuration. Never bypass that guard to prepare
+verification. Do not start real chats until the operator below succeeds:
+
+For a new deployment the order is: provision infrastructure → initialize the
+transport key → bake → verify/mark the image → publish the full Doppler-backed
+environment → build/deploy. Initialize the key without any provider credentials:
+
+```bash
+node scripts/aws-secrets.mjs initialize-worker-key
+```
+
+This action accepts only an empty application secret (or the identical key-only
+record as a no-op), verifies the stack/public-key ownership, and uses conditional
+version promotion. It rejects an already configured deployment, including one
+with a different saved transport key. It does not fetch Doppler, configure an
+AMI or authorize worker startup. Existing deployments already holding their
+verified transport key skip this bootstrap; it must not overwrite them.
 
 ```bash
 node deploy/aws/verify-worker-ami.mjs \
@@ -180,11 +198,20 @@ probe phases. No model prompt is sent and no user account is imported.
 
 Success is a structured `accepted: true, cleanedUp: true` receipt with checks,
 instance/image IDs, SSM command IDs and public hashes. It is emitted only after
-the two audits and confirmed termination of that exact disposable VM/root
-volume. An ownership change blocks cleanup; inspect the logged instance ID
+the two audits, confirmed termination of that exact disposable VM, observed
+deletion of its encrypted disposable volumes, and verified acceptance-tag
+publication to that exact owned/private image. An ownership change blocks
+cleanup; inspect the logged instance ID
 manually rather than weakening scope checks. Failed SSM output contains only
 fixed stage descriptions; no private diagnostics are printed. The original
-controller, AMI, stack secret and product data are not deleted or modified.
+controller, stack secret and product data are not deleted or modified. Only
+the tested AMI's two acceptance tags are changed after successful verification.
+Deleting either tag or changing its version denies subsequent admission without
+forcibly stopping already running chats; sleep/delete cleanup stays available.
+The marker is trusted operator metadata, not cryptographic attestation. The
+controller role cannot tag AMIs. Its narrower `RunInstances` IAM condition
+requires a separate reviewed stack update before it is active. See the
+[admission decision](../../docs/adr/2026-09-19-worker-image-acceptance-admission.md).
 
 Probe failures include an allowlisted category and numeric exit code, when
 available (SSH host-key/authentication/network, missing remote command, worker
