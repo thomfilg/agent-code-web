@@ -1,9 +1,43 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { request as httpRequest } from "node:http";
 import { readinessProbe } from "../src/readiness.mjs";
 import { createAgentWebServer } from "../src/server.mjs";
 import { WebSocket } from "ws";
 import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
+
+test("denied incomplete Git/MCP requests close their socket and cannot hold a drained Relay open", async t => {
+  const root = await temporaryDirectory(t), app = await createAgentWebServer({ config: testConfig(root) });
+  const { url } = await app.start(); t.after(() => app.stop());
+  for (const [path, expected] of [["/gateway/github/mcp", 401], ["/gateway/github/git/1.git/git-receive-pack", 401], ["/gateway/github/git/1.git/unsupported", 404]]) {
+    const req = httpRequest(url + path, { method: "POST", headers: { "Content-Length": "1000", "Content-Type": "application/x-git-receive-pack-request", Authorization: "Bearer invalid" } });
+    let closed = false, status;
+    req.on("error", () => {}); req.once("close", () => { closed = true; });
+    req.once("response", response => { status = response.statusCode; response.resume(); });
+    t.after(() => req.destroy()); req.write("{");
+    await waitFor(() => closed); assert.equal(status, expected);
+  }
+  assert.equal((await fetch(url + "/internal/deploy/drain", { method: "POST" })).status, 200);
+  let stopped = false; const stopping = app.stop().then(() => { stopped = true; });
+  await waitFor(() => stopped); await stopping;
+});
+
+test("authenticated incomplete MCP requests keep drain busy and stop cancels them", async t => {
+  const root = await temporaryDirectory(t), app = await createAgentWebServer({ config: testConfig(root) });
+  const { url } = await app.start(); t.after(() => app.stop());
+  const chat = await app.manager.createChat({ agent: "mock", title: "HTTP lifecycle fixture" });
+  await app.store.update(chat.id, { status: "stopped", repositories: [{ id: 1, fullName: "fixture/project", githubConnectionId: "github_fixture" }] });
+  const gateway = app.manager.githubWorkers;
+  gateway.servicesFor = async () => ({ github: { queue: Promise.resolve(), requireConnection: async () => ({ id: "github_fixture", revision: 1, token: "offline-fixture-only" }) } });
+  const { token } = await gateway.runtime(chat.id, url);
+  const req = httpRequest(url + "/gateway/github/mcp", { method: "POST", headers: { "Content-Length": "1000", Authorization: `Bearer ${token}` } });
+  let closed = false; req.on("error", () => {}); req.once("close", () => { closed = true; });
+  t.after(() => req.destroy()); req.write("{");
+  await waitFor(() => gateway.active === 1);
+  assert.equal((await fetch(url + "/internal/deploy/drain", { method: "POST" })).status, 409);
+  let stopped = false; const stopping = app.stop().then(() => { stopped = true; });
+  await waitFor(() => stopped && closed && gateway.active === 0); await stopping;
+});
 
 test("readiness requires decryptable database and writable data directories", async t => {
   const directory = await temporaryDirectory(t);

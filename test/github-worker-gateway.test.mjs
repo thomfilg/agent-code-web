@@ -38,6 +38,22 @@ async function serve(t, gateway) { return listen(t, async (req, res) => { if (!a
 const discovery = "/gateway/github/git/1.git/info/refs?service=git-upload-pack";
 const headers = token => ({ authorization: `Bearer ${token}` });
 
+test("authenticated Git discovery rejects and closes unread GET bodies", async t => {
+  const f = await fixture(t), origin = await serve(t, f.gateway), grant = await f.gateway.runtime(f.chat.id, origin);
+  for (const framing of [{ "content-length": "1000" }, { "transfer-encoding": "chunked" }]) {
+    const req = http.request(origin + discovery, { method: "GET", headers: { ...headers(grant.token), ...framing } });
+    t.after(() => req.destroy());
+    let status; req.on("error", () => {});
+    req.once("response", response => { status = response.statusCode; response.resume(); });
+    const closed = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(Error("Git fixture socket did not close")), 1000);
+      req.once("close", () => { clearTimeout(timeout); resolve(); });
+    });
+    req.write("{"); await closed;
+    assert.equal(status, 400); assert.equal(f.gateway.active, 0); assert.equal(f.calls.length, 0);
+  }
+});
+
 test("runtime returns only selected IDs and ephemeral config, not a provider credential", async t => {
   const f = await fixture(t), result = await f.gateway.runtime(f.chat.id, "https://relay.example");
   assert.deepEqual(result.repositories, [{ id: 1, fullName: "allowed/repo" }]);
