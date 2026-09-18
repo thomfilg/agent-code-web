@@ -33,3 +33,14 @@ Trade-offs: key rotation requires a new deployment-specific AMI; private NAT
 costs apply; CLI upgrades require rebaking and updating validation pins; legacy
 instances are deliberately not adopted based on a chat tag alone. AMIs and
 snapshots are retained for rollback and require explicit later cleanup.
+
+Acceptance uses a fresh uniquely tagged private test instance, with controller
+SSM as the transport into the VPC. The controller reads the selected stack secret
+locally and holds its SSH key only in root-private tmpfs. A fixed, no-argument
+root audit helper can inspect protected credential locations without granting
+the agent arbitrary root commands or returning secret contents. Public builder
+identity hashes establish that the fresh worker regenerated its identity;
+subsequent stop/start must preserve that new identity and a test sentinel. An
+acceptance receipt requires both phases and exact-instance cleanup, not merely
+AMI availability. Provider/MCP round trips remain a separate user-authorized
+gate and are not performed by this no-prompts operator.
