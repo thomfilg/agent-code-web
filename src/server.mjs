@@ -38,6 +38,7 @@ import { AgentAccounts } from "./agent-accounts.mjs";
 import { BrowserConnections } from "./browser-connections.mjs";
 import { zipSync } from "fflate";
 import { readinessProbe } from "./readiness.mjs";
+import { closeIncompleteRequestAfterResponse } from "./http-request-lifecycle.mjs";
 
 const MIME = {
   ".css": "text/css; charset=utf-8",
@@ -157,9 +158,12 @@ export async function createAgentWebServer(options = {}) {
     configured: () => !stopping && !draining && (!googleAuth.enabled || googleAuth.info().configured) });
 
   const server = http.createServer(async (request, response) => {
+    closeIncompleteRequestAfterResponse(request, response);
     if (stopping) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
     securityHeaders(response);
-    const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+    let url;
+    try { url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`); }
+    catch { return json(response, 400, { error: "Invalid request URL" }); }
     let mutationPending = false;
     try {
       if (url.pathname.startsWith("/internal/deploy/")) {
