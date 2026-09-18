@@ -94,3 +94,13 @@ caused the explicit fail-closed privacy explanation, without navigating to the
 app. TLS keys, cookies, users and hostnames were disposable fixtures; no provider
 consent, model prompt or AWS call occurred. This proves the browser mechanism,
 not deployed CloudFront/session/runtime integration.
+
+The operator now asserts the exact repeated-open path/query/fragment too, uses
+a private fixture HOME/TMP with an explicit child environment, and bounds MCP
+calls and cleanup. It prints success only after browser closure and the SDK's
+exact child-close event are observed and local listeners close. An unconfirmed
+cleanup retains the private fixture and exits with a fixed failure receipt;
+an earlier assertion failure retains its original phase. The hardened run
+passed with `cleanupConfirmed:true`; eight offline lifecycle regressions include
+a real SDK stdio child, missing-close and resolved `isError` failures. This
+operator evidence still claims no AWS action or real provider consent.
