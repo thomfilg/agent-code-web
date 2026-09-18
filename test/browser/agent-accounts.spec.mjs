@@ -340,3 +340,79 @@ test("a post-consent verification failure is shown once and the same account can
   await expect(card(page, "Personal").getByText(message, { exact: true })).toHaveCount(0);
   expect(relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId).map(account => account.id)).toEqual([original.id]);
 });
+
+for (const provider of ["codex", "claude"]) test(`${provider} Delete account is confirmed, cancels pending consent and removes connected accounts without affecting another account`, async ({ page, relay }) => {
+  const errors = []; page.on("pageerror", error => errors.push(error.message));
+  await login(page, relay); await page.locator("#agent-accounts-button").click();
+  await addAccount(page, "Keep me"); await expect(card(page, "Keep me").locator("code")).toBeVisible();
+  relay.codex.clients.at(-1).approve(); await expect(card(page, "Keep me")).toContainText("Connected");
+  await page.locator("#agent-account-new").click(); await page.locator("#agent-account-provider").selectOption(provider);
+  await page.getByLabel("Account name", { exact: true }).fill("Delete me");
+  await page.locator("#agent-account-companies").getByLabel("Unassigned chats (no company)", { exact: true }).check();
+  await page.locator("#agent-account-submit").click();
+  const row = page.getByRole("region", { name: `Delete me · ${provider === "claude" ? "Claude" : "Codex"}`, exact: true });
+  await expect(row.getByRole("link")).toBeVisible();
+  page.once("dialog", dialog => { expect(dialog.message()).toContain("Conversations stay saved"); expect(dialog.message()).toContain("does not delete your"); return dialog.dismiss(); });
+  await row.getByRole("button", { name: "Delete account", exact: true }).click(); await expect(row).toBeVisible();
+  const client = relay[provider].clients.at(-1);
+  page.once("dialog", dialog => dialog.accept()); await row.getByRole("button", { name: "Delete account", exact: true }).click();
+  await expect(row).toHaveCount(0); expect(client.closed).toBe(true); client.approve();
+  await expect(card(page, "Keep me")).toContainText("Connected");
+  page.once("dialog", dialog => dialog.accept()); await card(page, "Keep me").getByRole("button", { name: "Delete account", exact: true }).click();
+  await expect(page.locator("#agent-account-list")).toContainText("No agent accounts yet");
+  await page.reload(); await page.locator("#agent-accounts-button").click();
+  await expect(page.locator(".agent-account-card")).toHaveCount(0); expect(errors).toEqual([]);
+});
+
+test("deleted account cannot return from delayed status or list responses", async ({ page, relay }) => {
+  await login(page, relay); await page.locator("#agent-accounts-button").click(); await addAccount(page, "Delete race");
+  await expect(card(page, "Delete race").locator("code")).toBeVisible();
+  const id = relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId)[0].id;
+  const gate = Promise.withResolvers(), polled = Promise.withResolvers(), listed = Promise.withResolvers();
+  await page.route(`${relay.url}/api/agent-accounts/${id}`, async route => {
+    if (route.request().method() !== "GET") return route.continue();
+    const response = await route.fetch(); polled.resolve(); await gate.promise; await route.fulfill({ response });
+  });
+  await page.route(`${relay.url}/api/agent-accounts`, async route => {
+    if (route.request().method() !== "GET") return route.continue();
+    const response = await route.fetch(); listed.resolve(); await gate.promise; await route.fulfill({ response });
+  });
+  try {
+    await page.evaluate(() => window.dispatchEvent(new Event("relay-agent-accounts-changed")));
+    await Promise.all([polled.promise, listed.promise]);
+    page.once("dialog", dialog => dialog.accept()); await card(page, "Delete race").getByRole("button", { name: "Delete account", exact: true }).click();
+    await expect(card(page, "Delete race")).toHaveCount(0); gate.resolve();
+    await expect(page.locator("#agent-account-list")).toContainText("No agent accounts yet");
+    await page.getByRole("button", { name: "Close agent accounts" }).click(); await page.locator("#agent-accounts-button").click();
+    await expect(card(page, "Delete race")).toHaveCount(0);
+  } finally { gate.resolve(); }
+});
+
+test("a delayed sign-in POST response cannot resurrect an account deleted while the response was in flight", async ({ page, relay }) => {
+  const gate = Promise.withResolvers(), submitted = Promise.withResolvers();
+  await page.route(`${relay.url}/api/agent-accounts`, async route => {
+    if (route.request().method() !== "POST") return route.continue();
+    const response = await route.fetch(); submitted.resolve(); await gate.promise; await route.fulfill({ response });
+  });
+  try {
+    await login(page, relay); await page.locator("#agent-accounts-button").click(); await addAccount(page, "Slow response");
+    await submitted.promise;
+    await expect(card(page, "Slow response").getByRole("button", { name: "Delete account", exact: true })).toBeVisible();
+    page.once("dialog", dialog => dialog.accept()); await card(page, "Slow response").getByRole("button", { name: "Delete account", exact: true }).click();
+    await expect(card(page, "Slow response")).toHaveCount(0); gate.resolve();
+    await expect(page.locator("#agent-account-submit")).toBeEnabled();
+    await expect(card(page, "Slow response")).toHaveCount(0);
+  } finally { gate.resolve(); }
+});
+
+test("failed deletion reports blocked access and can be retried on that account card", async ({ page, relay }) => {
+  await login(page, relay); await page.locator("#agent-accounts-button").click(); await addAccount(page, "Retry deletion");
+  await expect(card(page, "Retry deletion").locator("code")).toBeVisible();
+  const erase = relay.app.records.delete.bind(relay.app.records); let failOnce = true;
+  relay.app.records.delete = async (...args) => { if (args[0] === "agent-account" && failOnce) { failOnce = false; throw Error("private storage failure"); } return erase(...args); };
+  page.once("dialog", dialog => dialog.accept()); await card(page, "Retry deletion").getByRole("button", { name: "Delete account", exact: true }).click();
+  await expect(card(page, "Retry deletion").getByRole("alert")).toContainText("Access is blocked");
+  await expect(card(page, "Retry deletion")).not.toContainText("private storage failure");
+  page.once("dialog", dialog => dialog.accept()); await card(page, "Retry deletion").getByRole("button", { name: "Delete account", exact: true }).click();
+  await expect(card(page, "Retry deletion")).toHaveCount(0);
+});

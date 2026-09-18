@@ -32,7 +32,7 @@ test("named Claude worker uses only its account, redacts token echoes and retain
   assert.match(resumed.text, /resume fixture/); assert.equal(store.get(chat.id).agentSessionId, sessionId); assert.ok(calls.length >= 4);
 });
 
-test("Claude API onboarding, company/account admission, turn, resume and disconnect use the Google owner's account", async t => {
+for (const action of ["disconnect", "delete"]) test(`Claude API onboarding, company/account admission, turn, resume and ${action} use the Google owner's account`, async t => {
   const root = await temporaryDirectory(t), google = googleOidcFixture(), claude = claudeAccountFixture();
   const app = await createAgentWebServer({ config: testConfig(root, { ...googleTestEnv, CLAUDE_BIN: path.resolve("test/fixtures/fake-claude.mjs"), ANTHROPIC_API_KEY: "", OPENAI_API_KEY: "", AGENT_ENABLE_MOCK: "0", AGENT_IDLE_TIMEOUT_MS: "60000" }),
     googleAuthOptions: { fetchImpl: google.fetch }, agentAccountsOptions: { clientFactory: claude.factory } });
@@ -54,7 +54,10 @@ test("Claude API onboarding, company/account admission, turn, resume and disconn
   const session = app.store.get(chat.id).agentSessionId; await app.manager.stop(chat.id, "test-resume");
   const second = await app.manager.submit(chat.id, "second fixture turn"); await second.completion;
   assert.equal(app.store.get(chat.id).agentSessionId, session); assert.equal(app.broker.size, 0);
-  assert.equal((await post(`/api/agent-accounts/${account.id}/disconnect`)).status, 200);
-  await app.manager.send(chat.id, "must not execute"); assert.match(app.store.get(chat.id).queueError, /Reconnect/);
+  const messages = structuredClone(app.store.get(chat.id).messages);
+  const removal = action === "delete" ? await browser.request(`/api/agent-accounts/${account.id}`, { method: "DELETE" }) : await post(`/api/agent-accounts/${account.id}/disconnect`);
+  assert.equal(removal.status, 200);
+  assert.deepEqual(app.store.get(chat.id).messages, messages); assert.equal(app.store.get(chat.id).agentAccountId, account.id);
+  await app.manager.send(chat.id, "must not execute"); assert.match(app.store.get(chat.id).queueError, action === "delete" ? /account not found/ : /Reconnect/);
   assert.equal(app.store.get(chat.id).status, "stopped"); assert.ok(app.store.get(chat.id).messages.length >= 4);
 });

@@ -16,7 +16,7 @@ const reconnectError = provider => provider === "claude" ? new ClaudeAccountErro
 export class AgentAccounts {
   constructor({ records, config, clientFactory = provider => provider === "claude" ? new ClaudeAccountClient(config) : new CodexAccountClient(config), now = Date.now, loginTimeoutMs = 600000, onChange = () => {}, onRevoke = async () => {} }) {
     Object.assign(this, { records, config, clientFactory, now, loginTimeoutMs, onChange, onRevoke });
-    this.metadata = new Map(); this.flows = new Map(); this.locks = new Map(); this.closed = false;
+    this.metadata = new Map(); this.flows = new Map(); this.locks = new Map(); this.removing = new Map(); this.closed = false;
   }
   async initialize() {
     for (const record of await this.records.list("agent-account")) {
@@ -28,7 +28,7 @@ export class AgentAccounts {
       this.metadata.set(record.id, { ownerId: record.ownerId, ...publicAccount(record) });
     }
   }
-  list(ownerId) { return [...this.metadata.values()].filter(item => item.ownerId === ownerId).map(publicAccount); }
+  list(ownerId) { return [...this.metadata.values()].filter(item => item.ownerId === ownerId).map(item => publicAccount(this.removing.has(item.id) ? { ...item, status: "disconnected", error: "Account deletion is in progress. Retry deletion if it did not finish." } : item)); }
   hasConnected(ownerId, provider) { return this.list(ownerId).some(item => item.provider === provider && item.status === "connected"); }
   async locked(id, action) {
     const prior = this.locks.get(id) || Promise.resolve();
@@ -39,12 +39,16 @@ export class AgentAccounts {
     owner(ownerId);
     if (!/^account_[a-f0-9-]{36}$/.test(id || "")) throw fail("Agent account not found", 404);
     const record = await this.records.get("agent-account", id);
-    if (!record || record.ownerId !== ownerId) throw fail("Agent account not found", 404);
+    if (!record || record.ownerId !== ownerId || this.removing.has(id)) throw fail("Agent account not found", 404);
     return record;
   }
   async save(record, { guard = null, rollback = null } = {}) {
+    if (this.removing.has(record.id)) throw fail("Agent account not found", 404);
     guard?.();
     await this.records.put("agent-account", record.id, record);
+    // Deletion invalidates in-flight refresh/verification before it can
+    // publish credentials. Its ID lock removes this provisional write next.
+    if (this.removing.has(record.id)) throw fail("Agent account not found", 404);
     try { guard?.(); } catch (error) {
       // The native ceremony may be cancelled while an asynchronous encrypted
       // write is committing. Undo that provisional write before publishing it.
@@ -59,6 +63,7 @@ export class AgentAccounts {
   }
   async select(ownerId, id, chat = {}, { connected = true } = {}) {
     const record = await this.get(ownerId, id);
+    if (this.removing.has(id)) throw fail("Agent account not found", 404);
     if (record.provider !== chat.agent) throw fail("Choose an account for the selected agent");
     if (!scopeAllows(record, companyForChat(chat))) throw fail("This agent account is not available for this chat's company", 403);
     if (connected && (this.flows.has(id) || record.status !== "connected" || !record.auth)) throw fail(reconnectError(record.provider), 409);
@@ -111,6 +116,7 @@ export class AgentAccounts {
   }
   async status(ownerId, id) {
     const record = await this.get(ownerId, id), flow = this.flows.get(id);
+    if (this.removing.has(id)) throw fail("Agent account not found", 404);
     // Never publish provisional database state from an unfinished guarded
     // commit. Admission is separately blocked while the flow owns this ID.
     const visible = flow ? this.metadata.get(id) || record : record;
@@ -192,6 +198,48 @@ export class AgentAccounts {
     await this.onRevoke(ownerId, id);
     return this.status(ownerId, id);
   }
+  async remove(ownerId, id) {
+    owner(ownerId);
+    if (this.metadata.get(id)?.ownerId !== ownerId) throw fail("Agent account not found", 404);
+    const existing = this.removing.get(id);
+    if (existing?.promise) return existing.promise;
+    // Owner-checked invalidation must happen before any asynchronous lock or
+    // database operation, including a currently gated credential refresh.
+    const removal = { ownerId }; this.removing.set(id, removal);
+    const flow = this.flows.get(id);
+    if (flow) {
+      flow.cancelled = true; flow.cancelMessage = "Account deleted."; clearTimeout(flow.timer);
+      void flow.client.cancel().catch(() => {});
+    }
+    const erase = this.locked(id, async () => {
+      const record = await this.records.get("agent-account", id);
+      if (!record) return; // Retry after erasure succeeded but worker stop failed.
+      if (record.ownerId !== ownerId) throw fail("Agent account not found", 404);
+      const pending = this.flows.get(id);
+      if (pending) {
+        this.flows.delete(id); clearTimeout(pending.timer);
+        await pending.client.cancel().catch(() => {}); await pending.client.close().catch(() => {});
+      }
+      // If deletion fails, durable credentials are still revoked and the
+      // account can safely be retried. Do not modify any chat/account binding.
+      const disconnected = { ...record, status: "disconnected", auth: null, revision: record.revision + 1, error: null };
+      await this.records.put("agent-account", id, disconnected);
+      this.metadata.set(id, { ownerId, ...publicAccount(disconnected) });
+      await this.records.delete("agent-account", id);
+    });
+    // Stop workers in parallel with lock drainage. Admission and refresh are
+    // already unavailable, so no worker can obtain replacement credentials.
+    const revoked = Promise.resolve().then(() => this.onRevoke(ownerId, id));
+    removal.promise = Promise.allSettled([erase, revoked]).then(results => {
+      if (results.some(result => result.status === "rejected")) {
+        removal.promise = null; this.onChange(ownerId);
+        throw fail("Account deletion could not finish. Access is blocked; retry deleting this account.", 503);
+      }
+      this.metadata.delete(id); this.removing.delete(id); this.onChange(ownerId);
+      return { deleted: true, id };
+    });
+    return removal.promise;
+  }
   async credentials(ownerId, id, chat, { refresh = false, previousAccountId = null } = {}) {
     return this.locked(id, async () => {
       let record = await this.select(ownerId, id, chat);
@@ -204,6 +252,7 @@ export class AgentAccounts {
         } } : {}) });
         if (identity(snapshot) !== record.accountIdentity || snapshot.subject !== record.subject) throw fail("Agent account identity changed");
         await this.save({ ...record, ...snapshot, error: null });
+        if (this.removing.has(id)) throw fail("Agent account not found", 404);
         if (record.provider === "claude") return { accessToken: snapshot.auth.claudeAiOauth.accessToken, accountId: record.subject, organizationId: record.accountIdentity, email: snapshot.email, expiresAt: snapshot.auth.claudeAiOauth.expiresAt };
         return { accessToken: snapshot.auth.tokens.access_token, chatgptAccountId: record.accountIdentity, chatgptPlanType: snapshot.plan };
       } catch (error) {
@@ -227,7 +276,9 @@ export class AgentAccounts {
             const next = { ...record, auth }; await this.save(next); record = next;
           } });
           if (identity(snapshot) !== record.accountIdentity || snapshot.subject !== record.subject) throw fail("Agent account identity changed");
-          await this.save({ ...record, ...snapshot, error: null }); return models;
+          await this.save({ ...record, ...snapshot, error: null });
+          if (this.removing.has(id)) throw fail("Agent account not found", 404);
+          return models;
         }
         const models = []; let cursor;
         do {
@@ -238,8 +289,10 @@ export class AgentAccounts {
         const snapshot = await client.snapshot();
         if (snapshot.auth.tokens.account_id !== record.accountIdentity || snapshot.subject !== record.subject) throw fail("Codex account identity changed");
         await this.save({ ...record, ...snapshot });
+        if (this.removing.has(id)) throw fail("Agent account not found", 404);
         return models;
       } catch (error) {
+        if (this.removing.has(id)) throw fail("Agent account not found", 404);
         if (record.provider === "claude") {
           const temporary = error instanceof ClaudeAccountError && error.code === "temporary";
           const message = temporary ? new ClaudeAccountError("temporary").message : reconnectError(record.provider);
@@ -256,6 +309,7 @@ export class AgentAccounts {
     // A begin() may still be saving its record before registering the flow.
     // Drain starts first so shutdown cannot leave an untracked login process.
     await Promise.allSettled([...this.locks.values()]);
+    await Promise.allSettled([...this.removing.values()].map(removal => removal.promise).filter(Boolean));
     await Promise.all([...this.flows.values()].map(flow => this.cancel(flow.ownerId, flow.id).catch(() => {})));
     await Promise.allSettled([...this.locks.values()]);
   }

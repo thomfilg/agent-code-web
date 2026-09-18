@@ -104,14 +104,23 @@ Independent review found cancellation-during-verification/persistence and
 refresh-rotation-followed-by-profile-outage races. Both were reproduced with
 five failing gated regression cases before fixing them. Additional checks cover
 foreign-owner cancellation, rotated-but-revoked/wrong-identity access, restart
-retry and safe temporary errors over the private renewal channel. Final review
-of those corrections remains pending before integration. No live Relay
+retry and safe temporary errors over the private renewal channel. Independent
+review accepted these corrections and the integration branch includes them. No live Relay
 controller was restarted or production account imported by this feature task.
 
 A follow-up review also reproduced a queued-replacement race: an old attempt's
 cancel could run after a newer begin acquired the account lock. Cancellation is
 now bound to the captured flow/revision; whole-account disconnect still cancels
 any replacement. Both orderings have gated regression tests.
+
+Named-account deletion is now implemented separately from disconnect, for both
+Claude and Codex; see the [deletion ADR](adr/2026-09-18-named-agent-account-deletion.md).
+The follow-up focused suite passed **44/44** checks, including gated concurrent
+operations, safe storage/worker-stop retry and real worker-transport shutdown
+without deleting conversations or silently replacing their account binding.
+The account/Google browser suite passed **19/19**, including deletion of both
+providers, confirmation dismissal, an unaffected sibling account, stale
+GET/list/POST suppression and retry after a simulated storage failure.
 
 Pending release acceptance (not counted as completed browser consent): deploy
 the integrated build, have the user finish this named Claude account's browser

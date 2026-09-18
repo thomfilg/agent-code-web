@@ -74,8 +74,9 @@ renew expired tokens.
   Such a copy does not prove the product's browser consent ceremony. Refreshing
   it can rotate a token in the same provider token family; tests must never
   logout/revoke the host account or write back to its credential file.
-- Account deletion is the separate queued item 46, not silently conflated with
-  disconnect. Deployment and real user-consent gates remain explicit.
+- Account deletion is separate from disconnect; see
+  [the account-deletion ADR](2026-09-18-named-agent-account-deletion.md).
+  Deployment and real user-consent gates remain explicit.
 
 ## References
 
