@@ -25,7 +25,7 @@ export class ModelCatalog {
     if (context.agentAccountId && agent === "codex") {
       // Never consult a shared/host catalog for a named account. Validate
       // ownership on every request, including when the browser cached a list.
-      const models = await this.accounts.models(context.ownerId, context.agentAccountId);
+      const models = await this.accounts.models(context.ownerId, context.agentAccountId, agent);
       const configured = this.defaults(agent);
       const chosen = models.find(model => model.model === configured.model) || models.find(model => model.isDefault) || models[0];
       const defaults = { model: chosen?.model || null, effort: chosen?.supportedReasoningEfforts?.some(e => e.reasoningEffort === configured.effort) ? configured.effort : chosen?.defaultReasoningEffort || null };
@@ -33,6 +33,17 @@ export class ModelCatalog {
         defaultEffort: model.defaultReasoningEffort, efforts: (model.supportedReasoningEfforts || []).map(e => e.reasoningEffort), supportsPersonality: model.supportsPersonality === true,
         serviceTiers: (model.serviceTiers || []).map(tier => ({ id: tier.id, name: tier.name, description: tier.description })) })),
         source: "codex-account", note: "Models reported for the selected Codex account.", configuredDefault: defaults.model, configuredDefaultEffort: defaults.effort, defaults };
+    }
+    if (context.agentAccountId && agent === "claude") {
+      const native = await this.accounts.models(context.ownerId, context.agentAccountId, agent);
+      const models = native.filter(model => typeof model.value === "string" && /^[a-zA-Z0-9_.\[\]-]{1,150}$/.test(model.value)).map(model => ({
+        id: model.value, label: typeof model.displayName === "string" ? model.displayName.slice(0, 150) : model.value,
+        description: typeof model.description === "string" ? model.description.slice(0, 500) : "",
+        isDefault: model.value === "default", efforts: ["auto", ...(model.supportedEffortLevels || []).filter(e => ["low", "medium", "high", "xhigh", "max"].includes(e))], defaultEffort: "auto",
+      }));
+      const model = models.find(item => item.id === this.defaults(agent).model) || models.find(item => item.isDefault) || models[0];
+      const defaults = { model: model?.id || null, effort: model?.efforts.includes(this.defaults(agent).effort) ? this.defaults(agent).effort : "auto" };
+      return { models, source: "claude-account", note: "Models reported by Claude for this account; availability is enforced when you send.", configuredDefault: defaults.model, configuredDefaultEffort: defaults.effort, defaults };
     }
     if (this.config.google?.enabled) throw fail("Connect and select an agent account for this user");
     const cached = this.cache.get(agent);

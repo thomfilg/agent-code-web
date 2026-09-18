@@ -6,15 +6,16 @@ import { testConfig } from "../helpers.mjs";
 import { googleOidcFixture, googleTestEnv } from "../fixtures/google-oidc.mjs";
 import { codexAccountFixture } from "../fixtures/codex-account.mjs";
 import { CodexAccountError } from "../../src/codex-account-client.mjs";
+import { claudeAccountFixture } from "../fixtures/claude-account.mjs";
 
 const test = base.extend({
   relay: async ({}, use) => {
-    const root = await mkdtemp("/tmp/relay-accounts-browser-"), google = googleOidcFixture(), codex = codexAccountFixture();
+    const root = await mkdtemp("/tmp/relay-accounts-browser-"), google = googleOidcFixture(), codex = codexAccountFixture(), claude = claudeAccountFixture();
     const app = await createAgentWebServer({ config: testConfig(root, { ...googleTestEnv, CODEX_BIN: path.resolve("test/fixtures/fake-codex.mjs"), AGENT_ENABLE_MOCK: "0", OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "" }),
-      googleAuthOptions: { fetchImpl: google.fetch }, agentAccountsOptions: { clientFactory: codex.factory } });
+      googleAuthOptions: { fetchImpl: google.fetch }, agentAccountsOptions: { clientFactory: provider => provider === "claude" ? claude.factory() : codex.factory() } });
     try {
       const { url } = await app.start(); app.config.google.origin = url; await app.googleAuth.initialize();
-      await use({ app, url, google, codex });
+      await use({ app, url, google, codex, claude });
     } finally { await app.stop(); await rm(root, { recursive: true, force: true }); }
   },
 });
@@ -38,6 +39,44 @@ async function addAccount(page, name) {
   await page.locator("#agent-account-companies").getByLabel("Unassigned chats (no company)", { exact: true }).check();
   await page.getByRole("button", { name: "Sign in to Codex", exact: true }).click();
 }
+
+test("Claude account card owns its link and returned code, enables account models and reconnects without a megazord", async ({ page, relay }) => {
+  const errors = []; page.on("pageerror", error => errors.push(error.message));
+  await page.setViewportSize({ width: 390, height: 844 }); await login(page, relay);
+  await page.locator("#welcome-new-chat").click(); await page.locator("#connect-codex-button").click();
+  await page.locator("#agent-account-new").click(); await page.locator("#agent-account-provider").selectOption("claude");
+  await page.getByLabel("Account name", { exact: true }).fill("Claude Personal");
+  await page.locator("#agent-account-companies").getByLabel("Unassigned chats (no company)", { exact: true }).check();
+  await page.getByRole("button", { name: "Sign in to Claude", exact: true }).click();
+  const accountCard = page.getByRole("region", { name: "Claude Personal · Claude", exact: true });
+  await expect(accountCard.getByRole("link", { name: "Open Claude sign-in for Claude Personal", exact: true })).toHaveAttribute("href", /^https:\/\/claude\.com\//);
+  await expect(accountCard.getByLabel("Claude authorization code for Claude Personal")).toHaveAttribute("type", "password");
+  await accountCard.getByLabel("Claude authorization code for Claude Personal").fill("bad-code");
+  await accountCard.getByRole("button", { name: "Complete sign-in" }).click();
+  await expect(accountCard.getByRole("alert")).toContainText("could not be verified");
+  await accountCard.getByLabel("Claude authorization code for Claude Personal").fill("fixture-code#fixture-state");
+  await accountCard.getByRole("button", { name: "Complete sign-in" }).click();
+  await expect(accountCard).toContainText("claude@example.test · Connected");
+  await expect(accountCard.locator("input")).toHaveCount(0);
+  await page.screenshot({ path: test.info().outputPath("claude-account-connected-mobile.png") });
+  await page.getByRole("button", { name: "Close agent accounts" }).click();
+  await expect(page.locator("#agent-select")).toHaveValue("claude");
+  await expect(page.getByLabel("Claude account", { exact: true })).toHaveValue("");
+  const account = relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId)[0];
+  await page.getByLabel("Claude account", { exact: true }).selectOption(account.id);
+  await expect(page.locator("#new-model-controls")).toHaveAttribute("data-status", "ready");
+  await page.locator("#connect-codex-button").click(); page.once("dialog", dialog => dialog.accept());
+  await accountCard.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await accountCard.getByRole("button", { name: "Reconnect", exact: true }).click();
+  await expect(page.locator("#agent-account-form")).toBeHidden();
+  await expect(accountCard.getByLabel("Claude authorization code for Claude Personal")).toBeVisible();
+  await expect(accountCard.getByRole("link")).toHaveCount(1);
+  await accountCard.getByRole("button", { name: "Cancel sign-in", exact: true }).click();
+  await expect(accountCard).toContainText("cancelled");
+  expect(relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId).length).toBe(1);
+  expect(await page.locator("#agent-accounts-dialog").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(errors).toEqual([]);
+});
 
 test("missing agent offers account onboarding instead of Invalid agent; device login persists and is explicitly selected", async ({ page, relay }) => {
   const errors = []; page.on("pageerror", error => errors.push(error.message));

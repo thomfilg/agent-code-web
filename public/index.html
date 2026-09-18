@@ -265,8 +265,8 @@
           <span>Agent</span>
           <select id="agent-select" required></select>
         </label>
-        <div id="agent-account-requirement" class="dialog-security" hidden><p id="agent-account-hint">Connect an agent account before creating a conversation.</p><button type="button" class="secondary-button" id="connect-codex-button">Connect Codex / manage accounts</button></div>
-        <label id="new-agent-account-field" hidden><span>Codex account</span><select id="new-agent-account" aria-label="Codex account"><option value="">Select an account</option></select></label>
+        <div id="agent-account-requirement" class="dialog-security" hidden><p id="agent-account-hint">Connect an agent account before creating a conversation.</p><button type="button" class="secondary-button" id="connect-codex-button">Connect Codex or Claude / manage accounts</button></div>
+        <label id="new-agent-account-field" hidden><span>Agent account</span><select id="new-agent-account" aria-label="Agent account"><option value="">Select an account</option></select></label>
         <div class="model-controls" id="new-model-controls"><label><span>Model</span><select class="model-select" aria-label="New chat model"></select></label><label><span>Effort</span><select class="effort-select" aria-label="New chat effort"></select></label><p class="model-note" role="status"></p></div>
         <label><span>What would you like to work on?</span><textarea id="initial-prompt" rows="3" maxlength="100000" placeholder="Describe the task. Your agent will name this conversation."></textarea></label>
         <div class="environment-choice"><label><span>Environment</span><select id="environment-select" required></select></label><button type="button" class="icon-button" id="environment-settings" aria-label="Manage selected environment">⚙</button></div>
@@ -288,20 +288,21 @@
     <dialog id="agent-accounts-dialog" aria-labelledby="agent-accounts-title">
       <section class="dialog-card">
         <div class="dialog-heading"><h2 id="agent-accounts-title">Your agent accounts</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close agent accounts">×</button></div>
-        <p class="muted">Connect your personal or work Codex accounts.</p>
+        <p class="muted">Connect your personal or work Codex and Claude accounts.</p>
         <div id="agent-account-list"></div>
-        <button type="button" class="secondary-button" id="agent-account-new" aria-expanded="false" aria-controls="agent-account-form">＋ Add Codex account</button>
+        <button type="button" class="secondary-button" id="agent-account-new" aria-expanded="false" aria-controls="agent-account-form">＋ Add agent account</button>
         <form id="agent-account-form" aria-labelledby="agent-account-form-title" hidden>
-          <h3 id="agent-account-form-title">Add a Codex account</h3>
+          <h3 id="agent-account-form-title">Add an agent account</h3>
           <fieldset id="agent-account-fields">
-            <label><span>Account name</span><input id="agent-account-name" required maxlength="80" placeholder="Personal Codex or company Codex" autocomplete="off"></label>
+            <label><span>Agent</span><select id="agent-account-provider"><option value="codex">Codex</option><option value="claude">Claude Code</option></select></label>
+            <label><span>Account name</span><input id="agent-account-name" required maxlength="80" placeholder="Personal or company" autocomplete="off"></label>
             <div id="agent-account-companies"></div>
             <div class="dialog-actions"><button type="button" class="secondary-button" id="agent-account-cancel">Cancel</button><button type="submit" class="primary-button" id="agent-account-submit">Sign in to Codex</button></div>
           </fieldset>
           <p id="agent-account-progress" class="agent-account-progress" role="status" hidden></p>
           <p id="agent-account-error" class="form-error" role="alert"></p>
         </form>
-        <details class="agent-account-help"><summary>About accounts and access</summary><p class="muted">Google sign-in does not sign you in to Codex or Claude. Server logins are never imported. Only the companies you select can use an account; the first repository determines a chat’s company.</p><p class="muted">Credentials are encrypted on the controller. Local workers share the host filesystem; use isolated cloud workers for untrusted multi-user workloads. Claude account sign-in is not available yet.</p></details>
+        <details class="agent-account-help"><summary>About accounts and access</summary><p class="muted">Google sign-in does not sign you in to Codex or Claude. Server logins are never imported. Only the companies you select can use an account; the first repository determines a chat’s company.</p><p class="muted">Credentials are encrypted on the controller. Local workers share the host filesystem; use isolated cloud workers for untrusted multi-user workloads. Claude uses your Pro, Max, Team or Enterprise subscription; authorize in your browser, then paste the returned code into that account’s card.</p></details>
       </section>
     </dialog>
 

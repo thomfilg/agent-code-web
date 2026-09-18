@@ -56,21 +56,24 @@ export class WorkspaceSettings {
     $("#agent-account-requirement").hidden = !supported;
     const agent = $("#agent-select").value;
     $("#agent-select").disabled = !agent;
-    const needed = supported && agent === "codex";
+    const needed = supported && ["codex", "claude"].includes(agent);
     const select = $("#new-agent-account"), old = select.value || this.preferences?.agentAccountId;
     const available = (this.accounts || []).filter(account => account.provider === agent && account.status === "connected" && scopeAllows(account, companyForChat({ repositories: this.selected })));
     select.replaceChildren(option("", "Select an account"), ...available.map(account => option(account.id, `${account.name}${account.email ? ` · ${account.email}` : ""}`)));
     if (available.some(account => account.id === old)) select.value = old;
     select.required = needed; $("#new-agent-account-field").hidden = !needed;
-    $("#agent-account-hint").textContent = !agent ? "No agent is connected. Connect Codex to get started." : needed && !available.length ? "No Codex account is available for this company. Connect one or choose an allowed company." : "Choose the account for this chat. Other users' and companies' credentials are never used.";
+    const label = `${agent === "claude" ? "Claude" : "Codex"} account`;
+    select.setAttribute("aria-label", label); $("#new-agent-account-field span").textContent = label;
+    $("#agent-account-hint").textContent = !agent ? "No agent is connected. Connect Codex or Claude to get started." : needed && !available.length ? `No ${label} is available for this company. Connect one or choose an allowed company.` : "Choose the account for this chat. Other users' and companies' credentials are never used.";
     $("#create-chat-button").disabled = !this.github?.connected || !agent || Boolean(needed && !select.value);
     if (!agent || needed && !select.value) void this.modelPicker.setAgent(null);
   }
   updateModels(selected = {}) {
     const agent = $("#agent-select").value;
-    const agentAccountId = this.state.config.features?.agentAccounts && agent === "codex" ? $("#new-agent-account").value : null;
-    $("#create-chat-button").disabled = !this.github?.connected || !agent || Boolean(this.state.config.features?.agentAccounts && agent === "codex" && !agentAccountId);
-    return this.modelPicker.setAgent(!agent || this.state.config.features?.agentAccounts && agent === "codex" && !agentAccountId ? null : agent, { ...selected, agentAccountId }, { useDefaults: true });
+    const needed = this.state.config.features?.agentAccounts && ["codex", "claude"].includes(agent);
+    const agentAccountId = needed ? $("#new-agent-account").value : null;
+    $("#create-chat-button").disabled = !this.github?.connected || !agent || Boolean(needed && !agentAccountId);
+    return this.modelPicker.setAgent(!agent || needed && !agentAccountId ? null : agent, { ...selected, agentAccountId }, { useDefaults: true });
   }
   async openNew() {
     $("#create-chat-error").textContent = "";
@@ -126,15 +129,15 @@ export class WorkspaceSettings {
   payload() {
     if (!this.github?.connected) throw new Error("Connect GitHub first"); if (!this.selected.length) throw new Error("Select at least one repository");
     const agent = $("#agent-select").value, agentAccountId = $("#new-agent-account").value;
-    if (!agent || this.state.config.features?.agentAccounts && agent === "codex" && !agentAccountId) throw new Error("Connect and select an agent account first");
-    return { agent, ...(agentAccountId && agent === "codex" ? { agentAccountId } : {}), ...this.modelPicker.value(), environmentId: $("#environment-select").value, repositories: this.selected };
+    if (!agent || this.state.config.features?.agentAccounts && ["codex", "claude"].includes(agent) && !agentAccountId) throw new Error("Connect and select an agent account first");
+    return { agent, ...(agentAccountId && ["codex", "claude"].includes(agent) ? { agentAccountId } : {}), ...this.modelPicker.value(), environmentId: $("#environment-select").value, repositories: this.selected };
   }
   async remember() {
     if (!$("#environment-select").value) return;
     const selection = $("#new-chat-dialog").open ? { agent: $("#agent-select").value, ...this.modelPicker.value() } : { agent: this.preferences.agent || $("#agent-select").value, model: this.preferences.model || null, effort: this.preferences.effort || null };
     const body = { ...selection, environmentId: $("#environment-select").value, repositories: structuredClone(this.selected) };
     if (!body.agent) return;
-    if (this.state.config.features?.agentAccounts && body.agent === "codex") {
+    if (this.state.config.features?.agentAccounts && ["codex", "claude"].includes(body.agent)) {
       body.agentAccountId = $("#new-chat-dialog").open ? $("#new-agent-account").value : this.preferences.agentAccountId;
       if (!body.agentAccountId) return;
     }

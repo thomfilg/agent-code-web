@@ -23,6 +23,18 @@ function fixture(hooks = {}) {
   return f;
 }
 
+test("native OAuth refresh is private, access-only, fail-closed and cannot become a user approval", async () => {
+  const calls = [], f = fixture({ accountCredentials: async options => { calls.push(options); return { accessToken: "private-access-fixture", refreshToken: "never-send" }; } });
+  f.requests.accept({ type: "control_request", request_id: "refresh", request: { subtype: "oauth_token_refresh" } }); await tick();
+  assert.deepEqual(calls, [{ refresh: true }]); assert.deepEqual(f.shown, []); assert.deepEqual(f.events, []);
+  assert.deepEqual(f.sent[0].response.response, { accessToken: "private-access-fixture" }); assert.doesNotMatch(JSON.stringify(f.sent), /never-send/);
+  const denied = fixture({ accountCredentials: async () => { throw Error("private-provider-error"); } });
+  denied.requests.accept({ type: "control_request", request_id: "refresh", request: { subtype: "oauth_token_refresh" } }); await tick();
+  assert.equal(denied.sent[0].response.subtype, "error"); assert.match(denied.sent[0].response.error, /Reconnect/); assert.doesNotMatch(JSON.stringify(denied.sent), /private-provider-error/);
+  const gate = Promise.withResolvers(), stopped = fixture({ accountCredentials: () => gate.promise });
+  stopped.requests.accept({ type: "control_request", request_id: "refresh", request: { subtype: "oauth_token_refresh" } }); stopped.requests.close(); gate.resolve({ accessToken: "late" }); await tick(); assert.deepEqual(stopped.sent, []);
+});
+
 test("Claude approvals bind opaque IDs to unchanged native inputs and never persist suggested permissions", async () => {
   const f = fixture(), input = { file_path: "/private/workspace/.claude/skills/verify/SKILL.md", content: "Fixture recipe", note: "AUTH_TOKEN=private-fixture-token" };
   f.requests.accept(packet("native-1", input, "Write")); input.content = "Mutated after receipt"; await tick();

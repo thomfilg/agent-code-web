@@ -336,9 +336,10 @@ export async function createAgentWebServer(options = {}) {
       }
       if (url.pathname === "/api/agent-accounts" || url.pathname.startsWith("/api/agent-accounts/")) {
         if (!googleAuth.enabled || !user) return json(response, 401, { error: "Sign in with Google to connect agent accounts" });
-        if (url.pathname === "/api/agent-accounts" && request.method === "GET") return json(response, 200, { accounts: agentAccounts.list(user.id), providers: [{ id: "codex", label: "Codex", loginAvailable: true }, { id: "claude", label: "Claude Code", loginAvailable: false }] });
+        if (url.pathname === "/api/agent-accounts" && request.method === "GET") return json(response, 200, { accounts: agentAccounts.list(user.id), providers: [{ id: "codex", label: "Codex", loginAvailable: true }, { id: "claude", label: "Claude Code", loginAvailable: true }] });
         if (url.pathname === "/api/agent-accounts" && request.method === "POST") return json(response, 201, await agentAccounts.begin(user.id, await bodyJson(request, config.maxBodyBytes)));
-        const accountRoute = /^\/api\/agent-accounts\/(account_[a-f0-9-]{36})(?:\/(cancel|disconnect))?$/.exec(url.pathname);
+        const accountRoute = /^\/api\/agent-accounts\/(account_[a-f0-9-]{36})(?:\/(cancel|disconnect|code))?$/.exec(url.pathname);
+        if (accountRoute && request.method === "POST" && accountRoute[2] === "code") return json(response, 200, await agentAccounts.submitCode(user.id, accountRoute[1], await bodyJson(request, config.maxBodyBytes)));
         if (accountRoute && request.method === "GET" && !accountRoute[2]) return json(response, 200, await agentAccounts.status(user.id, accountRoute[1]));
         if (accountRoute && request.method === "POST" && accountRoute[2]) return json(response, 200, await agentAccounts[accountRoute[2]](user.id, accountRoute[1]));
         return json(response, 404, { error: "Agent account action not found" });
@@ -368,8 +369,8 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/models" && request.method === "GET") {
         const agent = url.searchParams.get("agent");
         const agentAccountId = url.searchParams.get("account") || null;
-        if (googleAuth.enabled && agent === "codex" && !agentAccountId) return json(response, 409, { error: "Connect and select a Codex account first" });
-        if (googleAuth.enabled && agent !== "mock" && agent !== "codex") return json(response, 403, { error: "No agent account is connected for this user" });
+        if (googleAuth.enabled && ["codex", "claude"].includes(agent) && !agentAccountId) return json(response, 409, { error: "Connect and select an agent account first" });
+        if (googleAuth.enabled && !["mock", "codex", "claude"].includes(agent)) return json(response, 403, { error: "No agent account is connected for this user" });
         return json(response, 200, await models.list(agent, { ownerId: user?.id, agentAccountId }));
       }
       if (url.pathname === "/api/github" && request.method === "POST") return json(response, 200, await github.update(await bodyJson(request, config.maxBodyBytes)));
@@ -398,14 +399,14 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/preferences" && request.method === "GET") return json(response, 200, { preferences: await records.get("preferences", "new-chat") || {} });
       if (url.pathname === "/api/preferences" && request.method === "PATCH") {
         const body = await bodyJson(request, config.maxBodyBytes);
-        if (googleAuth.enabled && body.agent === "codex") await agentAccounts.select(user.id, body.agentAccountId, body);
-        if (googleAuth.enabled && body.agent !== "mock" && body.agent !== "codex") return json(response, 403, { error: "No agent account is connected for this user" });
+        if (googleAuth.enabled && ["codex", "claude"].includes(body.agent)) await agentAccounts.select(user.id, body.agentAccountId, body);
+        if (googleAuth.enabled && !["mock", "codex", "claude"].includes(body.agent)) return json(response, 403, { error: "No agent account is connected for this user" });
         await environments.get(body.environmentId);
         if (!Array.isArray(body.repositories) || body.repositories.length > 100 || body.repositories.some(repo => typeof repo.fullName !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(repo.fullName) || typeof repo.branch !== "string" || repo.branch.length > 250)) throw new Error("Invalid repository preferences");
         const modelSettings = await models.validate(body.agent, body, { ...body, ownerId: user?.id });
         if (body.repositories.some(repo => repo.githubConnectionId && !/^github(?:_[a-f0-9-]{36})?$/.test(repo.githubConnectionId))) throw new Error("Invalid GitHub connection preference");
         const preferences = { environmentId: body.environmentId, agent: ["codex", "claude", "mock"].includes(body.agent) ? body.agent : null,
-          ...(body.agent === "codex" && body.agentAccountId ? { agentAccountId: body.agentAccountId } : {}),
+          ...(["codex", "claude"].includes(body.agent) && body.agentAccountId ? { agentAccountId: body.agentAccountId } : {}),
           ...modelSettings, repositories: body.repositories.map(({ fullName, branch, githubConnectionId }) => ({ fullName, branch, ...(githubConnectionId ? { githubConnectionId } : {}) })) };
         await records.put("preferences", "new-chat", preferences);
         return json(response, 200, { preferences });
