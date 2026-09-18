@@ -83,9 +83,12 @@ test("runtime preview holds prevent idle sleep, never start a model, and Stop re
   await manager.send(chat.id, "fixture"); await waitFor(() => store.get(chat.id).idleKeepAwakeReason === "preview");
   await delay(150); assert.equal(store.get(chat.id).status, "idle"); assert.equal(starts, 1);
   let resumeUpdate;
-  const update = store.update.bind(store); store.update = (...args) => new Promise(resolve => { resumeUpdate = () => update(...args).then(resolve); });
-  const stopping = manager.stop(chat.id); assert.equal(lease.signal.aborted, true); assert.equal(manager.previewGeneration(chat.id), 1);
+  const update = store.update.bind(store); let gated = false;
+  store.update = (...args) => { if (gated) return update(...args); gated = true; return new Promise(resolve => { resumeUpdate = () => update(...args).then(resolve); }); };
+  const stopping = manager.stop(chat.id); assert.equal(lease.signal.aborted, true); assert.equal(manager.previewGeneration(chat.id), null);
+  await assert.rejects(manager.previewActivity.hold(chat.id, 1, new AbortController().signal));
   store.update = update; resumeUpdate(); await stopping;
   assert.equal(store.get(chat.id).status, "stopped");
+  assert.equal(manager.previewGeneration(chat.id), 1);
   assert.deepEqual(store.get(chat.id).messages.map(message => message.text), ["fixture", "reply"]);
 });

@@ -71,6 +71,19 @@ export function loadConfig(env = process.env) {
   if (workerBackend === "ec2" && (codexAuthMode === "host" || claudeAuthMode === "host")) {
     throw new Error("EC2 workers require gateway auth mode; host CLI credentials must not be baked into worker images");
   }
+  const preview = {
+    enabled: boolean(env, "AGENT_PREVIEW_ENABLED", false),
+    expectedAccount: env.AGENT_PREVIEW_ACCOUNT_ID || "", deployment: env.AGENT_EC2_DEPLOYMENT || "",
+    vpcOriginId: env.AGENT_PREVIEW_VPC_ORIGIN_ID || "", controllerInstanceId: env.AGENT_PREVIEW_CONTROLLER_INSTANCE_ID || "",
+    controllerOriginDns: env.AGENT_PREVIEW_CONTROLLER_ORIGIN_DNS || "", relayDistributionId: env.AGENT_PREVIEW_RELAY_DISTRIBUTION_ID || "",
+    region: env.AWS_REGION || "us-east-1", awsBin: env.AWS_BIN || "aws", profile: env.AWS_PROFILE || "",
+    maxHosts: integer(env, "AGENT_PREVIEW_MAX_HOSTS", 8, { min: 1, max: 40 }),
+    maxPerOwner: integer(env, "AGENT_PREVIEW_MAX_PER_OWNER", 4, { min: 1, max: 40 }),
+    maxPerChat: integer(env, "AGENT_PREVIEW_MAX_PER_CHAT", 2, { min: 1, max: 40 }),
+  };
+  if (preview.enabled && (workerBackend !== "ec2" || !googleEnabled || !googleOrigin.startsWith("https://"))) throw new Error("Remote app previews require EC2 workers and HTTPS Google Relay login");
+  if (preview.enabled && (!/^\d{12}$/.test(preview.expectedAccount) || !preview.deployment || !preview.vpcOriginId || !preview.controllerInstanceId || !preview.controllerOriginDns || !preview.relayDistributionId)) throw new Error("Configure all AGENT_PREVIEW deployment identity fields before enabling app previews");
+  if (preview.maxPerChat > preview.maxPerOwner || preview.maxPerOwner > preview.maxHosts) throw new Error("Preview per-chat and per-owner limits must fit the deployment limit");
   return {
     appRoot: APP_ROOT,
     publicDir: path.join(APP_ROOT, "public"),
@@ -96,6 +109,7 @@ export function loadConfig(env = process.env) {
     dataDir: path.resolve(APP_ROOT, env.AGENT_DATA_DIR || "data"),
     workspaceSource: env.AGENT_WORKSPACE_SOURCE || "",
     workerBackend,
+    preview,
     enableMock: boolean(env, "AGENT_ENABLE_MOCK", false),
     chromeBin: env.AGENT_CHROME_BIN || "google-chrome",
     processIsolation: choice(env, "AGENT_PROCESS_ISOLATION", isolationDefault, ["namespace", "none"]),

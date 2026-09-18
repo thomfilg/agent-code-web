@@ -49,6 +49,8 @@ export class RuntimeManager extends EventEmitter {
   #eventIds = new Map();
   #events = new Map();
   #lifecycleVersions = new Map();
+  #previewStops = new Map();
+  #previewBlocked = new Set();
   #switching = new Set();
   #draining = new Map();
   #submissions = new Map();
@@ -623,7 +625,7 @@ export class RuntimeManager extends EventEmitter {
     try { return await pending; } catch (error) { if (this.#executors.get(chatId) === pending) this.#executors.delete(chatId); throw error; }
   }
 
-  previewGeneration(chatId) { return this.store.get(chatId) && !this.store.get(chatId).archived ? this.#lifecycleVersions.get(chatId) || 0 : null; }
+  previewGeneration(chatId) { return this.store.get(chatId) && !this.store.get(chatId).archived && !this.#previewStops.has(chatId) && !this.#previewBlocked.has(chatId) ? this.#lifecycleVersions.get(chatId) || 0 : null; }
 
   async browserIdle(chatId) {
     // A browser-only wake must release its EC2 lease too. Otherwise the cloud
@@ -1371,6 +1373,9 @@ export class RuntimeManager extends EventEmitter {
   async stop(chatId, reason = "manual") {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("chat not found"), { statusCode: 404 });
+    this.#previewStops.set(chatId, (this.#previewStops.get(chatId) || 0) + 1);
+    let stopped = false;
+    try {
     this.#lifecycleVersions.set(chatId, (this.#lifecycleVersions.get(chatId) || 0) + 1);
     this.previewActivity.revokeChat(chatId);
     this.emit("preview-revoke", { chatId, reason });
@@ -1414,6 +1419,12 @@ export class RuntimeManager extends EventEmitter {
     const detail = reason === "idle-timeout" ? "Stopped after idle timeout" : "Stopped manually";
     await this.#setStatus(chatId, "stopped", detail, null);
     this.#emit(chatId, { type: "runtime_stopped", reason });
+    stopped = true;
+    } finally {
+      if (stopped) this.#previewBlocked.delete(chatId); else this.#previewBlocked.add(chatId);
+      const pending = this.#previewStops.get(chatId) - 1;
+      if (pending) this.#previewStops.set(chatId, pending); else this.#previewStops.delete(chatId);
+    }
   }
 
   async goalAction(chatId, action) {
@@ -1763,6 +1774,7 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async #fatal(chatId, error) {
+    this.#previewBlocked.add(chatId);
     this.previewActivity.revokeChat(chatId);
     this.emit("preview-revoke", { chatId, reason: "error" });
     this.githubWorkers?.revokeChat(chatId);
