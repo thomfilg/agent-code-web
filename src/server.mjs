@@ -345,11 +345,12 @@ export async function createAgentWebServer(options = {}) {
       const mcpRoute = /^\/api\/mcps\/(mcp_[a-f0-9-]{36})$/.exec(url.pathname);
       if (mcpRoute && request.method === "PATCH") return json(response, 200, { connection: await mcps.save(await bodyJson(request, config.maxBodyBytes), mcpRoute[1]) });
       if (mcpRoute && request.method === "DELETE") { await mcps.remove(mcpRoute[1]); return json(response, 200, { removed: true }); }
-      const mcpAction = /^\/api\/mcps\/(mcp_[a-f0-9-]{36})\/(test|oauth|disconnect)$/.exec(url.pathname);
+      const mcpAction = /^\/api\/mcps\/(mcp_[a-f0-9-]{36})\/(test|oauth|disconnect|cancel-oauth)$/.exec(url.pathname);
       if (mcpAction && request.method === "POST") {
         const [, id, action] = mcpAction;
         if (action === "test") return json(response, 200, { connection: await mcps.test(id) });
         if (action === "disconnect") return json(response, 200, { connection: await mcps.oauth.disconnect(id) });
+        if (action === "cancel-oauth") { await mcps.oauth.cancel(id); return json(response, 200, { cancelled: true }); }
         let origin = publicOrigin;
         if (!origin) {
           const candidate = safeMcpUrl(`http://${request.headers.host}`);

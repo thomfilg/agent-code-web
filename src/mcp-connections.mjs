@@ -4,6 +4,7 @@ import { CapabilityBroker } from "./capabilities.mjs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpOAuth } from "./mcp-oauth.mjs";
+import { isLinearMcp } from "../public/mcp-provider.js";
 import { companyForChat, companyScope, normalizeCompanyScope, scopeAllows, scopesOverlap } from "../public/company-scope.js";
 const fail = message => Object.assign(new Error(message), { statusCode: 400 });
 const publicConnection = ({ headers, oauth, oauthClientSecret, authGeneration, ...connection }) => ({ ...connection, ...companyScope(connection), scopeNeedsReview: !Array.isArray(connection.companies) && !connection.organization, authMode: connection.authMode || (Object.keys(headers || {}).length ? "headers" : "none"), headerNames: Object.keys(headers || {}), hasCredentials: Boolean(Object.keys(headers || {}).length), oauthConnected: Boolean(oauth?.tokens), hasClientSecret: Boolean(oauthClientSecret), health: connection.health || { status: "unverified" } });
@@ -13,7 +14,7 @@ export class McpConnections {
     this.records = records; this.fetch = fetchImpl; this.broker = new CapabilityBroker({ ttlMs }); this.grants = new Map(); this.queue = Promise.resolve();
     this.oauth = new McpOAuth(this);
   }
-  async list() { return (await this.records.list("mcp")).map(publicConnection); }
+  async list() { return (await this.records.list("mcp")).map(connection => ({ ...publicConnection(connection), signIn: this.oauth.status(connection.id) })); }
   async get(id) { const value = await this.records.get("mcp", id); if (!value) throw Object.assign(new Error("MCP connection not found"), { statusCode: 404 }); return value; }
   save(input, id = null) { const result = this.queue.then(() => this.saveUnlocked(input, id)); this.queue = result.catch(() => {}); return result; }
   update(id, revision, transform) {
@@ -46,7 +47,7 @@ export class McpConnections {
       const headers = authMode !== "headers" ? {} : input.headers === undefined ? (sameTarget ? old?.headers || {} : {}) : input.headers;
       if (!headers || typeof headers !== "object" || Array.isArray(headers) || Object.keys(headers).length > 20) throw fail("Headers must be a JSON object of up to 20 entries");
       for (const [key, value] of Object.entries(headers)) if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(key) || /^(host|cookie|origin|connection|content-length|transfer-encoding|mcp-session-id)$/i.test(key) || typeof value !== "string" || value.length > 8192 || /[\r\n\0]/.test(value)) throw fail("Invalid MCP authentication header");
-      const oauthClientId = String(input.oauthClientId || "").trim(), oauthScopes = String(input.oauthScopes || "").trim();
+      const oauthClientId = String(input.oauthClientId || "").trim(), oauthScopes = String(input.oauthScopes || (isLinearMcp(url.href) && authMode === "oauth" ? "read" : "")).trim();
       if (oauthClientId.length > 2048 || oauthScopes.length > 2048 || /[\r\n\0]/.test(oauthClientId + oauthScopes)) throw fail("Invalid OAuth client ID or scopes");
       const sameOAuth = sameTarget && old.authMode === authMode && (old.oauthClientId || "") === oauthClientId && (old.oauthScopes || "") === oauthScopes && input.oauthClientSecret === undefined;
       const oauthClientSecret = input.oauthClientSecret === undefined ? (sameOAuth ? old?.oauthClientSecret : undefined) : input.oauthClientSecret;
@@ -69,6 +70,7 @@ export class McpConnections {
     await this.get(id);
     if ((await this.records.list("environment")).some(env => env.mcpIds?.includes(id))) throw fail("Remove this MCP from its environments before deleting it");
     await this.records.delete("mcp", id);
+    this.oauth.forget(id);
     this.revokeConnection(id);
   }
   async test(id) {
@@ -93,10 +95,21 @@ export class McpConnections {
         if (tools.length > 2000 || (cursor && cursors.has(cursor))) throw fail("Tool inventory is too large or has invalid pagination");
         cursors.add(cursor);
       } while (cursor);
-      health = { status: "connected", checkedAt: new Date().toISOString(), tools, toolCount: tools.length, serverName: client.getServerVersion()?.name?.slice(0, 128) };
+      // Only this known provider/tool is automatically called, never an arbitrary
+      // custom server's tool based on its name or claimed readOnly annotation.
+      let workspaceRead;
+      if (isLinearMcp(connection.url)) {
+        if (!headers.has("authorization")) throw Object.assign(fail("Linear requires account authentication."), { statusCode: 401 });
+        if (!tools.some(tool => tool.name === "list_teams")) throw fail("Linear workspace verification is unavailable: expected read-only list_teams tool was not advertised.");
+        const result = await client.callTool({ name: "list_teams", arguments: { limit: 1 } }, undefined, { timeout: 20000, signal: timeout });
+        if (result.isError) throw fail("Linear workspace read failed. Reconnect and check your workspace permissions.");
+        // Do not persist workspace data, issues, identities or tool response text.
+        workspaceRead = { tool: "list_teams", checkedAt: new Date().toISOString() };
+      }
+      health = { status: "connected", checkedAt: new Date().toISOString(), tools, toolCount: tools.length, serverName: client.getServerVersion()?.name?.slice(0, 128), ...(workspaceRead ? { workspaceRead, message: "Authenticated workspace read verified. Select this connection in an environment; it applies on the next worker start." } : {}) };
     } catch (error) {
       const authError = [401, 403].includes(error.code) || [401, 403].includes(error.statusCode);
-      health = { status: authError ? "needs_auth" : "error", checkedAt: new Date().toISOString(), message: authError ? "Authentication required or access denied. Sign in or check your credentials and permissions." : "Could not connect. Check the endpoint, transport and server availability. Redirects are not followed." };
+      health = { status: authError ? "needs_auth" : "error", checkedAt: new Date().toISOString(), message: authError ? "Authentication required or access denied. Sign in or check your credentials and permissions." : isLinearMcp(connection.url) ? "Linear verification failed. Reconnect, check workspace permissions and retry. Tool discovery alone is not a verified workspace read." : "Could not connect. Check the endpoint, transport and server availability. Redirects are not followed." };
     } finally {
       if (transport?.sessionId) await transport.terminateSession().catch(() => {});
       await client.close().catch(() => {});
@@ -148,7 +161,11 @@ export class McpConnections {
     const controller = new AbortController(); selected.streams.add(controller); const timer = setTimeout(() => controller.abort(), 3600000);
     response.once("close", () => { clearTimeout(timer); selected.streams.delete(controller); controller.abort(); });
     try {
-      const upstream = await this.fetch(connection.url, { method: request.method, headers, body: request.method === "POST" ? request : undefined, duplex: request.method === "POST" ? "half" : undefined, redirect: "manual", signal: controller.signal });
+      // Credentials are explicit headers, never ambient browser authentication.
+      // Omitting ambient credentials also prevents fetch from trying to replay
+      // the non-replayable request stream after an upstream 401 challenge.
+      const upstream = await this.fetch(connection.url, { method: request.method, headers, body: request.method === "POST" ? request : undefined, duplex: request.method === "POST" ? "half" : undefined, credentials: "omit", redirect: "manual", signal: controller.signal });
+      if ([401, 403].includes(upstream.status)) await this.oauth.accessDenied(connection).catch(() => {});
       if (upstream.status >= 300 && upstream.status < 400) { await upstream.body?.cancel(); return finish(502, "MCP redirects are blocked; configure the final endpoint URL"); }
       if (upstream.ok && upstream.headers.has("mcp-session-id")) selected.sessions.add(upstream.headers.get("mcp-session-id"));
       for (const key of ["content-type", "mcp-session-id", "mcp-protocol-version", "retry-after"]) if (upstream.headers.has(key)) response.setHeader(key, upstream.headers.get(key));

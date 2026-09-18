@@ -113,6 +113,11 @@ test("HTTP OAuth routes require authenticated same-origin initiation and a brows
   const callback = await fetch(`${origin}/oauth/mcp/callback?${params}`, { headers: { Cookie: cookie.split(";")[0] } });
   assert.equal(callback.status, 200); assert.ok(!(await callback.text()).includes("fixture-access-secret"));
   assert.equal((await (await fetch(`${origin}/api/mcps`, { headers: authorization })).json()).connections[0].oauthConnected, true);
+  const cancel = `${origin}/api/mcps/${c.id}/cancel-oauth`;
+  assert.equal((await fetch(cancel, { method: "POST" })).status, 401);
+  assert.equal((await fetch(cancel, { method: "POST", headers: { ...authorization, Origin: "https://attacker.example" } })).status, 403);
+  assert.equal((await fetch(cancel, { method: "POST", headers: authorization })).status, 200);
+  assert.equal((await (await fetch(`${origin}/api/mcps`, { headers: authorization })).json()).connections[0].oauthConnected, true, "cancel is not disconnect");
 });
 
 test("environment selections reach both adapters; grants revoke on stop and fresh starts pick up edits", async t => {
