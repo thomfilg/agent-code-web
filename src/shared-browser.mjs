@@ -8,9 +8,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { prepareChrome } from "./chrome-software.mjs";
 import { captureWorker } from "./software.mjs";
+import { browserSelectionExpression } from "./browser-clipboard.mjs";
+import { sendBrowserFrame } from "./browser-frames.mjs";
 
 const stopped = () => ({ running: false, mode: "guest", tabs: [], tabId: null });
-const uiActions = new Set(["status", "navigate", "reload", "back", "forward", "newTab", "selectTab", "closeTab", "mouse", "key", "text", "resize", "dialog"]);
+const uiActions = new Set(["status", "navigate", "reload", "back", "forward", "newTab", "selectTab", "closeTab", "mouse", "key", "text", "resize", "dialog", "copy"]);
 
 export class BrowserProcess extends EventEmitter {
   constructor(child) {
@@ -94,9 +96,9 @@ export class SharedBrowsers {
       const browser = this.processFactory(child); entry.browser = browser;
       browser.on("frame", value => {
         entry.frame = value;
-        for (const viewer of entry.viewers) if (viewer.bufferedAmount < 2 * 1024 * 1024) this.send(viewer, { event: "frame", value });
+        for (const viewer of entry.viewers) sendBrowserFrame(viewer, value);
       });
-      for (const event of ["status", "dialog"]) browser.on(event, value => { for (const viewer of entry.viewers) this.send(viewer, { event, value }); });
+      for (const event of ["status", "dialog"]) browser.on(event, value => { for (const viewer of entry.viewers) this.send(viewer, { event, value: event === "status" ? { ...value, clipboard: true } : value }); });
       browser.on("closed", value => {
         clearTimeout(entry.idleTimer);
         if (this.entries.get(chatId) === entry) { this.entries.delete(chatId); void this.onIdle(chatId).catch(() => {}); }
@@ -130,15 +132,17 @@ export class SharedBrowsers {
     if (this.personal?.grants.has(chatId)) return this.personal.attachViewer(chatId, socket);
     entry.viewers.add(socket); this.touch(chatId);
     void this.onViewers(chatId).catch(() => {});
-    this.send(socket, { event: "status", value: entry.browser.state });
-    if (entry.frame) this.send(socket, { event: "frame", value: entry.frame });
+    this.send(socket, { event: "status", value: { ...entry.browser.state, clipboard: true } });
+    if (entry.frame) sendBrowserFrame(socket, entry.frame);
     let pending = 0;
     socket.on("message", data => {
       if (this.personal?.grants.has(chatId) || socket.readyState !== 1) { socket.close(4001, "Browser access changed"); return; }
       let input; try { input = JSON.parse(data); } catch { socket.close(1008, "Invalid browser input"); return; }
       if (!input || !Number.isInteger(input.id) || !uiActions.has(input.action)) { socket.close(1008, "Invalid browser action"); return; }
       if (++pending > 64) { socket.close(1008, "Too many browser actions"); return; }
-      void entry.browser.command(input.action, input.params).then(value => this.send(socket, { id: input.id, value }), error => this.send(socket, { id: input.id, error: error.message })).finally(() => { pending--; });
+      const action = input.action === "copy" ? "evaluate" : input.action;
+      const params = input.action === "copy" ? { expression: browserSelectionExpression } : input.params;
+      void entry.browser.command(action, params).then(value => this.send(socket, { id: input.id, value }), error => this.send(socket, { id: input.id, error: error.message })).finally(() => { pending--; });
     });
     socket.once("close", () => {
       entry.viewers.delete(socket);

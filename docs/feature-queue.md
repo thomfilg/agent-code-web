@@ -1,5 +1,15 @@
 # Feature queue — original request order
 
+Shared Chrome follow-up (2026-09-18): user authorized proceeding on interaction
+lag, reload shortcuts and plain-text clipboard. The implementation now uses
+native compressed frames while interacting, idle high-DPI refinement, bounded
+input with motion coalescing, remote F5/Ctrl+R, and explicit Copy/Paste text.
+Final acceptance and publication are still separate gates; see
+[the local measurements and limitations](validation-2026-09-18-browser-interaction.md).
+The separate perceived agent-chat lag is under diagnosis: messages traverse the
+controller and return over SSE, not a direct browser-to-worker connection. No
+real account prompt was sent and that incident is not claimed fixed.
+
 Deployment clarification (2026-09-18): today's manual setup/update may stop
 workers if necessary, explicitly authorized by the user. **When deployments
 become automatic, they must not bring down running instances.** Keep automatic

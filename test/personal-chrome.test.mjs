@@ -112,6 +112,8 @@ test("real Chrome extension keeps logins private until the per-chat toggle, and 
   await assert.rejects(app.manager.browsers.command(chat.id, "navigate", { url }), /hostname cannot be opened/);
   await app.manager.browsers.command(chat.id, "fill", { selector: "#entry", text: "Agent used my authorized profile" });
   await waitFor(async () => (await (await fetch(`${site.url}/observed`)).json()).text === "Agent used my authorized profile");
+  await app.manager.browsers.command(chat.id, "evaluate", { expression: "document.querySelector('#entry').select()" });
+  assert.deepEqual(await app.manager.browsers.personal.command(chat.id, "copy", { expression: "document.body.textContent='must not run'" }), { text: "Agent used my authorized profile" });
   await relay.screenshot({ path: "/tmp/agent-relay-personal-chrome-desktop.png", fullPage: true });
   const pending = app.manager.browsers.command(chat.id, "evaluate", { expression: "new Promise(resolve => setTimeout(() => resolve('private late result'), 5000))" });
   const rejected = assert.rejects(pending, /revoked|changed|closed/i);

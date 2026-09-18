@@ -172,11 +172,15 @@ working direct links: they require port forwarding, so use Shared Chrome there.
 
 The viewport picker offers xxs (320×640), xs (390×844), sm (640×960),
 md (834×1112), lg (1280×800), xlg (1920×1080), and custom dimensions.
-Resizing restarts capture on the same page without navigation. Live PNG frames
-retain 2× pixel density for the presets; very large custom views use 1× to bound
-bitmap memory. The canvas does not upscale a phone viewport to fill a desktop
-panel. Capture, navigation, input and resize operations are serialized, and
-only one frame is decoded at a time. Desktop column dividers can be dragged
+Resizing restarts capture on the same page without navigation. Interaction uses
+compressed Chrome screencast frames; after 350 ms without input or changed frames,
+a lossless PNG restores 2× pixel density for presets (very large custom views use
+1× to bound bitmap memory). PNG capture no longer runs for every repaint. The
+canvas does not upscale a phone viewport to fill a desktop panel. Idle capture
+and viewport/input changes remain serialized to protect Chrome's surface cleanup.
+Only one frame is decoded at a time; stale waiting frames are replaced, and the
+input window bounds outstanding requests, coalescing adjacent mouse motion.
+Desktop column dividers can be dragged
 or resized with arrow keys; widths are saved in this browser.
 
 Both agents receive the built-in `relay_browser` MCP server when their worker
@@ -185,6 +189,17 @@ typing, tabs, viewport sizing and page JavaScript evaluation. The browser starts
 on demand, without an extra model request. Ask the agent to run a dev server and
 open it with `browser_navigate`; use the Browser column to test it yourself.
 Click the page to type, or paste text. Escape returns focus to the address bar.
+With the remote page focused, F5/Ctrl+R/Cmd+R reload that page, not Relay; Shift
+also bypasses its cache. Ctrl+C/Cmd+C copies selected plain text and Ctrl+V/Cmd+V
+pastes plain text. **Copy text** and **Paste text** offer the same operations in
+the toolbar. Clipboard access occurs only on that explicit user action, is not
+stored in chat history, and is not synchronized in the background. The Relay
+origin needs HTTPS (or localhost) and browser clipboard permission for toolbar
+actions; native paste remains available if clipboard-read permission is denied.
+Selections in ordinary inputs, textareas, page text and open shadow roots are
+supported. Password copying, cross-origin embedded-frame copying, rich clipboard
+formats/files and native cut are not implemented by this bridge. Oversized text
+is rejected without silently truncating it (30,000-character limit).
 
 Each chat starts with a fresh, separate Chrome profile. It does **not** import
 your personal Chrome cookies or passwords. Closing the panel disconnects only

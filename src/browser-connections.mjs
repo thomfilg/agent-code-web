@@ -1,10 +1,12 @@
 import { EventEmitter } from "node:events";
+import { browserSelectionExpression } from "./browser-clipboard.mjs";
+import { sendBrowserFrame } from "./browser-frames.mjs";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 const digest = value => createHash("sha256").update(String(value)).digest("hex");
 const failure = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const equal = (a, b) => typeof a === "string" && typeof b === "string" && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
-const allowedActions = new Set(["status", "navigate", "reload", "back", "forward", "mouse", "key", "text", "resize", "dialog", "screenshot", "snapshot", "click", "fill", "evaluate", "watch"]);
+const allowedActions = new Set(["status", "navigate", "reload", "back", "forward", "mouse", "key", "text", "resize", "dialog", "screenshot", "snapshot", "click", "fill", "evaluate", "watch", "copy"]);
 
 export class BrowserConnections extends EventEmitter {
   constructor({ records, store, ttlMs = 3600000, now = Date.now }) {
@@ -103,7 +105,7 @@ export class BrowserConnections extends EventEmitter {
     if (!grant?.active) throw failure("Signed-in Chrome sharing is not enabled", 409);
     if (["newTab", "selectTab", "closeTab"].includes(action)) throw failure("Personal Chrome shares only its separate automation tab, never your existing tabs. Navigate this tab or switch to guest Chrome.");
     if (!allowedActions.has(action)) throw failure("Unsupported personal browser action");
-    const result = await this.request(grant.bridge, action, params, grant);
+    const result = await this.request(grant.bridge, action === "copy" ? "evaluate" : action, action === "copy" ? { expression: browserSelectionExpression } : params, grant);
     if (!grant.active || this.grants.get(chatId) !== grant) throw failure("Signed-in browser access revoked");
     return result;
   }
@@ -113,7 +115,7 @@ export class BrowserConnections extends EventEmitter {
     grant.viewers.add(socket);
     this.emit("viewers", chatId);
     const send = value => { if (socket.readyState === 1) socket.send(JSON.stringify(value)); };
-    send({ event: "status", value: grant.state });
+    send({ event: "status", value: { ...grant.state, clipboard: true } });
     let pending = 0;
     socket.on("message", data => {
       let input; try { input = JSON.parse(data); } catch { socket.close(1008, "Invalid input"); return; }
@@ -176,7 +178,10 @@ export class BrowserConnections extends EventEmitter {
       const grant = bridge.active;
       if (!grant?.active || message.grantId !== grant.id || !["status", "frame", "dialog"].includes(message.event)) return;
       if (message.event === "status") grant.state = { ...message.value, mode: "personal" };
-      for (const viewer of grant.viewers) if (viewer.readyState === 1 && viewer.bufferedAmount < 2 * 1024 * 1024) viewer.send(JSON.stringify({ event: message.event, value: message.event === "status" ? grant.state : message.value }));
+      for (const viewer of grant.viewers) if (viewer.readyState === 1) {
+        if (message.event === "frame") sendBrowserFrame(viewer, message.value);
+        else viewer.send(JSON.stringify({ event: message.event, value: message.event === "status" ? { ...grant.state, clipboard: true } : message.value }));
+      }
     });
     socket.once("close", () => {
       clearTimeout(deadline); clearInterval(heartbeat);
