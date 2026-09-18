@@ -1,8 +1,9 @@
 import { CompanyPicker, knownCompanies } from "./company-picker.js";
-import { scopeLabel } from "./company-scope.js";
+import { companyScope, scopeLabel } from "./company-scope.js";
 const $ = selector => document.querySelector(selector);
 const element = (tag, text, cls) => { const node = document.createElement(tag); if (text) node.textContent = text; if (cls) node.className = cls; return node; };
 const button = (text, action, cls = "secondary-button") => { const node = element("button", text, cls); node.type = "button"; node.onclick = action; return node; };
+const needsCompanyAccess = connection => connection.connected && !companyScope(connection).companies.length;
 
 export class GitHubAccounts {
   constructor(settings) {
@@ -16,16 +17,23 @@ export class GitHubAccounts {
   async open() {
     $("#github-error").textContent = "";
     if (!$("#github-dialog").open) $("#github-dialog").showModal();
-    await this.refresh();
+    await this.refresh({ resumeSetup: true });
   }
-  async refresh() {
+  async refresh({ resumeSetup = false } = {}) {
     clearTimeout(this.timer);
     try {
       const data = await this.api("/api/github");
       const previous = this.connections;
       this.connections = data.connections; this.settings.github = data;
       this.render();
-      for (const connection of this.connections) if (connection.connected && previous.find(old => old.id === connection.id)?.signIn && !this.editing) this.edit(connection);
+      if (!this.editing) {
+        const completed = this.connections.filter(connection => connection.connected && previous.find(old => old.id === connection.id)?.signIn);
+        const incomplete = this.connections.filter(needsCompanyAccess);
+        // Resume one unambiguous setup, never choose among several accounts or
+        // replace a form the user is already editing. Scope remains unchecked.
+        const candidate = completed.length === 1 ? completed[0] : resumeSetup && incomplete.length === 1 ? incomplete[0] : null;
+        if (candidate) this.edit(candidate);
+      }
       if (this.connections.some(connection => connection.signIn) && $("#github-dialog").open) this.timer = setTimeout(() => this.refresh(), 1500);
     } catch (error) { $("#github-error").textContent = error.message; if ($("#github-dialog").open) this.timer = setTimeout(() => this.refresh(), 3000); }
   }
@@ -35,6 +43,7 @@ export class GitHubAccounts {
       const card = element("section", "", "agent-account-card"); card.dataset.connectionId = connection.id;
       card.append(element("h3", connection.name), element("p", connection.signIn ? (connection.signIn.state === "starting" ? "Connecting to GitHub…" : "Waiting for your GitHub authorization…") : connection.connected ? `Signed in as ${connection.login}` : "Not connected", "muted"));
       if (connection.connected) card.append(element("p", scopeLabel(connection), "muted"));
+      if (needsCompanyAccess(connection)) card.append(element("p", "Choose company access to show this account's repositories. No companies are enabled yet.", "form-error"));
       if (connection.error && !connection.signIn) card.append(element("p", connection.error, "form-error"));
       if (connection.signIn?.userCode) {
         const code = element("code", connection.signIn.userCode), link = element("a", "Open GitHub sign-in", "primary-button");
@@ -47,7 +56,7 @@ export class GitHubAccounts {
       if (connection.signIn) actions.append(button("Cancel sign-in", () => this.action(connection.id, () => this.api("/api/github/device/cancel", { method: "POST", body: JSON.stringify({ id: connection.signIn.id }) }))));
       else {
         if (!connection.connected) actions.append(button("Reconnect", () => this.start(connection)));
-        if (connection.connected) actions.append(button("Company access", () => this.edit(connection)));
+        if (connection.connected) actions.append(button(needsCompanyAccess(connection) ? "Set up company access" : "Company access", () => this.edit(connection)));
         actions.append(button("Disconnect", () => {
           if (confirm(`Disconnect “${connection.name}” from Relay? Its conversations will remain saved.`)) void this.action(connection.id, () => this.api(`/api/github/connections/${connection.id}`, { method: "DELETE" }));
         }));
@@ -78,7 +87,7 @@ export class GitHubAccounts {
     this.editing = connection;
     $("#github-access-title").textContent = `Access for ${connection.login || connection.name}`;
     $("#github-connection-name").value = connection.name;
-    this.companies.set(connection, knownCompanies(this.settings.state, [...this.connections, ...this.settings.environments, ...(this.settings.mcps || [])]));
+    this.companies.set(connection, knownCompanies(this.settings.state, [...this.connections, ...this.settings.environments, ...(this.settings.mcps || []), ...(this.settings.accounts || [])]));
     $("#github-access-form").hidden = false;
     $("#github-connection-name").focus();
   }

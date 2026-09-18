@@ -263,21 +263,21 @@
           </div>
           <button class="icon-button" value="cancel" formnovalidate aria-label="Close">×</button>
         </div>
-        <label>
+        <div class="environment-choice"><label>
           <span>Agent</span>
           <select id="agent-select" required></select>
-        </label>
-        <div id="agent-account-requirement" class="dialog-security" hidden><p id="agent-account-hint">Connect an agent account before creating a conversation.</p><button type="button" class="secondary-button" id="connect-codex-button">Connect Codex or Claude / manage accounts</button></div>
-        <label id="new-agent-account-field" hidden><span>Agent account</span><select id="new-agent-account" aria-label="Agent account"><option value="">Select an account</option></select></label>
-        <div class="model-controls" id="new-model-controls"><label><span>Model</span><select class="model-select" aria-label="New chat model"></select></label><label><span>Effort</span><select class="effort-select" aria-label="New chat effort"></select></label><p class="model-note" role="status"></p></div>
-        <label><span>What would you like to work on?</span><textarea id="initial-prompt" rows="3" maxlength="100000" placeholder="Describe the task. Your agent will name this conversation."></textarea></label>
-        <div class="environment-choice"><label><span>Environment</span><select id="environment-select" required></select></label><button type="button" class="icon-button" id="environment-settings" aria-label="Manage selected environment">⚙</button></div>
+        </label><button type="button" class="icon-button" id="connect-codex-button" aria-label="Manage agent accounts" title="Manage agent accounts" hidden>⚙</button></div>
         <div id="github-requirement" class="dialog-security"><p>Connect GitHub to choose your repositories.</p><button type="button" class="secondary-button" id="connect-github-button">Connect GitHub</button></div>
         <div id="repository-picker" hidden>
           <div id="selected-repositories" class="selected-repositories"></div>
           <p class="muted" id="repository-group-hint"></p>
           <details class="repository-picker-dropdown"><summary>Choose repositories</summary><div class="repository-search"><input id="repo-search" type="search" placeholder="Search repositories…" aria-label="Search repositories"><button type="button" class="icon-button" id="refresh-repositories" aria-label="Refresh repositories">↻</button></div><div id="repository-results"></div></details>
         </div>
+        <div id="agent-account-requirement" hidden><p id="agent-account-hint" class="muted" role="status">Connect an agent account before creating a conversation.</p></div>
+        <label id="new-agent-account-field" hidden><span>Agent account</span><select id="new-agent-account" aria-label="Agent account"><option value="">Select an account</option></select></label>
+        <div class="model-controls" id="new-model-controls"><label><span>Model</span><select class="model-select" aria-label="New chat model"></select></label><label><span>Effort</span><select class="effort-select" aria-label="New chat effort"></select></label><p class="model-note" role="status"></p></div>
+        <label><span>What would you like to work on?</span><textarea id="initial-prompt" rows="3" maxlength="100000" placeholder="Describe the task. Your agent will name this conversation."></textarea></label>
+        <div class="environment-choice"><label><span>Environment</span><select id="environment-select" required></select></label><button type="button" class="icon-button" id="environment-settings" aria-label="Manage selected environment">⚙</button></div>
         <div class="dialog-security" id="dialog-security"></div>
         <p id="create-chat-error" class="form-error" role="alert"></p>
         <div class="dialog-actions">

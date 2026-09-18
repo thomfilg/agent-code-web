@@ -87,6 +87,8 @@ test("missing agent offers account onboarding instead of Invalid agent; device l
   await expect(page.locator("#create-chat-error")).toHaveText("");
   await expect(page.locator("#new-model-controls")).toBeHidden();
   await expect(page.locator("#create-chat-button")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Manage agent accounts", exact: true })).toHaveText("⚙");
+  await expect(page.getByRole("button", { name: "Connect Codex or Claude / manage accounts", exact: true })).toHaveCount(0);
   await page.locator("#connect-codex-button").click();
   await page.locator("#agent-account-new").click();
   await page.getByLabel("Account name", { exact: true }).fill("Personal Codex");
@@ -108,6 +110,101 @@ test("missing agent offers account onboarding instead of Invalid agent; device l
   await expect(page.locator("#agent-account-list")).toContainText("Personal Codex");
   await expect(page.locator("#agent-account-list")).toContainText("Connected");
   expect(errors).toEqual([]);
+});
+
+test("connected company accounts follow the primary repository instead of asking for another login", async ({ page, relay }) => {
+  const errors = []; page.on("pageerror", error => errors.push(error.message));
+  const repositories = ["12-apps/future-pay", "other/project", "thomfilg/no-environment"].map((fullName, index) => ({
+    id: index + 1, fullName, defaultBranch: "main", githubConnectionId: "github-fixture", connectionName: "Fixture GitHub", private: true,
+  }));
+  await page.route("**/api/github", route => route.fulfill({ json: { connected: true, login: "fixture", connections: [{ id: "github-fixture", connected: true, companies: ["12-apps", "other", "thomfilg"] }] } }));
+  await page.route("**/api/github/repositories*", route => route.fulfill({ json: { repositories } }));
+  await page.route("**/api/github/branches?*", route => route.fulfill({ json: { branches: ["main"] } }));
+  await page.route("**/api/environments", route => route.fulfill({ json: { environments: [{ id: "environment-fixture", name: "12-apps fixture", companies: ["12-apps"], allowUnassigned: false, archived: false, backend: "local" }], software: [] } }));
+  await page.route("**/api/preferences", route => route.fulfill({ json: { preferences: route.request().method() === "PATCH" ? route.request().postDataJSON() : { repositories: [] } } }));
+  await login(page, relay);
+  const owner = relay.app.googleAuth.legacyOwnerId;
+  for (const provider of ["codex", "claude"]) {
+    await relay.app.agentAccounts.begin(owner, { provider, name: `Personal ${provider}`, companies: ["12-apps", "thomfilg"], allowUnassigned: false });
+    relay[provider].clients.at(-1).approve();
+    await expect.poll(() => relay.app.agentAccounts.list(owner).find(account => account.provider === provider)?.status).toBe("connected");
+  }
+  await page.reload(); await page.locator("#welcome-new-chat").click();
+  const chooser = page.locator("#repository-picker .repository-picker-dropdown"), accounts = page.locator("#new-agent-account");
+  await expect(chooser).toHaveAttribute("open", "");
+  await expect(accounts).toBeDisabled(); await expect(accounts.locator("option")).toHaveCount(1);
+  await expect(page.locator("#agent-account-hint")).toContainText("Choose a primary repository first");
+  await expect(page.locator("#agent-account-hint")).not.toContainText("Connect one");
+  await expect(page.locator("#create-chat-button")).toBeDisabled();
+  expect(await page.locator("#repository-picker").evaluate(element => Boolean(element.compareDocumentPosition(document.querySelector("#new-agent-account-field")) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+  await page.getByRole("button", { name: "Manage agent accounts", exact: true }).click();
+  await expect(page.locator("#agent-accounts-dialog")).toBeVisible();
+  await expect(page.locator("#agent-account-new")).toBeVisible();
+  await page.getByRole("button", { name: "Close agent accounts", exact: true }).click();
+  await page.locator("#repository-results").getByRole("checkbox", { name: /12-apps\/future-pay/ }).check();
+  for (const provider of ["codex", "claude"]) {
+    await page.locator("#agent-select").selectOption(provider);
+    const account = relay.app.agentAccounts.list(owner).find(item => item.provider === provider);
+    await expect(accounts).toBeEnabled(); await expect(accounts.locator("option")).toHaveCount(2);
+    await expect(accounts.locator(`option[value="${account.id}"]`)).toHaveCount(1);
+    await accounts.selectOption(account.id);
+    await expect(page.locator("#create-chat-button")).toBeEnabled();
+  }
+  await page.locator("#repository-results").getByRole("checkbox", { name: /other\/project/ }).check();
+  await expect(accounts.locator("option")).toHaveCount(2); // A secondary repo never changes account scope.
+  await page.getByRole("button", { name: "Make other/project primary", exact: true }).click();
+  await expect(accounts).toBeDisabled(); await expect(accounts).toHaveValue(""); await expect(accounts.locator("option")).toHaveCount(1);
+  await expect(page.locator("#agent-account-hint")).toContainText("No connected Claude account is allowed for other");
+  await expect(page.locator("#new-model-controls")).toBeHidden(); await expect(page.locator("#create-chat-button")).toBeDisabled();
+  await page.getByRole("button", { name: "Make 12-apps/future-pay primary", exact: true }).click();
+  await expect(accounts).toBeEnabled(); await expect(accounts.locator("option")).toHaveCount(2);
+  await page.locator("#repository-results").getByRole("checkbox", { name: /thomfilg\/no-environment/ }).check();
+  await page.getByRole("button", { name: "Make thomfilg/no-environment primary", exact: true }).click();
+  await expect(accounts).toBeEnabled();
+  await accounts.selectOption(relay.app.agentAccounts.list(owner).find(item => item.provider === "claude").id);
+  await expect(page.locator("#environment-select")).toHaveValue(""); await expect(page.locator("#create-chat-button")).toBeDisabled();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.locator("#new-chat-dialog").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(relay.app.store.list()).toEqual([]); expect(errors).toEqual([]);
+  for (const account of relay.app.agentAccounts.list(owner)) { expect(account.companies).toEqual(["12-apps", "thomfilg"]); expect(account.allowUnassigned).toBe(false); }
+});
+
+test("repository picker explains missing company access, failed loads and search misses without stale refresh results", async ({ page, relay }) => {
+  const errors = []; page.on("pageerror", error => errors.push(error.message));
+  let companies = [], mode = "empty", releaseOld, oldStarted = false;
+  const oldRequest = new Promise(resolve => { releaseOld = resolve; });
+  const repository = fullName => ({ id: fullName === "12-apps/future-pay" ? 1 : 2, fullName, defaultBranch: "main", githubConnectionId: "github-fixture", private: true });
+  await page.route("**/api/github", route => route.fulfill({ json: { connected: true, login: "fixture", connections: [{ id: "github-fixture", name: "Fixture GitHub", login: "fixture", connected: true, companies, allowUnassigned: false }] } }));
+  await page.route("**/api/github/repositories*", async route => {
+    if (mode === "error") return route.fulfill({ status: 503, json: { error: "Private upstream fixture error" } });
+    if (mode === "hold") { oldStarted = true; await oldRequest; return route.fulfill({ json: { repositories: [repository("12-apps/stale")] } }); }
+    return route.fulfill({ json: { repositories: mode === "ready" ? [repository("12-apps/future-pay")] : [] } });
+  });
+  try {
+    await login(page, relay); await page.locator("#welcome-new-chat").click();
+    await expect(page.locator("#repository-status")).toHaveText("GitHub is connected, but no companies are allowed. Configure company access to choose repositories.");
+    await page.locator("#repository-manage-github").click(); await expect(page.locator("#github-dialog")).toBeVisible();
+    await page.getByRole("button", { name: "Close GitHub dialog", exact: true }).click();
+    await page.locator("#new-chat-dialog").getByRole("button", { name: "Close", exact: true }).click();
+    companies = ["12-apps"]; mode = "error";
+    await page.locator("#welcome-new-chat").click();
+    await expect(page.locator("#repository-status")).toHaveText("Could not load repositories. Check your GitHub connection and retry.");
+    await expect(page.locator("#repository-status")).toHaveAttribute("role", "alert");
+    await expect(page.locator("#repository-results")).not.toContainText("Private upstream");
+    mode = "empty"; await page.locator("#repository-retry").click();
+    await expect(page.locator("#repository-status")).toContainText("No repositories are available for the allowed companies");
+    mode = "ready"; await page.locator("#repository-retry").click();
+    await expect(page.locator("#repository-results").getByRole("checkbox", { name: /12-apps\/future-pay/ })).toBeVisible();
+    await page.locator("#repo-search").fill("no-match"); await expect(page.locator("#repository-status")).toHaveText("No repositories match your search.");
+    await expect(page.locator("#repository-retry")).toHaveCount(0); await page.locator("#repo-search").fill("");
+    mode = "hold"; await page.locator("#refresh-repositories").click(); await expect.poll(() => oldStarted).toBe(true);
+    mode = "ready"; await page.locator("#refresh-repositories").click();
+    await expect(page.locator("#repository-results").getByRole("checkbox", { name: /12-apps\/future-pay/ })).toBeVisible();
+    const oldResponse = page.waitForResponse(response => response.url().includes("/api/github/repositories")); releaseOld(); await oldResponse;
+    await expect(page.locator("#repository-results")).not.toContainText("12-apps/stale");
+    await expect(page.locator("#repository-results").getByRole("checkbox", { name: /12-apps\/future-pay/ })).toBeVisible();
+    expect(companies).toEqual(["12-apps"]); expect(relay.app.store.list()).toEqual([]); expect(errors).toEqual([]);
+  } finally { releaseOld(); }
 });
 
 test("mobile onboarding permits cancelling a pending login and never widens company scope", async ({ page, relay }) => {

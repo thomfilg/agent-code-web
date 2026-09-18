@@ -1,5 +1,5 @@
 import { ModelPicker } from "./model-picker.js";
-import { companyForChat, scopeAllows, scopeLabel, scopesOverlap } from "./company-scope.js";
+import { companyForChat, companyScope, scopeAllows, scopeLabel, scopesOverlap } from "./company-scope.js";
 import { CompanyPicker, knownCompanies } from "./company-picker.js";
 import { GitHubAccounts } from "./github-accounts.js";
 const $ = selector => document.querySelector(selector);
@@ -9,7 +9,7 @@ const button = (text, action, cls = "secondary-button") => { const e = el("butto
 
 export class WorkspaceSettings {
   constructor({ api, state, toast }) {
-    Object.assign(this, { api, state, toast }); this.selected = []; this.environments = []; this.repositories = []; this.branchCache = new Map();
+    Object.assign(this, { api, state, toast }); this.selected = []; this.environments = []; this.repositories = []; this.branchCache = new Map(); this.repositoryRequest = 0;
     this.environmentCompanies = new CompanyPicker($("#environment-companies"), scope => { Object.assign(this.draft, scope); this.renderEnvironmentMcps(); });
     this.githubAccounts = new GitHubAccounts(this);
     this.modelPicker = new ModelPicker({ root: $("#new-model-controls"), api, onChange: () => this.remember() });
@@ -17,7 +17,7 @@ export class WorkspaceSettings {
     $("#connect-github-button").addEventListener("click", () => this.openGitHub());
     $("#repo-search").addEventListener("input", () => this.renderRepositories());
     $("#refresh-repositories").addEventListener("click", () => this.loadRepositories(true).catch(error => toast(error.message)));
-    $("#environment-select").addEventListener("change", () => this.remember());
+    $("#environment-select").addEventListener("change", () => { this.updateCreateAvailability(); this.remember(); });
     $("#agent-select").addEventListener("change", async () => { this.renderAccounts(); await this.updateModels(); this.remember(); });
     $("#new-agent-account").addEventListener("change", async () => { await this.updateModels(); this.remember(); });
     $("#environment-settings").addEventListener("click", () => this.openEnvironments($("#environment-select").value));
@@ -31,6 +31,11 @@ export class WorkspaceSettings {
   }
   async load() {
     const [github, environments, saved, mcps] = await Promise.all([this.api("/api/github"), this.api("/api/environments"), this.api("/api/preferences"), this.api("/api/mcps")]);
+    const repositoryScope = JSON.stringify(github.connections || []);
+    if (this.repositoryScope !== repositoryScope) {
+      this.repositoryScope = repositoryScope; this.repositoryRequest++;
+      this.repositories = []; this.repositoryLoading = false; this.repositoryError = false;
+    }
     this.mcps = mcps.connections;
     this.github = github; this.environments = environments.environments; this.software = environments.software;
     this.preferences = saved.preferences;
@@ -41,6 +46,7 @@ export class WorkspaceSettings {
     $("#repository-picker").hidden = !github.connected;
     $("#create-chat-button").disabled = !github.connected;
     this.renderEnvironments();
+    this.renderRepositories();
   }
   renderEnvironments() {
     const selected = $("#environment-select").value || this.preferences?.environmentId;
@@ -54,25 +60,35 @@ export class WorkspaceSettings {
   renderAccounts() {
     const supported = this.state.config.features?.agentAccounts;
     $("#agent-account-requirement").hidden = !supported;
+    $("#connect-codex-button").hidden = !supported;
     const agent = $("#agent-select").value;
     $("#agent-select").disabled = !agent;
     const needed = supported && ["codex", "claude"].includes(agent);
     const select = $("#new-agent-account"), old = select.value || this.preferences?.agentAccountId;
-    const available = (this.accounts || []).filter(account => account.provider === agent && account.status === "connected" && scopeAllows(account, companyForChat({ repositories: this.selected })));
+    const company = companyForChat({ repositories: this.selected });
+    const available = (this.accounts || []).filter(account => account.provider === agent && account.status === "connected" && scopeAllows(account, company));
     select.replaceChildren(option("", "Select an account"), ...available.map(account => option(account.id, `${account.name}${account.email ? ` · ${account.email}` : ""}`)));
     if (available.some(account => account.id === old)) select.value = old;
-    select.required = needed; $("#new-agent-account-field").hidden = !needed;
+    select.required = needed; select.disabled = !available.length; $("#new-agent-account-field").hidden = !needed;
     const label = `${agent === "claude" ? "Claude" : "Codex"} account`;
     select.setAttribute("aria-label", label); $("#new-agent-account-field span").textContent = label;
-    $("#agent-account-hint").textContent = !agent ? "No agent is connected. Connect Codex or Claude to get started." : needed && !available.length ? `No ${label} is available for this company. Connect one or choose an allowed company.` : "Choose the account for this chat. Other users' and companies' credentials are never used.";
-    $("#create-chat-button").disabled = !this.github?.connected || !agent || Boolean(needed && !select.value);
+    $("#agent-account-hint").textContent = !agent ? "No agent is connected. Use the settings button beside Agent to connect Codex or Claude." : needed && !available.length
+      ? !company ? "Choose a primary repository first to see accounts allowed for its company. Connected accounts keep their existing access."
+        : `No connected ${label} is allowed for ${company}. Choose an allowed primary repository or use Agent settings to manage accounts.`
+      : "Choose the account for this chat. Other users' and companies' credentials are never used.";
+    this.updateCreateAvailability();
     if (!agent || needed && !select.value) void this.modelPicker.setAgent(null);
+  }
+  updateCreateAvailability() {
+    const agent = $("#agent-select").value;
+    const needed = this.state.config.features?.agentAccounts && ["codex", "claude"].includes(agent);
+    $("#create-chat-button").disabled = !this.github?.connected || !this.selected.length || !$("#environment-select").value || !agent || Boolean(needed && !$("#new-agent-account").value);
   }
   updateModels(selected = {}) {
     const agent = $("#agent-select").value;
     const needed = this.state.config.features?.agentAccounts && ["codex", "claude"].includes(agent);
     const agentAccountId = needed ? $("#new-agent-account").value : null;
-    $("#create-chat-button").disabled = !this.github?.connected || !agent || Boolean(needed && !agentAccountId);
+    this.updateCreateAvailability();
     return this.modelPicker.setAgent(!agent || needed && !agentAccountId ? null : agent, { ...selected, agentAccountId }, { useDefaults: true });
   }
   async openNew() {
@@ -84,16 +100,35 @@ export class WorkspaceSettings {
     this.renderAccounts(); await this.updateModels(this.preferences);
     $("#repo-search").value = "";
     this.renderSelected();
+    $("#repository-picker .repository-picker-dropdown").open = !this.selected.length;
     if (this.github.connected) await this.loadRepositories();
   }
   async loadRepositories(refresh = false) {
-    $("#repository-results").replaceChildren(el("p", "muted", "Loading repositories…"));
-    this.repositories = (await this.api(`/api/github/repositories${refresh ? "?refresh=1" : ""}`)).repositories;
-    this.renderRepositories();
+    const request = ++this.repositoryRequest;
+    this.repositoryLoading = true; this.repositoryError = false; this.renderRepositories();
+    try {
+      const { repositories } = await this.api(`/api/github/repositories${refresh ? "?refresh=1" : ""}`);
+      if (request !== this.repositoryRequest) return;
+      this.repositories = repositories;
+    } catch {
+      if (request !== this.repositoryRequest) return;
+      this.repositories = []; this.repositoryError = true;
+    } finally {
+      if (request === this.repositoryRequest) { this.repositoryLoading = false; this.renderRepositories(); }
+    }
   }
   renderRepositories() {
     const query = $("#repo-search").value.toLowerCase();
     const results = $("#repository-results"); results.replaceChildren();
+    const status = (text, { error = false, manage = false, retry = false } = {}) => {
+      const message = el("p", error ? "form-error" : "muted", text); message.id = "repository-status"; message.setAttribute("role", error ? "alert" : "status"); results.append(message);
+      if (manage) { const action = button("Manage GitHub company access", () => this.openGitHub()); action.id = "repository-manage-github"; results.append(action); }
+      if (retry) { const action = button("Retry loading repositories", () => this.loadRepositories(true)); action.id = "repository-retry"; results.append(action); }
+    };
+    if (this.repositoryLoading) return status("Loading repositories…");
+    if (this.github?.connected && !(this.github.connections || []).some(connection => connection.connected && companyScope(connection).companies.length))
+      return status("GitHub is connected, but no companies are allowed. Configure company access to choose repositories.", { manage: true });
+    if (this.repositoryError) return status("Could not load repositories. Check your GitHub connection and retry.", { error: true, manage: true, retry: true });
     for (const repo of this.repositories.filter(repo => repo.fullName.toLowerCase().includes(query))) {
       const label = el("label", "repository-option"); const input = el("input"); input.type = "checkbox"; input.checked = this.selected.some(item => item.fullName === repo.fullName && (!item.githubConnectionId || item.githubConnectionId === repo.githubConnectionId));
       input.addEventListener("change", () => {
@@ -103,7 +138,7 @@ export class WorkspaceSettings {
       });
       label.append(input, el("span", "", repo.fullName), el("small", "", `${repo.private ? "Private" : "Public"}${repo.connectionName ? ` · ${repo.connectionName}` : ""}`)); results.append(label);
     }
-    if (!results.childElementCount) results.append(el("p", "muted", "No matching repositories. Check account permissions or refresh the list."));
+    if (!results.childElementCount) status(this.repositories.length ? "No repositories match your search." : "No repositories are available for the allowed companies. Check GitHub permissions or refresh the list.", { manage: !this.repositories.length, retry: !this.repositories.length });
   }
   renderSelected() {
     this.renderEnvironments();

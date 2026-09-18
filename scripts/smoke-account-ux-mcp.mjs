@@ -102,9 +102,72 @@ try {
   }
   assert.equal(app.store.list().length, 0);
   assert.equal(app.agentAccounts.list(app.googleAuth.legacyOwnerId).length, 2);
+  // Reproduce the reported company-bound accounts + connected-but-unscoped
+  // GitHub onboarding gap. These records and upstream responses are fixtures;
+  // no production account or company permission is changed.
+  for (const account of app.agentAccounts.list(app.googleAuth.legacyOwnerId)) {
+    const saved = await app.agentAccounts.get(app.googleAuth.legacyOwnerId, account.id);
+    await app.agentAccounts.save({ ...saved, companies: ["12-apps", "thomfilg"], allowUnassigned: false });
+  }
+  const fixtureRepo = { id: 101, full_name: "12-apps/fixture-repo", name: "fixture-repo", private: true, default_branch: "main", size: 0 };
+  let repositoryReads = 0;
+  app.resources.legacy.github.fetch = async target => {
+    const pathname = new URL(target).pathname;
+    if (pathname === "/user") return Response.json({ id: 42, login: "fixture-github" });
+    if (pathname === "/user/repos") { repositoryReads++; return Response.json([fixtureRepo]); }
+    if (pathname === "/repos/12-apps/fixture-repo") return Response.json(fixtureRepo);
+    throw new Error("Unexpected fixture GitHub request");
+  };
+  await app.resources.legacy.github.connect({ token: "fixture_github_credential_only", name: "Fixture GitHub", companies: [], allowUnassigned: false });
+  await run(`await page.reload(); await page.locator('#welcome-new-chat').click();
+    await page.locator('#repository-results').getByRole('button',{name:/GitHub/}).waitFor();
+    if (!(await page.locator('#new-agent-account').isDisabled())) throw Error('Unassigned chat must not offer company accounts');
+    if (!(await page.locator('#create-chat-button').isDisabled())) throw Error('Incomplete setup must not create chats');
+    const order=await page.evaluate(()=>document.querySelector('#repository-picker').compareDocumentPosition(document.querySelector('#new-agent-account-field'))&Node.DOCUMENT_POSITION_FOLLOWING);
+    if(!order)throw Error('Repositories must precede company-dependent accounts');
+    await page.getByRole('button',{name:'Manage agent accounts',exact:true}).click();
+    await page.locator('#agent-account-new').waitFor();
+    await page.getByRole('button',{name:'Close agent accounts',exact:true}).click();`);
+  assert.equal(repositoryReads, 0, "No repository request before explicit GitHub company permission");
+  await call("browser_resize", { width: 390, height: 1000 });
+  await shot("05-repository-first-incomplete-company-setup.png");
+  await run(`await page.locator('#repository-results').getByRole('button',{name:/GitHub/}).click();
+    await page.locator('#github-access-form').waitFor();
+    if(await page.locator('#github-companies input[type=checkbox]:checked').count())throw Error('Company permission must not be automatic');
+    await page.locator('#github-companies').getByRole('checkbox',{name:'12-apps',exact:true}).check();
+    await page.locator('#github-save-scope').click();
+    await page.locator('#github-dialog').waitFor({state:'hidden'});
+    await page.locator('#repository-results').getByRole('checkbox').check();
+    await page.locator('#agent-select').selectOption('codex');
+    await page.locator('#new-agent-account').selectOption({label:'Personal · codex@example.test'});
+    await page.locator('#new-model-controls[data-status=ready]').waitFor();
+    if(!(await page.locator('#create-chat-button').isDisabled()))throw Error('Missing company environment must block creation');
+    await page.locator('#environment-settings').click();
+    await page.locator('#environment-companies').getByRole('checkbox',{name:'12-apps',exact:true}).check();
+    await page.getByRole('button',{name:'Save environment',exact:true}).click();
+    await page.locator('#environment-save-status').getByText('Saved securely',{exact:true}).waitFor();
+    await page.getByRole('button',{name:'Close environments',exact:true}).click();
+    await page.locator('#agent-select').selectOption('claude');
+    await page.locator('#new-agent-account').selectOption({label:'Claude Personal · claude@example.test'});
+    await page.locator('#new-model-controls[data-status=ready]').waitFor();
+    await page.locator('#agent-select').selectOption('codex');
+    await page.locator('#new-agent-account').selectOption({label:'Personal · codex@example.test'});
+    await page.locator('#new-model-controls[data-status=ready]').waitFor();`);
+  assert.ok(repositoryReads > 0);
+  for (const width of [320, 390, 1600]) {
+    await call("browser_resize", { width, height: 1000 });
+    await run(`if(!await page.locator('#new-chat-dialog').evaluate(e=>e.scrollWidth<=e.clientWidth))throw Error('New chat dialog overflow');`);
+    await shot(`06-new-chat-configured-${width}.png`);
+  }
+  await run(`await page.locator('#create-chat-button').click();await page.locator('#new-chat-dialog').waitFor({state:'hidden'});`);
+  const created = app.store.list(); assert.equal(created.length, 1);
+  assert.equal(created[0].agent, "codex"); assert.equal(created[0].repositories[0].fullName, fixtureRepo.full_name);
+  assert.deepEqual(created[0].messages, []); assert.equal(created[0].workspaceReady, false);
   console.log(JSON.stringify({ browserTransport: "official Playwright MCP", disposableFixtures: true,
     missingAgentOnboarding: true, scopedCodexLink: true, pendingAccountDeletion: true, claudeCodeCompletion: true,
-    retainedAccounts: 2, chatsCreated: 0, realProviderConsents: 0, modelPrompts: 0, responsiveWidths: [320, 390, 1600], screenshots }));
+    repositoryFirst: true, agentSettingsIcon: true, explicitGitHubCompanyAccess: true, selectedProviderAccounts: true,
+    explicitEnvironmentCompanyAccess: true, retainedAccounts: 2, chatsCreated: 1, realProviderConsents: 0, modelPrompts: 0,
+    responsiveWidths: [320, 390, 1600], screenshots }));
 } finally {
   await client.callTool({ name: "browser_close", arguments: {} }).catch(() => {});
   await client.close().catch(() => {}); await transport.close().catch(() => {});
