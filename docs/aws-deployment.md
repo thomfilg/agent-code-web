@@ -10,9 +10,11 @@ for future disruptive automation. See [the required continuity gate](adr/2026-09
 Current product clarification (2026-09-18): the GitHub company-selection step
 described in historical receipts below is superseded by
 [provider-authorized repository access](adr/2026-09-18-github-provider-permissions.md).
-The refinement is being validated, not yet claimed deployed. Existing saved
-connections will work without migration or new consent. Other user/agent/
+The refinement is included in verified runtime revision `e7689a7`, published
+at 16:05 UTC together with the chat auto-follow and native Claude catalog fixes.
+Existing saved connections work without migration or new consent. Other user/agent/
 environment/MCP and selected-worker-repository boundaries remain enforced.
+See [the exact rollout and validation receipt](validation-2026-09-18-chat-ui.md).
 
 At 14:45 UTC the user reported successful deployed chat creation and supplied a
 Personal Codex/Luna response screenshot under `12-apps/future-pay`. This is

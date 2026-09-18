@@ -11,8 +11,14 @@ Latest chat follow-up (2026-09-18): incoming agent messages were not followed by
 the viewport. The defect was reproduced and a frontend fix now passes 14/14
 unit/window cases and 5/5 browser follow/navigation cases, preserving intentional
 manual scrollback and a stable Jump to latest during streaming and virtualized
-history. Publication remains separate: a running AWS worker may contain native
-background work, so no live restart has been performed for this patch yet.
+history. Runtime revision `e7689a7` was published to AWS under today's explicit
+interruption authorization: SSM Success/0, readiness 200 and all 11 changed
+public assets matched the exact commit in an independent check at 16:05 UTC.
+The 13 fixed deployed GitHub denial probes passed without provider/model calls.
+The final broad run was 1,187/1,188; its personal-Chrome consent case passed on
+an isolated rerun after explicit fixture startup readiness was added. Preserve
+that distinction rather than reporting a fully green single broad run; the
+original intermittent transport error is not causally diagnosed.
 This refines item 26, not permission to inject messages in the user's real chat.
 The earlier controls report was clarified as intermittent:
 normally the controls respond, but in that instance none did. It remains open;
@@ -25,7 +31,8 @@ command browser checks passed 49 distinct cases (47 on the initial run plus
 two startup-only failures passing after explicit fixture readiness). The
 incoming-message follow fix has focused acceptance as described above.
 See [the scoped evidence and remaining limits](validation-2026-09-18-chat-ui.md).
-This is not a deployment receipt or real-account Fable confirmation.
+The later deployment receipt is in that evidence document. Neither fixture
+acceptance nor deployment confirms real-account Fable availability.
 
 Source checkpoint (2026-09-18, 15:24 UTC; rollout still pending): GitHub's extra
 company gate is removed, existing connections need no migration, and the
@@ -72,20 +79,24 @@ without migration or reconnect. User ownership, explicit connections, provider
 denials and selected-repository/branch worker grants remain enforced. Agent,
 environment and MCP scopes are unchanged. This supersedes GitHub company-step
 requirements and the historical 14:11 receipt below; see the
-[decision](adr/2026-09-18-github-provider-permissions.md). Validation is in
-progress; this refinement is not yet claimed deployed.
+[decision](adr/2026-09-18-github-provider-permissions.md). This refinement is
+implemented, fixture-tested and published in runtime `e7689a7`; the exact
+deployment receipt is linked above.
 
 Composer refinement (2026-09-18, item 14): remove the redundant default footer
 containing model/effort, context and branch. Keep model controls and the context
 ring; show the branch in the PR/repository strip, including before a PR exists.
-Deliberately configured custom status lines remain available.
+Deliberately configured custom status lines remain available. This is included
+in the verified `e7689a7` publication.
 
 Claude model-list correction (2026-09-18): the user's installed native model
 menu includes Fable and a version-disabled Fable 5.1; Relay omits both and shows
 two Default choices. Align discovery/rendering with actual CLI/account options,
 remove duplicate default entries, and retain disabled-option reasons rather
-than inventing support. This refines the existing model/agent picker; validation
-is pending and no model prompt is authorized by this report.
+than inventing support. Native bootstrap/list refresh, duplicate removal and
+disabled reasons are implemented, fixture-tested and published in `e7689a7`.
+Actual Fable availability for the user's account remains unverified; no model
+prompt is authorized by this report.
 
 Ultracode clarification (2026-09-18): the user requests the missing Ultracode
 option. Inspection of the installed Claude 2.1.222 identifies a separate native
@@ -98,8 +109,10 @@ Claude runtime reports (2026-09-18): the command picker returns no matches for
 web capabilities rather than claiming all commands are absent from one query.
 The user also reports disabled composer controls after background Docker/pnpm
 tasks. Reproduce the actual transition and distinguish expected temporary
-switch/stop restrictions from a stuck state. Both remain open refinements of
-items 14/20; no success is inferred from the screenshot or unrelated tests.
+switch/stop restrictions from a stuck state. The native command metadata and
+cold-cache refresh fixes are tested and published in `e7689a7`. The intermittent
+all-controls report remains open; no cause is inferred from the screenshot or
+expected stopping-state restrictions.
 
 User-reported AWS acceptance (2026-09-18, 14:45 UTC): the user confirmed
 “funcionou” with a deployed screenshot of a Personal Codex/Luna chat under
@@ -169,8 +182,8 @@ is the current prerequisite; item 20's unfinished doctor work stays paused.
 
 ## MVP release gate — 2026-09-17
 
-Latest publication (2026-09-18 14:11 UTC): the repository/account onboarding fix
-`f271d7e` is live on AWS at immutable digest
+Previous publication (2026-09-18 14:11 UTC, superseded by the 16:05 receipt above):
+the repository/account onboarding fix `f271d7e` was published at immutable digest
 `aa59e99face500213d3f04b554b0567d4c2c7f7670376fcc47b10ef28ecfcfc8`.
 The single safe-drain rollout completed Success / exit 0; independent public
 readiness and exact source-byte checks of all three changed frontend assets

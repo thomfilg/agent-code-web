@@ -11,8 +11,10 @@
 - `27a3e12`: the active command menu refreshes after selected-account metadata
   arrives. Late discovery cannot refresh a different chat, owner, provider,
   account or model; dismissed menus stay dismissed.
+- `e7689a7`: incoming-message follow, manual scrollback and stable latest
+  navigation, with the focused tests and independent review described below.
 
-All three checkpoints are saved on the PR branch. A source checkpoint is not
+These checkpoints are saved on the PR branch. A source checkpoint is not
 a deployment receipt or confirmation of real account capabilities.
 
 ## Completed local evidence
@@ -33,6 +35,25 @@ a deployment receipt or confirmation of real account capabilities.
 - Earlier GitHub/account/startup/footer browser and official MCP fixture
   receipts remain recorded in `feature-queue.md`. These use disposable data,
   not real OAuth approvals or provider quota.
+- The first final integrated run of 1,188 cases passed 1,187 and failed one
+  existing 40 ms account-readiness budget assertion tied to the host wall
+  clock. The unchanged case passed in isolation. Its test now advances a
+  controlled clock and asserts exact remaining budgets `[40, 20]`, keeping
+  timeout and wrong-auth-type refusal checks intact; no authentication runtime
+  code changed. The entire auth-client file plus manual-only CI guards passed
+  **17/17**.
+- Final integrated rerun: **1,187/1,188 passed**, zero skips, 388,000 ms;
+  `/tmp/relay-final-rollout-node.log`. The sole failure was the personal Chrome
+  consent dialog reporting `Failed to fetch`. An isolated attempt also exposed
+  fixture interaction before UI readiness. The fixture now waits for the real
+  startup-ready button and records only fixed consent-route classifications,
+  HTTP statuses and sanitized network error codes (no bodies/cookies/URLs).
+  The complete personal Chrome case then **passed in 32.9 seconds**, including
+  private login isolation, explicit grant/revocation and restart behavior;
+  `/tmp/relay-personal-chrome-diagnostic-rerun.log`. Every recorded consent
+  response was HTTP 200. No application runtime changed for this fixture fix.
+  The original transient network failure is not causally diagnosed, and this
+  receipt does **not** claim an uninterrupted all-green final full-suite run.
 
 ## Incoming-message follow investigation
 
@@ -83,11 +104,22 @@ changes.
 - Complete MVP acceptance, real Linear consent, authenticated preview, or
   selected-account worker restart/resume.
 
-## Deployment
+## Deployment — independently verified at 16:05 UTC
 
-Pending. The previously deployed revision remains `f271d7e` until an immutable
-image rollout, SSM result, health and exact public asset checks establish a
-new receipt. No existing chat, credential or running job is disposable test data.
+- Runtime revision: `e7689a7cff469ce800a0bca19397625d44cfec3f`.
+- Image: `456808212788.dkr.ecr.us-east-2.amazonaws.com/agent-relay-mvp-applicationrepository-sujdgarjwejp@sha256:36d67eb651e6d4bc2156dea44a3d93165b9ee91c6c264e17e1275fa2cc8ca0da`.
+- Build: `ImageBuild-t8BSbSkDsHYX:9e1863c3-73b8-493e-b6a7-ececd7004785`,
+  **SUCCEEDED**, immutable S3 source version `r2qlUxeLSu6PR4La9JlHYbFvDYKCKiob`.
+- Rollout: SSM `3d556b2b-09a2-4fdd-a9c5-6aa8858c873b`, **Success**, exit **0**,
+  elapsed **34.892 seconds**, controller `i-08c991c22089589a5`.
+- `/readyz`: HTTP 200 with `ok:true`. All **11 changed public assets** returned
+  200 without Set-Cookie and SHA-256 matched the exact runtime commit.
+- All **13 fixed GitHub negative-route probes** passed at 16:04:59 UTC. These
+  verify rejection behavior, not positive authenticated GitHub operation;
+  pair this receipt with the independently established image/revision above.
+  Zero model prompts or provider mutations were requested by the probe.
+
+This replaces runtime `f271d7e`. No chat, credential or data volume was deleted.
 
 Read-only AWS preflight at 15:46 UTC verified the expected account/stack,
 healthy controller, encrypted attached data volume, SSM and readiness. At
@@ -97,5 +129,7 @@ not prove retained native Bash tasks are idle. After this was explained, the
 user explicitly authorized interruption for today's manual update and clarified
 that future automatic deployments must preserve running instances. See the
 [continuity gate](adr/2026-09-18-automatic-rollouts-preserve-workers.md).
-Build `ImageBuild-t8BSbSkDsHYX:9e1863c3-73b8-493e-b6a7-ececd7004785` is preparing
-immutable runtime revision `e7689a7`; rollout verification remains pending.
+The later read-only worker count at 16:05:44 UTC was one running worker, all
+other states zero. That isolated count does **not** prove whether a worker
+stopped/restarted or whether native processes survived this authorized manual
+rollout, and is not evidence that the future automatic-continuity gate passes.

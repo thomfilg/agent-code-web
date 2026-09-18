@@ -30,8 +30,20 @@ test("real Chrome extension keeps logins private until the per-chat toggle, and 
   const launch = () => chromium.launchPersistentContext(path.join(root, "personal-profile"), { channel: "chromium", headless: true, chromiumSandbox: true, viewport: { width: 1600, height: 1000 },
     args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`] });
   profile = await launch();
-  const relay = await profile.newPage(), uiErrors = []; relay.on("pageerror", error => uiErrors.push(error.message));
+  const relay = await profile.newPage(), uiErrors = [], consentRequests = [];
+  relay.on("pageerror", error => uiErrors.push(error.message));
+  const consentRoute = value => /\/privacy$/.test(new URL(value).pathname) ? "privacy" : /\/browser\/access$/.test(new URL(value).pathname) ? "browser-access" : null;
+  relay.on("requestfailed", request => {
+    const route = consentRoute(request.url()); if (!route) return;
+    const error = request.failure()?.errorText || "";
+    consentRequests.push({ route, error: /^net::[A-Z_]+$/.test(error) ? error : "network-failure" });
+  });
+  relay.on("response", response => { const route = consentRoute(response.url()); if (route) consentRequests.push({ route, status: response.status() }); });
+  // Fixed endpoint classifications/status only: never bodies, cookies, URLs or
+  // pairing codes, including when this fixture fails before consent completes.
+  t.after(() => t.diagnostic(JSON.stringify({ consentRequests })));
   await relay.goto(url);
+  await expect(relay.locator("#new-chat-button")).toBeEnabled({ timeout: 15000 });
   await relay.getByRole("button", { name: "Browser connections", exact: true }).click();
   await relay.getByLabel("Username", { exact: true }).fill("alice"); await relay.getByLabel("Account password", { exact: true }).fill("private fixture chrome");
   await relay.getByRole("button", { name: "Create private account", exact: true }).click();
