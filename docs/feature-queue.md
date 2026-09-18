@@ -8,8 +8,9 @@ view containing only that connection's settings. Hide transport/registration
 details under Advanced. Company assignment replaces the extra environment-MCP
 selection. Ambiguous legacy MCP/GitHub bindings require an explicit company;
 preserve encrypted credentials without duplicating them or guessing the mapping.
-See [the decision](adr/2026-09-18-company-connections.md). Implementation is under
-local acceptance; production is not yet updated.
+See [the decision](adr/2026-09-18-company-connections.md) and
+[local acceptance / publication blockers](validation-2026-09-18-company-chat.md).
+The local runtime is committed as `b7b3067`; production is not yet updated.
 
 New-chat refinement (2026-09-18): replace the creation modal with an inline
 page, with the message composer at the bottom, a compact environment / repository
