@@ -124,11 +124,12 @@ the project-scoped token/CLI login and optional manual environment launch.
 
 In Google mode, agent credentials must belong to the signed-in Relay user,
 including the administrator. **Agent accounts** provides named Codex sign-in by
-browser URL/device code and explicit personal/company account selection per
-chat. There is no host-login or shared-key fallback. See
+browser URL/device code and Claude sign-in by authorization URL/returned code,
+with explicit personal/company account selection per chat. There is no
+host-login or shared-key fallback. See the [provider onboarding checklist](docs/provider-onboarding.md) and
 [Codex accounts](docs/codex-accounts.md) for native CLI requirements, storage,
-isolation and the remaining real-account acceptance gate. Claude account login
-is still a separate unfinished MVP item; Google login alone does not enable it.
+isolation and the remaining real-account acceptance gates. Both flows are
+implemented; Google login alone does not authorize either provider.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

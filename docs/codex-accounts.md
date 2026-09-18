@@ -14,8 +14,8 @@ Relay; each user must separately connect their own Codex accounts.
 - Device-code sign-in must be allowed in the user's ChatGPT security settings
   and, where applicable, by their workspace administrator.
 
-Open **Agent accounts** and select **+ Add Codex account** to expand the form.
-Name the account (for example Personal or Company), choose its allowed companies,
+Open **Agent accounts** and select **＋ Add agent account** to expand the form.
+Choose **Codex**, name the account (for example Personal or Company), choose its allowed companies,
 and select **Sign in to Codex**. The button immediately shows **Connecting…**
 while the native client prepares the sign-in link. The form cannot be submitted
 again during this request. Collapsing an unsent form preserves its draft.
