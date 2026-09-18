@@ -116,8 +116,9 @@ export async function bakeWorkerImage(options, { run = defaultRun, sleep = ms =>
     if (base?.ImageId !== o.baseImageId || base.State !== "available" || base.Architecture !== "x86_64" || base.OwnerId !== "099720109477" || !base.Name?.startsWith("ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-")) throw new Error("Base image must be an available official Canonical Ubuntu 24.04 amd64 AMI");
     const keys = await json("ec2", "describe-key-pairs", "--key-names", o.keyName, "--include-public-key", "--query", "KeyPairs");
     const key = keys?.[0];
-    if (keys?.length !== 1 || key.KeyName !== o.keyName || !owned(key) || !/^(ssh-ed25519|ssh-rsa) [A-Za-z0-9+/=]+(?: [^\r\n]*)?$/.test(key.PublicKey || "")) throw new Error("Worker key pair must be deployment-owned and expose one valid public key");
-    const publicKey = key.PublicKey.split(" ").slice(0, 2).join(" ");
+    const normalizedKey = typeof key?.PublicKey === "string" ? key.PublicKey.trim() : "";
+    if (keys?.length !== 1 || key.KeyName !== o.keyName || !owned(key) || !/^(ssh-ed25519|ssh-rsa) [A-Za-z0-9+/=]+(?: [^\r\n]*)?$/.test(normalizedKey)) throw new Error("Worker key pair must be deployment-owned and expose one valid public key");
+    const publicKey = normalizedKey.split(" ").slice(0, 2).join(" ");
     temporary = await mkdtemp(path.join(tmpdir(), "relay-worker-bake-"));
     const userData = path.join(temporary, "cloud-init.yaml");
     await writeFile(userData, recipe.replaceAll("__RELAY_WORKER_PUBLIC_KEY_BASE64__", Buffer.from(`${publicKey}\n`).toString("base64")), { mode: 0o600 });

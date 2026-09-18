@@ -90,6 +90,16 @@ test("AMI baker supports IAM default chain and rejects failed bootstrap without 
   assert.equal(f.calls.filter(c => c.includes("terminate-instances")).length, 1);
 });
 
+test("AMI baker accepts AWS's newline-terminated public key but not multiple keys", async () => {
+  const publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestFixturePublicKeyOnly";
+  const f = fixture({ keyOverride: { PublicKey: `${publicKey} deployment-key\n` } });
+  await bakeWorkerImage(parseOptions(required), { run: f.run, sleep: async () => {} });
+  assert.ok(f.getUserData().includes(Buffer.from(`${publicKey}\n`).toString("base64")));
+  const invalid = fixture({ keyOverride: { PublicKey: `${publicKey}\n${publicKey}\n` } });
+  await assert.rejects(bakeWorkerImage(parseOptions(required), { run: invalid.run }));
+  assert.equal(invalid.calls.some(c => c.includes("run-instances")), false);
+});
+
 test("AMI baker never snapshots failed/timed-out guest finalization", async () => {
   const f = fixture({ neverStops: true });
   await assert.rejects(bakeWorkerImage(parseOptions(required), { run: f.run, sleep: async () => {}, pollLimit: 2 }), /sanitized builder shutdown/);
