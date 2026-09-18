@@ -6,10 +6,20 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
+import { gzipSync } from "node:zlib";
 
 const recipePath = fileURLToPath(new URL("worker-cloud-init.yaml", import.meta.url));
 const exec = promisify(execFile);
 export const CLI_VERSIONS = { codex: "0.154.0", claude: "2.1.222" };
+export const EC2_USER_DATA_MAX_BYTES = 16 * 1024;
+
+export function gzipWorkerUserData(recipe) {
+  // EC2 limits the decoded payload, not its base64 wire representation.
+  // cloud-init detects gzip before parsing the original #cloud-config text.
+  const compressed = gzipSync(Buffer.from(recipe, "utf8"), { level: 9 });
+  if (compressed.length > EC2_USER_DATA_MAX_BYTES) throw new Error("Compressed worker user-data exceeds the EC2 16 KiB limit; no builder was launched");
+  return compressed;
+}
 
 export function safeBootstrapReceipt(output) {
   try {
@@ -54,6 +64,7 @@ export async function bakeWorkerImage(options, { run = defaultRun, sleep = ms =>
   const plan = { expectedAccount: o.expectedAccount, deployment: o.deployment, region: o.region, subnetId: o.subnetId, securityGroupId: o.securityGroupId, keyName: o.keyName, builderInstanceProfile: o.builderInstanceProfile, baseImageId: o.baseImageId, versions: CLI_VERSIONS, privateOnly: true, finalWorkerRole: null, finalWorkerMetadata: "disabled" };
   recipe ||= await readFile(recipePath, "utf8");
   for (const [pkg, version] of [["@openai/codex", CLI_VERSIONS.codex], ["@anthropic-ai/claude-code", CLI_VERSIONS.claude]]) if (!recipe.includes(`${pkg}@${version}`)) throw new Error("Worker recipe must contain the pinned CLI versions");
+  gzipWorkerUserData(recipe); // Early local rejection, including dry-run.
   if (o.dryRun) return { dryRun: true, ...plan };
   const aws = (...args) => run([...(o.profile ? ["--profile", o.profile] : []), "--region", o.region, "--no-cli-pager", ...args]);
   const json = async (...args) => JSON.parse(await aws(...args, "--output", "json"));
@@ -132,15 +143,18 @@ export async function bakeWorkerImage(options, { run = defaultRun, sleep = ms =>
     const normalizedKey = typeof key?.PublicKey === "string" ? key.PublicKey.trim() : "";
     if (keys?.length !== 1 || key.KeyName !== o.keyName || !owned(key) || !/^(ssh-ed25519|ssh-rsa) [A-Za-z0-9+/=]+(?: [^\r\n]*)?$/.test(normalizedKey)) throw new Error("Worker key pair must be deployment-owned and expose one valid public key");
     const publicKey = normalizedKey.split(" ").slice(0, 2).join(" ");
+    const compressedUserData = gzipWorkerUserData(recipe.replaceAll("__RELAY_WORKER_PUBLIC_KEY_BASE64__", Buffer.from(`${publicKey}\n`).toString("base64")));
     temporary = await mkdtemp(path.join(tmpdir(), "relay-worker-bake-"));
-    const userData = path.join(temporary, "cloud-init.yaml");
-    await writeFile(userData, recipe.replaceAll("__RELAY_WORKER_PUBLIC_KEY_BASE64__", Buffer.from(`${publicKey}\n`).toString("base64")), { mode: 0o600 });
+    const userData = path.join(temporary, "cloud-init.yaml.gz");
+    await writeFile(userData, compressedUserData, { mode: 0o600, flag: "wx" });
     const launched = await json("ec2", "run-instances", "--image-id", o.baseImageId, "--instance-type", o.instanceType,
       "--network-interfaces", JSON.stringify([{ DeviceIndex: 0, SubnetId: o.subnetId, Groups: [o.securityGroupId], AssociatePublicIpAddress: false, DeleteOnTermination: true }]),
       "--key-name", o.keyName, "--iam-instance-profile", JSON.stringify({ Name: o.builderInstanceProfile }), "--metadata-options", "HttpTokens=required,HttpEndpoint=enabled,HttpPutResponseHopLimit=1",
       "--instance-initiated-shutdown-behavior", "stop", "--credit-specification", "CpuCredits=standard",
       "--block-device-mappings", JSON.stringify([{ DeviceName: "/dev/sda1", Ebs: { VolumeSize: o.volumeGb, VolumeType: "gp3", Encrypted: true, DeleteOnTermination: true } }]),
-      "--user-data", `file://${userData}`, "--tag-specifications", JSON.stringify(["instance", "volume"].map(ResourceType => ({ ResourceType, Tags: [...tags, { Key: "AgentRelayBake", Value: bakeId }, { Key: "Name", Value: `${o.deployment}-worker-builder` }] }))), "--query", "Instances[0].InstanceId");
+      // fileb preserves gzip bytes. The EC2 CLI customization encodes them
+      // once; pre-encoding here would send base64 text instead of gzip.
+      "--user-data", `fileb://${userData}`, "--tag-specifications", JSON.stringify(["instance", "volume"].map(ResourceType => ({ ResourceType, Tags: [...tags, { Key: "AgentRelayBake", Value: bakeId }, { Key: "Name", Value: `${o.deployment}-worker-builder` }] }))), "--query", "Instances[0].InstanceId");
     if (!/^i-[a-f0-9]{8,17}$/.test(launched || "")) throw new Error("Invalid builder instance ID");
     builderId = launched;
     log(`Private builder ${builderId} launched. No SSH or provider credentials are used.`);
