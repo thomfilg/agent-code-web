@@ -42,6 +42,17 @@ path and the minted capability format; it does not collect upstream provider
 credentials. A stale fatal callback from a previous stopped adapter cannot
 revoke or terminate a newly resumed runtime.
 
+Legacy source-only records from the original schema have no `repositories`
+field. Restore defaults only that absent field to `[]`: startup, native-history
+import and resume obtain no GitHub capability even if an account is connected.
+An explicit null, malformed selection or incomplete repository identity is not
+silently migrated or matched to an account; it remains denied with a fixed 403
+message. Old selections missing a connection ID require explicitly reselecting
+the repository and intended account in a new chat; merely reconnecting is not a
+repair, and the current UI cannot edit an existing selection. The fork/import
+and Linear integration fixtures now use complete saved selections and scoped
+synthetic connection records, exercising admission rather than bypassing it.
+
 Validation includes offline lifecycle, owner namespace, delayed-save, startup
 cancellation, HTTP authentication, both-provider argv and split-stream tests.
 The opt-in command below runs real installed CLIs in disposable private homes,
