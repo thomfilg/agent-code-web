@@ -82,6 +82,15 @@ is the current prerequisite; item 20's unfinished doctor work stays paused.
 
 ## MVP release gate — 2026-09-17
 
+Latest activation (2026-09-18 04:47 UTC): the post-consent Codex readiness fix is
+active on `http://localhost:8787`, preserving all 12 current encrypted records
+and the local credential file byte-for-byte. Personal and umg are disconnected;
+fresh consent and the authorized real-turn/resume gate are still open. The
+older connected-Personal checkpoint above is historical. Claude, GitHub and
+Linear work proceeds in parallel isolated worktrees under ADR 0001.
+AWS provisioning is now explicitly authorized for profile `code-web`, account
+`456808212788`, region `us-east-2`; no AWS resources have yet been created.
+
 The user explicitly requires working **Codex, Claude, GitHub and Linear
 authentication**, plus **a script to deploy Relay on AWS**, before the MVP is
 usable. These requirements take priority over starting unrelated features;

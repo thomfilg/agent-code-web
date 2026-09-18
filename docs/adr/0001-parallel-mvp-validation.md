@@ -27,9 +27,12 @@ non-MVP work may start only after the complete MVP has been manually verified.
 - Make compatible product decisions in feature ADRs. Do not infer authority
   to provision billable AWS resources from permission to implement its deploy
   script. The user subsequently explicitly authorized billable AWS provisioning
-  and selected the AWS CLI account used by `scripts/tabwhoah` QC tasks. Resolve
-  and verify that target from its configuration before creating isolated Relay
-  resources. The user has no brand/domain yet, so an AWS-assigned temporary
+  and initially selected the AWS CLI account used by `scripts/tabwhoah` QC tasks.
+  The latest explicit target supersedes that reference: newly authenticated
+  profile `code-web`, account `456808212788`, region `us-east-2`. STS verified
+  the current bootstrap principal is the account root; do not copy those
+  credentials to the application or CI. Use scoped runtime/CI roles and create
+  isolated Relay resources. The user has no brand/domain yet, so an AWS-assigned temporary
   HTTPS hostname is acceptable; do not purchase a domain or reuse QC resources.
 
 ## Consequences

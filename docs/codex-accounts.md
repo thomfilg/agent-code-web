@@ -151,3 +151,11 @@ credential access and removal of every private profile. Run it with
 `npm run smoke:codex:account-login`; it uses fictitious credentials, no real
 consent and no model quota. It does not replace the user's fresh-consent and
 authorized real-turn/resume acceptance.
+
+Activation at 2026-09-18 04:47 UTC: the corrected controller is running again at
+`http://localhost:8787` under Doppler `code-web/dev`. An offline backup preceded
+startup; all 12 encrypted record payloads and the local credential file have
+identical SHA-256 fingerprints before/after startup. The database contains zero
+chats and both named accounts remain disconnected; no credentials were restored
+from backup. The page returns 200 and anonymous chat access returns 401. This
+is deployment/preservation evidence, not a fresh Codex consent or real turn.
