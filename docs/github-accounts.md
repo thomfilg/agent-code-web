@@ -44,7 +44,7 @@ The native temporary-profile and same-OS-user boundary are documented in
 - Run that **test-only**, explicitly authorized read-only check with
   `taskset -c 0,1 nice -n 10 node scripts/smoke-real-github.mjs --allow-local-test-credential --account=thomfilg --repository=thomfilg/agent-code-web`.
   This does not install/import a connection into the live Relay.
-- 41 backend regressions passed (native lifecycle, HTTP owner isolation,
+- 42 backend regressions passed (native lifecycle, HTTP owner isolation,
   Google login, company scopes, encrypted PostgreSQL, server and shutdown).
   Command: `node --test --test-concurrency=1 test/github-login.test.mjs test/github-login-api.test.mjs test/company-scope.test.mjs test/settings.test.mjs test/google-auth.test.mjs test/server.test.mjs test/server-shutdown.test.mjs`.
 - 13 browser scenarios passed with one worker: new GitHub progress/code,
@@ -52,6 +52,9 @@ The native temporary-profile and same-OS-user boundary are documented in
   company/PR/repository-picker/organization controls. The 390×844 rendered
   connection panel was visually inspected. Command:
   `node node_modules/@playwright/test/cli.js test test/browser/github-login.spec.mjs test/browser/company-scope.spec.mjs test/browser/controls.spec.mjs test/browser/organization.spec.mjs --workers=1`.
+- Adversarial review found and fixed a delayed 401 invalidation write that could
+  race reconnection. Invalidation now shares the connection mutation queue and
+  rechecks the token inside it; a DB-write-boundary regression covers the race.
 - Tests were CPU-limited to cores 0–1 at nice 10. Interactive user consent in
   the deployed product is still required; test credential copying is not
   presented as proof that it happened.

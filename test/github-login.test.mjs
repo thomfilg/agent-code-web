@@ -154,3 +154,19 @@ test("failed sign-in output stays private and outstanding native processes are b
   assert.equal((await github.status()).connections.length, 3);
   await github.close(); assert.ok(clients.every(client => client.closed));
 });
+test("a delayed revocation write cannot overwrite a newly reconnected credential", async () => {
+  const { github, records } = fixture();
+  const saved = (await github.connect({ token: "fixture_old_token", companies: ["allowed"] })).connection;
+  const fetch = github.fetch; github.fetch = (url, options) => url.endsWith("/user") ? fetch(url, options) : Promise.resolve(Response.json({}, { status: 401 }));
+  const put = records.put.bind(records); let release, entered = false;
+  records.put = async (kind, id, value) => {
+    if (kind === "github_connection" && value.token === null && !entered) { entered = true; await new Promise(resolve => { release = resolve; }); }
+    return put(kind, id, value);
+  };
+  const rejected = assert.rejects(github.request("/repos/allowed/repo", { connectionId: saved.id }), { statusCode: 401 });
+  while (!entered) await tick();
+  const reconnect = github.connect({ id: saved.id, revision: saved.revision + 1, token: "fixture_new_token", companies: ["allowed"] });
+  await tick(); release(); await rejected; await reconnect;
+  assert.equal((await github.get(saved.id)).token, "fixture_new_token");
+  await github.close();
+});

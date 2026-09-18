@@ -112,7 +112,15 @@ export class GitHubConnection {
       signal: AbortSignal.timeout(20000), redirect: "error",
     });
     if (response.status === 401) {
-      if (connection) { const old = await this.get(connection.id).catch(() => null); if (old?.token === connection.token) await this.put({ ...old, token: null, loginState: "disconnected", error: "GitHub access expired or was revoked. Reconnect this account.", revision: (old.revision || 0) + 1 }); }
+      if (connection) {
+        // A slow rejected request must not overwrite a newly reconnected token,
+        // edited scope or deletion. Share the mutation queue and compare inside it.
+        const invalidate = this.queue.then(async () => {
+          const current = await this.get(connection.id).catch(() => null);
+          if (current?.token === connection.token) await this.put({ ...current, token: null, loginState: "disconnected", error: "GitHub access expired or was revoked. Reconnect this account.", revision: (current.revision || 0) + 1 });
+        });
+        this.queue = invalidate.catch(() => {}); await invalidate;
+      }
       throw fail("GitHub credentials expired or were revoked. Reconnect your account.", 401);
     }
     if (response.status === 403) throw fail("GitHub denied access. Check repository permissions, organization SSO, or the API rate limit.", 403);
