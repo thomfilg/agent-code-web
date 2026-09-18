@@ -1,0 +1,167 @@
+#!/usr/bin/env node
+import { execFile } from "node:child_process";
+import { readFile, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { randomUUID } from "node:crypto";
+import { promisify } from "node:util";
+
+const recipePath = fileURLToPath(new URL("worker-cloud-init.yaml", import.meta.url));
+const exec = promisify(execFile);
+export const CLI_VERSIONS = { codex: "0.154.0", claude: "2.1.222" };
+
+export function parseOptions(args) {
+  const options = { region: "us-east-1", profile: "", instanceType: "t3.medium", volumeGb: 20, dryRun: false };
+  const keys = { "--expected-account": "expectedAccount", "--region": "region", "--profile": "profile", "--subnet-id": "subnetId", "--security-group-id": "securityGroupId", "--key-name": "keyName", "--builder-instance-profile": "builderInstanceProfile", "--base-image-id": "baseImageId", "--deployment": "deployment", "--instance-type": "instanceType", "--volume-gb": "volumeGb", "--name": "name" };
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--dry-run") { options.dryRun = true; continue; }
+    const key = keys[args[i]];
+    if (!key || !args[i + 1] || args[i + 1].startsWith("--")) throw new Error(`Unknown or incomplete baker argument: ${args[i]}`);
+    options[key] = args[++i];
+  }
+  const patterns = { expectedAccount: /^\d{12}$/, subnetId: /^subnet-[a-f0-9]{8,17}$/, securityGroupId: /^sg-[a-f0-9]{8,17}$/, baseImageId: /^ami-[a-f0-9]{8,17}$/, deployment: /^[A-Za-z][A-Za-z0-9-]{0,127}$/, keyName: /^[A-Za-z0-9_.-]{1,255}$/, builderInstanceProfile: /^[\w+=,.@-]{1,128}$/, region: /^[a-z]{2}(?:-[a-z]+)+-\d$/ };
+  for (const [key, pattern] of Object.entries(patterns)) if (!pattern.test(options[key] || "")) throw new Error(`Missing or invalid baker option: ${key}`);
+  if (!/^t3\.(small|medium|large|xlarge)$/.test(options.instanceType)) throw new Error("Use a supported x86_64 t3 builder size");
+  options.volumeGb = Number(options.volumeGb);
+  if (!Number.isSafeInteger(options.volumeGb) || options.volumeGb < 20 || options.volumeGb > 100) throw new Error("Builder volume must be 20–100 GiB");
+  options.name ||= `${options.deployment}-worker-${Date.now()}`;
+  if (!/^[A-Za-z0-9_.-]{3,128}$/.test(options.name)) throw new Error("Invalid AMI name");
+  return options;
+}
+
+async function defaultRun(args) {
+  // Only this local operator process receives AWS auth, never the guest.
+  try { return (await exec(process.env.AWS_BIN || "aws", args, { timeout: 65_000, maxBuffer: 1_048_576 })).stdout.trim(); }
+  catch (error) {
+    if (String(error.stderr).includes("InvocationDoesNotExist")) throw new Error("InvocationDoesNotExist");
+    throw new Error("AWS command failed; inspect the scoped builder in AWS (raw output withheld)");
+  }
+}
+
+export async function bakeWorkerImage(options, { run = defaultRun, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), log = () => {}, recipe = null, pollLimit = 180 } = {}) {
+  const o = options;
+  const plan = { expectedAccount: o.expectedAccount, deployment: o.deployment, region: o.region, subnetId: o.subnetId, securityGroupId: o.securityGroupId, keyName: o.keyName, builderInstanceProfile: o.builderInstanceProfile, baseImageId: o.baseImageId, versions: CLI_VERSIONS, privateOnly: true, finalWorkerRole: null, finalWorkerMetadata: "disabled" };
+  recipe ||= await readFile(recipePath, "utf8");
+  for (const [pkg, version] of [["@openai/codex", CLI_VERSIONS.codex], ["@anthropic-ai/claude-code", CLI_VERSIONS.claude]]) if (!recipe.includes(`${pkg}@${version}`)) throw new Error("Worker recipe must contain the pinned CLI versions");
+  if (o.dryRun) return { dryRun: true, ...plan };
+  const aws = (...args) => run([...(o.profile ? ["--profile", o.profile] : []), "--region", o.region, "--no-cli-pager", ...args]);
+  const json = async (...args) => JSON.parse(await aws(...args, "--output", "json"));
+  const bakeId = randomUUID();
+  const tags = [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: o.deployment }, { Key: "AgentRelayWorkerKey", Value: o.keyName }, { Key: "CodexVersion", Value: CLI_VERSIONS.codex }, { Key: "ClaudeVersion", Value: CLI_VERSIONS.claude }];
+  let builderId;
+  let temporary;
+  async function builder() {
+    const instances = await json("ec2", "describe-instances", "--instance-ids", builderId, "--query", "Reservations[].Instances[]");
+    const instance = instances?.[0];
+    const t = Object.fromEntries((instance?.Tags || []).map(({ Key, Value }) => [Key, Value]));
+    if (instances?.length !== 1 || instance.InstanceId !== builderId || t.ManagedBy !== "agent-relay" || t.AgentRelayDeployment !== o.deployment || t.AgentRelayBake !== bakeId ||
+        instance.SubnetId !== o.subnetId || instance.SecurityGroups?.length !== 1 || instance.SecurityGroups[0].GroupId !== o.securityGroupId || instance.PublicIpAddress || instance.KeyName !== o.keyName ||
+        !instance.IamInstanceProfile?.Arn?.endsWith(`:instance-profile/${o.builderInstanceProfile}`)) {
+      throw new Error("Builder ownership/network/profile mismatch; refusing to mutate it");
+    }
+    return instance;
+  }
+  async function poll(label, check) {
+    for (let attempt = 0; attempt < pollLimit; attempt++) {
+      const value = await check();
+      if (value) return value;
+      if (attempt % 6 === 0) log(`Waiting for ${label}...`);
+      await sleep(10_000);
+    }
+    throw new Error(`Timed out waiting for ${label}`);
+  }
+  async function ssm(commands, executionTimeout = "1800") {
+    await builder();
+    const result = await json("ssm", "send-command", "--instance-ids", builderId, "--document-name", "AWS-RunShellScript", "--timeout-seconds", "120", "--parameters", JSON.stringify({ commands, executionTimeout: [executionTimeout] }));
+    const commandId = result.Command?.CommandId;
+    if (!/^[a-f0-9-]{36}$/.test(commandId || "")) throw new Error("SSM did not return a command ID");
+    return poll("SSM command completion", async () => {
+      let invocation;
+      try { invocation = await json("ssm", "get-command-invocation", "--instance-id", builderId, "--command-id", commandId); }
+      catch (error) { if (/InvocationDoesNotExist/.test(error.message)) return false; throw error; }
+      if (["Pending", "InProgress", "Delayed"].includes(invocation.Status)) return false;
+      if (invocation.Status !== "Success" || invocation.ResponseCode !== 0) throw new Error(`Builder SSM command failed (${invocation.Status}); inspect command ${commandId} in AWS`);
+      return invocation;
+    });
+  }
+  try {
+    const identity = await json("sts", "get-caller-identity");
+    if (identity.Account !== o.expectedAccount) throw new Error("AWS account does not match --expected-account; no resources were changed");
+    const stacks = await json("cloudformation", "describe-stacks", "--stack-name", o.deployment, "--query", "Stacks");
+    const stack = stacks?.[0];
+    const outputs = Object.fromEntries((stack?.Outputs || []).map(({ OutputKey, OutputValue }) => [OutputKey, OutputValue]));
+    if (stacks?.length !== 1 || stack.StackName !== o.deployment || !stack.StackId?.includes(`:cloudformation:${o.region}:${o.expectedAccount}:stack/${o.deployment}/`) || !["CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE"].includes(stack.StackStatus) ||
+        Object.entries({ WorkerSubnetId: o.subnetId, WorkerSecurityGroupId: o.securityGroupId, WorkerKeyName: o.keyName, BuilderInstanceProfile: o.builderInstanceProfile, BaseImageId: o.baseImageId, DeploymentName: o.deployment }).some(([key, value]) => outputs[key] !== value)) {
+      throw new Error("Baker inputs must exactly match a completed deployment's CloudFormation outputs");
+    }
+    const owned = resource => resource?.Tags?.some(t => t.Key === "AgentRelayDeployment" && t.Value === o.deployment) && resource.Tags.some(t => t.Key === "ManagedBy" && t.Value === "12-apps-ci");
+    const subnets = await json("ec2", "describe-subnets", "--subnet-ids", o.subnetId, "--query", "Subnets");
+    const groups = await json("ec2", "describe-security-groups", "--group-ids", o.securityGroupId, "--query", "SecurityGroups");
+    if (subnets?.length !== 1 || groups?.length !== 1 || subnets[0].SubnetId !== o.subnetId || groups[0].GroupId !== o.securityGroupId || subnets[0].OwnerId !== o.expectedAccount || groups[0].OwnerId !== o.expectedAccount || !owned(subnets[0]) || !owned(groups[0]) || subnets[0].MapPublicIpOnLaunch || subnets[0].VpcId !== groups[0].VpcId) throw new Error("Worker subnet/security group must be private and owned by this deployment/account");
+    const controllerGroup = await json("cloudformation", "describe-stack-resource", "--stack-name", o.deployment, "--logical-resource-id", "ControllerGroup", "--query", "StackResourceDetail.PhysicalResourceId");
+    const ingress = groups[0].IpPermissions;
+    const egress = groups[0].IpPermissionsEgress;
+    if (!/^sg-[a-f0-9]{8,17}$/.test(controllerGroup || "") || ingress?.length !== 1 || ingress[0].IpProtocol !== "tcp" || ingress[0].FromPort !== 22 || ingress[0].ToPort !== 22 || ingress[0].IpRanges?.length || ingress[0].Ipv6Ranges?.length || ingress[0].PrefixListIds?.length || ingress[0].UserIdGroupPairs?.length !== 1 || ingress[0].UserIdGroupPairs[0].GroupId !== controllerGroup ||
+        egress?.length !== 2 || egress.some(rule => rule.IpProtocol !== "tcp" || ![80, 443].includes(rule.FromPort) || rule.ToPort !== rule.FromPort || rule.IpRanges?.length !== 1 || rule.IpRanges[0].CidrIp !== "0.0.0.0/0" || rule.Ipv6Ranges?.length || rule.PrefixListIds?.length || rule.UserIdGroupPairs?.length)) {
+      throw new Error("Worker security group must allow only controller SSH ingress and HTTP(S) egress");
+    }
+    const profile = await json("iam", "get-instance-profile", "--instance-profile-name", o.builderInstanceProfile, "--query", "InstanceProfile");
+    if (profile?.InstanceProfileName !== o.builderInstanceProfile || profile.Roles?.length !== 1 || !profile.Arn?.includes(`:iam::${o.expectedAccount}:instance-profile/`)) throw new Error("Builder instance profile is not owned by the expected account");
+    const role = await json("iam", "get-role", "--role-name", profile.Roles[0].RoleName, "--query", "Role");
+    const policies = await json("iam", "list-attached-role-policies", "--role-name", role.RoleName, "--query", "AttachedPolicies");
+    const inline = await json("iam", "list-role-policies", "--role-name", role.RoleName, "--query", "PolicyNames");
+    if (!owned(role) || role.Arn !== profile.Roles[0].Arn || policies?.length !== 1 || policies[0].PolicyArn !== "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" || inline?.length !== 0) throw new Error("Builder role must be deployment-owned and limited to AmazonSSMManagedInstanceCore");
+    const base = await json("ec2", "describe-images", "--image-ids", o.baseImageId, "--query", "Images[0]");
+    if (base?.ImageId !== o.baseImageId || base.State !== "available" || base.Architecture !== "x86_64" || base.OwnerId !== "099720109477" || !base.Name?.startsWith("ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-")) throw new Error("Base image must be an available official Canonical Ubuntu 24.04 amd64 AMI");
+    const keys = await json("ec2", "describe-key-pairs", "--key-names", o.keyName, "--include-public-key", "--query", "KeyPairs");
+    const key = keys?.[0];
+    if (keys?.length !== 1 || key.KeyName !== o.keyName || !owned(key) || !/^(ssh-ed25519|ssh-rsa) [A-Za-z0-9+/=]+(?: [^\r\n]*)?$/.test(key.PublicKey || "")) throw new Error("Worker key pair must be deployment-owned and expose one valid public key");
+    const publicKey = key.PublicKey.split(" ").slice(0, 2).join(" ");
+    temporary = await mkdtemp(path.join(tmpdir(), "relay-worker-bake-"));
+    const userData = path.join(temporary, "cloud-init.yaml");
+    await writeFile(userData, recipe.replaceAll("__RELAY_WORKER_PUBLIC_KEY_BASE64__", Buffer.from(`${publicKey}\n`).toString("base64")), { mode: 0o600 });
+    const launched = await json("ec2", "run-instances", "--image-id", o.baseImageId, "--instance-type", o.instanceType,
+      "--network-interfaces", JSON.stringify([{ DeviceIndex: 0, SubnetId: o.subnetId, Groups: [o.securityGroupId], AssociatePublicIpAddress: false, DeleteOnTermination: true }]),
+      "--key-name", o.keyName, "--iam-instance-profile", JSON.stringify({ Name: o.builderInstanceProfile }), "--metadata-options", "HttpTokens=required,HttpEndpoint=enabled,HttpPutResponseHopLimit=1",
+      "--instance-initiated-shutdown-behavior", "stop", "--credit-specification", "CpuCredits=standard",
+      "--block-device-mappings", JSON.stringify([{ DeviceName: "/dev/sda1", Ebs: { VolumeSize: o.volumeGb, VolumeType: "gp3", Encrypted: true, DeleteOnTermination: true } }]),
+      "--user-data", `file://${userData}`, "--tag-specifications", JSON.stringify(["instance", "volume"].map(ResourceType => ({ ResourceType, Tags: [...tags, { Key: "AgentRelayBake", Value: bakeId }, { Key: "Name", Value: `${o.deployment}-worker-builder` }] }))), "--query", "Instances[0].InstanceId");
+    if (!/^i-[a-f0-9]{8,17}$/.test(launched || "")) throw new Error("Invalid builder instance ID");
+    builderId = launched;
+    log(`Private builder ${builderId} launched. No SSH or provider credentials are used.`);
+    await poll("private SSM registration", async () => {
+      await builder();
+      const info = await json("ssm", "describe-instance-information", "--filters", JSON.stringify([{ Key: "InstanceIds", Values: [builderId] }]), "--query", "InstanceInformationList");
+      return info?.length === 1 && info[0].InstanceId === builderId && info[0].PingStatus === "Online";
+    });
+    await ssm(["set -eu", "cloud-init status --wait", "test -f /opt/agent-web/READY", "test \"$(codex --version)\" = 'codex-cli 0.154.0'", "test \"$(claude --version)\" = '2.1.222 (Claude Code)'", "test -x /usr/local/sbin/agent-web-finalize-image"]);
+    log("Pinned CLIs verified. Scheduling credential scrub and builder shutdown.");
+    await ssm(["set -eu", "systemd-run --unit=agent-relay-image-finalize --on-active=15s /usr/local/sbin/agent-web-finalize-image"], "60");
+    await poll("sanitized builder shutdown", async () => (await builder()).State?.Name === "stopped");
+    // No StopInstances: an interrupted scrub must fail, not produce an AMI.
+    const imageId = await json("ec2", "create-image", "--instance-id", builderId, "--name", o.name,
+      "--description", "Agent Relay private worker: no credentials; deployment-specific SSH public key",
+      "--tag-specifications", JSON.stringify(["image", "snapshot"].map(ResourceType => ({ ResourceType, Tags: tags }))), "--query", "ImageId");
+    if (!/^ami-[a-f0-9]{8,17}$/.test(imageId || "")) throw new Error("Invalid created image ID");
+    await poll("worker AMI availability", async () => {
+      const image = await json("ec2", "describe-images", "--image-ids", imageId, "--query", "Images[0]");
+      if (image?.State === "failed") throw new Error(`Worker AMI ${imageId} failed; inspect and clean up its image/snapshot explicitly`);
+      return image?.ImageId === imageId && image.State === "available";
+    });
+    log(`Worker AMI ready: ${imageId}. A fresh IMDS-disabled boot still requires deployment acceptance.`);
+    return { imageId, builderId, ...plan };
+  } finally {
+    if (temporary) await rm(temporary, { recursive: true, force: true });
+    if (builderId) {
+      await builder(); // Recheck exact scope before cleanup, never broad filters.
+      await aws("ec2", "terminate-instances", "--instance-ids", builderId);
+      log(`Terminated temporary builder ${builderId}; any created AMI/snapshot is retained.`);
+    }
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  try { console.log(JSON.stringify(await bakeWorkerImage(parseOptions(process.argv.slice(2)), { log: message => console.error(message) }), null, 2)); }
+  catch (error) { console.error(error.message); process.exitCode = 1; }
+}
