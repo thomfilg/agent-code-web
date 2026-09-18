@@ -38,6 +38,13 @@ code timeout, an unsupported response or explicitly denied device access using
 fixed, credential-free messages. An arbitrary failure no longer tells the user
 to enable device-code access in ChatGPT.
 
+Native device consent and native account-cache readiness are distinct events.
+After matching successful consent, Relay retries only a temporarily null
+`account/read` result within one 15-second verification deadline. It never
+accepts a credential file alone as proof of consent, switches auth types, or
+restarts the login automatically. Credential-file and account-verification
+failures use fixed stage-specific messages, never native output or tokens.
+
 Choose the account explicitly when creating a chat. Existing chats expose an
 account button next to the agent picker: open it and select **Use in this chat**.
 Changing accounts retains messages and workspace files but starts a new native
@@ -126,3 +133,21 @@ Claude, GitHub, Linear and AWS
 have separate open MVP gates in [feature-queue.md](feature-queue.md).
 
 Protocol reference: [official Codex app-server authentication documentation](https://learn.chatgpt.com/docs/app-server#auth-endpoints).
+
+### Post-consent regression (2026-09-18)
+
+The user confirmed that OpenAI approved their login while Relay failed. An
+installed Codex 0.154.0 probe reproduced the underlying race: the native client
+emitted `account/login/completed: success` and wrote its credential file before
+`account/read` stopped returning `null`. Relay previously discarded the approved
+login immediately. The deterministic regression failed before the fix and
+passed after adding the bounded native-account readiness check.
+
+Verification: **33/33 focused account/server tests**, **14/14 account/Google
+browser tests**, and **five native device-code logins** against a loopback OAuth
+fixture passed. Four of those native logins returned a transient null account
+and then recovered. The smoke also checks named-record reload, selected-account
+credential access and removal of every private profile. Run it with
+`npm run smoke:codex:account-login`; it uses fictitious credentials, no real
+consent and no model quota. It does not replace the user's fresh-consent and
+authorized real-turn/resume acceptance.

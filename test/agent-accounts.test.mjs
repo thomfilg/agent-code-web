@@ -147,3 +147,25 @@ test("login failure preserves only fixed diagnostic messages and remains retryab
     assert.equal(accounts.list(alice).length, 1);
   }
 });
+
+test("post-consent verification reports safe diagnostics without persisting unverified credentials", async t => {
+  const { accounts, records, fixture } = await setup(t);
+  const pending = await accounts.begin(alice, input), client = fixture.clients[0];
+  client.snapshot = async () => {
+    const error = new CodexAccountError("verification_timeout");
+    error.message = "secret-native-output https://example.test/private";
+    throw error;
+  };
+  client.approve();
+  await waitFor(() => accounts.list(alice)[0].status === "disconnected");
+  await waitFor(() => client.closed);
+  const saved = await records.get("agent-account", pending.account.id);
+  assert.equal(saved.auth, null);
+  assert.equal(saved.error, new CodexAccountError("verification_timeout").message);
+  assert.doesNotMatch(JSON.stringify(accounts.list(alice)), /secret-native-output|example\.test/);
+  const retried = await accounts.begin(alice, { ...input, id: saved.id });
+  fixture.clients.at(-1).approve();
+  await waitFor(() => accounts.hasConnected(alice, "codex"));
+  assert.equal(retried.account.id, saved.id);
+  assert.equal(accounts.list(alice).length, 1);
+});

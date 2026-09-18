@@ -8,6 +8,14 @@ existing MVP requirement. Repeated
 reports remain evidence that an earlier fix needs verification, not permission
 to skip it. Queued work proceeds under the existing implementation authorization;
 adding an item does not require another request to resume in-scope work.
+Execution update (2026-09-18): the user authorized six hours of parallel agent
+work, tested commits/pushes/PRs per feature, and compatible product decisions
+recorded as ADRs. Interactive consent tests can await the user's return while
+other MVP implementation proceeds. The user explicitly permitted copying local
+GitHub/Claude credentials into isolated test profiles, not adding host-account
+imports to the product. Non-MVP implementation still waits for a manually
+verified complete MVP. This supersedes the earlier sequential-execution
+constraint below; see [ADR 0001](adr/0001-parallel-mvp-validation.md).
 The documentation-only MVP checkpoint was merged in PR #3. Implementation has
 resumed under the persistent MVP goal: finish one feature, test it (request
 user-only consent where necessary), commit/push, then take the next feature.
@@ -237,6 +245,20 @@ References inspected for this request:
 | 46 | Delete a saved agent account, separately from disconnecting it; confirm the specific account, remove its stored credentials, prevent other-user deletion, and retain conversations without silently selecting another account | New request (2026-09-17), appended outside the MVP under the standing queue rule; not implemented |
 
 ## Verification ledger
+
+- Codex post-consent correction (2026-09-18): the user confirmed OpenAI approved
+  login while Relay failed verification. Reproduced with installed Codex 0.154.0
+  and a loopback OAuth issuer: `account/login/completed` success can precede
+  account-cache readiness, despite an existing native credential file. Added
+  bounded null-only account-read retries after matching native consent, plus
+  safe final-verification diagnostics. No host credentials are adopted and
+  credential-file validation stays strict. The regression failed before and
+  passed after the fix. **33/33 focused account/server** and **14/14 browser**
+  tests passed; **five real-executable fixture logins** passed, including four
+  transient-null reads. Zero real tokens, real consent or model turns in this
+  smoke. User consent and the authorized real-turn/resume gate remain pending.
+  The local controller was no longer running when work resumed; activation
+  with the existing database is the next step, not assumed completed.
 
 - Codex reconnection refinement (2026-09-17): replaced reopening the saved
   account's name/company form with a one-click Reconnect action inside its card.

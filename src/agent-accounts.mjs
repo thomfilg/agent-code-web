@@ -108,7 +108,9 @@ export class AgentAccounts {
         if (initial.accountIdentity && (initial.accountIdentity !== snapshot.auth.tokens.account_id || initial.subject !== snapshot.subject)) throw fail("You signed in to a different Codex workspace or user. Reconnect the original account, or add a separate named account.");
         await this.save({ ...initial, ...snapshot, accountIdentity: snapshot.auth.tokens.account_id, status: "connected", error: null });
       } catch (error) {
-        await this.save({ ...initial, status: "disconnected", auth: null, error: error.statusCode ? error.message : "Codex sign-in could not be verified. Reconnect this account." });
+        const message = error instanceof CodexAccountError ? new CodexAccountError(error.code).message
+          : error.statusCode ? error.message : "Codex sign-in could not be verified. Reconnect this account.";
+        await this.save({ ...initial, status: "disconnected", auth: null, error: message });
       } finally {
         this.flows.delete(flow.id); clearTimeout(flow.timer); await flow.client.close().catch(() => {});
       }

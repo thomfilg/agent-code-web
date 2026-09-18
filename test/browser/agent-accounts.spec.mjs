@@ -277,3 +277,27 @@ test("Reconnect is one click inside the saved account, preserves scope and expos
     await expect(page.locator(".agent-account-help")).not.toHaveAttribute("open", "");
   } finally { gate.resolve(); }
 });
+
+test("a post-consent verification failure is shown once and the same account can reconnect", async ({ page, relay }) => {
+  let attempt = 0;
+  relay.app.agentAccounts.clientFactory = () => {
+    const client = relay.codex.factory();
+    if (++attempt === 1) client.snapshot = async () => { throw new CodexAccountError("verification_timeout"); };
+    return client;
+  };
+  await login(page, relay); await page.locator("#agent-accounts-button").click(); await addAccount(page, "Personal");
+  await expect(card(page, "Personal").locator("code")).toBeVisible();
+  const original = relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId)[0];
+  relay.codex.clients[0].approve();
+  const message = new CodexAccountError("verification_timeout").message;
+  await expect(card(page, "Personal").getByText(message, { exact: true })).toHaveCount(1);
+  await expect(card(page, "Personal").locator("code")).toHaveCount(0);
+  await expect(card(page, "Personal").getByRole("button", { name: "Reconnect", exact: true })).toBeVisible();
+  expect((await relay.app.records.get("agent-account", original.id)).auth).toBeNull();
+  await card(page, "Personal").getByRole("button", { name: "Reconnect", exact: true }).click();
+  await expect(card(page, "Personal").locator("code")).toBeVisible();
+  relay.codex.clients.at(-1).approve();
+  await expect(card(page, "Personal")).toContainText("codex@example.test · Connected");
+  await expect(card(page, "Personal").getByText(message, { exact: true })).toHaveCount(0);
+  expect(relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId).map(account => account.id)).toEqual([original.id]);
+});
