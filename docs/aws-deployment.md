@@ -7,7 +7,16 @@ manual-only and off by default. Today's manually operated update may interrupt
 workers under the user's explicit setup authorization; that is not permission
 for future disruptive automation. See [the required continuity gate](adr/2026-09-18-automatic-rollouts-preserve-workers.md).
 
-Latest application publication (2026-09-18 17:41 UTC): build source `28654d6`
+Latest application publication (2026-09-18, verified 18:40 UTC): runtime
+`b89269a` adds prompt-free environment wake and immediate deletion feedback.
+Rollout SSM `e8941890-07f8-4aa9-b96a-b74929d4398d` completed Success/0; an
+independent check matched the running immutable image, all five changed public
+assets, readiness and 13 denial probes. No workers existed before/after this
+manual rollout. [Exact receipt and limits](validation-2026-09-18-runtime-controls.md#aws-publication--independently-verified-at-1840-utc).
+The newly chosen two-minute hibernation/manual-only full stop policy is not
+activated by this release; it needs compatible-image and process-resume proof.
+
+Previous application publication (2026-09-18 17:41 UTC): build source `28654d6`
 (runtime `79d66cc`) adds Shared Chrome streaming/input improvements, remote
 reload shortcuts and explicit plain-text clipboard. Rollout SSM
 `609c230c-af33-4e41-bcce-6426341f59ae` completed Success/0. At 17:43 UTC,

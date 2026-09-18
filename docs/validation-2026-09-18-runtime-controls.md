@@ -56,13 +56,32 @@ All fixtures use disposable test data, not real provider quota or account consen
 The unrelated unfinished Claude-doctor script/fixture remains untouched and must
 not be included in this feature's commit or immutable build.
 
-## New inactivity/hibernation request — not activated
+## AWS publication — independently verified at 18:40 UTC
 
-The user subsequently requested hibernation after two minutes and the existing
-full stop after fifteen minutes, reasoning that full stop would cost less.
-An optional product-choice question is open: retain that two-stage policy, or
-hibernate after two minutes and reserve destructive full stop for manual use.
-The current production timers and launch configuration have not been changed.
+- Runtime source: `b89269a87d72f3a989a7598cf889639ecf05b293`.
+- CodeBuild: `ImageBuild-t8BSbSkDsHYX:b8c96b38-1447-4cc6-84b8-2f9287490857`,
+  SUCCEEDED; immutable source version `nbQstXqtLZR3eHKWu8P5omXHMRltchY6`.
+- Image digest: `sha256:4cb53a408f0e96cbf9d7aae9f92349f7528a1f3b94dd3edb03342f9ba5c43487`.
+- Manual rollout SSM `e8941890-07f8-4aa9-b96a-b74929d4398d`: Success/0.
+- Independent read-only SSM `adc088bf-af9e-48cb-b9e7-2871f40f553c` confirmed
+  that the container is running that exact immutable image.
+- Public `/readyz`: 200/ok; anonymous `/api/chats`: 401. All five changed
+  public files matched their Git bytes. Thirteen fixed GitHub denial probes
+  passed, without provider operations, model prompts or account imports.
+- Exact deployment-owned worker inventory was empty before and after rollout.
+  No chat, user data, worker instance or volume was deleted by this publication.
+
+The authenticated Wake/Delete flow was tested with the local browser fixtures
+above, not replayed in the user's live AWS account. The negative-route receipt
+does not claim authenticated acceptance. Automatic rollout remains disabled.
+
+## New inactivity/hibernation request — decided, not activated
+
+After the cost clarification, the user explicitly chose **hibernate after two
+minutes of inactivity; full stop only by manual action**. This supersedes the
+earlier fifteen-minute automatic full stop. No policy question remains open.
+The current production timers and launch configuration have not yet been changed;
+activation requires the process-preserving acceptance below.
 
 AWS does not charge instance usage after hibernation reaches `stopped`, while
 EBS storage remains billable. Ordinary stop also leaves EBS storage in place;
