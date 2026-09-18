@@ -14,6 +14,7 @@ import { MessageHistory } from "./message-history.js";
 import { MessageNavigator } from "./message-navigator.js";
 import { DocumentPreview } from "./document-preview.js";
 import { SharedBrowserPanel } from "./shared-browser.js";
+import { AppPreviewDialog } from "./app-preview.js";
 import { BrowserConnectionSettings } from "./browser-connections.js";
 import { setupPanelResizers } from "./panel-resizers.js";
 import { MessageWindow } from "./message-window.js";
@@ -220,6 +221,7 @@ function renderActive() {
   chatPresence.select(chat?.id);
   documentPreview.setChat(chat?.id);
   sharedBrowser.setChat(chat?.id);
+  appPreview.setChat(chat);
   browserConnectionSettings.setChat(chat?.id);
   elements.welcome.hidden = Boolean(chat);
   elements.conversation.hidden = !chat;
@@ -823,9 +825,12 @@ const chatPresence = new ChatPresence({ api });
 const documentPreview = new DocumentPreview();
 const sideChat = new SideChatPanel({ api, getChat: () => state.active, toast, onPreview: preview => documentPreview.open(preview) });
 const agentThreads = new AgentThreadsPanel({ api, getChat: () => state.active, toast, onPreview: preview => documentPreview.open(preview) });
-const sharedBrowser = new SharedBrowserPanel({ api, getBackend: () => state.active?.runtimeMetadata?.backend || state.config?.workerBackend });
+const appPreview = new AppPreviewDialog({ api, getChat: () => state.active, getBackend: () => state.active?.runtimeMetadata?.backend || state.config?.workerBackend });
+$("#open-app-preview").onclick = () => appPreview.open();
+const sharedBrowser = new SharedBrowserPanel({ api, getBackend: () => state.active?.runtimeMetadata?.backend || state.config?.workerBackend, openApp: options => appPreview.open(options) });
 const browserConnectionSettings = new BrowserConnectionSettings({ api, state, toast, browser: sharedBrowser,
   accountChanged: async () => {
+    appPreview.resetIdentity();
     vimComposer.resetIdentity();
     statusline.resetIdentity();
     tabTitle.resetIdentity();

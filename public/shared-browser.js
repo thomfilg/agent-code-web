@@ -5,10 +5,11 @@ const $ = selector => document.querySelector(selector);
 const modifiers = event => (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0);
 
 export class SharedBrowserPanel {
-  constructor({ api, getBackend = () => "local" }) {
+  constructor({ api, getBackend = () => "local", openApp = () => {} }) {
     this.api = api; this.panel = $("#browser-panel"); this.canvas = $("#browser-canvas"); this.context = this.canvas.getContext("2d"); this.sequence = 0; this.frameVersion = 0;
     this.pendingCommands = new Map(); this.resizeQueue = Promise.resolve(); this.resizeVersion = 0;
     this.getBackend = getBackend;
+    $("#browser-open-app").onclick = () => openApp({ address: $("#browser-address").value });
     $("#browser-address").addEventListener("input", () => this.updateDirectLink());
     $("#browser-copy-link").onclick = async () => {
       const link = this.directLink();
@@ -186,6 +187,7 @@ export class SharedBrowserPanel {
     link.setAttribute("aria-disabled", String(!result.url));
     if (result.url) link.href = result.url; else link.removeAttribute("href");
     $("#browser-copy-link").disabled = !result.url;
+    $("#browser-open-app").hidden = Boolean(result.url) || this.getBackend() !== "ec2" || this.mode === "personal";
   }
   point(event) {
     const rect = this.canvas.getBoundingClientRect();
