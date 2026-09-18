@@ -73,7 +73,15 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
   if (ingress?.length !== 1 || ingress[0].IpProtocol !== "tcp" || ingress[0].FromPort !== 22 || ingress[0].ToPort !== 22 || ingress[0].UserIdGroupPairs?.length !== 1 || ingress[0].UserIdGroupPairs[0].GroupId !== controllerGroup || ingress[0].IpRanges?.length || ingress[0].Ipv6Ranges?.length || ingress[0].PrefixListIds?.length) throw new Error("Acceptance permits only controller-to-worker SSH ingress");
   const images = await json("ec2", "describe-images", "--image-ids", o.imageId, "--owners", o.account, "--query", "Images");
   const image = images?.[0], tags = tagsOf(image);
-  if (images?.length !== 1 || image.ImageId !== o.imageId || image.OwnerId !== o.account || image.State !== "available" || image.Architecture !== "x86_64" || image.Public || !image.BlockDeviceMappings?.length || image.BlockDeviceMappings.some(mapping => !mapping.Ebs?.Encrypted) || Object.entries({ ...imageTags, AgentRelayDeployment: o.deployment, AgentRelayWorkerKey: outputs.WorkerKeyName }).some(([key, value]) => tags[key] !== value)) throw new Error("Acceptance requires a private encrypted pinned AMI owned by this deployment");
+  // Canonical images retain optional instance-store hints. The fixed t3.medium
+  // verifier has no instance store; require an encrypted EBS root/all EBS disks
+  // without treating those inert ephemeral hints as unencrypted EBS volumes.
+  const mappings = image?.BlockDeviceMappings || [];
+  const rootDisks = mappings.filter(mapping => mapping.DeviceName === image?.RootDeviceName && mapping.Ebs);
+  const disksValid = image?.RootDeviceType === "ebs" && rootDisks.length === 1 && mappings.every(mapping => mapping.Ebs
+    ? mapping.Ebs.Encrypted === true && !mapping.VirtualName && !Object.hasOwn(mapping, "NoDevice")
+    : /^ephemeral\d+$/.test(mapping.VirtualName || "") && /^\/dev\/sd[b-z]$/.test(mapping.DeviceName || "") && !Object.hasOwn(mapping, "NoDevice"));
+  if (images?.length !== 1 || image.ImageId !== o.imageId || image.OwnerId !== o.account || image.State !== "available" || image.Architecture !== "x86_64" || image.Public || !disksValid || Object.entries({ ...imageTags, AgentRelayDeployment: o.deployment, AgentRelayWorkerKey: outputs.WorkerKeyName }).some(([key, value]) => tags[key] !== value)) throw new Error("Acceptance requires a private encrypted pinned AMI owned by this deployment");
   const keys = await json("ec2", "describe-key-pairs", "--key-names", outputs.WorkerKeyName, "--include-public-key", "--query", "KeyPairs");
   const publicKey = keys?.[0]?.PublicKey?.trim();
   if (keys?.length !== 1 || keys[0].KeyName !== outputs.WorkerKeyName || !owned(keys[0]) || !/^(ssh-ed25519|ssh-rsa) [A-Za-z0-9+/=]+(?: [^\r\n]*)?$/.test(publicKey || "")) throw new Error("Acceptance key must belong to this deployment");
