@@ -20,14 +20,13 @@ export async function chromeSandboxReceipt(root, { proc = "/proc", uid = process
       // renderers. The status effective UID describes the actual process.
       const effectiveUid = status.match(/^Uid:\s+\d+\s+(\d+)/m)?.[1];
       if (effectiveUid === undefined) { scanComplete = false; continue; }
-      if (Number(effectiveUid) !== uid) continue;
       // Chrome rewrites child argv into one space-separated proc title. The
       // fixture's executable/profile paths contain no whitespace; tokenize
       // both native argv and those rewritten titles for flag checks.
       const args = (await readFile(path.join(base, "cmdline"))).toString().split(/[\0\s]+/).filter(Boolean);
       let cwd = null;
       try { cwd = await readlink(path.join(base, "cwd")); } catch { /* Nondumpable renderer: keep it in the inventory. */ }
-      processes.push({ pid: Number(name), ppid: Number(status.match(/^PPid:\s+(\d+)/m)?.[1]), args, cwd,
+      processes.push({ pid: Number(name), uid: Number(effectiveUid), ppid: Number(status.match(/^PPid:\s+(\d+)/m)?.[1]), args, cwd,
         seccomp: status.match(/^Seccomp:\s+(\d+)/m)?.[1], nspid: (status.match(/^NSpid:\s+(.+)/m)?.[1] || "").trim().split(/\s+/).filter(Boolean) });
     } catch {
       // A disappearing PID is normal; unreadable metadata for an extant PID
@@ -49,7 +48,7 @@ export async function chromeSandboxReceipt(root, { proc = "/proc", uid = process
   for (const p of processes) if (!descendants.has(p.pid) && !unrelated.has(p.pid) && !p.cwd) scanComplete = false;
   const renderers = children.filter(p => p.args.includes("--type=renderer"));
   return { roots: roots.length, processes: children.length, renderers: renderers.length, scanComplete,
-    nonRoot: uid > 0, pipeOnly: roots.length === 1 && children.every(p => !p.args.some(arg => arg.startsWith("--remote-debugging-port"))),
+    nonRoot: uid > 0 && children.length > 0 && children.every(p => p.uid === uid), pipeOnly: roots.length === 1 && children.every(p => !p.args.some(arg => arg.startsWith("--remote-debugging-port"))),
     noSandboxBypass: children.every(p => !p.args.some(arg => ["--no-sandbox", "--disable-setuid-sandbox", "--disable-seccomp-filter-sandbox", "--disable-namespace-sandbox"].includes(arg))),
     rendererSeccomp: renderers.length > 0 && renderers.every(p => p.seccomp === "2"),
     rendererNamespace: roots.length === 1 && roots[0].nspid.length > 0 && renderers.length > 0 && renderers.every(p => p.nspid.length > roots[0].nspid.length) };
@@ -62,8 +61,8 @@ export function guestHtml() {
   #echo{top:210px}#live{top:240px}#metrics{top:270px;font-size:12px}#stripes{left:20px;top:310px;width:100px;height:8px;background:repeating-linear-gradient(90deg,#000 0,#000 1px,#fff 1px,#fff 2px)}#live-tile{position:absolute;left:150px;top:310px;width:10px;height:8px;background:#e00000}
   button,input{font:inherit;padding:8px}button{background:#225ddd;color:white;border:0}</style></head><body>
   <h1>EC2 guest acceptance</h1><button id="click">Clicks: 0</button><input id="entry" aria-label="Example input"><p id="echo"></p><p id="live">Waiting</p><p id="metrics"></p><div id="stripes"></div><div id="live-tile"></div>
-  <script>const documentId=crypto.randomUUID();let clicks=0;const entry=document.querySelector('#entry');
-  function report(){const value={documentId,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,clicks,text:entry.value,live:document.querySelector('#live').textContent};document.querySelector('#metrics').textContent=innerWidth+'x'+innerHeight+' @'+devicePixelRatio;fetch('/observed',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(value)}).catch(()=>{});}
+  <script>const documentId=crypto.randomUUID();let clicks=0,sequence=0;const entry=document.querySelector('#entry');
+  function report(){const value={documentId,sequence:++sequence,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,clicks,text:entry.value,live:document.querySelector('#live').textContent};document.querySelector('#metrics').textContent=innerWidth+'x'+innerHeight+' @'+devicePixelRatio;fetch('/observed',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(value)}).catch(()=>{});}
   document.querySelector('#click').onclick=()=>{document.querySelector('#click').textContent='Clicks: '+(++clicks);report()};entry.oninput=()=>{document.querySelector('#echo').textContent=entry.value;report()};addEventListener('resize',report);requestAnimationFrame(report);
   new EventSource('/events').onmessage=e=>{document.querySelector('#live').textContent=e.data;document.querySelector('#live-tile').style.background='#00c040';report()};</script></body></html>`;
 }
@@ -87,8 +86,10 @@ export async function startGuestSite(runId, { rootBase = "/opt/agent-web", sandb
         let length = 0; const chunks = [];
         for await (const chunk of request) { length += chunk.length; requireValue(length <= 4096); chunks.push(chunk); }
         const input = JSON.parse(Buffer.concat(chunks));
-        requireValue(validGuestRun(input.documentId) && Number.isInteger(input.width) && Number.isInteger(input.height) && Number.isFinite(input.dpr) && Number.isInteger(input.clicks) && typeof input.text === "string" && input.text.length <= 128 && typeof input.live === "string" && input.live.length <= 128);
-        observed = Object.fromEntries(["documentId", "width", "height", "dpr", "clicks", "text", "live"].map(key => [key, input[key]]));
+        requireValue(validGuestRun(input.documentId) && Number.isSafeInteger(input.sequence) && input.sequence > 0 && Number.isInteger(input.width) && Number.isInteger(input.height) && Number.isFinite(input.dpr) && Number.isInteger(input.clicks) && typeof input.text === "string" && input.text.length <= 128 && typeof input.live === "string" && input.live.length <= 128);
+        // Concurrent fetches can reach HTTP connections out of order. Keep the
+        // latest page observation, never an older partial keyboard snapshot.
+        if (observed.documentId !== input.documentId || input.sequence > observed.sequence) observed = Object.fromEntries(["documentId", "sequence", "width", "height", "dpr", "clicks", "text", "live"].map(key => [key, input[key]]));
         response.end("ok"); return;
       }
       response.writeHead(404); response.end();

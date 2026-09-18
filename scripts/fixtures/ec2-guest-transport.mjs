@@ -29,7 +29,7 @@ export class GuestSiteControl {
     let bytes = 0;
     child.stdout.on("data", chunk => { bytes += chunk.length; if (bytes > 262144) this.fail(); });
     child.stderr.on("data", () => {}); // Guest private diagnostics are never logged.
-    const lines = createInterface({ input: child.stdout });
+    const lines = this.lines = createInterface({ input: child.stdout });
     lines.on("line", line => {
       if (this.failed) return;
       try {
@@ -44,6 +44,7 @@ export class GuestSiteControl {
   }
   fail() {
     this.failed = true;
+    this.lines?.close(); this.child.stdout.pause();
     clearTimeout(this.deadline); this.rejectReady(Error("Guest fixture disconnected"));
     for (const pending of this.pending.values()) { clearTimeout(pending.timeout); pending.reject(Error("Guest fixture disconnected")); }
     this.pending.clear();
