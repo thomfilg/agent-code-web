@@ -20,6 +20,8 @@ import { createWorkerBackend } from "./worker-backends.mjs";
 import { openDatabase } from "./database.mjs";
 import { ChatOrganization } from "./chat-organization.mjs";
 import { GitHubConnection } from "./github.mjs";
+import { GitHubWorkerGateway } from "./github-worker-gateway.mjs";
+import { handleGitHubWorkerMcp } from "./github-worker-mcp.mjs";
 import { Environments, SOFTWARE_CATALOG } from "./environments.mjs";
 import { ModelCatalog } from "./models.mjs";
 import { Attachments } from "./attachments.mjs";
@@ -135,7 +137,10 @@ export async function createAgentWebServer(options = {}) {
   const models = options.models || new ModelCatalog(config, agentAccounts);
   const attachments = new Attachments(records, store);
   const commands = options.commands || new CommandCatalog(config, models);
-  const resources = new UserServices({ records, config, identity: googleAuth, store, legacy: { records, github, mcps, environments, organization }, changed: sidebarChanged });
+  const resources = new UserServices({ records, config, identity: googleAuth, store, legacy: { records, github, mcps, environments, organization }, changed: sidebarChanged,
+    githubChanged: (ownerId, id) => githubWorkers.revokeConnection(ownerId, id) });
+  const githubWorkers = new GitHubWorkerGateway({ store, servicesFor: chat => resources.forOwner(chat.ownerId), ttlMs: config.sessionCapabilityTtlMs,
+    ...(options.githubWorkerFetch ? { fetchImpl: options.githubWorkerFetch } : {}) });
   await environments.initialize();
   let manager = null;
   const browserSockets = new WebSocketServer({ noServer: true, maxPayload: 100000, perMessageDeflate: false });
@@ -170,7 +175,7 @@ export async function createAgentWebServer(options = {}) {
         if (url.pathname !== "/internal/deploy/drain") return json(response, 404, { error: "Not found" });
         const providerLogin = resources.all().some(service => service.github.pending?.size ||
           [...service.mcps.oauth.flows.values()].some(flow => flow.expiresAt > Date.now()));
-        const busy = activeMutations || browserAttachments || agentAccounts.flows.size || providerLogin || store.list().some(chat =>
+        const busy = activeMutations || githubWorkers.active || browserAttachments || agentAccounts.flows.size || providerLogin || store.list().some(chat =>
           manager?.isBusy(chat.id) || manager?.sideChats.busy(chat.id) || ["starting", "stopping", "running", "waiting"].includes(chat.status));
         if (busy) return json(response, 409, { ok: false, error: "Wait for active work and sign-in attempts to finish" });
         draining = true;
@@ -189,6 +194,8 @@ export async function createAgentWebServer(options = {}) {
         return json(response, ok ? 200 : 503, { ok });
       }
       if (await gateway.handle(request, response, url)) return;
+      if (await githubWorkers.handle(request, response, url)) return;
+      if (await handleGitHubWorkerMcp(request, response, url, { gateway: githubWorkers })) return;
       if (await resources.handleMcp(request, response, url)) return;
       if (await manager?.browsers?.handle(request, response, url)) return;
       if (await googleAuth.handle(request, response, url)) return;
@@ -770,6 +777,7 @@ export async function createAgentWebServer(options = {}) {
       gatewayOrigin,
       workerBackend,
       github,
+      githubWorkers,
       environments,
       models,
       attachments,
@@ -795,6 +803,7 @@ export async function createAgentWebServer(options = {}) {
     return stopping ||= shutdown();
   }
   async function shutdown() {
+    githubWorkers.shutdown();
     // Stop accepting connections before closing SSE. Otherwise a browser may
     // reconnect while workers shut down and keep server.close() waiting forever.
     const closed = new Promise(resolve => server.close(resolve));

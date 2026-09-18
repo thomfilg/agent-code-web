@@ -9,6 +9,7 @@ import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, in
 import { claudeFastRequest, claudeFastState, claudeFastCredential, claudeFastScope, checkClaudeFastAvailability, claudeFastUnavailable } from "../claude-fast.mjs";
 import { ClaudeTextStream } from "../claude-text-stream.mjs";
 import { SecretTextStream } from "../secret-text-stream.mjs";
+import { capabilityMcpServers } from "../worker-capabilities.mjs";
 import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR, ClaudeControlChannel, runClaudeMcpCommand } from "../claude-mcp.mjs";
 import { ClaudeSession, claudeCallResult, CLAUDE_SCHEDULE_DIAGNOSTICS } from "../claude-session.mjs";
 import { claudePluginReloadRequest, reloadClaudePlugins, CLAUDE_PLUGIN_PRIVATE_ERROR } from "../claude-plugins.mjs";
@@ -35,22 +36,22 @@ export class ClaudeAdapter {
     this.sendVersion = 0;
     this.fetchImpl = fetchImpl;
     this.now = now;
-    this.accountSecrets = new Set();
-    if (chat.agentAccountId) this.hooks = { ...hooks,
+    this.accountSecrets = new Set(executor?.capabilitySecrets || []);
+    if (chat.agentAccountId || this.accountSecrets.size) this.hooks = { ...hooks,
       ...(hooks.onEvent ? { onEvent: event => hooks.onEvent(this.redactAccount(event)) } : {}),
       ...(hooks.onLog ? { onLog: text => hooks.onLog(this.redactAccount(text)) } : {}),
-      ...(hooks.onRequest ? { onRequest: request => hooks.onRequest(this.redactAccount(request)) } : {}), accountCredentials: async options => {
+      ...(hooks.onRequest ? { onRequest: request => hooks.onRequest(this.redactAccount(request)) } : {}), ...(chat.agentAccountId ? { accountCredentials: async options => {
       const credentials = await hooks.accountCredentials(options);
       if (typeof credentials?.accessToken !== "string" || !credentials.accessToken || !credentials.accountId || !credentials.organizationId || credentials.expiresAt <= this.now()) throw Error("Reconnect this Claude account; no other credentials were used.");
       this.accountSecrets.add(credentials.accessToken);
       return credentials;
-    } };
+    } } : {}) };
   }
 
   get privateProfile() { return this.config.claude.authMode !== "host"; }
 
   redactAccount(value) {
-    if (this.nativeAuthMode !== "account") return value;
+    if (this.nativeAuthMode !== "account" && !this.accountSecrets.size) return value;
     let raw = JSON.stringify(value, (_key, item) => {
       if (typeof item !== "string") return item;
       for (const secret of [...this.accountSecrets].sort((a, b) => b.length - a.length)) item = item.replaceAll(secret, "[redacted]");
@@ -296,7 +297,7 @@ export class ClaudeAdapter {
       "--prompt-suggestions", "false",
       "--add-dir", uploads,
       ...(systemPrompt ? ["--append-system-prompt", systemPrompt] : []),
-      ...(this.executor?.mcpServers && Object.keys(this.executor.mcpServers).length ? ["--mcp-config", JSON.stringify({ mcpServers: this.executor.mcpServers })] : []),
+      ...(this.executor?.mcpServers && Object.keys(this.executor.mcpServers).length ? ["--mcp-config", JSON.stringify({ mcpServers: capabilityMcpServers(this.executor.mcpServers, this.accountSecrets, env, "claude") })] : []),
       ...(isNew ? ["--session-id", sessionId] : ["--resume", sessionId]),
       ...(launchModel ? ["--model", launchModel] : []),
       ...(effort ? ["--effort", effort] : []),
@@ -441,9 +442,9 @@ export class ClaudeAdapter {
       child.stdin.end(interactive || settingsPrompt || debugRequest ? `${JSON.stringify({ type: "user", message: { role: "user", content: input } })}\n` : input);
     }
 
-    const output = new ClaudeTextStream(delta => this.hooks.onEvent?.({ type: "assistant_delta", delta }), this.nativeAuthMode === "account" ? { secrets: this.accountSecrets } : {});
+    const output = new ClaudeTextStream(delta => this.hooks.onEvent?.({ type: "assistant_delta", delta }), this.nativeAuthMode === "account" || this.accountSecrets.size ? { secrets: this.accountSecrets } : {});
     this.activeOutput = output;
-    const errorOutput = this.nativeAuthMode === "account" ? new SecretTextStream(this.accountSecrets, { tokenPrefix: "sk-ant-" }) : null;
+    const errorOutput = this.nativeAuthMode === "account" || this.accountSecrets.size ? new SecretTextStream(this.accountSecrets, { tokenPrefix: "sk-ant-" }) : null;
     let resultMessage = null;
     let nativeFast = null;
     const notifications = new Set();
@@ -689,7 +690,7 @@ export class ClaudeAdapter {
     }
     if (!this.stopped && event.type === "background_turn") { this.hooks.onEvent?.(event); return; }
     if (this.stopped || !["assistant", "stream_event", "result"].includes(event.type)) return;
-    this.backgroundOutput ||= new ClaudeTextStream(() => {}, this.nativeAuthMode === "account" ? { secrets: this.accountSecrets } : {});
+    this.backgroundOutput ||= new ClaudeTextStream(() => {}, this.nativeAuthMode === "account" || this.accountSecrets.size ? { secrets: this.accountSecrets } : {});
     this.backgroundOutput.accept(raw);
     if (event.type === "assistant" && !event.parent_tool_use_id && event.message?.usage) this.backgroundRequest = event.message;
     if (event.type === "result") {

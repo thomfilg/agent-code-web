@@ -3,7 +3,7 @@
 import readline from "node:readline";
 const send = value => process.stdout.write(JSON.stringify(value) + "\n");
 const delta = text => send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text } } });
-let token = process.env.CLAUDE_CODE_OAUTH_TOKEN, previous = token, pending;
+let token = process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.RELAY_MCP_CAPABILITY_0, previous = token, pending;
 for await (const line of readline.createInterface({ input: process.stdin })) {
   const packet = JSON.parse(line);
   if (packet.type === "control_request") {
@@ -29,7 +29,8 @@ function emit(mode) {
     }
     return;
   }
-  const tokens = mode === "refresh" ? [previous, token] : mode === "historical" ? ["sk-ant-historical-fixture-value"] : [token];
+  const tokens = mode === "refresh" ? [previous, token] : mode === "historical" ? ["sk-ant-historical-fixture-value"] : mode === "all-capabilities"
+    ? Object.entries(process.env).filter(([key]) => /^RELAY_MCP_CAPABILITY_\d+$/.test(key)).map(([, value]) => value) : [token];
   let text = "";
   for (const value of tokens) for (let split = 1; split < value.length; split++) {
     delta(value.slice(0, split)); delta(value.slice(split) + " "); text += value + " ";
