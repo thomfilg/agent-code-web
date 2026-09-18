@@ -664,6 +664,9 @@ dialog { max-height: calc(100dvh - 28px); }
 .mcp-preset strong, .mcp-preset span { display: block; } .mcp-preset span { margin-top: 4px; font-size: 12px; }
 #mcp-catalog { margin-top: 18px; } #mcp-connection-status { margin: 12px 0; overflow-wrap: anywhere; }
 .mcp-connect-actions { display: flex; flex-wrap: wrap; gap: 8px; } .mcp-tool-list { max-height: 240px; overflow-y: auto; padding-left: 20px; }
+.mcp-connect-actions a { display: inline-flex; align-items: center; text-decoration: none; }
+#mcp-sign-in-status:not(:empty) { margin: 14px 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; overflow-wrap: anywhere; }
+#mcp-sign-in-status p { margin: 8px 0 12px; }
 .oauth-result { max-width: 600px; margin: 12vh auto; padding: 24px; } #mcp-callback-url { overflow-wrap: anywhere; }
 @media (max-width: 480px) { .mcp-presets { grid-template-columns: 1fr; } }
 #mcp-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }

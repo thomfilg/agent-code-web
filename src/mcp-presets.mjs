@@ -1,7 +1,7 @@
 // Official hosted endpoints, checked September 2026. Presets only fill the form;
 // they never silently install tools or grant an account access.
 export const MCP_PRESETS = [
-  { id: "linear", name: "Linear", description: "Issues, projects and cycles", url: "https://mcp.linear.app/mcp", authMode: "oauth", docs: "https://linear.app/docs/mcp" },
+  { id: "linear", name: "Linear", description: "Issues, projects and cycles · read-only by default", url: "https://mcp.linear.app/mcp", authMode: "oauth", oauthScopes: "read", docs: "https://linear.app/docs/mcp" },
   { id: "atlassian", name: "Atlassian", description: "Jira, Confluence and Bitbucket", url: "https://mcp.atlassian.com/v2/mcp", authMode: "oauth", docs: "https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/" },
   { id: "github", name: "GitHub", description: "Repositories, pull requests and issues · token required", url: "https://api.githubcopilot.com/mcp/", authMode: "headers", docs: "https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md" },
   { id: "sentry", name: "Sentry", description: "Errors, performance and debugging", url: "https://mcp.sentry.dev/mcp", authMode: "oauth", docs: "https://mcp.sentry.dev/" },
