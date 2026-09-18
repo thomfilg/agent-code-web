@@ -4,6 +4,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { SSH_WORKER_LAUNCHER, sshWorkerRequest } from "../../src/ssh-worker-launcher.mjs";
 import { nativeTarget } from "./ec2-native-guards.mjs";
+import { NativeAcceptanceError, nativeFailure, readRemoteNativeFailure } from "./ec2-native-worker.mjs";
 
 export const operatorEnv = () => ({ PATH: process.env.PATH, HOME: process.env.HOME, LANG: "C.UTF-8", AWS_PAGER: "", AWS_CLI_AUTO_PROMPT: "off", AWS_CONFIG_FILE: path.join(process.env.HOME, ".aws/config"), AWS_SHARED_CREDENTIALS_FILE: path.join(process.env.HOME, ".aws/credentials") });
 export const awsArgs = args => ["--profile", nativeTarget.profile, "--region", nativeTarget.region, "--no-cli-pager", ...args];
@@ -79,7 +80,11 @@ export async function openNativeTunnel(target, directory, plugin, { run = runPri
       await sleep(250);
     }
     throw Error("Native SSM tunnel startup timed out");
-  } catch (error) { await close(); throw error; }
+  } catch (error) {
+    let sessionClosed = false;
+    try { await close(); sessionClosed = true; } catch { /* Keep the primary startup failure; report cleanup separately. */ }
+    throw nativeFailure(error, "ssm-tunnel", { sessionCloseAttempted: true, sessionClosed });
+  }
 }
 
 export async function nativeProbeOverSsh({ options, directory, tunnel, request, first = false, run = runPrivate, signal }) {
@@ -94,5 +99,8 @@ export async function nativeProbeOverSsh({ options, directory, tunnel, request, 
   // Only code is in SSH argv. The access token is in the input stream, not
   // the launcher header, host environment, SSM payload, disk or command log.
   const output = await run("ssh", args, { input: header + JSON.stringify(request), timeout: request.action === "run" ? 280000 : 60000, signal });
-  try { return JSON.parse(output); } catch { throw Error("Native SSH receipt was not valid JSON; private output suppressed"); }
+  let receipt;
+  try { receipt = JSON.parse(output); } catch { throw new NativeAcceptanceError("ssh-receipt", "invalid-receipt"); }
+  readRemoteNativeFailure(receipt, request);
+  return receipt;
 }
