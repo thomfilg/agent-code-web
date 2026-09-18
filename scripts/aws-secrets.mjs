@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, writeFile, rm, lstat } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -61,9 +61,48 @@ export function assertWorkerKey(derived, pair, expectedName) {
   if (!publicKey || pair?.KeyName !== expectedName || normalize(pair.PublicKey) !== publicKey) throw new Error("Operator private key does not match the deployment's worker public key");
 }
 
+export function assertWorkerOnlyUpdate(current, next) {
+  if (!current || !next || !/^ami-[a-f0-9]{8,17}$/.test(current.AGENT_EC2_AMI_ID || "") || !/^ami-[a-f0-9]{8,17}$/.test(next.AGENT_EC2_AMI_ID || "")) throw new Error("Worker update requires an existing published environment");
+  const keys = Object.keys(current).sort();
+  if (JSON.stringify(keys) !== JSON.stringify(Object.keys(next).sort()) || keys.some(key => typeof current[key] !== "string" || typeof next[key] !== "string" || key !== "AGENT_EC2_AMI_ID" && current[key] !== next[key])) throw new Error("Worker-only update cannot change credentials, identity, access or other settings; use Doppler publication");
+}
+
+export function parsePublishedEnvironment(serialized) {
+  try {
+    if (typeof serialized !== "string" || serialized.length > 1048576) throw new Error();
+    const value = JSON.parse(serialized);
+    if (!value || Array.isArray(value) || typeof value !== "object" || Object.keys(value).length > 128 || Object.entries(value).some(([key, item]) => !/^[A-Z][A-Z0-9_]{0,127}$/.test(key) || typeof item !== "string" || item.length > 262144)) throw new Error();
+    return value;
+  } catch { throw new Error("Published AWS environment is malformed; private contents suppressed"); }
+}
+
+export async function publishWorkerOnlyUpdate(secretArn, current, next, { awsCall = aws, secretFile = withSecretFile, version = randomUUID() } = {}) {
+  if (current.ARN !== secretArn || !current.VersionStages?.includes("AWSCURRENT") || !/^[a-zA-Z0-9-]{32,64}$/.test(current.VersionId || "") || !/^[a-f0-9-]{36}$/.test(version)) throw new Error("Worker update requires the exact current secret version");
+  const previous = parsePublishedEnvironment(current.SecretString);
+  assertWorkerOnlyUpdate(previous, next);
+  if (previous.AGENT_EC2_AMI_ID === next.AGENT_EC2_AMI_ID) return { changed: false };
+  const stage = `relay-worker-${version}`;
+  try {
+    const written = await secretFile(next, filename => awsCall(["secretsmanager", "put-secret-value"], ["--secret-id", secretArn, "--client-request-token", version, "--version-stages", stage, "--secret-string", `file://${filename}`]));
+    if (written.ARN !== secretArn || written.VersionId !== version) throw new Error("Worker candidate version was not confirmed; current version was not promoted");
+    // Compare-and-swap: a concurrent credential publication must win, never be
+    // overwritten with the older credentials captured for this metadata change.
+    await awsCall(["secretsmanager", "update-secret-version-stage"], ["--secret-id", secretArn, "--version-stage", "AWSCURRENT", "--move-to-version-id", version, "--remove-from-version-id", current.VersionId]);
+    const observed = await awsCall(["secretsmanager", "get-secret-value"], ["--secret-id", secretArn, "--version-stage", "AWSCURRENT"]);
+    if (observed.ARN !== secretArn || observed.VersionId !== version) throw new Error("Worker update was superseded or not confirmed; inspect the current configuration");
+    const confirmed = parsePublishedEnvironment(observed.SecretString);
+    assertWorkerOnlyUpdate(next, confirmed);
+    if (confirmed.AGENT_EC2_AMI_ID !== next.AGENT_EC2_AMI_ID) throw new Error("Worker image update was not confirmed");
+    return { changed: true };
+  } finally {
+    // Remove only our temporary label; AWSCURRENT/AWSPREVIOUS are untouched.
+    await awsCall(["secretsmanager", "update-secret-version-stage"], ["--secret-id", secretArn, "--version-stage", stage, "--remove-from-version-id", version]).catch(() => {});
+  }
+}
+
 export async function main(args) {
   const [action, flag, value] = args;
-  if (!["initialize", "check", "publish"].includes(action)) throw new Error("Usage: aws-secrets.mjs initialize --initialize-from-dev | check | publish --worker-ami ami-ID");
+  if (!["initialize", "check", "publish", "update-worker"].includes(action)) throw new Error("Usage: aws-secrets.mjs initialize --initialize-from-dev | check | publish --worker-ami ami-ID | update-worker --worker-ami ami-ID");
   if (action === "initialize") {
     if (flag !== "--initialize-from-dev" || value) throw new Error("Explicit --initialize-from-dev is required to copy only Google/owner settings into the separate AWS config");
     const list = JSON.parse(await doppler(["configs", "--json"]));
@@ -84,7 +123,7 @@ export async function main(args) {
     console.log(JSON.stringify({ project, config, initialized: true, copied: required.slice(0, 3), generated: required.slice(3), localDevChanged: false }));
     return;
   }
-  const secrets = await values(config);
+  let secrets = action === "update-worker" ? null : await values(config);
   if (action === "check") {
     const missing = required.filter(key => !secrets[key]?.trim());
     console.log(JSON.stringify({ project, config, configured: !missing.length, missing }));
@@ -99,6 +138,11 @@ export async function main(args) {
   if (!outputs.SecretArn?.startsWith(`arn:aws:secretsmanager:${target.region}:${target.account}:secret:`)) throw new Error("Invalid deployment secret target");
   const resources = (await aws(["cloudformation", "list-stack-resources"], ["--stack-name", target.stack])).StackResourceSummaries;
   if (!resources.some(resource => resource.ResourceType === "AWS::SecretsManager::Secret" && resource.PhysicalResourceId === outputs.SecretArn)) throw new Error("Secret is not owned by the deployment stack");
+  let current;
+  if (action === "update-worker") {
+    current = await aws(["secretsmanager", "get-secret-value"], ["--secret-id", outputs.SecretArn, "--version-stage", "AWSCURRENT"]);
+    secrets = parsePublishedEnvironment(current.SecretString);
+  }
   const image = (await aws(["ec2", "describe-images"], ["--image-ids", value, "--owners", target.account])).Images?.[0];
   if (!image) throw new Error("Worker image is not owned by this account");
   const keyPath = path.join(os.homedir(), ".local/share/agent-relay-aws-mvp/worker-ed25519");
@@ -111,6 +155,11 @@ export async function main(args) {
   const pair = (await aws(["ec2", "describe-key-pairs"], ["--key-names", outputs.WorkerKeyName, "--include-public-key"])).KeyPairs?.[0];
   assertWorkerKey(derived, pair, outputs.WorkerKeyName);
   const environment = environmentFor(secrets, outputs, image, key);
+  if (action === "update-worker") {
+    const result = await publishWorkerOnlyUpdate(outputs.SecretArn, current, environment);
+    console.log(JSON.stringify({ workerUpdated: result.changed, workerImage: value, credentialsChanged: false, source: "Existing Doppler-published AWS environment", restartRequired: result.changed }));
+    return;
+  }
   await withSecretFile(environment, filename => aws(["secretsmanager", "put-secret-value"], ["--secret-id", outputs.SecretArn, "--secret-string", `file://${filename}`]));
   console.log(JSON.stringify({ published: true, source: `${project}/${config}`, publicUrl: outputs.PublicUrl, googleCallback: `${outputs.PublicUrl}/api/auth/callback/google`, credentialsPrinted: false, accountImports: false }));
 }

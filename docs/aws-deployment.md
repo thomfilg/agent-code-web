@@ -102,6 +102,23 @@ are staged only in private tmpfs files, cleaned afterward, and never printed.
 The running controller reads its one AWS secret with an instance role, not a
 Doppler service token. The cloud has no static AWS keys or profile files.
 
+To replace **only** the worker image after a new image has passed fresh-worker
+acceptance, the operator can reuse the already published AWS environment:
+
+```bash
+node scripts/aws-secrets.mjs update-worker --worker-ami ami-VERIFIED_WORKER
+```
+
+This operation does not download Doppler or refresh credentials. It verifies the
+same stack/image/key ownership, requires every existing setting and credential
+to remain byte-identical except `AGENT_EC2_AMI_ID`, and conditionally promotes a
+new secret version only if the inspected current version has not changed.
+Malformed private snapshots are never printed. If it reports a concurrent or
+unconfirmed publication, inspect the current version before retrying. Changing
+credentials, invited users or any other setting still requires normal Doppler
+publication. Redeploy the controller to apply the new image setting; an AMI's
+`available` status alone does not establish its acceptance.
+
 Register these values in the Google OAuth application's console before real
 cloud sign-in (keep localhost entries if local use is still needed):
 
