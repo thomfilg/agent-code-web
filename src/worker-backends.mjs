@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { isIP } from "node:net";
 import { spawnWorker } from "./worker-process.mjs";
+import { SSH_WORKER_LAUNCHER, sshWorkerRequest } from "./ssh-worker-launcher.mjs";
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
@@ -101,20 +102,20 @@ class Ec2Executor {
   spawn(command, args, options = {}) {
     const setupPath = options.env?.PATH?.startsWith(`${this.runtimeHome}/`) ? options.env.PATH : this.backend.config.ec2.remotePath;
     const env = { ...(options.env || {}), PATH: this.environmentPath || setupPath };
-    const assignments = Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`)).join(" ");
-    const inner = [
-      `cd ${shellQuote(options.cwd || this.workspace)} || exit 1`,
-      `touch ${shellQuote(this.heartbeat)}`,
-      `(while sleep 20; do touch ${shellQuote(this.heartbeat)}; done) &`,
-      "heartbeat_pid=$!",
-      "trap 'kill \"$heartbeat_pid\" 2>/dev/null || true' EXIT HUP INT TERM",
-      `env -i ${assignments} ${shellQuote(command)} ${args.map(shellQuote).join(" ")}`,
-    ].join("\n");
-    const remote = `exec /bin/sh -c ${shellQuote(inner)}`;
-    return spawn(this.backend.config.ec2.sshBin, [...this.backend.sshArgs(this.host, this.instance.InstanceId), remote], {
-      stdio: options.stdio || ["pipe", "pipe", "pipe"],
+    // Never put account tokens, gateway capabilities or native MCP arguments in
+    // the controller's SSH argv. The fixed launcher consumes one private frame,
+    // then hands the remaining stream to the CLI unchanged.
+    const stdio = options.stdio || ["pipe", "pipe", "pipe"];
+    if (!Array.isArray(stdio) || !["pipe", "ignore"].includes(stdio[0])) throw new Error("Remote workers require pipe or ignored stdin");
+    const remote = `exec /usr/bin/node --input-type=module -e ${shellQuote(SSH_WORKER_LAUNCHER)}`;
+    const child = spawn(this.backend.config.ec2.sshBin, [...this.backend.sshArgs(this.host, this.instance.InstanceId), remote], {
+      stdio: ["pipe", ...stdio.slice(1)],
       detached: process.platform !== "win32",
     });
+    child.stdin.on("error", () => {});
+    child.stdin.write(sshWorkerRequest({ command, args, cwd: options.cwd || this.workspace, env, heartbeat: this.heartbeat }));
+    if (stdio[0] === "ignore") child.stdin.end();
+    return child;
   }
 
   mkdir(directory) {

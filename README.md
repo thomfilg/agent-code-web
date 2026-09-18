@@ -67,6 +67,13 @@ An environment variable cannot be both usable by a process and hidden from
 that same process. For that reason this mode does **not** inject either master
 provider key into the agent. It injects only a revocable capability.
 
+This statement applies to **provider-key gateway mode**, not named native
+Codex/Claude accounts. A selected native account supplies its access token to
+that chat's CLI; refresh tokens stay encrypted on the controller. Dedicated
+EC2 workers isolate chats, but code inside the same VM can access the native
+runtime's credentials. See the [remote worker credential boundary](docs/adr/2026-09-19-remote-worker-credential-boundary.md)
+for the per-integration contract and pending AWS acceptance gates.
+
 Export the key only into the control-plane process:
 
 ```bash
