@@ -27,7 +27,7 @@ function exactRequest(request, hostname) {
   if (count(request, "host") !== 1 || request.headers.host !== hostname || count(request, "origin") > 1 ||
       typeof request.url !== "string" || !request.url.startsWith("/") || request.url.startsWith("//") || /[\\\x00-\x20\x7f]/.test(request.url)) fail();
 }
-function savedPath(path, hostname) {
+export function previewAppPath(path, hostname) {
   if (typeof path !== "string" || path.length > 4096 || !path.startsWith("/") || path.startsWith("//") || /[\\\x00-\x20\x7f]/.test(path)) fail();
   let parsed;
   try { parsed = new URL(path, `https://${hostname}`); } catch { fail(); }
@@ -90,7 +90,7 @@ export class PreviewBootstrap {
     if (this.#closed || !binding || Object.keys(binding).length !== fields.length || fields.some(field => !Object.hasOwn(binding, field))) fail();
     const saved = Object.freeze(Object.fromEntries(fields.map(field => [field, binding[field]])));
     if (!this.#current(saved)) fail();
-    const destination = savedPath(path, saved.hostname);
+    const destination = previewAppPath(path, saved.hostname);
     for (const flow of this.#flows.values()) if (flow.expiresAt <= this.#now()) this.#drop(flow);
     if (this.#flows.size >= this.#limit || [...this.#flows.values()].filter(flow => flow.binding.ownerId === saved.ownerId).length >= this.#ownerLimit) fail();
     const launch = token(), flow = { key: hash(launch).toString("hex"), binding: saved, path: destination,
