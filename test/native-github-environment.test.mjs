@@ -21,6 +21,11 @@ async function fixture(t, provider) {
   const tokens = [capability, `cap_${randomBytes(32).toString("base64url")}`, `cap_${randomBytes(32).toString("base64url")}`];
   const authenticated = new Set(); let providerRequests = 0;
   const gateway = { listRepositories: async token => { assert.ok(tokens.includes(token)); authenticated.add(token); return [{ id: 1, fullName: "fixture/repo" }]; } };
+  gateway.withRequest = async (token, callback, { signal }) => {
+    await gateway.listRepositories(token);
+    return callback({ signal, listRepositories: () => gateway.listRepositories(token),
+      withRepository: async () => { throw Error("Native configuration fixture forbids provider operations"); } });
+  };
   const server = http.createServer((req, res) => {
     if (!["/gateway/github/mcp", "/gateway/browser", "/gateway/mcp/mcp_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"].includes(req.url)) { providerRequests++; res.writeHead(404); res.end(); return; }
     req.url = "/gateway/github/mcp"; // All three local fixture tools share one no-write handler.
