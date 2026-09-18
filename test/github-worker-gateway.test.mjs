@@ -193,7 +193,9 @@ test("client disconnect cancels provider work and never persists provider error 
   const origin = await serve(t, f.gateway), grant = await f.gateway.runtime(f.chat.id, origin), cancellation = new AbortController();
   const result = fetch(origin + discovery, { headers: headers(grant.token), signal: cancellation.signal }); const rejected = assert.rejects(result);
   while (!entered) await tick(); cancellation.abort(); await rejected;
-  for (let i = 0; i < 100 && !upstreamAborted; i++) await tick();
+  // TCP close delivery needs an actual bounded timer window under parallel
+  // suites; a tight setImmediate loop can finish before the socket event.
+  for (let i = 0; i < 200 && !upstreamAborted; i++) await new Promise(resolve => setTimeout(resolve, 5));
   assert.equal(upstreamAborted, true);
 });
 
