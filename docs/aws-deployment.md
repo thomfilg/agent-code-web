@@ -1,0 +1,171 @@
+# AWS MVP operations
+
+Deployment target authorized on 2026-09-18:
+
+| Setting | Value |
+| --- | --- |
+| Operator profile | `code-web` |
+| Account / region | `456808212788` / `us-east-2` |
+| Application stack | `agent-relay-mvp` |
+| Public origin | `https://d20atclccf8cku.cloudfront.net` |
+| Deployment secrets | Doppler `code-web/stg_aws_mvp` → one AWS Secrets Manager secret |
+| Shared rollout engine | `12-apps/ci` commit `848182b33461640e9ac0feb7315f747a67877c88` |
+
+This is a private, single-AZ, single-controller MVP, not a highly available
+service. Updates have a short maintenance gap. A new VPC/NAT/private controller
+and private per-chat workers are separate from unrelated account resources.
+No domain purchase is needed. See [ADR 0002](adr/0002-aws-mvp-isolation.md) for
+costs, authority, security boundaries and limitations.
+
+## Operator setup and infrastructure
+
+Use an authenticated CLI session; never put AWS root/access credentials in an
+image, workflow secret, worker or application environment. The initially
+authorized root CLI session is bootstrap-only. Production uses instance roles;
+the opt-in CI consumer uses a repository/environment-scoped OIDC role.
+
+```bash
+aws sts get-caller-identity --profile code-web
+git clone https://github.com/12-apps/ci.git /YOUR/OPERATOR/PATH/ci-aws
+git -C /YOUR/OPERATOR/PATH/ci-aws switch --detach 848182b33461640e9ac0feb7315f747a67877c88
+export CI_AWS_ENGINE=/YOUR/OPERATOR/PATH/ci-aws/scripts/deploy/aws.mjs
+node scripts/aws-deploy.mjs plan
+node scripts/aws-deploy.mjs provision
+node scripts/aws-deploy.mjs status
+```
+
+`plan` is read-only. `provision` explicitly creates/updates billable resources;
+do not run it for an ordinary image update. It checks the account, stack owner,
+in-progress state and infrastructure template. The wrapper rejects a dirty or
+different engine revision. It creates the deployment SSH key and pins the base
+Ubuntu AMI under `~/.local/share/agent-relay-aws-mvp` (private directory); only
+the public key enters CloudFormation. Keep the private key outside Git/backups
+shared with other users. An update preserves the original pinned base AMI.
+
+Wait for `CREATE_COMPLETE` / `UPDATE_COMPLETE`. A submitted operation is not a
+successful deployment. Inspect the stack's events on failure; do not repeatedly
+submit the same operation. Deletion/teardown is not part of these commands.
+Data EBS, application secret, ECR and artifact bucket have retention policies.
+
+## Build an immutable application image
+
+Commit tested runtime changes first. No Docker daemon is needed on the operator
+machine: the scoped CodeBuild project builds the Docker image remotely.
+
+```bash
+node scripts/aws-build.mjs start
+node scripts/aws-build.mjs status 'PROJECT:BUILD_UUID'
+```
+
+Keep the returned build ID. The script uploads only an allowlisted `git archive`
+of the exact commit, excluding local credentials, untracked files and saved
+Relay data. CodeBuild uses that upload's immutable S3 version, pinned Node base
+image and pinned native CLIs. Its role can read source, push only the application
+ECR repository and write build logs; it cannot read application secrets.
+Success returns an ECR `@sha256:` digest. Never deploy `latest` or an image tag.
+An immutable existing tag may reject rebuilding the same commit; use its verified
+existing digest, or commit the intended change before another build.
+
+## Bake and accept private workers
+
+Use the six exact outputs of this stack with the
+[worker baker](../deploy/aws/README.md). The operator runs it explicitly; it
+uses one temporary SSM-only private builder and automatically terminates that
+exact builder after checking ownership. The final image has a deployment public
+SSH key, not a private key, provider token, AWS profile or SSM identity.
+
+Final workers must have **no IAM role, disabled EC2 metadata and no public IP**.
+The image availability result alone is not acceptance: a fresh instance must
+pass the fixed credential/identity audit and a stop/start persistence check.
+Only then use it for real chat admission. An image or snapshot is retained after
+the builder stops; no broad automatic resource deletion is performed.
+
+## Deployment secrets and Google callback
+
+The cloud uses separate state and encryption/session keys. It does not copy
+local chats, provider accounts or the local `code-web/dev` configuration wholesale.
+
+```bash
+# One-time, explicitly copy only Google client settings and owner email;
+# generate independent AWS encryption/session keys in the separate config.
+node scripts/aws-secrets.mjs initialize --initialize-from-dev
+node scripts/aws-secrets.mjs check
+node scripts/aws-secrets.mjs publish --worker-ami ami-VERIFIED_WORKER
+```
+
+Set additional invited users in `AGENT_ALLOWED_EMAILS` in
+`code-web/stg_aws_mvp`, then republish and deploy to apply. The owner is always
+explicit (`AGENT_OWNER_EMAIL`); the first arbitrary Google login never inherits
+the administrator's state. Publication verifies stack/image/key ownership and
+matches the private transport key to the actual deployment public key. Secrets
+are staged only in private tmpfs files, cleaned afterward, and never printed.
+The running controller reads its one AWS secret with an instance role, not a
+Doppler service token. The cloud has no static AWS keys or profile files.
+
+Register these values in the Google OAuth application's console before real
+cloud sign-in (keep localhost entries if local use is still needed):
+
+- Authorized JavaScript origin: `https://d20atclccf8cku.cloudfront.net`
+- Authorized redirect URI: `https://d20atclccf8cku.cloudfront.net/api/auth/callback/google`
+
+That console change and each user's Codex/Claude/GitHub/Linear consent are
+external acceptance gates. No controller/admin login is imported into another
+user's account. Codex/GitHub provide device URLs/codes; Claude provides its
+native authorization URL and asks for the complete returned code. Linear uses
+browser OAuth and a read-only workspace verification before claiming success.
+
+## Deploy, observe and roll back
+
+```bash
+node scripts/aws-deploy.mjs deploy --image 'ACCOUNT.dkr.ecr.us-east-2.amazonaws.com/REPOSITORY@sha256:DIGEST'
+node scripts/aws-deploy.mjs status --command-id COMMAND_UUID
+node scripts/aws-deploy.mjs rollback
+```
+
+The first command submits an SSM operation and observes it. If the local
+observation times out or disconnects, inspect the returned command ID instead
+of blindly starting another rollout. Secrets, Docker logs and environment dumps
+are deliberately absent from public command output.
+
+The shared engine verifies the exact controller and encrypted volume, a
+root-owned bootstrap marker, filesystem identity and container ownership. A
+host-wide lock and mount-overlap checks prevent concurrent controllers. It
+pulls the digest before draining. Busy chats/login attempts/browser connections
+refuse the update. New HTTP/WebSocket admission is blocked during the accepted
+drain, then the old controller is stopped before the new one starts.
+
+Readiness checks the encrypted database and required writable directories,
+not just a listening HTTP port. Failed startup attempts restore the retained
+old container and its original configuration. Explicit rollback exchanges the
+current and previous versions without deleting data. There is only one retained
+previous container; preserve its compatible encryption key and state.
+
+Public checks after a healthy command:
+
+```bash
+curl --fail https://d20atclccf8cku.cloudfront.net/readyz
+curl --silent --output /dev/null --write-out '%{http_code}\n' https://d20atclccf8cku.cloudfront.net/api/chats
+```
+
+Expected: readiness `{"ok":true}`, anonymous chats `401`. These checks do not
+establish OAuth, model turns, SSE/WebSocket or worker resume acceptance. Record
+those independently. Do not expose arbitrary worker applications under the
+controller's authenticated origin: that would let untrusted app code act as
+the Relay user. Direct remote application origins remain an explicit separate
+transport acceptance item, not something a local `.localhost` alias provides.
+
+## Durability and acceptance status
+
+The database, encrypted account records, message/attachment data and controller
+SSH trust live on the retained encrypted data volume. Workers are disposable
+and do not own the conversation database. Retention is **not** a backup:
+consistent backup/restore and failed-release rollback must each be exercised
+and documented before delivery is complete. Do not format, replace or restore
+over the live data volume to test those cases; use a separate disposable restore.
+
+Current evidence (2026-09-18): stack created, controller private SSM bootstrap
+passed (Docker, Python, separate ext4 mount and UID 1000/mode 700). Application
+build, worker bake and live rollout acceptance are in progress. The integrated
+code passed 712 backend tests plus 15 account/Google, 4 Linear and 4
+GitHub/company browser checks. Those fixture checks do not close real consent,
+deployed runtime, backup/restore or rollback gates.
