@@ -29,12 +29,12 @@ function awsFixture(change = {}) {
       "list-stack-resources": resources,
       "describe-subnets": [{ SubnetId: outputs.WorkerSubnetId, OwnerId: t.account, Tags: owned, MapPublicIpOnLaunch: false, VpcId: "vpc-fixture" }],
       "describe-security-groups": [{ GroupId: outputs.WorkerSecurityGroupId, OwnerId: t.account, Tags: owned, VpcId: "vpc-fixture", IpPermissions: [{ IpProtocol: "tcp", FromPort: 22, ToPort: 22, UserIdGroupPairs: [{ GroupId: "sg-controller" }] }] }],
-      "describe-images": [{ ImageId: imageId, OwnerId: t.account, State: "available", Architecture: "x86_64", Public: false, BlockDeviceMappings: [{ Ebs: { Encrypted: true } }], Tags: tags({ ManagedBy: "agent-relay", AgentRelayDeployment: t.deployment, AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" }) }],
+      "describe-images": [{ ImageId: imageId, OwnerId: t.account, State: "available", Architecture: "x86_64", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true } }], Tags: tags({ ManagedBy: "agent-relay", AgentRelayDeployment: t.deployment, AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" }) }],
       "describe-key-pairs": [{ KeyName: outputs.WorkerKeyName, Tags: owned, PublicKey: "ssh-ed25519 AAAAFixturePublic comment" }],
     };
     const key = operation === "describe-instances" ? (args.includes(t.controller) ? "controller" : "worker") : operation;
     rows.controller = [{ InstanceId: t.controller, State: { Name: "running" }, Tags: owned, SubnetId: "subnet-controller", SecurityGroups: [{ GroupId: "sg-controller" }], IamInstanceProfile: { Arn: `arn:aws:iam::${t.account}:instance-profile/fixture-controller` } }];
-    rows.worker = [{ InstanceId: workerId, ImageId: imageId, State: { Name: "running" }, Tags: tags({ ManagedBy: "agent-relay", AgentRelayDeployment: t.deployment, AgentRelayNativeAcceptance: id }), SubnetId: outputs.WorkerSubnetId, SecurityGroups: [{ GroupId: outputs.WorkerSecurityGroupId }], KeyName: outputs.WorkerKeyName, MetadataOptions: { HttpEndpoint: "disabled" }, PrivateIpAddress: "10.84.2.12" }];
+    rows.worker = [{ InstanceId: workerId, InstanceType: "t3.medium", ImageId: imageId, State: { Name: "running" }, Tags: tags({ ManagedBy: "agent-relay", AgentRelayDeployment: t.deployment, AgentRelayNativeAcceptance: id }), SubnetId: outputs.WorkerSubnetId, SecurityGroups: [{ GroupId: outputs.WorkerSecurityGroupId }], KeyName: outputs.WorkerKeyName, MetadataOptions: { HttpEndpoint: "disabled" }, PrivateIpAddress: "10.84.2.12" }];
     if (!Object.hasOwn(rows, key)) throw Error("Unexpected AWS operation");
     const value = structuredClone(rows[key]); change[key]?.(value); return value;
   };
@@ -72,6 +72,16 @@ test("AWS guards fail closed on owner, production tag, network, profile, image a
     { worker: x => { x[0].NetworkInterfaces = [{ Ipv6Addresses: [{ Ipv6Address: "::1" }] }]; } },
   ];
   for (const change of changes) await assert.rejects(guardNativeTarget(options, awsFixture(change).json));
+});
+
+test("real-shaped Canonical AMI accepts inert hints but requires one encrypted EBS root and t3.medium", async () => {
+  const root = { DeviceName: "/dev/sda1", Ebs: { Encrypted: true } }, hint = { DeviceName: "/dev/sdb", VirtualName: "ephemeral0" };
+  const valid = awsFixture({ "describe-images": x => { x[0].BlockDeviceMappings = [root, hint, { DeviceName: "/dev/sdc", VirtualName: "ephemeral1" }]; } });
+  assert.equal((await guardNativeTarget(options, valid.json)).workerId, workerId);
+  for (const mapping of [[hint], [root, root], [{ ...root, Ebs: { Encrypted: false } }, hint], [root, { DeviceName: "/dev/sdc" }], [root, { ...hint, NoDevice: "" }]]) {
+    await assert.rejects(guardNativeTarget(options, awsFixture({ "describe-images": x => { x[0].BlockDeviceMappings = mapping; } }).json));
+  }
+  await assert.rejects(guardNativeTarget(options, awsFixture({ worker: x => { x[0].InstanceType = "i3.large"; } }).json));
 });
 
 test("host credential reader transfers only access and detects source changes without restoring", async t => {

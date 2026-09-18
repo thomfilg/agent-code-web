@@ -23,7 +23,7 @@ modifies the user's source credential, or invokes Codex.
 - Fixed MVP target: profile `code-web`, account `456808212788`, region
   `us-east-2`, completed stack `agent-relay-mvp`, controller
   `i-08c991c22089589a5`. Ownership outputs must match the stack resource list.
-- The worker must have the selected private, encrypted, pinned deployment AMI,
+- The `t3.medium` worker must have the selected private, encrypted, pinned deployment AMI,
   exact deployment subnet/group/key, no public address, no role, disabled IMDS,
   and `AgentRelayNativeAcceptance=<acceptance UUID>`. `AgentWebChat` and image
   verification tags are rejected; this cannot select an active product chat.
@@ -90,7 +90,7 @@ taskset -c 0,1 nice -n 10 node scripts/smoke-ec2-native.mjs
 ```
 
 The supervising operator must first launch the dedicated instance using the
-accepted AMI, deployment key/private network, no role, IMDS disabled and a new
+accepted AMI, `t3.medium` type, deployment key/private network, no role, IMDS disabled and a new
 UUID. Its tags are `ManagedBy=agent-relay`,
 `AgentRelayDeployment=agent-relay-mvp`, and
 `AgentRelayNativeAcceptance=<UUID>`. Do not set product chat or image-verification
