@@ -93,10 +93,31 @@ AWS provisioning is now explicitly authorized for profile `code-web`, account
 `456808212788`, region `us-east-2`. Stack `agent-relay-mvp` reached
 `CREATE_COMPLETE`; the private controller booted with its encrypted data volume
 and CloudFront assigned `https://d20atclccf8cku.cloudfront.net`. CodeBuild built
-the pinned application image successfully. The first worker bake failed and
-terminated its own temporary builder without publishing an AMI. Bootstrap
-corrections are tested/reviewed; the second real bake is in progress. No
-application rollout or worker acceptance is claimed yet.
+the pinned application image successfully. Actual HTTPS rollout now responds
+with database-backed `/readyz` 200 and denies anonymous `/api/chats` with 401.
+Official Playwright MCP verified the Google entry screen at 1600, 390 and 320
+pixels without horizontal overflow. Google cloud consent remains pending the
+new callback registration; no production account or chat was fabricated.
+
+AWS checkpoint (2026-09-18 06:44 UTC):
+
+- Cold backup/restore passed on the actual encrypted EBS volume. Snapshot
+  `snap-08d0e108e9596b5df` is retained; a distinct restored volume matched both
+  encrypted records and zero attachments, was unmounted and removed, and the
+  original controller recovered. This small empty-account dataset is not a
+  claim of large-volume recovery testing. Run `775be65e-3184-4822-b9f1-7e919d96d076`.
+- The initial app image is running; a reviewed update through revision
+  `f0692eb` has built successfully and its rollout is in progress. Integration
+  tests passed 783/783, plus 21 isolated-native/SSH tests. A passing build is
+  not counted as a completed update/rollback gate.
+- Worker AMI `ami-0511b35c0d21d5ee0` was built and finalized, but fresh boot
+  acceptance failed an internal image-audit flag after SSH connected. Both
+  disposable verification workers were confirmed terminated. Safe boolean
+  diagnostics are now implemented; the image is **not accepted for real chats**.
+- The cloud Google callback to register is
+  `https://d20atclccf8cku.cloudfront.net/api/auth/callback/google`.
+  Fresh product consent for Codex/Claude/GitHub/Linear, worker/native acceptance,
+  deployed authenticated transports, and rollback remain explicit open gates.
 
 Parallel implementation checkpoint (2026-09-18):
 
@@ -117,8 +138,9 @@ Parallel implementation checkpoint (2026-09-18):
   authenticated reads still require user consent. Fixture reads are not that gate.
 - AWS: controller template/image/readiness/drain, private deployment-scoped
   worker baker, separate Doppler `code-web/stg_aws_mvp` secrets and immutable
-  build/deploy scripts implemented. Actual image boot, application rollout,
-  rollback/durability and deployed authentication checks remain open.
+  build/deploy scripts implemented. Actual HTTPS rollout and cold backup/restore
+  pass as recorded above; worker image acceptance, update/rollback and deployed
+  authenticated integration checks remain open.
 - Account deletion: reviewed backend/UI implementation removes a selected
   account without deleting its conversations. Integrated focused checks: 18
   deletion/API tests and 20 account/Google browser tests passed. Live activation

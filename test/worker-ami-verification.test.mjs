@@ -151,6 +151,17 @@ test("failed cleanup retains the original probe reason and never prints arbitrar
   }
 });
 
+test("image audit errors expose only fixed-name boolean checks from the controller", async () => {
+  const f = fixture({ commandFailed: true, mutateReceipt: () => ({ diagnostic: { stage: "worker-probe", category: "image-audit", exitCode: 1,
+    auditChecks: { finalized: true, ssmDisabled: false, credentialsAbsent: false, metadataReachable: false, freshIdentity: "PRIVATE SECRET", watchdogActive: 1, private: "PRIVATE SECRET", machine: "PRIVATE SECRET" } } }) });
+  await assert.rejects(verifyWorkerImage(options, { run: f.run, sleep: async () => {} }), error => {
+    assert.match(error.message, /image-audit \(exit 1\)/);
+    assert.match(error.message, /finalized=true, ssmDisabled=false, credentialsAbsent=false, metadataReachable=false/);
+    assert.doesNotMatch(error.message, /PRIVATE SECRET|freshIdentity=|watchdogActive=|machine=/);
+    return true;
+  });
+});
+
 test("receipt validation compares identity values independently of object key ordering", () => {
   const context = { verificationId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", workerId, phase: "fresh" };
   const first = receipt(context);
