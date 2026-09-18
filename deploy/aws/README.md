@@ -1,98 +1,113 @@
-# EC2 worker mode
+# Private EC2 workers
 
-This mode converts a logical chat runtime into one actual EC2 instance. The web
-control plane remains available, but an active chat starts/resumes its tagged
-instance. Five minutes after a turn completes, the instance is stopped. Its
-encrypted EBS root volume retains the workspace and CLI session; the next
-message starts it again. Deleting the chat terminates the instance and its root
-volume.
+One chat owns one VM and encrypted EBS root volume. The controller starts or
+resumes it on demand, stops it after idle, and terminates it when its runtime is
+deleted. Master provider/MCP credentials stay on the controller; the worker
+receives revocable, scoped gateway capabilities. Do not use a shared VM for
+untrusted users. Docker access is root-equivalent inside this one-chat VM.
 
-No provider key is copied to EC2. The worker gets one random chat capability and
-calls the control plane's HTTPS credential-gateway route. The gateway swaps that
-capability for `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` while forwarding only the
-model request paths.
+The controller uses its IAM role through the default AWS credential chain:
+leave `AWS_PROFILE` empty on EC2. An explicit named profile remains supported
+for operators. `AGENT_EC2_DEPLOYMENT` must match the CloudFormation stack.
+Every lookup/mutation requires matching deployment, ManagedBy and chat tags;
+the backend also verifies subnet, exact security group/key, absence of an IAM
+profile/public IP, and disabled metadata. Ambiguous/legacy instances fail closed.
+The CloudFormation controller role limits AWS actions to the deployment's
+resources. The old broad `agent-web-poc` starter IAM policy has been removed.
 
-SSH is transport only: the AMI forces commands received through the `ubuntu`
-login to execute as a dedicated, non-sudo `agent` account and disables SSH
-forwarding and TTYs. A root-owned watchdog also powers off an abandoned worker
-after roughly seven minutes without a heartbeat. The normal control-plane timer
-still issues `StopInstances` at five minutes; the watchdog covers a crashed or
-disconnected control plane.
+## Bake an image
 
-## 1. Network boundaries
-
-- Put the control plane behind TLS (ALB, Caddy, nginx, or Cloudflare Tunnel).
-- Set `AGENT_EC2_GATEWAY_ORIGIN` to that HTTPS origin.
-- Give the worker security group SSH ingress only from the control-plane
-  security group/private address. Do not open port 22 to the world.
-- Restrict worker egress to the credential gateway and explicitly required
-  package/repository destinations. The POC cannot enforce another security
-  group's egress policy for you.
-- Prefer an IAM role on the control-plane host over static AWS credentials. A
-  starter policy is in `control-plane-policy.json`; scope its RunInstances
-  resources to your AMI, subnet, security group, key, and volumes before
-  production use.
-
-## 2. Bake a credential-free worker AMI
-
-The bake script creates billable AWS resources and therefore is never run
-automatically:
+Run this **explicitly** after creating the application stack; it incurs charges
+for one temporary private builder, an AMI and its encrypted snapshot. Copy the
+six named stack outputs into the corresponding arguments. The account ID is an
+additional required safety check; a profile name alone is not sufficient.
 
 ```bash
-cd deploy/aws
-export AWS_PROFILE=qc-arm
-export AWS_REGION=us-east-1
-export SUBNET_ID=subnet-...
-export SECURITY_GROUP_ID=sg-...
-export KEY_NAME=agent-web-worker
-export SSH_PRIVATE_KEY=/absolute/path/to/id_ed25519
-export USE_PUBLIC_IP=1 # only when baking outside the VPC
-./bake-worker-ami.sh
+node deploy/aws/bake-worker-ami.mjs \
+  --profile code-web --region us-east-1 --expected-account 123456789012 \
+  --deployment YOUR_STACK \
+  --subnet-id subnet-0123456789abcdef0 \
+  --security-group-id sg-0123456789abcdef0 \
+  --key-name YOUR_STACK-worker \
+  --builder-instance-profile STACK_BUILDER_PROFILE \
+  --base-image-id ami-0123456789abcdef0 \
+  --dry-run
 ```
 
-It installs Node.js, Codex, and Claude Code, verifies their versions, stops the
-builder before snapshotting, creates the AMI, and terminates the builder. It
-never receives model credentials.
+`--dry-run` validates arguments and pinned recipe without making any AWS calls.
+Remove it to perform the bake. `bake-worker-ami.sh` is an equivalent wrapper.
+`--name`, `--instance-type` (x86_64 t3 sizes) and `--volume-gb` are optional.
+The actual run checks STS identity, completed stack outputs, deployment-owned
+network/key/profile, private subnet, controller-only SSH ingress, HTTP(S) egress,
+and a builder role limited to `AmazonSSMManagedInstanceCore` before launching.
+Base images must be official Canonical Ubuntu 24.04 amd64 images.
 
-The current image also includes Python 3/venv and Docker Engine, Compose and
-Buildx. Docker starts only when enabled by a chat's environment preflight.
-Rebuild existing AMIs to use this capability. The enable helper is limited to
-the dedicated worker; never install it on the control plane. Docker grants
-root-equivalent access within this one-chat VM, so do not attach a sensitive
-IAM role or store master secrets there. The control-plane stop timer still
-stops the complete VM, including its containers. An agent with Docker access
-can bypass the guest watchdog; it cannot bypass AWS StopInstances.
+The builder has no public IP. Installation/validation use SSM Run Command, not
+SSH, and never receive an operator private key, Doppler/provider secrets or user
+credentials. SSM needs private NAT egress (or appropriate VPC endpoints); the
+stack's builder role is temporary and never attached to final workers.
 
-## 3. Start the control plane
+The image installs Node 22, **Codex 0.154.0**, **Claude Code 2.1.222**, Chrome with
+its native sandbox, Python/venv, Docker Engine/Compose/Buildx. Docker starts only
+when selected by the chat's environment. A failed bootstrap or finalizer does
+not produce an AMI. The finalizer clears cloud-init/SSM registration and logs,
+user credential locations, machine identity and SSH host private keys, and
+performs a credential-filename scan without printing contents.
+
+Final workers use **IMDS disabled**, no IAM profile and no public IP. Therefore
+the image retains only the deployment's selected **public** SSH key; it is tied
+to `WorkerKeyName`. Rotate the private key by baking a new AMI with a new key.
+Cloud-init is disabled in the final image; generic DHCP netplan avoids copying
+the builder NIC identity. Boot generates unique SSH host keys and resets the
+heartbeat. The controller pins SSH host identity per deployment/instance ID,
+not recycled private IP, and ignores ambient SSH config/agent forwarding.
+
+The builder is terminated on success/failure after checking its exact tags and
+network/profile. A changed scope intentionally prevents automatic cleanup; the
+log identifies the builder for operator review. Created AMIs/snapshots are
+retained, including after later failures; remove obsolete ones explicitly only
+after confirming no deployment uses them. There is no automatic AWS teardown.
+
+## Controller worker settings
+
+Set via the deployment secret/rollout path, not in a committed environment file:
+
+```dotenv
+AGENT_WORKER_BACKEND=ec2
+AGENT_EC2_DEPLOYMENT=YOUR_STACK
+AGENT_EC2_GATEWAY_ORIGIN=https://YOUR_RELAY_ORIGIN
+AGENT_EC2_AMI_ID=ami-0123456789abcdef0
+AGENT_EC2_SUBNET_ID=subnet-0123456789abcdef0
+AGENT_EC2_SECURITY_GROUP_ID=sg-0123456789abcdef0
+AGENT_EC2_KEY_NAME=YOUR_STACK-worker
+AGENT_EC2_SSH_PRIVATE_KEY=/run/relay/worker-key
+AGENT_EC2_SSH_USER=ubuntu
+AWS_REGION=us-east-1
+AWS_PROFILE=
+```
+
+Only the controller stores the SSH private key. `AGENT_EC2_USE_PUBLIC_IP=1` is
+now rejected. An old AMI without deployment/key/version tags must be rebaked.
+Provider `host` authentication mode is also rejected for remote workers.
+
+## Acceptance gate (not satisfied by local fixtures)
+
+Before selecting a baked AMI for real chats, boot a fresh worker with IMDS
+disabled/no role/no public IP. From the controller verify generic DHCP and
+SSH work, `IMAGE_FINALIZED` exists, exact CLI versions, regenerated machine/host
+identity, absence of builder/user credentials, stopped SSM, heartbeat/watchdog,
+and stop/start persistence. Then exercise one authorized scoped provider turn
+and selected environment MCP read. Do not infer success from AMI availability
+or an SSM command being queued. Real OAuth consent remains per user/account.
+
+Local checks:
 
 ```bash
-export AGENT_WEB_HOST=0.0.0.0
-export AGENT_WEB_AUTH_TOKEN='a-long-random-browser-token'
-export AGENT_COOKIE_SECURE=1
-export AGENT_IDLE_TIMEOUT_MS=300000
-
-export AGENT_WORKER_BACKEND=ec2
-export AGENT_EC2_GATEWAY_ORIGIN=https://agents.example.com
-export AGENT_EC2_AMI_ID=ami-...
-export AGENT_EC2_SUBNET_ID=subnet-...
-export AGENT_EC2_SECURITY_GROUP_ID=sg-...
-export AGENT_EC2_KEY_NAME=agent-web-worker
-export AGENT_EC2_SSH_PRIVATE_KEY=/absolute/path/to/id_ed25519
-export AGENT_EC2_SSH_USER=ubuntu
-export AWS_PROFILE=qc-arm
-export AWS_REGION=us-east-1
-
-# Kept only in this process/secret manager, never copied to a worker:
-export OPENAI_API_KEY='...'
-export ANTHROPIC_API_KEY='...'
-
-npm start
+taskset -c 0,1 nice -n 10 node --test --test-concurrency=1 \
+  test/ec2-backend.test.mjs test/worker-ami-baker.test.mjs \
+  test/config-auth.test.mjs test/runtime-manager.test.mjs
 ```
 
-The default uses an EC2 private IP. Set `AGENT_EC2_USE_PUBLIC_IP=1` only when the
-control plane cannot reach the worker subnet. The selected subnet must assign a
-public IP for that mode.
-
-The first message after autosleep includes EC2 start + SSH readiness latency.
-Chat creation itself does not spend compute: an instance is allocated only when
-the first message is sent.
+Implementation references: [SSM Run Command parameters](https://docs.aws.amazon.com/cli/latest/reference/ssm/send-command.html),
+[EC2 launch options](https://docs.aws.amazon.com/cli/latest/reference/ec2/run-instances.html),
+and [AWS CLI IAM role credentials](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-role.html).

@@ -62,6 +62,12 @@ export function loadConfig(env = process.env) {
   if (workerBackend === "ec2" && !ec2GatewayOrigin.startsWith("https://") && !boolean(env, "AGENT_EC2_ALLOW_INSECURE_GATEWAY", false)) {
     throw new Error("AGENT_EC2_GATEWAY_ORIGIN must use HTTPS (or explicitly set AGENT_EC2_ALLOW_INSECURE_GATEWAY=1 for a private-network POC)");
   }
+  if (workerBackend === "ec2") {
+    const gateway = new URL(ec2GatewayOrigin);
+    if (!["https:", "http:"].includes(gateway.protocol) || gateway.username || gateway.password || gateway.search || gateway.hash || gateway.pathname !== "/") {
+      throw new Error("AGENT_EC2_GATEWAY_ORIGIN must be an HTTP(S) origin without credentials, path, query, or fragment");
+    }
+  }
   if (workerBackend === "ec2" && (codexAuthMode === "host" || claudeAuthMode === "host")) {
     throw new Error("EC2 workers require gateway auth mode; host CLI credentials must not be baked into worker images");
   }
@@ -117,8 +123,10 @@ export function loadConfig(env = process.env) {
     },
     ec2: {
       awsBin: env.AWS_BIN || "aws",
-      profile: env.AWS_PROFILE || "default",
+      // Omit --profile when unset so an EC2 controller uses its IAM role.
+      profile: env.AWS_PROFILE || "",
       region: env.AWS_REGION || "us-east-1",
+      deployment: env.AGENT_EC2_DEPLOYMENT || "",
       amiId: env.AGENT_EC2_AMI_ID || "",
       instanceType: env.AGENT_EC2_INSTANCE_TYPE || "t3.medium",
       subnetId: env.AGENT_EC2_SUBNET_ID || "",
@@ -127,6 +135,7 @@ export function loadConfig(env = process.env) {
       sshBin: env.SSH_BIN || "ssh",
       sshUser: env.AGENT_EC2_SSH_USER || "ubuntu",
       sshPrivateKey: env.AGENT_EC2_SSH_PRIVATE_KEY || "",
+      sshKnownHosts: path.resolve(APP_ROOT, env.AGENT_EC2_SSH_KNOWN_HOSTS || path.join(env.AGENT_DATA_DIR || "data", "worker-known-hosts")),
       usePublicIp: boolean(env, "AGENT_EC2_USE_PUBLIC_IP", false),
       remoteRoot: env.AGENT_EC2_REMOTE_ROOT || "/opt/agent-web",
       remotePath: env.AGENT_EC2_REMOTE_PATH || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
