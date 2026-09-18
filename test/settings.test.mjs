@@ -50,7 +50,7 @@ test("protected variables never enter worker env; public values and toggles do; 
 });
 test("GitHub validates access, redacts credentials, preserves primary order and detects revocation", async () => {
   const records = new MemoryRecords(); let revoked = false;
-  const gh = new GitHubConnection({ records, config: { localConnection: true, apiBase: "https://api.github.com" }, localToken: async () => "fixture-github-token",
+  const gh = new GitHubConnection({ records, config: { apiBase: "https://api.github.com" },
     fetchImpl: async (url, options) => {
       assert.equal(options.headers.authorization, "Bearer fixture-github-token");
       if (revoked) return Response.json({}, { status: 401 });
@@ -62,7 +62,7 @@ test("GitHub validates access, redacts credentials, preserves primary order and 
     },
   });
   assert.equal((await gh.status()).connected, false);
-  const status = await gh.connect({ method: "local", companies: ["first", "second"] }); assert.equal(status.token, undefined);
+  const status = await gh.connect({ token: "fixture-github-token", companies: ["first", "second"] }); assert.equal(status.token, undefined);
   const repos = await gh.resolveSelections([{ fullName: "Second/web", branch: "develop" }, { fullName: "First/api" }]);
   assert.equal(repos[0].fullName, "Second/web"); assert.equal(repos[0].branch, "develop");
   assert.equal(repos[0].cloneUrl.includes("fixture-github-token"), false);

@@ -308,22 +308,18 @@
     <dialog id="github-dialog" aria-labelledby="github-dialog-title">
       <div class="dialog-card">
         <div class="dialog-heading"><h2 id="github-dialog-title">GitHub connections</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close GitHub dialog">×</button></div>
-        <label><span>Saved GitHub connections</span><select id="github-connections"></select></label>
+        <p class="muted">Connect your own GitHub account. Then choose which companies can use it.</p>
+        <div id="github-account-list" class="agent-account-list" aria-live="polite"></div>
         <button type="button" class="secondary-button" id="github-new">＋ Add GitHub connection</button>
-        <label><span>Connection name</span><input id="github-connection-name" maxlength="80" placeholder="e.g. 12-apps GitHub"></label>
-        <p class="muted" id="github-status"></p>
-        <div id="github-companies"></div>
-        <button type="button" class="primary-button" id="github-save-scope" hidden>Save company access</button>
-        <button type="button" class="primary-button" id="github-local">Use this server’s gh login</button>
-        <button type="button" class="secondary-button" id="github-oauth">Sign in on GitHub</button>
-        <div class="device-code" id="github-device-code"></div>
-        <form id="github-token-form" class="token-form">
-          <label><span>Or use a GitHub access token</span><input type="password" id="github-token" autocomplete="off" required placeholder="Repository read access required"></label>
-          <label><span>Expires at <small>optional, if GitHub does not report it</small></span><input type="datetime-local" id="github-expiry"></label>
-          <button class="secondary-button">Connect with token</button>
+        <form id="github-access-form" hidden>
+          <h3 id="github-access-title">Company access</h3>
+          <label><span>Connection name</span><input id="github-connection-name" maxlength="80" required placeholder="e.g. Personal GitHub"></label>
+          <div id="github-companies"></div>
+          <p class="muted">Only checked companies can use this account. You choose repositories when creating a conversation.</p>
+          <div class="dialog-actions"><button type="button" class="secondary-button" id="github-access-cancel">Cancel</button><button type="submit" class="primary-button" id="github-save-scope">Save company access</button></div>
         </form>
         <p class="form-error" id="github-error" role="alert"></p>
-        <button type="button" class="secondary-button" id="github-disconnect" hidden>Disconnect GitHub</button>
+        <details><summary>About GitHub access</summary><p class="muted">Sign-in uses a private GitHub CLI profile. Server logins are never imported. Credentials are encrypted on the controller; local workers share its host filesystem. Use isolated cloud workers for a stronger boundary. Disconnect removes the saved credential from Relay, not GitHub’s own authorization.</p></details>
       </div>
     </dialog>
     <dialog id="environments-dialog" aria-labelledby="environments-dialog-title">

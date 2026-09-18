@@ -366,13 +366,14 @@ export async function createAgentWebServer(options = {}) {
         if (googleAuth.enabled && agent !== "mock" && agent !== "codex") return json(response, 403, { error: "No agent account is connected for this user" });
         return json(response, 200, await models.list(agent, { ownerId: user?.id, agentAccountId }));
       }
-      if (url.pathname === "/api/github" && request.method === "POST") return json(response, 200, await github.connect(await bodyJson(request, config.maxBodyBytes)));
+      if (url.pathname === "/api/github" && request.method === "POST") return json(response, 200, await github.update(await bodyJson(request, config.maxBodyBytes)));
       if (url.pathname === "/api/github" && request.method === "DELETE") return json(response, 200, await github.disconnect());
       const githubRoute = /^\/api\/github\/connections\/(github(?:_[a-f0-9-]{36})?)$/.exec(url.pathname);
-      if (githubRoute && request.method === "PATCH") return json(response, 200, await github.connect({ ...await bodyJson(request, config.maxBodyBytes), id: githubRoute[1] }));
+      if (githubRoute && request.method === "PATCH") return json(response, 200, await github.update({ ...await bodyJson(request, config.maxBodyBytes), id: githubRoute[1] }));
       if (githubRoute && request.method === "DELETE") return json(response, 200, await github.disconnect(githubRoute[1]));
       if (url.pathname === "/api/github/device" && request.method === "POST") return json(response, 200, await github.beginDevice(await bodyJson(request, config.maxBodyBytes)));
       if (url.pathname === "/api/github/device/poll" && request.method === "POST") return json(response, 200, await github.pollDevice((await bodyJson(request, config.maxBodyBytes)).id));
+      if (url.pathname === "/api/github/device/cancel" && request.method === "POST") return json(response, 200, await github.cancelDevice((await bodyJson(request, config.maxBodyBytes)).id));
       if (url.pathname === "/api/github/repositories" && request.method === "GET") return json(response, 200, { repositories: await github.repositories(url.searchParams.get("q") || "", url.searchParams.get("refresh") === "1") });
       if (url.pathname === "/api/github/branches" && request.method === "GET") return json(response, 200, { branches: await github.branches(url.searchParams.get("repository"), url.searchParams.get("connection") || undefined) });
       if (url.pathname === "/api/environments" && request.method === "GET") return json(response, 200, { environments: await environments.list(), software: SOFTWARE_CATALOG });
@@ -784,6 +785,7 @@ export async function createAgentWebServer(options = {}) {
     const closed = new Promise(resolve => server.close(resolve));
     if (manager) await manager.shutdown();
     await agentAccounts.close();
+    await Promise.all(resources.all().map(entry => entry.github.close?.()));
     for (const client of sseClients) client.close();
     sseClients.clear();
     for (const response of sidebarClients) response.end();

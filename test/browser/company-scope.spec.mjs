@@ -10,8 +10,10 @@ test("GitHub, environments and MCPs persist multi-company availability and exclu
     await page.goto("/");
     for (const [name, companies] of [["Future GitHub", "12-apps, thomfilg"], ["G2i GitHub", "g2i"]]) {
       await page.locator("#github-button").click(); await page.locator("#github-new").click();
+      await expect(page.locator("#github-access-form")).toBeVisible();
+      await page.locator("#github-companies summary").click();
       await page.locator("#github-connection-name").fill(name); await addCompanies("#github-companies", companies);
-      await page.getByRole("button", { name: "Use this server’s gh login", exact: true }).click();
+      await page.getByRole("button", { name: "Save company access", exact: true }).click();
       await expect(page.locator("#github-dialog")).not.toBeVisible();
       const { connections } = await (await request.get("/api/github")).json(); githubIds.push(connections.find(connection => connection.name === name).id);
     }

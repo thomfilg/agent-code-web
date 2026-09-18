@@ -46,8 +46,8 @@ npm ci
 AGENT_ENABLE_MOCK=1 npm start
 ```
 
-Open <http://127.0.0.1:8787>, connect GitHub (the local `gh auth login`, an
-access token, or a configured OAuth device flow), and select repositories.
+Open <http://127.0.0.1:8787>, connect your GitHub account through the native
+browser code/link, choose its allowed companies, and select repositories.
 Choose Mock for a zero-provider-cost UI test. An initial prompt is optional;
 Codex/Claude name the chat when they receive its first prompt. The model/effort
 controls in the composer apply to the next message and persist per chat.
@@ -381,11 +381,14 @@ Embedded PostgreSQL requires a non-root user. `AGENT_DATABASE_MODE=memory` is
 for tests only and deliberately does not persist anything.
 
 Additional settings: `AGENT_CONTROL_DIR`, `AGENT_DATABASE_PORT`,
-`AGENT_DATABASE_TLS` (may be disabled for localhost only),
-`AGENT_GITHUB_LOCAL_CONNECT` (defaults on for loopback), and
-`GITHUB_OAUTH_CLIENT_ID` (a GitHub OAuth app with device flow enabled).
-GitHub expiry is saved when reported or supplied; unknown expiry is displayed
-as such. A revoked token is invalidated on the next GitHub API request.
+`AGENT_DATABASE_TLS` (may be disabled for localhost only), and
+`AGENT_GITHUB_CLI` (defaults to `gh`). GitHub onboarding runs native
+`gh auth login` in a new private profile, displays its code/link, then asks for
+the connection name and allowed companies. There is no token-entry or
+host-login import path. A GitHub OAuth client configuration is not required.
+See [GitHub accounts](docs/github-accounts.md) for the credential boundary,
+restart/reconnect behavior and real acceptance evidence. A revoked token is
+invalidated on the next GitHub API request.
 
 ### Company availability and credential separation
 
