@@ -47,6 +47,28 @@ function observer(t, options = {}) {
   t.after(() => agents.close()); return { rpc, agents, snapshots };
 }
 
+test("named-account child previews redact split tokens before snapshot, cache, replay and close", async t => {
+  const token = "private-child-account-token", rotated = "renewed-child-account-token", secrets = new Set([token]);
+  const { rpc, agents, snapshots } = observer(t, { secrets }); await agents.refresh();
+  const wait = () => waitFor(() => agents.queues.size === 0);
+  for (let split = 1; split < token.length; split++) {
+    const itemId = `split-${split}`;
+    rpc.notify("item/agentMessage/delta", { threadId: "child", itemId, turnId: "turn", delta: token.slice(0, split) }); await wait();
+    assert.equal(agents.snapshot().threads.find(thread => thread.id === "child").messages.at(-1).text, "");
+    rpc.notify("item/agentMessage/delta", { threadId: "child", itemId, turnId: "turn", delta: token.slice(split) }); await wait();
+    assert.equal(agents.snapshot().threads.find(thread => thread.id === "child").messages.at(-1).text, "[redacted]");
+  }
+  secrets.add(rotated);
+  for (const delta of rotated) rpc.notify("item/agentMessage/delta", { threadId: "child", itemId: "rotated", turnId: "turn", delta }); await wait();
+  rpc.notify("item/completed", { threadId: "child", turnId: "turn", item: { type: "agentMessage", id: "complete", text: `${token} ${rotated}` } });
+  rpc.notify("item/agentMessage/delta", { threadId: "nested", itemId: "partial", turnId: "other", delta: token.slice(0, 12) }); await wait();
+  await agents.close();
+  assert.equal(agents.snapshot().threads.find(thread => thread.id === "nested").messages.at(-1).text, "[redacted]");
+  assert.doesNotMatch(JSON.stringify([snapshots, agents.snapshot()]), /private-child-account-token|renewed-child-account-token/);
+  const restarted = observer(t, { secrets, saved: agents.snapshot() }).agents; await restarted.refresh();
+  assert.doesNotMatch(JSON.stringify(restarted.snapshot()), /private-child-account-token|renewed-child-account-token/);
+});
+
 test("native agent membership follows parent chains, not fork/session/company aliases", async t => {
   const { rpc, agents } = observer(t);
   const snapshot = await agents.refresh();

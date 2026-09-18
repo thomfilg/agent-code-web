@@ -1,3 +1,5 @@
+import { SecretTextStream } from "./secret-text-stream.mjs";
+
 // Claude may produce several main-agent messages in one print invocation
 // (tool steps and native goal continuations). Keep their boundaries without
 // copying subagent text, thinking blocks or duplicate complete-message events.
@@ -5,12 +7,16 @@ export class ClaudeTextStream {
   #current = null;
   #completed = new Set();
   #finalEvents = new Set();
+  #redactor;
+  #seenText = false;
+  #finished = false;
   text = "";
 
-  constructor(onDelta) { this.onDelta = onDelta; }
+  constructor(onDelta, { secrets } = {}) { this.onDelta = onDelta; this.#redactor = secrets ? new SecretTextStream(secrets, { tokenPrefix: "sk-ant-" }) : null; }
 
   #start(id = null) {
-    this.#current = { id, text: "", blockText: "", streaming: false, complete: false, boundary: Boolean(this.text) };
+    this.#publish(this.#redactor?.boundary() || "");
+    this.#current = { id, text: "", blockText: "", streaming: false, complete: false, boundary: this.#seenText };
   }
 
   #append(text) {
@@ -20,12 +26,26 @@ export class ClaudeTextStream {
     this.#current.boundary = false;
     this.#current.text += text;
     this.#current.blockText += text;
-    this.text += delta;
-    this.onDelta?.(delta);
+    this.#seenText = true;
+    this.#publish(this.#redactor ? this.#redactor.push(delta) : delta);
+  }
+
+  #publish(delta) {
+    if (!delta) return;
+    this.text += delta; this.onDelta?.(delta);
+  }
+
+  finish() {
+    if (this.#finished) return;
+    this.#finished = true;
+    this.#publish(this.#redactor?.finish() || "");
+    // Native deduplication needs raw prefixes while a turn is in flight. They
+    // are never the public cache and are discarded once that turn finishes.
+    this.#current = null; this.#completed.clear(); this.#finalEvents.clear();
   }
 
   accept(event) {
-    if (event.parent_tool_use_id) return;
+    if (this.#finished || event.parent_tool_use_id) return;
     if (event.type === "stream_event") {
       if (event.event?.type === "message_start") {
         const id = event.event.message?.id || null;
@@ -37,6 +57,7 @@ export class ClaudeTextStream {
         this.#current.streaming = true;
         this.#append(event.event.delta.text);
       } else if (event.event?.type === "message_stop" && this.#current) {
+        this.#publish(this.#redactor?.boundary() || "");
         this.#current.complete = true;
         if (this.#current.id) this.#completed.add(this.#current.id);
       }
@@ -57,6 +78,11 @@ export class ClaudeTextStream {
       if (!this.#current.streaming) this.#append(text);
       else if (text.startsWith(this.#current.text)) this.#append(text.slice(this.#current.text.length));
       else if (text.startsWith(this.#current.blockText)) this.#append(text.slice(this.#current.blockText.length));
-    } else if (event.type === "result" && !event.is_error && (!event.subtype || event.subtype === "success") && !this.text && typeof event.result === "string") this.#append(event.result);
+    } else if (event.type === "result") {
+      if (!event.is_error && (!event.subtype || event.subtype === "success") && !this.#seenText && typeof event.result === "string") this.#append(event.result);
+      // Empty local results may precede a resumed native turn. Preserve that
+      // existing behavior until it produces text or the process closes.
+      if (this.#seenText) this.finish();
+    }
   }
 }

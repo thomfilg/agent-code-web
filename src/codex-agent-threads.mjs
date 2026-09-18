@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { publicRequest, responseFor } from "./agent-requests.mjs";
 import { clampText, errorMessage, redact } from "./utils.mjs";
 import { extractResponse } from "./response-protocol.mjs";
+import { SecretTextStream } from "./secret-text-stream.mjs";
 
 const conflict = message => Object.assign(new Error(message), { statusCode: 409 });
 const denied = () => Object.assign(new Error("Agent thread not found in this chat"), { statusCode: 404 });
@@ -27,8 +28,8 @@ function visibleItem(item, turnId) {
 // IDs, never a shared CODEX_HOME, cwd, sessionId or forkedFromId. Side forks and
 // other Relay chats therefore cannot enter this picker or receive its input.
 export class CodexAgentThreads {
-  constructor({ rpc, root, workspace, model, publish, saved = null, log = () => {} }) {
-    Object.assign(this, { rpc, root, workspace, model, publish, saved, log });
+  constructor({ rpc, root, workspace, model, publish, saved = null, log = () => {}, secrets = null }) {
+    Object.assign(this, { rpc, root, workspace, model, publish, saved, log, secrets });
     this.entries = new Map(); this.revision = 0; this.epoch = randomUUID(); this.closed = false; this.pending = new Set(); this.queues = new Map();
     this.listeners = {
       notification: message => this.#enqueue(message, false),
@@ -55,13 +56,29 @@ export class CodexAgentThreads {
     let remaining = 1_000_000;
     // Recently viewed threads keep their bounded transcript first.
     const ordered = [...this.entries.values()].sort((a, b) => (b.viewedAt || 0) - (a.viewedAt || 0));
-    return { rootThreadId: this.root(), epoch: this.epoch, revision: this.revision, awake: !this.closed, truncated: Boolean(this.truncated), threads: ordered.map(entry => {
+    return this.#safe({ rootThreadId: this.root(), epoch: this.epoch, revision: this.revision, awake: !this.closed, truncated: Boolean(this.truncated), threads: ordered.map(entry => {
       const messages = entry.messages || [], size = messages.reduce((n, item) => n + item.text.length, 0);
       const include = size <= remaining; if (include) remaining -= size;
       return { id: entry.id, parentThreadId: entry.parentThreadId, name: entry.name, role: entry.role, status: this.closed ? "stopped" : entry.status,
         canAcceptDirectInput: entry.canAcceptDirectInput, messages: include ? messages : [], historyLoaded: include && Boolean(entry.historyLoaded),
         nextCursor: entry.nextCursor || null, pendingRequest: this.closed ? null : [...entry.requests.values()][0]?.public || null, error: entry.error || null };
-    }) };
+    }) });
+  }
+  #safe(value) {
+    if (!this.secrets) return value;
+    return JSON.parse(JSON.stringify(value, (_key, item) => {
+      if (typeof item !== "string") return item;
+      for (const secret of [...this.secrets].sort((a, b) => b.length - a.length)) item = item.replaceAll(secret, "[redacted]");
+      return item;
+    }));
+  }
+  #finishText(entry, itemId = null) {
+    for (const [id, stream] of entry.textRedactors) {
+      if (itemId && itemId !== id) continue;
+      const item = entry.messages.find(item => item.id === id), tail = stream.finish();
+      if (item && tail) item.text = (item.text + tail).slice(0, 16000);
+      entry.textRedactors.delete(id);
+    }
   }
   busy() { return !this.closed && [...this.entries.values()].some(entry => entry.status === "active" || entry.requests.size || entry.sending); }
   #remember(thread) {
@@ -72,7 +89,7 @@ export class CodexAgentThreads {
       // native ancestry check has reached this chat's root.
       const previous = this.saved?.rootThreadId === this.root() ? this.saved.threads.find(item => item.id === thread.id) : null;
       entry = { id: thread.id, messages: structuredClone(previous?.messages || []), historyLoaded: Boolean(previous?.historyLoaded), nextCursor: previous?.nextCursor || null,
-        messageVersions: new Map(), requests: new Map(), accepted: new Map() };
+        messageVersions: new Map(), requests: new Map(), accepted: new Map(), textRedactors: new Map() };
       this.entries.set(thread.id, entry);
     }
     Object.assign(entry, { parentThreadId: parentId(thread), name: String(thread.agentNickname || thread.name || thread.preview || "Agent").slice(0, 160), role: String(thread.agentRole || "agent").slice(0, 80),
@@ -124,7 +141,7 @@ export class CodexAgentThreads {
     await this.#subscribe(entry);
     const page = await this.#history(entry, cursor);
     entry.viewedAt = Date.now(); this.#emit();
-    return { ...this.snapshot(), page };
+    return { ...this.snapshot(), page: this.#safe(page) };
   }
   async #subscribe(entry) {
     if (entry.subscribed) return;
@@ -150,7 +167,7 @@ export class CodexAgentThreads {
   }
   #bound(entry) {
     let size = entry.messages.reduce((n, message) => n + message.text.length, 0);
-    while (entry.messages.length > 60 || size > 500000) { const removed = entry.messages.shift(); size -= removed.text.length; entry.messageVersions.delete(removed.id); }
+    while (entry.messages.length > 60 || size > 500000) { const removed = entry.messages.shift(); size -= removed.text.length; entry.messageVersions.delete(removed.id); entry.textRedactors.delete(removed.id); }
   }
   async send(id, input, mode) {
     const entry = await this.#authorize(id), text = clampText(input.text, 100000, "agent message"), requestId = input.requestId;
@@ -235,6 +252,7 @@ export class CodexAgentThreads {
     if (method === "thread/started") { this.#remember(params.thread); if (["active", "idle"].includes(entry.status)) await this.#subscribe(entry); }
     if (method === "thread/status/changed") entry.status = params.status?.type || entry.status;
     if (method === "thread/name/updated") entry.name = String(params.threadName || params.name || entry.name).slice(0, 160);
+    if (["turn/started", "turn/completed", "thread/closed", "thread/archived", "thread/deleted"].includes(method)) this.#finishText(entry);
     if (method === "turn/started") { entry.status = "active"; entry.turnId = params.turn?.id; }
     if (method === "turn/completed") { entry.status = "idle"; entry.turnId = null; entry.requests.clear(); entry.error = params.turn?.error?.message || null; }
     if (method === "thread/closed" || method === "thread/archived" || method === "thread/deleted") { entry.status = "notLoaded"; entry.requests.clear(); entry.subscribed = false; }
@@ -242,10 +260,13 @@ export class CodexAgentThreads {
     if (method === "item/agentMessage/delta") {
       let item = entry.messages.find(item => item.id === params.itemId);
       if (!item) { item = { id: params.itemId, turnId: params.turnId, role: "assistant", text: "" }; entry.messages.push(item); }
-      item.text = (item.text + (params.delta || "")).slice(0, 16000); this.#bound(entry);
+      if (this.secrets && !entry.textRedactors.has(item.id)) entry.textRedactors.set(item.id, new SecretTextStream(this.secrets));
+      const stream = entry.textRedactors.get(item.id);
+      item.text = (item.text + (stream ? stream.push(params.delta || "") : params.delta || "")).slice(0, 16000); this.#bound(entry);
       entry.messageVersions.set(item.id, entry.version);
     }
     if (method === "item/started" || method === "item/completed") {
+      if (method === "item/completed") this.#finishText(entry, params.item?.id);
       const item = visibleItem(params.item, params.turnId);
       if (item) { const index = entry.messages.findIndex(row => row.id === item.id); if (index < 0) entry.messages.push(item); else entry.messages[index] = item; entry.messageVersions.set(item.id, entry.version); this.#bound(entry); }
       await this.#discover(params.item);
@@ -266,6 +287,7 @@ export class CodexAgentThreads {
     // The owning adapter stops the shared process. Hiding a panel never closes
     // native child agents or changes their parent/goal/queue.
     await Promise.allSettled([...this.pending]);
+    for (const entry of this.entries.values()) this.#finishText(entry);
     this.revision++; this.publish(this.snapshot());
   }
 }
