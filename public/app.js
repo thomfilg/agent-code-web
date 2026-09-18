@@ -3,7 +3,7 @@ import { GoogleLogin } from "./google-login.js";
 import { AgentAccountSettings } from "./agent-accounts.js";
 import { closeSidePanel } from "./side-panels.js";
 import { WorkspaceSettings } from "./workspace-settings.js";
-import { ModelPicker } from "./model-picker.js";
+import { ModelPicker, claudeCatalogMatchesChat } from "./model-picker.js";
 import { ChatControls } from "./chat-controls.js";
 import { renderContent } from "./message-content.js";
 import { ToolActivity, groupTools } from "./tool-activity.js";
@@ -918,7 +918,9 @@ elements.messages.addEventListener("scroll", () => {
   if (elements.messages.scrollTop < 80 && messageWindow.start > 0) { messageWindow.move(-1); renderMessages(); }
   else if (nearBottom && messageWindow.end < messageWindow.rows.length) { messageWindow.move(1); renderMessages(); }
 }, { passive: true });
-const activeModelPicker = new ModelPicker({ root: $("#composer-model-controls"), api, onChange: async settings => {
+const activeModelPicker = new ModelPicker({ root: $("#composer-model-controls"), api,
+  onCatalogReady: context => { if (claudeCatalogMatchesChat(context, state.active)) slashComposer.refresh(context.chatId); },
+  onChange: async settings => {
   if (!state.active) return;
   const id = state.active.id;
   const { chat } = await api(`/api/chats/${id}/model`, { method: "PATCH", body: JSON.stringify(settings) });

@@ -1,9 +1,16 @@
 const catalogs = new Map();
 const option = (value, text) => { const el = document.createElement("option"); el.value = value; el.textContent = text; return el; };
+const selectionKey = (agent, selected, useDefaults) => JSON.stringify([selected.id || null, selected.ownerId || null, agent, selected.agentAccountId || null, selected.model || null, selected.effort || null, useDefaults]);
+export function claudeCatalogMatchesChat(context, chat) {
+  // Only named Claude discovery fills the metadata-only command fallback.
+  // Do not trigger Codex model probes or shared-host CLI command discovery.
+  return Boolean(context.agent === "claude" && context.agentAccountId && chat?.id && context.chatId === chat.id && context.ownerId === (chat.ownerId || null)
+    && context.agent === chat.agent && context.agentAccountId === (chat.agentAccountId || null) && context.model === (chat.model || null));
+}
 export class ModelPicker {
   static clearCatalogs() { catalogs.clear(); }
-  constructor({ root, api, onChange }) {
-    Object.assign(this, { root, api, onChange }); this.version = 0;
+  constructor({ root, api, onChange, onCatalogReady = () => {} }) {
+    Object.assign(this, { root, api, onChange, onCatalogReady }); this.version = 0;
     this.model = root.querySelector(".model-select"); this.effort = root.querySelector(".effort-select"); this.note = root.querySelector(".model-note");
     this.slider = root.querySelector(".effort-slider"); this.effortLabel = root.querySelector(".effort-label");
     this.model.addEventListener("change", () => { this.renderEfforts(); this.changed(); });
@@ -13,9 +20,10 @@ export class ModelPicker {
   }
   value() { return { model: this.model.value || null, effort: this.effort.value || null }; }
   async setAgent(agent, selected = {}, { useDefaults = false } = {}) {
-    const key = JSON.stringify([agent, selected.agentAccountId || null, selected.model || null, selected.effort || null, useDefaults]);
+    const key = selectionKey(agent, selected, useDefaults);
     if (this.key === key || this.busy) return;
-    this.key = key; this.agent = agent; this.agentAccountId = selected.agentAccountId || null; this.useDefaults = useDefaults; const version = ++this.version;
+    this.key = key; this.agent = agent; this.agentAccountId = selected.agentAccountId || null; this.chatId = selected.id || null; this.ownerId = selected.ownerId || null; this.useDefaults = useDefaults; const version = ++this.version;
+    const context = { chatId: this.chatId, ownerId: this.ownerId, agent, agentAccountId: this.agentAccountId, model: selected.model || null };
     this.root.dataset.status = "loading";
     this.root.hidden = !agent || agent === "mock";
     this.model.replaceChildren(option("", "Loading models…")); this.model.disabled = true; this.effort.disabled = true;
@@ -45,6 +53,9 @@ export class ModelPicker {
       this.model.disabled = this.noEnabledModels; this.root.dataset.status = "ready";
       this.model.title = `Model · ${selected.model || defaultModel || "Account default"}`;
       this.effort.title = `Effort · ${this.effort.value || catalog.configuredDefaultEffort || "Default"}`;
+      // Selected-account model discovery also supplies native command metadata.
+      // Notify only after this exact selection's result has been accepted.
+      this.onCatalogReady(context);
     } catch (error) { if (version === this.version) { this.model.replaceChildren(option("", "Default model")); this.note.textContent = error.message; this.root.dataset.status = "error"; this.key = null; } }
   }
   renderEfforts(selected = this.effort.value) {
@@ -73,7 +84,7 @@ export class ModelPicker {
     if (autoNote) autoNote.hidden = value !== "auto";
   }
   changed() {
-    const value = this.value(); this.key = JSON.stringify([this.agent, this.agentAccountId, value.model, value.effort, this.useDefaults]);
+    const value = this.value(); this.key = selectionKey(this.agent, { ...value, id: this.chatId, ownerId: this.ownerId, agentAccountId: this.agentAccountId }, this.useDefaults);
     this.busy = true; this.model.disabled = true; this.effort.disabled = true;
     this.syncEffort();
     this.saving = Promise.resolve(this.onChange(value)).then(() => { this.root.dataset.status = "ready"; this.model.title = `Model · ${value.model || "Default"}`; this.effort.title = `Effort · ${value.effort || "Default"}`; }).catch(error => { this.note.textContent = `Not saved: ${error.message}`; this.root.dataset.status = "error"; this.key = null; throw error; }).finally(() => { this.busy = false; this.model.disabled = false; this.effort.disabled = this.effort.options.length <= 1; this.syncEffort(); });
