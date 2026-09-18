@@ -85,7 +85,38 @@ is the current prerequisite; item 20's unfinished doctor work stays paused.
 
 ## MVP release gate — 2026-09-17
 
-Verification checkpoint (2026-09-18 12:40 UTC): the full integrated suite on
+Current checkpoint (2026-09-18 13:06 UTC): AWS serves immutable revision
+`6bf9524` / digest `b8b04eccd0a1a5841656868871e7666e553ebef12b760caef8aa74175d261d78`.
+The rollout and a second same-digest compatible rollback baseline completed
+healthy, both independently Success / exit 0. The final exact host audit
+confirmed current/previous image/configuration, zero container restarts and no
+remaining acceptance container/session/command; public readiness stayed healthy
+across observations almost six minutes apart. Local runtime `f0e57ca` uses the same application sources, with 12
+readable encrypted records and a byte-identical credential file after cold
+checkpoint `checkpoint-eDMBUp`. No user account was authorized or chat created
+in either live deployment for these checks.
+
+Final integrated regression: **1122/1122**, zero failures/cancellations/skips,
+with both native-GitHub and official-MCP guest-UI opt-ins, two-CPU sequential
+execution. The separate seven-file Python infrastructure-operator regression
+passed 52/52 with mocked AWS/Docker boundaries. Cold preview opening now returns
+bounded 202 progress, waits for the
+worker before bootstrap, and cannot auto-restart via stale polling after Stop.
+The full official-MCP UI/API/bootstrap/HTTP/WS/SSE/revocation fixture passed
+with deliberately blocked acquisition, plus the independent review and 10 UI
+browser checks. The real isolated CloudFront lifecycle and exact cleanup also
+passed; none of those fixtures establish authenticated deployed app traffic.
+
+The published Google entry/anonymous denials and real WSS transport checks
+passed again. Actual Google initiation at 13:04 UTC still returned
+`redirect_uri_mismatch`: the cloud callback and real provider consents remain
+open, followed by selected-account execution/resume and authenticated deployed
+transport/app acceptance. The MVP is **not complete**. Test totals do not close
+the historical priority re-audits or change the number of recorded requests.
+See [current deployment receipts](aws-deployment.md) and
+[preview operation limits](app-preview-operations.md).
+
+Earlier verification checkpoint (2026-09-18 12:40 UTC): the full integrated suite on
 `62bd880` passed **1097/1097**, with zero failures, cancellations or skips in
 255.4 seconds. Native GitHub and official-MCP guest UI were enabled; execution
 was sequential on CPUs 0–1 at nice 10. The subsequent bootstrap-cleanup and

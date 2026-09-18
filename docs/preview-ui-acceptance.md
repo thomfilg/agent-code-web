@@ -23,3 +23,10 @@ Passing this fixture is an integrated local product-flow result, **not** real Go
 The delayed-acquisition assertion proves the asynchronous UI/API contract; it
 does not measure a real EC2 cold-start duration or establish deployed cold/resume
 acceptance.
+
+The gated version passed against integrated runtime `ce9fdbe` (recorded in
+`6bf9524`) on 2026-09-18 before the immutable AWS image build. The receipt had
+`coldWorkerPreparationUi`, `workerReadyBeforeBootstrap`, `http`, `websocket`,
+`incrementalSse`, `revokeClosesStreams`, `noModelPrompts` and `cleanupConfirmed`
+all true, while `realAwsOrAccountConsent` remained false. The 320-pixel
+preparation screenshot was visually inspected by the primary reviewer.

@@ -191,7 +191,68 @@ transport acceptance item, not something a local `.localhost` alias provides.
 
 ## Durability and acceptance status
 
-Current application (2026-09-18 12:25 UTC): revision
+Current application (2026-09-18 13:06 UTC): revision
+`6bf952434ad2c9310ab032bc1fb2cc14c5a83aa8`, immutable digest
+`sha256:b8b04eccd0a1a5841656868871e7666e553ebef12b760caef8aa74175d261d78`.
+CodeBuild `ImageBuild-t8BSbSkDsHYX:56dda959-1ef2-4049-b2fb-db38158ead84`
+used exact S3 source version `n6MmfqeCyGaUMibuQPrI6lbqTVzNzhtg` and succeeded.
+Rollout `887b20aa-5d35-4bf5-b5b8-037af34b26fd` completed healthy and was
+independently confirmed Success / exit 0. After the public checks below, a
+second same-digest rollout `d3334a55-4313-4d52-a4ac-38ad67f59de0` completed
+healthy to retain the same preview-aware configuration in the previous slot.
+It was independently confirmed Success / exit 0. Read-only host audit
+`c0bef718-1439-4ff2-82d6-d9d7bfdc81b0` also completed Success / exit 0:
+both exact containers use this digest/configuration, only the current container
+is running, its restart count is zero, and the controller/data mount/accepted
+worker AMI are unchanged. No acceptance container, active controller SSM session
+or running acceptance command remained in the complete scoped inventories.
+Anonymous public readiness was 200 with `{ok:true}` and no Set-Cookie at
+13:06:42 and 13:12:33 UTC (5m50s apart).
+
+The removed preview hostname returned 421 without Set-Cookie for `/` and
+`/api/auth/session` against the actual controller's loopback listener with that
+Host header. This confirms deployed Host dispatch only, not CloudFront
+forwarding or a positive authenticated preview request.
+
+The deployed version includes strict preview-host isolation even when
+provisioning is disabled, and [bounded worker preparation](adr/2026-09-18-preview-cold-worker-preparation.md)
+before browser bootstrap. Cold acquisition returns 202 progress instead of
+holding the first app response past CloudFront's read timeout. Stale preparation
+IDs cannot restart an operation cancelled by Stop. This does not assert that
+the user's application service is listening after a VM restart.
+
+The final full regression passed **1122/1122**, with zero failures, cancellations
+or skips, in 258.3 seconds. Native GitHub and official-MCP guest UI opt-ins were
+enabled, sequentially on CPUs 0–1 at nice 10. A separate sequential run of all
+seven Python operator test files passed **52/52**, including the exact pinned
+shared rollout-engine bridge, worker image/bootstrap diagnostics, backup,
+rollback and preview launcher; these mocks perform no real AWS/Docker calls.
+The disposable preview UI browser suite passed 10/10. The official-MCP
+integrated fixture passed with deliberately gated
+acquisition, visible preparation, no pre-ready bootstrap/application request,
+then HTTP/WebSocket/incremental SSE, revocation and observed cleanup. Root
+inspected the 320-pixel preparation screenshot. These are fixture tests, not a
+real EC2 cold-start or provider-consent result.
+
+At 13:03 UTC all 13 fixed public Git/MCP denials passed again, together with
+readiness 200, anonymous SSE 401 and WSS 101/bidirectional frames/expected
+authentication rejection. At 13:04 UTC official MCP confirmed the login entry
+at 1600/390/320 pixels without horizontal overflow. Google initiation still
+returned **redirect_uri_mismatch / Error 400**; no credentials or consent were
+entered. Browser/client/transport closure and private transient cleanup were
+confirmed. Google callback registration, all real provider consents and
+authenticated deployed app/transport/selected-account execution remain open.
+
+Local runtime `f0e57ca` has the same application sources. Its controlled restart
+used cold private checkpoint `checkpoint-eDMBUp`; the credential file remained
+byte-identical and all 12 encrypted records were readable afterward. Verification
+performed no record writes and did not compare every encrypted row byte-for-byte.
+The two rejected worker AMIs and their exclusive snapshots were removed after
+exact ownership/reference checks; the accepted image, its snapshot, the cold
+backup and controller data were preserved. See the
+[irreversible test-artifact cleanup receipt](aws-worker-artifact-cleanup-2026-09-18.md).
+
+Historical activation (2026-09-18 12:25 UTC): revision
 `14050df15ec0cc1465fed4b7f929097ad010bb21`, immutable digest
 `sha256:9dbb6306863a60de96cf91118165b6164d053de72dbe04777fc5dfd296db6d9a`.
 CodeBuild `ImageBuild-t8BSbSkDsHYX:65d3f2a8-045f-487e-b407-7816a9ed56d0`
