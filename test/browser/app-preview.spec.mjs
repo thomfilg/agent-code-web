@@ -14,7 +14,7 @@ window.preview=new AppPreviewDialog({ getChat:()=>window.chat, getBackend:()=>wi
     if(window.mode==='hold')return new Promise(resolve=>window.waiting.push(resolve));
     if(window.mode==='abort')return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new Error('aborted')),{once:true}));
     if(window.mode==='fail')throw new Error('private arbitrary server error');
-    if(url.endsWith('/open'))return {url:window.launchUrl||location.origin+'/app-preview/open?launch=fixture-intent'};
+    if(url.endsWith('/open'))return window.warmPending ? {warming:{id:'warm_11111111-2222-4333-8444-555555555555',status:'pending',retryAfterMs:250}} : {url:window.launchUrl||location.origin+'/app-preview/open?launch=fixture-intent'};
     if(window.reply)return window.reply;
     const port=options.body?JSON.parse(options.body).port:Number(new URL(url,location.origin).searchParams.get('port'));
     if(options.method==='POST')window.state={...window.state,status:'pending',canRevoke:true};
@@ -59,6 +59,34 @@ test("blocked popup issues no intent; foreign launch is refused and pending blan
   await page.evaluate(() => { window.mode='hold'; }); await page.getByRole("button", { name: "Open app ↗", exact: true }).click();
   await page.evaluate(() => { window.chat={...window.chat,id:'other-chat'}; window.preview.setChat(window.chat); window.waiting.shift()({url:location.origin+'/app-preview/open?launch=stale'}); });
   await expect(page.getByRole("dialog")).not.toBeVisible(); expect(await page.evaluate(() => ({closed:window.popupRecords[1].closed,url:window.popupRecords[1].url}))).toEqual({closed:true,url:undefined});
+});
+
+test("cold worker shows progress in dialog and detached tab, polls one job, then opens without a prompt", async ({ page }) => {
+  await ready(page); await page.evaluate(() => { window.warmPending=true; });
+  await page.getByRole("button", { name: "Open app ↗", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("Preparing this chat’s worker");
+  await expect(page.getByRole("button", { name: "Open app ↗", exact: true })).toBeDisabled();
+  await expect.poll(() => page.evaluate(() => window.requests.filter(r=>r.url.endsWith('/open')).length)).toBeGreaterThan(1);
+  expect(await page.evaluate(() => window.popupRecords[0].url)).toBeUndefined();
+  expect(await page.evaluate(() => window.popupRecords[0].document.body.textContent)).toContain("No agent prompt");
+  expect(await page.evaluate(() => window.requests.filter(r=>r.url.endsWith('/open')).slice(1).every(r=>r.body.warmingId==='warm_11111111-2222-4333-8444-555555555555'))).toBe(true);
+  await page.evaluate(() => { window.warmPending=false; });
+  await expect.poll(() => page.evaluate(() => window.popupRecords[0].url)).toContain('/app-preview/open?launch=fixture-intent');
+  expect(await page.evaluate(() => window.popupRecords[0].opener)).toBeNull();
+});
+
+test("closing warming tab stops polls; bounded warm deadline restores an actionable UI", async ({ page }) => {
+  await ready(page); await page.evaluate(() => { window.warmPending=true; });
+  await page.getByRole("button", { name: "Open app ↗", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("Preparing this chat’s worker");
+  await page.evaluate(() => window.popupRecords[0].close());
+  await expect(page.getByRole("alert")).toContainText("could not be opened");
+  const calls = await page.evaluate(() => window.requests.filter(r=>r.url.endsWith('/open')).length);
+  await page.waitForTimeout(300); expect(await page.evaluate(() => window.requests.filter(r=>r.url.endsWith('/open')).length)).toBe(calls);
+  await page.evaluate(() => { window.preview.warmTimeoutMs=30; });
+  await page.getByRole("button", { name: "Open app ↗", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("could not be opened");
+  expect(await page.evaluate(() => window.popupRecords[1].closed)).toBe(true);
 });
 
 test("revocation remains available with invalid path and prevents launch while cleanup is pending", async ({ page }) => {

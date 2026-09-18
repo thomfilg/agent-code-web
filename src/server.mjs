@@ -504,7 +504,7 @@ export async function createAgentWebServer(options = {}) {
             result = await previews.status(user, chatId, Number(selected));
           } else if (["POST", "DELETE"].includes(request.method)) {
             const input = await bodyJson(request, 10000); await check();
-            if (tail === "app-preview/open" && request.method === "POST") result = await previews.open(user, chatId, input.port, input.path);
+            if (tail === "app-preview/open" && request.method === "POST") { result = await previews.open(user, chatId, input.port, input.path, input.warmingId); status = result.warming ? 202 : 200; }
             else if (tail === "app-preview" && request.method === "POST") { result = await previews.ensure(user, chatId, input.port); status = result.preview.status === "ready" ? 200 : 202; }
             else if (tail === "app-preview" && request.method === "DELETE") result = await previews.remove(user, chatId, input.port);
             else return json(response, 405, { error: "Unsupported app preview action" });
