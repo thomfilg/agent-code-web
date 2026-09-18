@@ -28,7 +28,10 @@ test("compact mobile composer switches agents with Sol/Opus high defaults and pr
 });
 
 test("PR bar opens colored diffs, shows CI counts/conflicts, and requires explicit GitHub auto-merge", async ({ page }) => {
-  await page.request.post("/api/github", { data: { method: "local", companies: ["acme", "other"] } });
+  const login = await (await page.request.post("/api/github/device", { data: {} })).json();
+  await expect.poll(async () => (await (await page.request.get("/api/github")).json()).connections.find(connection => connection.id === login.connection.id)?.connected).toBe(true);
+  const connection = (await (await page.request.get("/api/github")).json()).connections.find(connection => connection.id === login.connection.id);
+  await page.request.patch(`/api/github/connections/${connection.id}`, { data: { revision: connection.revision, companies: ["acme", "other"] } });
   await page.goto("/");
   await page.getByRole("button", { name: "Open PR controls fixture", exact: true }).click();
   const bar = page.locator(".pull-request-bar");

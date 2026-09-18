@@ -13,7 +13,10 @@ const config = testConfig(root, { AGENT_WEB_PORT: "8879" });
 const records = new MemoryRecords();
 const repos = ["Acme/api", "Acme/web", "Other/library"].map((full_name, index) => ({ id: index + 1, full_name, name: full_name.split("/")[1], default_branch: "main", private: true, size: 1 }));
 const pull = { number: 42, node_id: "PR_browser", title: "Fixture changes", state: "open", head: { sha: "a".repeat(40), ref: "feature/controls", repo: { full_name: "Acme/api" } }, base: { ref: "main", repo: { full_name: "Acme/api" } }, additions: 12, deletions: 3, changed_files: 1, mergeable: false, mergeable_state: "dirty", auto_merge: null };
-const github = new GitHubConnection({ records, config: config.github, localToken: async () => "test-github-credential",
+const github = new GitHubConnection({ records, config: config.github, loginFactory: () => {
+  let reject, timer;
+  return { start: onCode => new Promise((resolve, fail) => { reject = fail; onCode({ userCode: "TEST-CODE", verificationUrl: "https://github.com/login/device" }); timer = setTimeout(() => resolve("test-github-credential"), 2000); }), close: async () => { clearTimeout(timer); reject?.(new Error("cancelled")); } };
+},
   fetchImpl: async (url, options = {}) => {
     const path = new URL(url).pathname;
     if (path === "/user") return Response.json({ login: "browser-fixture", id: 1 });

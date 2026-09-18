@@ -30,7 +30,7 @@ export class UserServices {
   }
   async create(ownerId) {
     const records = userRecords(this.records, ownerId);
-    const github = new GitHubConnection({ records, config: { ...this.config.github, localConnection: false } });
+    const github = new GitHubConnection({ records, config: this.config.github });
     const mcps = new McpConnections(records, { ttlMs: this.config.sessionCapabilityTtlMs });
     const environments = new Environments(records, this.config.workerBackend, mcps);
     const organization = new ChatOrganization({ records, store: this.store, changed: this.changed });

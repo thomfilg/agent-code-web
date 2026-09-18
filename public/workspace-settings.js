@@ -1,6 +1,7 @@
 import { ModelPicker } from "./model-picker.js";
 import { companyForChat, scopeAllows, scopeLabel, scopesOverlap } from "./company-scope.js";
 import { CompanyPicker, knownCompanies } from "./company-picker.js";
+import { GitHubAccounts } from "./github-accounts.js";
 const $ = selector => document.querySelector(selector);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 const option = (value, text) => { const e = el("option", "", text); e.value = value; return e; };
@@ -10,18 +11,10 @@ export class WorkspaceSettings {
   constructor({ api, state, toast }) {
     Object.assign(this, { api, state, toast }); this.selected = []; this.environments = []; this.repositories = []; this.branchCache = new Map();
     this.environmentCompanies = new CompanyPicker($("#environment-companies"), scope => { Object.assign(this.draft, scope); this.renderEnvironmentMcps(); });
-    this.githubCompanies = new CompanyPicker($("#github-companies"));
-    $("#github-connections").onchange = event => this.editGitHub(this.github.connections.find(connection => connection.id === event.target.value));
-    $("#github-new").onclick = () => this.editGitHub(null);
-    $("#github-save-scope").onclick = event => this.connectGitHub({}, event.target);
+    this.githubAccounts = new GitHubAccounts(this);
     this.modelPicker = new ModelPicker({ root: $("#new-model-controls"), api, onChange: () => this.remember() });
     $("#github-button").addEventListener("click", () => this.openGitHub());
     $("#connect-github-button").addEventListener("click", () => this.openGitHub());
-    $("#github-local").addEventListener("click", event => this.connectGitHub({ method: "local" }, event.target));
-    $("#github-token-form").addEventListener("submit", event => { event.preventDefault(); this.connectGitHub({ token: $("#github-token").value, expiresAt: $("#github-expiry").value || null }, event.submitter); });
-    $("#github-disconnect").addEventListener("click", async () => { try { this.requireCompanyScopes(); if (!this.editingGitHub?.id || !confirm(`Disconnect only “${this.editingGitHub.name}”? Its other company connections will remain saved.`)) return; await api(`/api/github/connections/${this.editingGitHub.id}`, { method: "DELETE" }); this.repositories = []; this.branchCache.clear(); await this.load(); await this.openGitHub(); } catch (error) { toast(error.message); } });
-    $("#github-oauth").addEventListener("click", () => this.startDevice());
-    $("#github-dialog").addEventListener("close", () => { clearTimeout(this.deviceTimer); $("#github-token").value = ""; });
     $("#repo-search").addEventListener("input", () => this.renderRepositories());
     $("#refresh-repositories").addEventListener("click", () => this.loadRepositories(true).catch(error => toast(error.message)));
     $("#environment-select").addEventListener("change", () => this.remember());
@@ -149,47 +142,7 @@ export class WorkspaceSettings {
     try { await this.preferenceQueue; this.preferences = body; } catch (error) { this.toast(`Could not remember your selection: ${error.message}`); }
   }
   async openGitHub() {
-    try {
-      this.github = await this.api("/api/github");
-      $("#github-connections").replaceChildren(option("", "New connection"), ...(this.github.connections || []).map(connection => option(connection.id, `${connection.name} · ${scopeLabel(connection)}`)));
-      this.editGitHub(this.github.connections?.find(connection => connection.id === this.editingGitHub?.id) || this.github.connections?.[0]);
-      $("#github-local").hidden = !this.github.localAvailable; $("#github-oauth").hidden = !this.github.oauthAvailable;
-      $("#github-error").textContent = ""; $("#github-device-code").textContent = "";
-      if (!$("#github-dialog").open) $("#github-dialog").showModal();
-    } catch (error) { this.toast(error.message); }
-  }
-  editGitHub(connection) {
-    this.editingGitHub = connection || null; $("#github-connections").value = connection?.id || "";
-    $("#github-connection-name").value = connection?.name || "";
-    this.githubCompanies.set(connection || {}, knownCompanies(this.state, [...(this.github.connections || []), ...this.environments, ...(this.mcps || [])]));
-    $("#github-status").textContent = connection ? `${connection.connected ? `Signed in as ${connection.login}` : "Sign-in expired or disconnected"} · ${scopeLabel(connection)}${connection.scopeNeedsReview ? ". This legacy connection is blocked until you select and save its companies." : ""}` : "Add a separate saved connection for each company account. Credentials stay encrypted outside agent environments.";
-    $("#github-disconnect").hidden = !connection;
-    $("#github-save-scope").hidden = !connection;
-    $("#github-token").value = ""; $("#github-error").textContent = "";
-  }
-  githubPayload() { return { id: this.editingGitHub?.id, revision: this.editingGitHub?.revision, name: $("#github-connection-name").value || "GitHub", ...this.githubCompanies.value() }; }
-  async connectGitHub(body, submitter) {
-    submitter.disabled = true; $("#github-error").textContent = "";
-    try { this.requireCompanyScopes(); const settings = this.githubPayload(); await this.api(settings.id ? `/api/github/connections/${settings.id}` : "/api/github", { method: settings.id ? "PATCH" : "POST", body: JSON.stringify({ ...settings, ...body }) }); $("#github-token").value = ""; this.branchCache.clear(); await this.load(); if ($("#new-chat-dialog").open) await this.loadRepositories(); $("#github-dialog").close(); }
-    catch (error) { $("#github-error").textContent = error.message; }
-    finally { submitter.disabled = false; }
-  }
-  async startDevice() {
-    try {
-      this.requireCompanyScopes();
-      clearTimeout(this.deviceTimer);
-      const flow = await this.api("/api/github/device", { method: "POST", body: JSON.stringify(this.githubPayload()) });
-      const link = el("a", "", "Open GitHub to authorize"); link.href = "https://github.com/login/device"; link.target = "_blank"; link.rel = "noopener noreferrer";
-      $("#github-device-code").replaceChildren(el("strong", "", flow.userCode), link);
-      const poll = async () => {
-        if (!$("#github-dialog").open) return;
-        try { const result = await this.api("/api/github/device/poll", { method: "POST", body: JSON.stringify({ id: flow.id }) });
-          if (result.pending) this.deviceTimer = setTimeout(poll, result.interval * 1000);
-          else { await this.load(); if ($("#new-chat-dialog").open) await this.loadRepositories(); $("#github-dialog").close(); }
-        } catch (error) { $("#github-error").textContent = error.message; }
-      };
-      this.deviceTimer = setTimeout(poll, flow.interval * 1000);
-    } catch (error) { $("#github-error").textContent = error.message; }
+    await this.githubAccounts.open();
   }
   async openEnvironments(id) {
     try { await this.load(); this.editEnvironment(this.environments.find(env => env.id === id) || this.environments[0]); $("#environments-dialog").showModal(); }

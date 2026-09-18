@@ -83,8 +83,7 @@ export function loadConfig(env = process.env) {
       port: integer(env, "AGENT_DATABASE_PORT", 55438, { min: 1024, max: 65535 }),
     },
     github: {
-      clientId: env.GITHUB_OAUTH_CLIENT_ID || "",
-      localConnection: boolean(env, "AGENT_GITHUB_LOCAL_CONNECT", isLoopbackHost(host)),
+      cliPath: env.AGENT_GITHUB_CLI || "gh",
       apiBase: "https://api.github.com",
     },
     idleTimeoutMs: integer(env, "AGENT_IDLE_TIMEOUT_MS", 300_000, { min: 100, max: 86_400_000 }),
