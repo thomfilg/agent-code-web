@@ -69,7 +69,7 @@ export async function migrationPlan(records, time = new Date().toISOString()) {
   // Keep provider IDs for the existing ownership-checked asynchronous cleanup.
   for (const preview of await records.list("preview-host")) if (preview.chatId === targets.chat && preview.status !== "deleted") {
     check(preview.ownerId === owner.ownerId, "preview ownership changed");
-    put("preview-host", { ...preview, desired: "deleted", status: "revoking", pendingStep: preview.distributionId ? "disable" : "create", error: null, updatedAt: time });
+    put("preview-host", { ...preview, desired: "deleted", status: "revoking", pendingStep: preview.distributionId ? "disable" : "create", error: null, updatedAt: Date.parse(time) });
   }
   return { writes, deletes, summary: { deletedChat: targets.chat, companies: ["12-apps", "g2i"],
     githubCredentialsPreserved: personal.token === writes.find(row => row.id === targets.personal).value.token && work.token === writes.find(row => row.id === targets.work).value.token,

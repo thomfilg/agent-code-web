@@ -41,6 +41,7 @@ test("authorized migration preserves credentials, isolates companies and deletes
   assert.deepEqual(env.variables, []); assert.equal(env.setupScript, "");
   assert.deepEqual((await records.get("preferences", "new-chat")).repositories.map(r => r.companyId), ["12-apps"]);
   assert.equal((await records.get("preview-host", "owned-preview")).desired, "deleted");
+  assert.equal(Number.isSafeInteger((await records.get("preview-host", "owned-preview")).updatedAt), true);
   await assert.rejects(migrationPlan(records), /already applied/);
 });
 

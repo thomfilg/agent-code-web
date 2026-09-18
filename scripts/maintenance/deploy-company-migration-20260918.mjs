@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import { aws, verifyTarget, engineRevision } from "../aws-deploy.mjs";
 const execute = promisify(execFile);
 const engineRoot = "/home/thomfilg/p/12-apps/ci-aws";
@@ -76,7 +77,30 @@ except Exception:
     // Keep SSM's IPC document small even though the reviewed engine and the
     // offline planner are bundled for a single locked maintenance operation.
     const compressed = gzipSync(Buffer.from(python)).toString("base64");
-    const command = `python3 - <<'RELAY_COMPANY_MAINTENANCE'\nimport base64,gzip\nexec(gzip.decompress(base64.b64decode('${compressed}')))\nRELAY_COMPANY_MAINTENANCE`;
+    const digest = createHash("sha256").update(python).digest("hex");
+    const staging = `/run/relay-company-migration-${digest}`;
+    // SSM's agent IPC rejected large documents before invoking the plugin.
+    // Stage non-secret source in individually small, exclusive files; execution
+    // is a separate command and checks the complete source hash first.
+    const chunks = compressed.match(/.{1,3500}/g);
+    const staged = await Promise.all(chunks.map(async (chunk, index) => {
+      const prepare = `import os,pathlib\np=pathlib.Path('${staging}')\ntry: p.mkdir(mode=0o700)\nexcept FileExistsError: pass\ns=p.lstat()\nif p.is_symlink() or not p.is_dir() or s.st_uid!=0 or s.st_mode&0o077: raise SystemExit(1)\nf=p/'part-${index}'\nwith f.open('x',encoding='ascii') as stream: stream.write('${chunk}')\nos.chmod(f,0o600)\nprint('source part staged; not executed')`;
+      const sent = await aws(["ssm", "send-command"], ["--document-name", "AWS-RunShellScript", "--instance-ids", controller, "--parameters",
+        JSON.stringify({ commands: [`python3 - <<'STAGE_SOURCE'\n${prepare}\nSTAGE_SOURCE`], executionTimeout: ["60"] }), "--comment", `Stage public maintenance source ${index + 1}/${chunks.length}; no execution`]);
+      return sent.Command.CommandId;
+    }));
+    console.log(JSON.stringify({ sourceHash: digest, stagedCommands: staged, state: "staging-only" }));
+    for (const id of staged) {
+      let complete = false;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const invocation = await aws(["ssm", "get-command-invocation"], ["--command-id", id, "--instance-id", controller]);
+        if (invocation.Status === "Success" && invocation.ResponseCode === 0) { complete = true; break; }
+        if (!["Pending", "InProgress", "Delayed"].includes(invocation.Status)) throw new Error("Source staging failed; not executed");
+      }
+      if (!complete) throw new Error("Source staging incomplete; not executed");
+    }
+    const command = `python3 - <<'RELAY_COMPANY_MAINTENANCE'\nimport base64,gzip,hashlib,pathlib\np=pathlib.Path('${staging}')\nsource=gzip.decompress(base64.b64decode(''.join((p/('part-'+str(i))).read_text() for i in range(${chunks.length}))))\nif hashlib.sha256(source).hexdigest()!='${digest}': raise SystemExit(1)\nexec(compile(source,'verified-company-maintenance','exec'))\nRELAY_COMPANY_MAINTENANCE`;
     const sent = await aws(["ssm", "send-command"], ["--document-name", "AWS-RunShellScript", "--instance-ids", controller, "--timeout-seconds", "600", "--parameters",
       JSON.stringify({ commands: [command], executionTimeout: ["1800"] }), "--cloud-watch-output-config", "CloudWatchOutputEnabled=false", "--comment", "Authorized company migration, mixed-chat deletion and immutable rollout"]);
     console.log(JSON.stringify({ commandId: sent.Command.CommandId, controller, image, state: "submitted" }));
