@@ -3,6 +3,7 @@
 import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { gzipSync } from "node:zlib";
 import { aws, verifyTarget, engineRevision } from "../aws-deploy.mjs";
 const execute = promisify(execFile);
 const engineRoot = "/home/thomfilg/p/12-apps/ci-aws";
@@ -72,7 +73,10 @@ except Exception:
     print(json.dumps({'ok':False,'error':'Maintenance rollout failed; private diagnostics suppressed. Inspect before retrying.'}),flush=True)
     sys.exit(1)
 `;
-    const command = `python3 - <<'RELAY_COMPANY_MAINTENANCE'\n${python}\nRELAY_COMPANY_MAINTENANCE`;
+    // Keep SSM's IPC document small even though the reviewed engine and the
+    // offline planner are bundled for a single locked maintenance operation.
+    const compressed = gzipSync(Buffer.from(python)).toString("base64");
+    const command = `python3 - <<'RELAY_COMPANY_MAINTENANCE'\nimport base64,gzip\nexec(gzip.decompress(base64.b64decode('${compressed}')))\nRELAY_COMPANY_MAINTENANCE`;
     const sent = await aws(["ssm", "send-command"], ["--document-name", "AWS-RunShellScript", "--instance-ids", controller, "--timeout-seconds", "600", "--parameters",
       JSON.stringify({ commands: [command], executionTimeout: ["1800"] }), "--cloud-watch-output-config", "CloudWatchOutputEnabled=false", "--comment", "Authorized company migration, mixed-chat deletion and immutable rollout"]);
     console.log(JSON.stringify({ commandId: sent.Command.CommandId, controller, image, state: "submitted" }));
