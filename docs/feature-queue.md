@@ -90,9 +90,13 @@ older connected-Personal checkpoint above is historical. Claude, GitHub and
 Linear implementations are now integrated from reviewed isolated worktrees
 under ADR 0001; this running local process has not yet been restarted to them.
 AWS provisioning is now explicitly authorized for profile `code-web`, account
-`456808212788`, region `us-east-2`. Stack `agent-relay-mvp` is being created:
-the private controller and encrypted data attachment exist; CloudFront is still
-provisioning. This is not a deployed/readiness pass.
+`456808212788`, region `us-east-2`. Stack `agent-relay-mvp` reached
+`CREATE_COMPLETE`; the private controller booted with its encrypted data volume
+and CloudFront assigned `https://d20atclccf8cku.cloudfront.net`. CodeBuild built
+the pinned application image successfully. The first worker bake failed and
+terminated its own temporary builder without publishing an AMI. Bootstrap
+corrections are tested/reviewed; the second real bake is in progress. No
+application rollout or worker acceptance is claimed yet.
 
 Parallel implementation checkpoint (2026-09-18):
 
@@ -115,6 +119,14 @@ Parallel implementation checkpoint (2026-09-18):
   worker baker, separate Doppler `code-web/stg_aws_mvp` secrets and immutable
   build/deploy scripts implemented. Actual image boot, application rollout,
   rollback/durability and deployed authentication checks remain open.
+- Account deletion: reviewed backend/UI implementation removes a selected
+  account without deleting its conversations. Integrated focused checks: 18
+  deletion/API tests and 20 account/Google browser tests passed. Live activation
+  is still pending; existing local credentials/data are preserved.
+- Shared AWS CI: reviewed engine is pinned to `12-apps/ci` commit `848182b` in
+  draft PR #98; its remote checks passed. Relay's opt-in, manual consumer is in
+  PR #8 and integrated into PR #4. It remains disabled; no CI IAM role or GitHub
+  environment has been activated.
 - All integrated auth changes are saved in PR #4; feature PRs #5/#6/#7 retain
   their separate review/evidence. Existing unfinished doctor edits are untouched.
 
