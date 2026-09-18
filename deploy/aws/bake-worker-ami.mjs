@@ -12,6 +12,45 @@ const recipePath = fileURLToPath(new URL("worker-cloud-init.yaml", import.meta.u
 const exec = promisify(execFile);
 export const CLI_VERSIONS = { codex: "0.154.0", claude: "2.1.222" };
 export const EC2_USER_DATA_MAX_BYTES = 16 * 1024;
+const awsOperations = {
+  sts: ["get-caller-identity"],
+  cloudformation: ["describe-stacks", "describe-stack-resource"],
+  ec2: ["describe-instances", "describe-subnets", "describe-security-groups", "describe-images", "describe-key-pairs", "run-instances", "create-image", "terminate-instances"],
+  iam: ["get-instance-profile", "get-role", "list-attached-role-policies", "list-role-policies"],
+  ssm: ["describe-instance-information", "send-command", "get-command-invocation"],
+};
+const awsErrorCodes = new Set(["InvalidParameterValue", "InvalidParameterCombination", "UnauthorizedOperation", "AccessDenied", "AccessDeniedException", "ExpiredToken", "ExpiredTokenException", "InvalidClientTokenId", "RequestExpired", "RequestLimitExceeded", "Throttling", "ThrottlingException", "ServiceUnavailable", "InternalError", "InvalidAMIID.NotFound", "InvalidInstanceID.NotFound", "InvocationDoesNotExist"]);
+
+function knownAwsOperation(args) {
+  let index = 0;
+  while (index < args.length) {
+    if (["--profile", "--region"].includes(args[index])) index += 2;
+    else if (args[index] === "--no-cli-pager") index++;
+    else break;
+  }
+  const service = args[index], action = args[index + 1];
+  if (!Object.hasOwn(awsOperations, service) || !awsOperations[service].includes(action)) return null;
+  return { service, action, apiAction: action.split("-").map(word => word[0].toUpperCase() + word.slice(1)).join("") };
+}
+
+function awsFailure(args, category) {
+  const operation = knownAwsOperation(args);
+  const error = new Error(`AWS ${operation ? `${operation.service}/${operation.action}` : "operation"} failed (${category}); private diagnostics suppressed`);
+  error.code = category;
+  return error;
+}
+
+export function safeBakerAwsFailure(args, error) {
+  const operation = knownAwsOperation(args);
+  const match = typeof error?.stderr === "string" && error.stderr.match(/^An error occurred \(([A-Za-z0-9.]+)\) when calling the ([A-Za-z0-9]+) operation(?: \(reached max retries: \d+\))?:/m);
+  let category = "unclassified";
+  if (operation && match?.[2] === operation.apiAction && awsErrorCodes.has(match[1]) && (match[1] !== "InvocationDoesNotExist" || operation.service === "ssm" && operation.action === "get-command-invocation")) category = match[1];
+  else if (error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") category = "output-limit";
+  else if (error?.code === "ETIMEDOUT" || error?.killed === true && error?.signal === "SIGTERM") category = "timeout";
+  else if (error?.code === "ENOENT") category = "executable-unavailable";
+  // Never retain a cause: exec errors include argv, stdout and private stderr.
+  return awsFailure(args, category);
+}
 
 export function gzipWorkerUserData(recipe) {
   // EC2 limits the decoded payload, not its base64 wire representation.
@@ -50,16 +89,13 @@ export function parseOptions(args) {
   return options;
 }
 
-async function defaultRun(args) {
+export async function runBakerAws(args, execute = exec) {
   // Only this local operator process receives AWS auth, never the guest.
-  try { return (await exec(process.env.AWS_BIN || "aws", args, { timeout: 65_000, maxBuffer: 1_048_576 })).stdout.trim(); }
-  catch (error) {
-    if (String(error.stderr).includes("InvocationDoesNotExist")) throw new Error("InvocationDoesNotExist");
-    throw new Error("AWS command failed; inspect the scoped builder in AWS (raw output withheld)");
-  }
+  try { return (await execute(process.env.AWS_BIN || "aws", args, { timeout: 65_000, maxBuffer: 1_048_576 })).stdout.trim(); }
+  catch (error) { throw safeBakerAwsFailure(args, error); }
 }
 
-export async function bakeWorkerImage(options, { run = defaultRun, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), log = () => {}, recipe = null, pollLimit = 180 } = {}) {
+export async function bakeWorkerImage(options, { run = runBakerAws, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), log = () => {}, recipe = null, pollLimit = 180 } = {}) {
   const o = options;
   const plan = { expectedAccount: o.expectedAccount, deployment: o.deployment, region: o.region, subnetId: o.subnetId, securityGroupId: o.securityGroupId, keyName: o.keyName, builderInstanceProfile: o.builderInstanceProfile, baseImageId: o.baseImageId, versions: CLI_VERSIONS, privateOnly: true, finalWorkerRole: null, finalWorkerMetadata: "disabled" };
   recipe ||= await readFile(recipePath, "utf8");
@@ -67,18 +103,28 @@ export async function bakeWorkerImage(options, { run = defaultRun, sleep = ms =>
   gzipWorkerUserData(recipe); // Early local rejection, including dry-run.
   if (o.dryRun) return { dryRun: true, ...plan };
   const aws = (...args) => run([...(o.profile ? ["--profile", o.profile] : []), "--region", o.region, "--no-cli-pager", ...args]);
-  const json = async (...args) => JSON.parse(await aws(...args, "--output", "json"));
+  const json = async (...args) => {
+    const output = await aws(...args, "--output", "json");
+    try { return JSON.parse(output); }
+    catch { throw awsFailure(args, "invalid-response"); }
+  };
   const bakeId = randomUUID();
   const tags = [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: o.deployment }, { Key: "AgentRelayWorkerKey", Value: o.keyName }, { Key: "CodexVersion", Value: CLI_VERSIONS.codex }, { Key: "ClaudeVersion", Value: CLI_VERSIONS.claude }];
   let builderId;
   let temporary;
-  async function builder() {
+  async function builder(terminationObservation = false) {
     const instances = await json("ec2", "describe-instances", "--instance-ids", builderId, "--query", "Reservations[].Instances[]");
     const instance = instances?.[0];
     const t = Object.fromEntries((instance?.Tags || []).map(({ Key, Value }) => [Key, Value]));
-    if (instances?.length !== 1 || instance.InstanceId !== builderId || t.ManagedBy !== "agent-relay" || t.AgentRelayDeployment !== o.deployment || t.AgentRelayBake !== bakeId ||
-        instance.SubnetId !== o.subnetId || instance.SecurityGroups?.length !== 1 || instance.SecurityGroups[0].GroupId !== o.securityGroupId || instance.PublicIpAddress || instance.KeyName !== o.keyName ||
-        !instance.IamInstanceProfile?.Arn?.endsWith(`:instance-profile/${o.builderInstanceProfile}`)) {
+    if (instances?.length !== 1 || instance.InstanceId !== builderId || instance.ImageId !== o.baseImageId || tags.some(tag => t[tag.Key] !== tag.Value) || t.AgentRelayBake !== bakeId) {
+      throw new Error("Builder ownership/network/profile mismatch; refusing to mutate it");
+    }
+    // EC2 may detach network/profile data while terminating. This exception is
+    // read-only and retains exact ID, AMI and every ownership/version tag. Any
+    // mutation below requires another strict observation immediately before it.
+    if (!(terminationObservation && ["shutting-down", "terminated"].includes(instance.State?.Name)) &&
+        (instance.SubnetId !== o.subnetId || instance.SecurityGroups?.length !== 1 || instance.SecurityGroups[0].GroupId !== o.securityGroupId || instance.PublicIpAddress || instance.KeyName !== o.keyName ||
+        instance.IamInstanceProfile?.Arn !== `arn:aws:iam::${o.expectedAccount}:instance-profile/${o.builderInstanceProfile}`)) {
       throw new Error("Builder ownership/network/profile mismatch; refusing to mutate it");
     }
     return instance;
@@ -100,15 +146,18 @@ export async function bakeWorkerImage(options, { run = defaultRun, sleep = ms =>
     return poll("SSM command completion", async () => {
       let invocation;
       try { invocation = await json("ssm", "get-command-invocation", "--instance-id", builderId, "--command-id", commandId); }
-      catch (error) { if (/InvocationDoesNotExist/.test(error.message)) return false; throw error; }
+      catch (error) { if (error.code === "InvocationDoesNotExist") return false; throw error; }
       if (["Pending", "InProgress", "Delayed"].includes(invocation.Status)) return false;
       if (invocation.Status !== "Success" || invocation.ResponseCode !== 0) {
         const receipt = safeBootstrapReceipt(invocation.StandardOutputContent);
-        throw new Error(`Builder SSM command failed (${invocation.Status}); inspect command ${commandId} in AWS${receipt ? `; safe bootstrap receipt: ${JSON.stringify(receipt)}` : ""}`);
+        const status = ["Failed", "Cancelled", "Cancelling", "TimedOut"].includes(invocation.Status) ? invocation.Status : "unexpected-status";
+        throw new Error(`Builder SSM command failed (${status}); inspect command ${commandId} in AWS${receipt ? `; safe bootstrap receipt: ${JSON.stringify(receipt)}` : ""}`);
       }
       return invocation;
     });
   }
+  let primaryFailure;
+  let receipt;
   try {
     const identity = await json("sts", "get-caller-identity");
     if (identity.Account !== o.expectedAccount) throw new Error("AWS account does not match --expected-account; no resources were changed");
@@ -147,7 +196,7 @@ export async function bakeWorkerImage(options, { run = defaultRun, sleep = ms =>
     temporary = await mkdtemp(path.join(tmpdir(), "relay-worker-bake-"));
     const userData = path.join(temporary, "cloud-init.yaml.gz");
     await writeFile(userData, compressedUserData, { mode: 0o600, flag: "wx" });
-    const launched = await json("ec2", "run-instances", "--image-id", o.baseImageId, "--instance-type", o.instanceType,
+    const launched = await json("ec2", "run-instances", "--image-id", o.baseImageId, "--instance-type", o.instanceType, "--client-token", bakeId,
       "--network-interfaces", JSON.stringify([{ DeviceIndex: 0, SubnetId: o.subnetId, Groups: [o.securityGroupId], AssociatePublicIpAddress: false, DeleteOnTermination: true }]),
       "--key-name", o.keyName, "--iam-instance-profile", JSON.stringify({ Name: o.builderInstanceProfile }), "--metadata-options", "HttpTokens=required,HttpEndpoint=enabled,HttpPutResponseHopLimit=1",
       "--instance-initiated-shutdown-behavior", "stop", "--credit-specification", "CpuCredits=standard",
@@ -179,15 +228,29 @@ export async function bakeWorkerImage(options, { run = defaultRun, sleep = ms =>
       return image?.ImageId === imageId && image.State === "available";
     });
     log(`Worker AMI ready: ${imageId}. A fresh IMDS-disabled boot still requires deployment acceptance.`);
-    return { imageId, builderId, ...plan };
+    receipt = { imageId, builderId, ...plan };
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
   } finally {
-    if (temporary) await rm(temporary, { recursive: true, force: true });
-    if (builderId) {
-      await builder(); // Recheck exact scope before cleanup, never broad filters.
-      await aws("ec2", "terminate-instances", "--instance-ids", builderId);
-      log(`Terminated temporary builder ${builderId}; any created AMI/snapshot is retained.`);
+    try {
+      if (builderId) {
+        const observed = await builder(true);
+        if (!["shutting-down", "terminated"].includes(observed.State?.Name)) {
+          await builder(); // Strict recheck before mutation, never broad filters.
+          await aws("ec2", "terminate-instances", "--instance-ids", builderId);
+        }
+        await poll("temporary builder termination", async () => (await builder(true)).State?.Name === "terminated");
+        log(`Confirmed termination of temporary builder ${builderId}; any created AMI/snapshot is retained.`);
+      }
+    } catch (error) {
+      const cleanup = `cleanup unconfirmed for temporary builder ${builderId}; inspect the exact deployment-owned instance before further mutation`;
+      throw new Error(`${primaryFailure ? `${primaryFailure.message}; ` : ""}${error.message}; ${cleanup}`);
+    } finally {
+      if (temporary) await rm(temporary, { recursive: true, force: true });
     }
   }
+  return { ...receipt, cleanedUp: true };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
