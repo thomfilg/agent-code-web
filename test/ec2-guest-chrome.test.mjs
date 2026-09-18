@@ -69,13 +69,13 @@ test("guest HTTP fixture is loopback-only, bounded and removes only its own priv
 });
 test("guest cleanup refuses altered marker and active Chrome, including repeated cleanup", async t => {
   for (const altered of [false, true]) {
-    const base = await temp(t), fixture = await startGuestSite(id, { rootBase: base, sandbox: async () => ({ processes: altered ? 0 : 1, scanComplete: true }) });
+    const base = await temp(t), fixture = await startGuestSite(id, { rootBase: base, cleanupTimeoutMs: 0, sandbox: async () => ({ processes: altered ? 0 : 1, scanComplete: true }) });
     if (altered) await writeFile(path.join(fixture.root, "owner.json"), JSON.stringify({ runId: "other", pid: process.pid }));
     await assert.rejects(fixture.close()); await assert.rejects(fixture.close()); assert.equal((await lstat(fixture.root)).isDirectory(), true);
   }
 });
 test("guest cleanup refuses an incomplete zero-process inventory", async t => {
-  const fixture = await startGuestSite(id, { rootBase: await temp(t), sandbox: async () => ({ processes: 0, scanComplete: false }) });
+  const fixture = await startGuestSite(id, { rootBase: await temp(t), cleanupTimeoutMs: 0, sandbox: async () => ({ processes: 0, scanComplete: false }) });
   await assert.rejects(fixture.close()); await assert.rejects(fixture.close());
   assert.equal((await lstat(fixture.root)).isDirectory(), true);
 });
