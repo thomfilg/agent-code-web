@@ -1,5 +1,9 @@
 # Private EC2 workers
 
+For the separately scoped, disabled-by-default GitHub application rollout,
+see the [CI identity and activation runbook](CI.md). It does not provision workers
+or modify this application's infrastructure stack.
+
 One chat owns one VM and encrypted EBS root volume. The controller starts or
 resumes it on demand, stops it after idle, and terminates it when its runtime is
 deleted. Master provider/MCP credentials stay on the controller; the worker
