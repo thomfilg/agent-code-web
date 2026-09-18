@@ -32,6 +32,7 @@ function fixture({ bad = null, fails = null } = {}) {
     }
     if (action === "send-command") {
       const script = JSON.parse(val("--parameters")).commands[0], payload = JSON.parse(Buffer.from(script.match(/^python3 - '([^']+)'/)[1], "base64").toString());
+      assert.equal(payload.stack, `arn:aws:cloudformation:${backupTarget.region}:${backupTarget.account}:stack/${backupTarget.stack}/fixture`, "Host ownership must match the rollout's immutable stack ARN label");
       const command = `00000000-0000-0000-0000-${String(++n).padStart(12, "0")}`;
       commands.set(command, payload.action);
       if (fails === `host-${payload.action}`) commands.set(command, "failure");

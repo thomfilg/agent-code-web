@@ -44,7 +44,7 @@ export async function verifyBackupTarget(aws) {
   if (volumes.length !== 1 || volume.VolumeId !== source || !volume.Encrypted || !stackOwned(volume) || volume.State !== "in-use" || volume.AvailabilityZone !== instance.Placement.AvailabilityZone ||
     volume.Attachments?.length !== 1 || volume.Attachments[0].InstanceId !== controller || volume.Attachments[0].State !== "attached" || volume.Attachments[0].Device !== "/dev/sdf") fail("Source volume ownership/attachment mismatch");
   if (instance.BlockDeviceMappings?.some(mapping => ["/dev/sdg", "/dev/xvdg"].includes(mapping.DeviceName))) fail("Temporary restore device is occupied");
-  return { controller, source, repository, zone: volume.AvailabilityZone, size: volume.Size };
+  return { controller, source, repository, stackId: stack.StackId, zone: volume.AvailabilityZone, size: volume.Size };
 }
 
 export async function verifyBackup({ execute: shouldExecute = false } = {}, { aws = awsCall, sleep = pause, log = () => {}, runId = randomUUID(), pollLimit = 240,
@@ -54,7 +54,9 @@ export async function verifyBackup({ execute: shouldExecute = false } = {}, { aw
   hostScript ||= await readFile(new URL("./backup-host.py", import.meta.url), "utf8");
   fingerprintScript ||= await readFile(new URL("./backup-fingerprint.mjs", import.meta.url), "utf8");
   const target = await verifyBackupTarget(aws);
-  const config = { ...target, stack: backupTarget.stack, run: runId, fingerprintScript: Buffer.from(fingerprintScript).toString("base64") };
+  // The rollout engine labels containers with the immutable stack ARN, not its
+  // reusable display name. Validate the same incarnation before stopping it.
+  const config = { ...target, stack: target.stackId, run: runId, fingerprintScript: Buffer.from(fingerprintScript).toString("base64") };
   const tags = [{ Key: "ManagedBy", Value: "12-apps-ci" }, { Key: "AgentRelayDeployment", Value: backupTarget.stack },
     { Key: "AgentRelayBackupRun", Value: runId }, { Key: "Purpose", Value: "backup-restore-acceptance" }];
   const tagged = value => stackOwned(value) && tagsOf(value).AgentRelayBackupRun === runId && tagsOf(value).Purpose === "backup-restore-acceptance";
@@ -98,7 +100,16 @@ os.execv("/usr/bin/python3",["/usr/bin/python3",p,sys.argv[1]])`;
       try { invocation = await aws("ssm", "get-command-invocation", ["--command-id", command, "--instance-id", target.controller]); }
       catch (error) { if (error.pending) return false; throw error; }
       if (["Pending", "InProgress", "Delayed"].includes(invocation.Status)) return false;
-      if (invocation.Status !== "Success" || invocation.ResponseCode !== 0) fail(`Backup host failed for command ${command}; private output suppressed`);
+      if (invocation.Status !== "Success" || invocation.ResponseCode !== 0) {
+        let diagnostic = "";
+        try {
+          const receipt = JSON.parse(invocation.StandardOutputContent);
+          const stages = ["inspect", "controller", "device", "validate_source", "audit_other_writers", "http", "state", "save", "fingerprint", "recover", "arm_recovery", "disarm_recovery", "watchdog", "hold", "cleanup_restore", "restore", "run", "unknown"];
+          const failures = ["BackupError", "FileNotFoundError", "PermissionError", "ValueError", "KeyError", "OSError", "JSONDecodeError", "unknown"];
+          if (stages.includes(receipt.stage) && failures.includes(receipt.failure)) diagnostic = `; stage=${receipt.stage}; failure=${receipt.failure}`;
+        } catch {}
+        fail(`Backup host failed for command ${command}; private output suppressed${diagnostic}`);
+      }
       try { return JSON.parse(invocation.StandardOutputContent); } catch { fail("Invalid backup host result"); }
     });
   }

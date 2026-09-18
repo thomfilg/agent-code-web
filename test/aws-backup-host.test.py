@@ -96,6 +96,24 @@ class Fake(module.Host):
 
 
 class Tests(unittest.TestCase):
+    def test_failure_receipt_returns_only_fixed_stage_and_type(self):
+        def controller():
+            raise module.BackupError("private-token-and-user-data")
+        try:
+            controller()
+        except Exception as error:
+            receipt = module.failure_receipt(error)
+        self.assertEqual(receipt["stage"], "controller")
+        self.assertEqual(receipt["failure"], "BackupError")
+        self.assertNotIn("private-token", json.dumps(receipt))
+        try:
+            raise type("private_token_class", (Exception,), {})("private-token")
+        except Exception as error:
+            receipt = module.failure_receipt(error)
+        self.assertEqual(receipt["stage"], "unknown")
+        self.assertEqual(receipt["failure"], "unknown")
+        self.assertNotIn("private", json.dumps({k: v for k, v in receipt.items() if k != "error"}))
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="relay-backup-host-test-")
         self.mask = os.umask(0o077)

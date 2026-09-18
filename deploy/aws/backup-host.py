@@ -9,6 +9,23 @@ import re
 import subprocess
 import sys
 import time
+import traceback
+
+SAFE_STAGES = frozenset(('inspect', 'controller', 'device', 'validate_source',
+    'audit_other_writers', 'http', 'state', 'save', 'fingerprint', 'recover',
+    'arm_recovery', 'disarm_recovery', 'watchdog', 'hold', 'cleanup_restore', 'restore', 'run'))
+
+
+def failure_receipt(error):
+    # Emit only fixed code-stage/type enums. Never echo exception messages,
+    # subprocess diagnostics, record data or credential-bearing environments.
+    stages = [frame.f_code.co_name for frame, _ in traceback.walk_tb(error.__traceback__)
+              if frame.f_code.co_name in SAFE_STAGES]
+    kind = type(error).__name__
+    if kind not in ('BackupError', 'FileNotFoundError', 'PermissionError', 'ValueError', 'KeyError', 'OSError', 'JSONDecodeError'):
+        kind = 'unknown'
+    return {'ok': False, 'stage': stages[-1] if stages else 'unknown', 'failure': kind,
+            'error': 'Backup host operation failed; private diagnostics suppressed. Inspect the exact run and original controller.'}
 
 
 class BackupError(Exception):
@@ -316,6 +333,6 @@ if __name__ == "__main__":
     os.umask(0o077)
     try:
         print(json.dumps(Host(json.loads(base64.b64decode(sys.argv[1], validate=True))).run()))
-    except Exception:
-        print(json.dumps({"ok": False, "error": "Backup host operation failed; private diagnostics suppressed. Inspect the exact run and original controller."}))
+    except Exception as error:
+        print(json.dumps(failure_receipt(error)))
         sys.exit(1)
