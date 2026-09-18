@@ -111,8 +111,23 @@ write_files:
       # Fresh workers use plain DHCP and do not contact IMDS for networking.
       rm -f /etc/netplan/50-cloud-init.yaml
       printf '%s\n' agent-worker > /etc/hostname
-      rm -rf -- /var/lib/amazon/ssm /var/log/amazon/ssm /var/snap/amazon-ssm-agent /root/snap/amazon-ssm-agent /home/ubuntu/snap/amazon-ssm-agent /home/agent/snap/amazon-ssm-agent /root/.aws /root/.ssh /root/.codex /root/.claude /root/.npm /root/.cache /home/ubuntu/.aws /home/ubuntu/.codex /home/ubuntu/.claude /home/agent/.aws /home/agent/.codex /home/agent/.claude
+      rm -rf -- /var/lib/amazon/ssm /var/log/amazon/ssm /var/snap/amazon-ssm-agent /root/snap/amazon-ssm-agent /home/ubuntu/snap/amazon-ssm-agent /home/agent/snap/amazon-ssm-agent /root/.aws /root/.codex /root/.claude /root/.npm /root/.cache /home/ubuntu/.aws /home/ubuntu/.codex /home/ubuntu/.claude /home/agent/.aws /home/agent/.codex /home/agent/.claude
       rm -f -- /root/.bash_history /root/.claude.json /home/ubuntu/.bash_history /home/ubuntu/.ssh/known_hosts /home/ubuntu/.claude.json /home/agent/.claude.json
+      # Remove nontransport SSH state, including the worker user created by
+      # cloud-init. A successful provider-file scan alone never proved this.
+      rm -rf -- /root/.ssh /home/agent/.ssh
+      for directory in /root/.ssh /home/agent/.ssh; do
+        [ ! -e "$directory" ] && [ ! -L "$directory" ] || { echo 'Unexpected worker SSH state remains.' >&2; exit 1; }
+      done
+      # Only the exact selected public transport key may survive. Refuse
+      # unknown users/alternate key files rather than silently deleting them.
+      authorized_keys_suspect=$(find /root /home /opt/agent-web \( -name authorized_keys -o -name authorized_keys2 \) ! -path /home/ubuntu/.ssh/authorized_keys -print -quit)
+      [ -z "$authorized_keys_suspect" ] || { echo 'Unexpected worker authorized key file remains.' >&2; exit 1; }
+      [ -d /home/ubuntu/.ssh ] && [ ! -L /home/ubuntu/.ssh ] && [ -f /home/ubuntu/.ssh/authorized_keys ] && [ ! -L /home/ubuntu/.ssh/authorized_keys ] || { echo 'Worker transport key is not an ordinary file.' >&2; exit 1; }
+      [ "$(stat -c '%U:%G' /home/ubuntu/.ssh)" = ubuntu:ubuntu ] && [ "$(stat -c '%U:%G' /home/ubuntu/.ssh/authorized_keys)" = ubuntu:ubuntu ] || { echo 'Worker transport key ownership changed.' >&2; exit 1; }
+      [ "$(stat -c '%a' /home/ubuntu/.ssh)" = 700 ] && [ "$(stat -c '%a' /home/ubuntu/.ssh/authorized_keys)" = 600 ] || { echo 'Worker transport key permissions changed.' >&2; exit 1; }
+      printf '%s' '__RELAY_WORKER_PUBLIC_KEY_BASE64__' | base64 -d | cmp -s - /home/ubuntu/.ssh/authorized_keys || { echo 'Worker transport public key changed.' >&2; exit 1; }
+      # Remove builder host identity only after the transport key boundary.
       for kind in rsa ecdsa ed25519; do
         rm -f -- "/etc/ssh/ssh_host_${kind}_key" "/etc/ssh/ssh_host_${kind}_key.pub"
       done
