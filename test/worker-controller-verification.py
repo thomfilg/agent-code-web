@@ -162,6 +162,50 @@ class ControllerProbeTest(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())['metadataProbe'], 'http-403-denied')
         self.assertNotIn('PRIVATE-', output.getvalue())
 
+    def execute_worker(self, audit, *, phase='fresh', heartbeat_error=None):
+        def run(args, **kwargs):
+            if args[0] == 'codex': return types.SimpleNamespace(returncode=0, stdout='codex-cli 0.154.0')
+            if args[0] == 'claude': return types.SimpleNamespace(returncode=0, stdout='2.1.222 (Claude Code)')
+            return audit
+        output = io.StringIO()
+        request = {'verificationId': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'phase': phase, 'sentinel': 'PRIVATE-SENTINEL'}
+        with patch.object(probe.subprocess, 'check_output', return_value='agent'), patch.object(probe.subprocess, 'run', side_effect=run), patch.object(probe.sys, 'argv', ['probe', json.dumps(request)]), patch.object(probe.pathlib.Path, 'stat', side_effect=heartbeat_error or FileNotFoundError('PRIVATE-PATH')), contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit): exec(probe.WORKER_PROBE, {})
+        result = json.loads(output.getvalue())
+        self.assertNotIn('PRIVATE-', output.getvalue())
+        return result
+
+    def test_invalid_helper_json_reports_only_stage_class_and_fixed_helper_line(self):
+        stderr = 'Traceback (most recent call last):\n  File "/usr/local/sbin/agent-web-audit-image", line 93, in <module>\n    PRIVATE-SOURCE\nFileNotFoundError: PRIVATE-PATH and PRIVATE-TOKEN\n'
+        result = self.execute_worker(types.SimpleNamespace(returncode=1, stdout='PRIVATE-BODY', stderr=stderr))
+        self.assertEqual(result['reason'], 'invalid-worker-receipt')
+        self.assertEqual(result['probeStage'], 'image-audit-json')
+        self.assertEqual(result['exceptionClass'], 'JSONDecodeError')
+        self.assertEqual(result['helperExceptionClass'], 'FileNotFoundError')
+        self.assertEqual(result['helperLine'], 93)
+        safe = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(result), stderr='PRIVATE-SSH')))
+        self.assertEqual(safe['diagnostic']['helperLine'], 93)
+        self.assertNotIn('PRIVATE-', json.dumps(safe))
+
+    def test_helper_arbitrary_paths_classes_and_out_of_range_lines_are_suppressed(self):
+        for stderr in ('  File "/PRIVATE-PATH", line 5, in <module>\nPRIVATEError: PRIVATE-TOKEN',
+                       '  File "/usr/local/sbin/agent-web-audit-image", line 10001, in <module>\nPRIVATEError: PRIVATE-TOKEN'):
+            result = self.execute_worker(types.SimpleNamespace(returncode=1, stdout='PRIVATE-BODY', stderr=stderr))
+            self.assertNotIn('helperLine', result)
+            self.assertNotIn('helperExceptionClass', result)
+
+    def test_heartbeat_exception_reports_stage_without_path(self):
+        result = self.execute_worker(types.SimpleNamespace(returncode=0, stdout='{"valid":true}', stderr=''), heartbeat_error=PermissionError('PRIVATE-PATH'))
+        self.assertEqual(result['probeStage'], 'heartbeat')
+        self.assertEqual(result['exceptionClass'], 'PermissionError')
+        self.assertNotIn('helperLine', result)
+
+    def test_controller_rejects_untrusted_diagnostic_types_and_unknown_values(self):
+        for line in (True, -1, 10001, 'PRIVATE-SECRET'):
+            value = {'reason': 'invalid-worker-receipt', 'probeStage': 'PRIVATE-SECRET', 'exceptionClass': 'PRIVATE-SECRET', 'helperExceptionClass': 'PRIVATE-SECRET', 'helperLine': line}
+            result = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(value), stderr='')))
+            self.assertEqual(result['diagnostic'], {'stage': 'worker-probe', 'category': 'invalid-receipt', 'exitCode': 1})
+
 
 if __name__ == '__main__':
     unittest.main()
