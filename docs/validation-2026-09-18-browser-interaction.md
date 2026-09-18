@@ -8,7 +8,9 @@ agent access to a personal profile, or change worker deployment lifecycle.
 
 - Forward Chrome's native JPEG screencast during interaction, suppress identical
   frames, and request a lossless high-DPI PNG after 350 ms of inactivity. Full
-  screenshot capture no longer precedes every input/paint. Preserve serialization
+  screenshot capture no longer precedes every input/paint. Keep the canvas's
+  backing size stable across 1x/2x frames, rejecting old surfaces with mismatched
+  aspect ratios after resizing. Preserve serialization
   around idle screenshots and viewport changes: Chrome's surface cleanup must
   not undo a newer resize. Reject stale/wrong-size stream frames.
 - Limit outstanding UI input to 12 requests, not one request per network round
@@ -44,14 +46,14 @@ acknowledgement and frame output, **not end-to-end AWS latency or time until an
 LLM's first token**. The host also runs unrelated work, so these are samples,
 not performance guarantees.
 
-| Measurement | Baseline `56d1cb4` | Changed worker |
+| Measurement | Baseline `56d1cb4` | Final worker `79d66cc` |
 | --- | ---: | ---: |
-| Input acknowledgement median | 317 ms | 11.8 ms |
-| Input acknowledgement p95 | 464.1 ms | 32 ms |
-| Workload duration | 21,996 ms | 3,466 ms |
-| Output frames/s | 2.7 | 14.4 |
+| Input acknowledgement median | 170.9 ms | 6.6 ms |
+| Input acknowledgement p95 | 223.5 ms | 21.8 ms |
+| Workload duration | 12,973 ms | 2,976 ms |
+| Output frames/s | 4.6 | 29.9 |
 | PNG captures during interaction | 60 | 0 |
-| Image data across the workload | 5,274 KiB | 1,180 KiB |
+| Image data across the workload | 5,325 KiB | 2,192 KiB |
 
 ```sh
 taskset -c 0,1 nice -n 10 node scripts/benchmark-shared-browser.mjs 56d1cb4
@@ -59,19 +61,41 @@ taskset -c 0,1 nice -n 10 node scripts/benchmark-shared-browser.mjs
 ```
 
 An earlier, more heavily loaded baseline measured 1,140 ms median / 0.8 frames/s;
-the first changed run measured 11 ms / 24.1 frames/s. Use the adjacent repeated
-comparison above instead of selecting the largest improvement from those runs.
+the first changed run measured 11 ms / 24.1 frames/s. The intermediate adjacent
+comparison measured 317 ms / 2.7 frames/s versus 11.8 ms / 14.4 frames/s. Use the
+final adjacent comparison above, after adding trailing-frame delivery, rather
+than selecting the largest improvement from separate runs. Higher frame rate
+can use more bandwidth per second (410 vs 737 KiB/s in the final sample), even
+though the faster completed workload transmits fewer total bytes.
 
 ## Acceptance and publication
 
-Five actual UI browser cases passed before the final queue-barrier refinement:
-live input and all viewport presets, native direct preview, F5/Ctrl+R (Relay
-survives), real clipboard shortcuts/toolbar, and denied/oversized paste. The
-real personal extension first exposed idle refinement starvation from duplicate
-native frames; after duplicate suppression its complete isolation/consent/
-revocation/restart case passed. These intermediate results are not a claim of
-final integrated acceptance; the final run and source checkpoint are recorded
-below when complete.
+Runtime source checkpoint: **`79d66cc47141994280580d8977d914b4b9a4dcfa`**, committed
+and pushed to draft PR #4. Final verification of this runtime:
+
+- Full Node suite, sequential and pinned to two cores: **1,202 passed, zero
+  failures, three opt-in skips**, 322,836 ms. Skips are the official-MCP local
+  guest UI probe and the two explicit native credential-environment probes.
+  Log: `/tmp/relay-browser-interaction-node.log`. The existing uncommitted
+  Claude-doctor script/fixture were preserved, excluded from this commit, and
+  were still present in the working tree during testing.
+- **8/8 actual UI browser tests passed**, 41.4 seconds: all viewport presets,
+  hover/click/typing, native direct preview, F5/Ctrl+R without reloading Relay,
+  real clipboard shortcuts/toolbar, denied/oversized paste, plus the three
+  existing stream-follow/scrollback regressions. Both idle PNG delivery and
+  stable canvas geometry are checked, not just nominal bitmap dimensions.
+  Log: `/tmp/relay-browser-interaction-ui.log`. Desktop and mobile screenshots
+  were visually inspected in `test-results/shared-browser-{desktop,mobile}.png`.
+- The full Node run includes the actual personal extension's login isolation,
+  explicit consent, fixed-expression copying, revocation and restart checks;
+  protocol/input-window/copy denial tests; bounded frame buffering and final
+  frame delivery; and correct cancellation through viewer/chat changes.
+
+Earlier iterations failed on duplicate-frame starvation and transient
+wrong-aspect surfaces/unstable canvas backing sizes during resize. Those were
+fixed and the final complete runs above passed without relaxing the behavior
+assertions. All browser state was disposable fixture data, with no real model
+prompts or real account consent.
 
 AWS credential verification currently reports an expired `code-web` login.
 No deployment or running worker was changed. The published runtime remains

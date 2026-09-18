@@ -4,8 +4,13 @@ Shared Chrome follow-up (2026-09-18): user authorized proceeding on interaction
 lag, reload shortcuts and plain-text clipboard. The implementation now uses
 native compressed frames while interacting, idle high-DPI refinement, bounded
 input with motion coalescing, remote F5/Ctrl+R, and explicit Copy/Paste text.
-Final acceptance and publication are still separate gates; see
-[the local measurements and limitations](validation-2026-09-18-browser-interaction.md).
+Runtime source `79d66cc` is committed/pushed to draft PR #4. Final local acceptance
+passed 1,202 Node cases (zero failures, three explicit opt-in skips) and 8/8 actual
+UI cases. The final synthetic comparison reduced command acknowledgement median
+from 170.9 to 6.6 ms and increased output from 4.6 to 29.9 frames/s; those numbers
+exclude network/model latency. Publication remains pending: the AWS `code-web`
+session is expired, and no instances or deployed files were changed. See
+[the measurements and limitations](validation-2026-09-18-browser-interaction.md).
 The separate perceived agent-chat lag is under diagnosis: messages traverse the
 controller and return over SSE, not a direct browser-to-worker connection. No
 real account prompt was sent and that incident is not claimed fixed.
