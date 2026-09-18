@@ -42,8 +42,15 @@ export class AgentAccounts {
     if (!record || record.ownerId !== ownerId) throw fail("Agent account not found", 404);
     return record;
   }
-  async save(record) {
+  async save(record, { guard = null, rollback = null } = {}) {
+    guard?.();
     await this.records.put("agent-account", record.id, record);
+    try { guard?.(); } catch (error) {
+      // The native ceremony may be cancelled while an asynchronous encrypted
+      // write is committing. Undo that provisional write before publishing it.
+      if (rollback) await this.records.put("agent-account", record.id, rollback);
+      throw error;
+    }
     const visible = { ownerId: record.ownerId, ...publicAccount(record) };
     const changed = JSON.stringify(this.metadata.get(record.id)) !== JSON.stringify(visible);
     this.metadata.set(record.id, visible);
@@ -54,7 +61,7 @@ export class AgentAccounts {
     const record = await this.get(ownerId, id);
     if (record.provider !== chat.agent) throw fail("Choose an account for the selected agent");
     if (!scopeAllows(record, companyForChat(chat))) throw fail("This agent account is not available for this chat's company", 403);
-    if (connected && (record.status !== "connected" || !record.auth)) throw fail(reconnectError(record.provider), 409);
+    if (connected && (this.flows.has(id) || record.status !== "connected" || !record.auth)) throw fail(reconnectError(record.provider), 409);
     return record;
   }
   async begin(ownerId, input = {}) {
@@ -81,18 +88,22 @@ export class AgentAccounts {
       this.flows.set(id, flow);
       try {
         await flow.client.start();
+        if (flow.cancelled) throw fail(flow.cancelMessage);
         const login = await flow.client.login();
+        if (flow.cancelled) throw fail(flow.cancelMessage);
         flow.verificationUrl = login.verificationUrl; flow.userCode = login.userCode;
         flow.inputRequired = login.inputRequired === true;
         flow.timer = setTimeout(() => { void this.cancel(ownerId, id, "Sign-in expired. Connect again.").catch(() => {}); }, this.loginTimeoutMs);
         flow.timer.unref?.();
-        login.completed.then(() => this.finish(flow, record), () => this.cancel(ownerId, id, `${providerLabel(record.provider)} sign-in was not completed. Try signing in again.`)).catch(() => {});
+        login.completed.then(() => this.finish(flow, record), () => {
+          if (this.flows.get(id) === flow) return this.cancel(ownerId, id, `${providerLabel(record.provider)} sign-in was not completed. Try signing in again.`);
+        }).catch(() => {});
         return this.status(ownerId, id);
       } catch (error) {
         this.flows.delete(id); await flow.client.close().catch(() => {});
         // Only our fixed, credential-free messages can reach the UI. Native
         // errors may contain tokens, codes or URLs and must never be forwarded.
-        const message = error instanceof ClaudeAccountError ? new ClaudeAccountError(error.code).message : error instanceof CodexAccountError ? new CodexAccountError(error.code).message : `${providerLabel(record.provider)} sign-in could not start on the server. Try again.`;
+        const message = flow.cancelled ? flow.cancelMessage : error instanceof ClaudeAccountError ? new ClaudeAccountError(error.code).message : error instanceof CodexAccountError ? new CodexAccountError(error.code).message : `${providerLabel(record.provider)} sign-in could not start on the server. Try again.`;
         await this.save({ ...record, status: "disconnected", error: message });
         throw fail(message, 502);
       }
@@ -100,13 +111,16 @@ export class AgentAccounts {
   }
   async status(ownerId, id) {
     const record = await this.get(ownerId, id), flow = this.flows.get(id);
-    return { account: publicAccount(record), ...(flow?.ownerId === ownerId && flow.verificationUrl ? {
+    // Never publish provisional database state from an unfinished guarded
+    // commit. Admission is separately blocked while the flow owns this ID.
+    const visible = flow ? this.metadata.get(id) || record : record;
+    return { account: publicAccount(visible), ...(flow?.ownerId === ownerId && !flow.cancelled && flow.verificationUrl ? {
       login: { verificationUrl: flow.verificationUrl, ...(flow.inputRequired ? { inputRequired: true, codeSubmitted: flow.codeSubmitted === true } : { userCode: flow.userCode }), expiresAt: flow.expiresAt } } : {}) };
   }
   async submitCode(ownerId, id, input = {}) {
     return this.locked(id, async () => {
       const record = await this.get(ownerId, id), flow = this.flows.get(id);
-      if (record.provider !== "claude" || flow?.ownerId !== ownerId || !flow.inputRequired || this.now() >= flow.expiresAt) throw fail("Sign-in is not pending. Reconnect this account.", 409);
+      if (record.provider !== "claude" || flow?.ownerId !== ownerId || flow.cancelled || !flow.inputRequired || this.now() >= flow.expiresAt) throw fail("Sign-in is not pending. Reconnect this account.", 409);
       try { await flow.client.submitCode(input.code); flow.codeSubmitted = true; }
       catch (error) { throw fail(error instanceof ClaudeAccountError ? new ClaudeAccountError(error.code).message : new ClaudeAccountError().message); }
       return this.status(ownerId, id);
@@ -115,27 +129,43 @@ export class AgentAccounts {
   async finish(flow, initial) {
     return this.locked(flow.id, async () => {
       if (this.flows.get(flow.id) !== flow) return;
-      try {
+      const guard = () => {
+        if (flow.cancelled) throw fail(flow.cancelMessage);
+        if (this.closed || this.flows.get(flow.id) !== flow) throw fail("Sign-in was cancelled. Connect again.");
         if (this.now() >= flow.expiresAt) throw fail("Sign-in expired. Connect again.");
+      };
+      try {
+        guard();
         const snapshot = await flow.client.snapshot();
+        guard();
         // Reconnect cannot switch an existing chat from a company account to a
         // personal account (or vice versa) under the same saved account ID.
         if (initial.accountIdentity && (initial.accountIdentity !== identity(snapshot) || initial.subject !== snapshot.subject)) throw fail(`You signed in to a different ${providerLabel(initial.provider)} workspace or user. Reconnect the original account, or add a separate named account.`);
-        await this.save({ ...initial, ...snapshot, accountIdentity: identity(snapshot), status: "connected", error: null });
+        await this.save({ ...initial, ...snapshot, accountIdentity: identity(snapshot), status: "connected", error: null }, { guard, rollback: initial });
       } catch (error) {
-        await this.save({ ...initial, status: "disconnected", auth: null, error: error instanceof ClaudeAccountError ? new ClaudeAccountError(error.code).message : error instanceof CodexAccountError ? new CodexAccountError(error.code).message : error.statusCode ? error.message : `${providerLabel(initial.provider)} sign-in could not be verified. Reconnect this account.` });
+        await this.save({ ...initial, status: "disconnected", auth: null, error: flow.cancelled ? flow.cancelMessage : error instanceof ClaudeAccountError ? new ClaudeAccountError(error.code).message : error instanceof CodexAccountError ? new CodexAccountError(error.code).message : error.statusCode ? error.message : `${providerLabel(initial.provider)} sign-in could not be verified. Reconnect this account.` });
       } finally {
         this.flows.delete(flow.id); clearTimeout(flow.timer); await flow.client.close().catch(() => {});
       }
     });
   }
   async cancel(ownerId, id, message = "Sign-in cancelled. Connect again when ready.") {
+    owner(ownerId);
+    const pending = this.flows.get(id);
+    if (pending?.ownerId === ownerId && !pending.cancelled) {
+      // Invalidate synchronously, before waiting behind verification/storage.
+      // A different user's request cannot invalidate this account's ceremony.
+      pending.cancelled = true; pending.cancelMessage = message; clearTimeout(pending.timer);
+      void pending.client.cancel().catch(() => {});
+    }
     return this.locked(id, async () => {
       const record = await this.get(ownerId, id), flow = this.flows.get(id);
-      if (flow) {
-        this.flows.delete(id); clearTimeout(flow.timer);
-        await flow.client.cancel().catch(() => {}); await flow.client.close().catch(() => {});
-        await this.save({ ...record, status: "disconnected", auth: null, error: message });
+      if (flow || pending?.ownerId === ownerId) {
+        if (flow) {
+          this.flows.delete(id); clearTimeout(flow.timer);
+          await flow.client.cancel().catch(() => {}); await flow.client.close().catch(() => {});
+        }
+        await this.save({ ...record, status: "disconnected", auth: null, error: pending?.cancelMessage || message });
       }
       return this.status(ownerId, id);
     });
@@ -153,34 +183,40 @@ export class AgentAccounts {
   }
   async credentials(ownerId, id, chat, { refresh = false, previousAccountId = null } = {}) {
     return this.locked(id, async () => {
-      const record = await this.select(ownerId, id, chat);
+      let record = await this.select(ownerId, id, chat);
       if (previousAccountId && previousAccountId !== record.accountIdentity) throw fail("The agent requested credentials for a different account", 403);
       const client = this.clientFactory(record.provider);
       try {
         await client.start(record.auth);
-        const snapshot = await client.snapshot({ refresh });
+        const snapshot = await client.snapshot({ refresh, ...(record.provider === "claude" ? { onCredentials: async auth => {
+          const next = { ...record, auth }; await this.save(next); record = next;
+        } } : {}) });
         if (identity(snapshot) !== record.accountIdentity || snapshot.subject !== record.subject) throw fail("Agent account identity changed");
-        await this.save({ ...record, ...snapshot });
+        await this.save({ ...record, ...snapshot, error: null });
         if (record.provider === "claude") return { accessToken: snapshot.auth.claudeAiOauth.accessToken, accountId: record.subject, organizationId: record.accountIdentity, email: snapshot.email, expiresAt: snapshot.auth.claudeAiOauth.expiresAt };
         return { accessToken: snapshot.auth.tokens.access_token, chatgptAccountId: record.accountIdentity, chatgptPlanType: snapshot.plan };
-      } catch {
-        await this.save({ ...record, status: "reconnect", error: reconnectError(record.provider) });
-        throw fail(reconnectError(record.provider), 409);
+      } catch (error) {
+        const temporary = record.provider === "claude" && error instanceof ClaudeAccountError && error.code === "temporary";
+        const message = temporary ? new ClaudeAccountError("temporary").message : reconnectError(record.provider);
+        await this.save({ ...record, status: temporary ? "connected" : "reconnect", error: message });
+        throw fail(message, temporary ? 503 : 409);
       } finally { await client.close().catch(() => {}); }
     });
   }
   async models(ownerId, id, provider = null) {
     return this.locked(id, async () => {
-      const record = await this.get(ownerId, id);
+      let record = await this.get(ownerId, id);
       if (provider && record.provider !== provider) throw fail("Choose an account for the selected agent");
       if (record.status !== "connected" || !record.auth) throw fail(reconnectError(record.provider), 409);
       const client = this.clientFactory(record.provider);
       try {
         await client.start(record.auth);
         if (record.provider === "claude") {
-          const models = await client.models(), snapshot = await client.snapshot();
+          const models = await client.models(), snapshot = await client.snapshot({ onCredentials: async auth => {
+            const next = { ...record, auth }; await this.save(next); record = next;
+          } });
           if (identity(snapshot) !== record.accountIdentity || snapshot.subject !== record.subject) throw fail("Agent account identity changed");
-          await this.save({ ...record, ...snapshot }); return models;
+          await this.save({ ...record, ...snapshot, error: null }); return models;
         }
         const models = []; let cursor;
         do {
@@ -192,7 +228,15 @@ export class AgentAccounts {
         if (snapshot.auth.tokens.account_id !== record.accountIdentity || snapshot.subject !== record.subject) throw fail("Codex account identity changed");
         await this.save({ ...record, ...snapshot });
         return models;
-      } catch { throw fail(`Could not load models for this ${providerLabel(record.provider)} account. Reconnect and retry.`, 502); }
+      } catch (error) {
+        if (record.provider === "claude") {
+          const temporary = error instanceof ClaudeAccountError && error.code === "temporary";
+          const message = temporary ? new ClaudeAccountError("temporary").message : reconnectError(record.provider);
+          await this.save({ ...record, status: temporary ? "connected" : "reconnect", error: message });
+          throw fail(message, temporary ? 503 : 409);
+        }
+        throw fail(`Could not load models for this ${providerLabel(record.provider)} account. Reconnect and retry.`, 502);
+      }
       finally { await client.close().catch(() => {}); }
     });
   }

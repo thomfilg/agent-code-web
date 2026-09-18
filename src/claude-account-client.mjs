@@ -13,6 +13,7 @@ const messages = {
   code: "Paste the complete code from this account's Claude sign-in page, including the part after #.",
   authentication: "Claude sign-in could not be verified. Reconnect this account.",
   expired: "Claude access expired. Reconnect this account; no other credentials were used.",
+  temporary: "Claude is temporarily unavailable. Try this action again.",
 };
 export class ClaudeAccountError extends Error {
   constructor(code = "authentication") { const key = Object.hasOwn(messages, code) ? code : "authentication"; super(messages[key]); this.code = key; }
@@ -40,7 +41,7 @@ export async function readClaudeAuth(filename) {
 // profile cannot inherit a host login, hooks, MCP servers or repository config.
 export class ClaudeAccountClient {
   constructor(config, { spawn = spawnWorker, fetchImpl = fetch, timeoutMs = 60000, now = Date.now } = {}) {
-    Object.assign(this, { config, spawn, fetchImpl, timeoutMs, now }); this.children = new Set();
+    Object.assign(this, { config, spawn, fetchImpl, timeoutMs, now }); this.children = new Set(); this.abort = new AbortController();
   }
   async start(auth = null) {
     this.directory = await mkdtemp(path.join(os.tmpdir(), "relay-claude-login-"));
@@ -106,24 +107,36 @@ export class ClaudeAccountClient {
     catch { throw new ClaudeAccountError(); }
     finally { channel.close(); lines.close(); await terminateWorker(child); }
   }
-  async snapshot({ refresh = false } = {}) {
+  async snapshot({ refresh = false, onCredentials = async () => {} } = {}) {
     try {
       let auth = await readClaudeAuth(path.join(this.home, ".credentials.json"));
       if (this.clientId) auth.claudeAiOauth.clientId = this.clientId;
       if (refresh || auth.claudeAiOauth.expiresAt < this.now() + 300000) {
         auth = await this.refresh(auth);
+        // The provider may rotate its refresh token before profile verification.
+        // Checkpoint it under the existing identity; deliver no access until
+        // the new bearer has independently verified that identity below.
+        await onCredentials(auth);
       }
       if (auth.claudeAiOauth.expiresAt <= this.now()) throw new ClaudeAccountError("expired");
-      const response = await this.fetchImpl("https://api.anthropic.com/api/oauth/profile", { headers: { Authorization: `Bearer ${auth.claudeAiOauth.accessToken}`, "Content-Type": "application/json", "Cache-Control": "no-cache" }, redirect: "error", signal: AbortSignal.timeout(15000) });
+      const response = await this.request("https://api.anthropic.com/api/oauth/profile", { headers: { Authorization: `Bearer ${auth.claudeAiOauth.accessToken}`, "Content-Type": "application/json", "Cache-Control": "no-cache" }, redirect: "error", signal: AbortSignal.timeout(15000) });
       if (!response.ok) throw new ClaudeAccountError();
       const profile = await this.readResponse(response);
       if (!validText(profile.account?.uuid, 200) || !validText(profile.organization?.uuid, 200)) throw new ClaudeAccountError();
       return { auth, subject: profile.account.uuid, accountIdentity: profile.organization.uuid, email: safeLabel(profile.account.email, 254), plan: auth.claudeAiOauth.subscriptionType };
     } catch (error) { throw error instanceof ClaudeAccountError ? error : new ClaudeAccountError(); }
   }
+  async request(url, options) {
+    let response;
+    try { response = await this.fetchImpl(url, { ...options, signal: AbortSignal.any([this.abort.signal, options.signal]) }); }
+    catch { throw new ClaudeAccountError("temporary"); }
+    if (response.status === 429 || response.status >= 500) { await response.body?.cancel().catch(() => {}); throw new ClaudeAccountError("temporary"); }
+    return response;
+  }
   async readResponse(response) {
     const decoder = new TextDecoder(); let text = "", bytes = 0;
     try { for await (const chunk of response.body) { bytes += chunk.byteLength; if (bytes > 262144) throw new ClaudeAccountError(); text += decoder.decode(chunk, { stream: true }); } return JSON.parse(text + decoder.decode()); }
+    catch (error) { if (error instanceof ClaudeAccountError || error instanceof SyntaxError) throw error; throw new ClaudeAccountError("temporary"); }
     finally { await response.body?.cancel().catch(() => {}); }
   }
   async refresh(auth) {
@@ -132,7 +145,7 @@ export class ClaudeAccountClient {
     // refresh token to an agent worker or an arbitrary configured endpoint.
     const oauth = auth.claudeAiOauth;
     const clientId = oauth.clientId || this.clientId || "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-    const response = await this.fetchImpl("https://platform.claude.com/v1/oauth/token", { method: "POST", headers: { "Content-Type": "application/json" },
+    const response = await this.request("https://platform.claude.com/v1/oauth/token", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ grant_type: "refresh_token", refresh_token: oauth.refreshToken, client_id: clientId, scope: oauth.scopes.join(" ") }), redirect: "error", signal: AbortSignal.timeout(30000) });
     if (!response.ok) throw new ClaudeAccountError("expired");
     const result = await this.readResponse(response);
@@ -146,9 +159,9 @@ export class ClaudeAccountClient {
     return refreshed;
   }
   async models() { const { models } = await this.initialize(); if (!Array.isArray(models) || models.length > 100) throw new ClaudeAccountError(); return models; }
-  async cancel() { this.completion?.reject(new ClaudeAccountError()); await terminateWorker(this.loginProcess); }
+  async cancel() { this.abort.abort(); this.completion?.reject(new ClaudeAccountError()); await terminateWorker(this.loginProcess); }
   async close() {
-    this.completion?.reject(new ClaudeAccountError()); this.state = null;
+    this.abort.abort(); this.completion?.reject(new ClaudeAccountError()); this.state = null;
     await Promise.all([...this.children].map(child => terminateWorker(child)));
     if (this.directory) { await rm(this.directory, { recursive: true, force: true }); this.directory = null; }
   }

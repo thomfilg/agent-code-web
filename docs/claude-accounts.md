@@ -41,7 +41,13 @@ The native worker has a private per-chat home and receives access-only bearer
 credentials. Renewals run on the controller; native refresh control messages
 are answered privately and omitted from approvals/history. Disconnect blocks
 new credentials before workers are stopped. Renewed credentials are identity
-checked and saved under the same encrypted record. No browser connection,
+checked before delivery; rotated refresh credentials are checkpointed under the
+same encrypted record so a subsequent temporary profile outage cannot lose
+them. A network/5xx/429 failure is retryable without disconnecting a previously
+verified account, but delivers no unverified bearer. Revocation/identity mismatch
+requires reconnect. Cancellation also invalidates an in-flight verification
+immediately and rolls back a provisional credential commit before publication.
+No browser connection,
 Google login, or developer host login implies Claude authentication.
 
 Local workers still share the controller's filesystem: do not use that mode as
@@ -69,14 +75,18 @@ resume. No developer credentials or external consent are used by this script.
 
 Evidence recorded on 2026-09-18:
 
-- The complete backend suite passed **640/640**, with zero skipped tests,
-  including native Chrome and PostgreSQL regression coverage.
+- The complete backend suite initially passed **640/640** and the security-fix
+  rerun passed **649/649**, with zero skipped tests, including native Chrome and
+  PostgreSQL regression coverage. The final targeted rerun passed **41/41** and
+  covers the late old-ceremony failure and streamed-transport-error additions
+  made afterward.
 - 148 focused backend tests passed (both providers, ownership/scope, encrypted
   persistence, cancellation/restart/reconnect, account-bound API/runtime/models,
   access-only delivery, refresh-channel redaction and legacy Claude regressions).
 - 14 account/Google browser checks passed with one worker, including mobile
   Claude manual-code errors/retry, per-card ceremony, native account models,
   disconnect/reconnect and cancel. A 390px screenshot was visually inspected.
+  All 14 passed again after the cancellation/rotation corrections.
 - Native Claude Code 2.1.222 loopback smoke passed: one private renewal, three
   fixture inference requests, same-session resume, no approval/credential leak.
 - Real native login startup produced the allowlisted URL/manual-code prompt and
@@ -90,7 +100,12 @@ Evidence recorded on 2026-09-18:
   worker had no refresh credential file; the original host credential file's
   checksum was unchanged. Only the test's private temporary files were removed.
 
-Independent security review is pending before integration. No live Relay
+Independent review found cancellation-during-verification/persistence and
+refresh-rotation-followed-by-profile-outage races. Both were reproduced with
+five failing gated regression cases before fixing them. Additional checks cover
+foreign-owner cancellation, rotated-but-revoked/wrong-identity access, restart
+retry and safe temporary errors over the private renewal channel. Final review
+of those corrections remains pending before integration. No live Relay
 controller was restarted or production account imported by this feature task.
 
 Pending release acceptance (not counted as completed browser consent): deploy

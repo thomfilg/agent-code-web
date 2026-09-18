@@ -31,6 +31,9 @@ test("native OAuth refresh is private, access-only, fail-closed and cannot becom
   const denied = fixture({ accountCredentials: async () => { throw Error("private-provider-error"); } });
   denied.requests.accept({ type: "control_request", request_id: "refresh", request: { subtype: "oauth_token_refresh" } }); await tick();
   assert.equal(denied.sent[0].response.subtype, "error"); assert.match(denied.sent[0].response.error, /Reconnect/); assert.doesNotMatch(JSON.stringify(denied.sent), /private-provider-error/);
+  const temporary = fixture({ accountCredentials: async () => { throw Object.assign(Error("private-provider-error"), { statusCode: 503 }); } });
+  temporary.requests.accept({ type: "control_request", request_id: "refresh", request: { subtype: "oauth_token_refresh" } }); await tick();
+  assert.match(temporary.sent[0].response.error, /temporarily unavailable/); assert.doesNotMatch(JSON.stringify(temporary.sent), /private-provider-error|Reconnect/);
   const gate = Promise.withResolvers(), stopped = fixture({ accountCredentials: () => gate.promise });
   stopped.requests.accept({ type: "control_request", request_id: "refresh", request: { subtype: "oauth_token_refresh" } }); stopped.requests.close(); gate.resolve({ accessToken: "late" }); await tick(); assert.deepEqual(stopped.sent, []);
 });

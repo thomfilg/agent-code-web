@@ -5,6 +5,7 @@ import { ModelCatalog } from "../src/models.mjs";
 import { MemoryRecords, RecordCipher } from "../src/database.mjs";
 import { claudeAccountFixture } from "./fixtures/claude-account.mjs";
 import { codexAccountFixture } from "./fixtures/codex-account.mjs";
+import { ClaudeAccountClient } from "../src/claude-account-client.mjs";
 import { waitFor } from "./helpers.mjs";
 const alice = `user_${"a".repeat(32)}`, bob = `user_${"b".repeat(32)}`;
 const input = { provider: "claude", name: "Claude Personal", companies: ["thomfilg"], allowUnassigned: false };
@@ -61,4 +62,81 @@ test("Claude reconnect cannot replace organization or user, cancel erases pendin
   await accounts.begin(alice, { ...input, id }); await accounts.cancel(alice, id);
   await assert.rejects(() => accounts.submitCode(alice, id, { code: "fixture-code#fixture-state" }), { statusCode: 409 });
   assert.equal((await accounts.status(alice, id)).login, undefined); assert.equal(accounts.list(alice).length, 1);
+});
+
+for (const provider of ["claude", "codex"]) for (const phase of ["snapshot", "persistence"]) test(`${provider} cancellation wins during gated ${phase} without publishing or admitting credentials`, async t => {
+  const ctx = await setup(t), { accounts, records } = ctx, fixture = provider === "claude" ? ctx.claude : ctx.codex;
+  const pending = await accounts.begin(alice, { ...input, provider }), id = pending.account.id;
+  const gate = Promise.withResolvers(), entered = Promise.withResolvers(), client = fixture.clients.at(-1), published = [];
+  accounts.onChange = () => published.push(accounts.list(alice)[0]?.status);
+  if (phase === "snapshot") { const snapshot = client.snapshot.bind(client); client.snapshot = async (...args) => { entered.resolve(); await gate.promise; return snapshot(...args); }; }
+  else { const put = records.put.bind(records); records.put = async (...args) => { const result = await put(...args); if (args[2].status === "connected") { entered.resolve(); await gate.promise; } return result; }; }
+  client.approve(); await entered.promise;
+  const cancelled = accounts.cancel(alice, id);
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    await assert.rejects(() => accounts.select(alice, id, { ...chat, agent: provider }), { statusCode: 409 });
+    assert.notEqual((await accounts.status(alice, id)).account.status, "connected");
+  } finally { gate.resolve(); await cancelled; }
+  assert.equal(accounts.list(alice)[0].status, "disconnected");
+  assert.equal((await records.get("agent-account", id)).auth, null);
+  assert.equal(published.includes("connected"), false);
+});
+
+test("Claude rotation survives temporary profile outage and restart without giving out unverified credentials", async t => {
+  const ctx = await setup(t), id = await connect(ctx), { accounts, records } = ctx;
+  let unavailable = true, refreshes = 0;
+  const factory = () => new ClaudeAccountClient({ claude: { bin: "unused" } }, { fetchImpl: async (url, options) => {
+    if (url.endsWith("/oauth/token")) {
+      refreshes++; assert.equal(JSON.parse(options.body).refresh_token, "fixture-claude-refresh-value");
+      return new Response(JSON.stringify({ access_token: "rotated-access", refresh_token: "rotated-refresh", expires_in: 3600, scope: "user:profile user:inference" }));
+    }
+    assert.equal(options.headers.Authorization, "Bearer rotated-access");
+    return unavailable ? new Response("Temporary provider error with private diagnostic", { status: 500 }) : new Response(JSON.stringify({ account: { uuid: "fixture-claude-user" }, organization: { uuid: "fixture-claude-company" } }));
+  } });
+  accounts.clientFactory = factory;
+  await assert.rejects(() => accounts.credentials(alice, id, chat, { refresh: true }), { statusCode: 503 });
+  const saved = await records.get("agent-account", id);
+  assert.equal(saved.auth.claudeAiOauth.refreshToken, "rotated-refresh");
+  assert.equal(saved.status, "connected"); assert.equal(saved.accountIdentity, "fixture-claude-company");
+  assert.doesNotMatch(JSON.stringify(accounts.list(alice)), /rotated-access|rotated-refresh|private diagnostic/);
+  const restarted = new AgentAccounts({ records, clientFactory: factory }); await restarted.initialize(); t.after(() => restarted.close());
+  unavailable = false;
+  assert.equal((await restarted.credentials(alice, id, chat)).accessToken, "rotated-access");
+  assert.equal(refreshes, 1);
+});
+
+test("another owner cannot cancel an account being verified", async t => {
+  const { accounts, claude } = await setup(t), pending = await accounts.begin(alice, input), id = pending.account.id;
+  const client = claude.clients.at(-1), snapshot = client.snapshot.bind(client), gate = Promise.withResolvers(), entered = Promise.withResolvers();
+  client.snapshot = async () => { entered.resolve(); await gate.promise; return snapshot(); };
+  client.approve(); await entered.promise;
+  const denied = assert.rejects(() => accounts.cancel(bob, id), { statusCode: 404 });
+  assert.notEqual(accounts.flows.get(id).cancelled, true); gate.resolve(); await denied;
+  assert.equal(accounts.hasConnected(alice, "claude"), true);
+});
+
+test("a late failure from a cancelled Claude ceremony cannot cancel its replacement", async t => {
+  const { accounts, claude } = await setup(t), first = await accounts.begin(alice, input), id = first.account.id;
+  const old = claude.clients.at(-1); old.cancel = async () => {};
+  await accounts.cancel(alice, id); await accounts.begin(alice, { ...input, id });
+  old.reject(Error("late private native failure")); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(accounts.list(alice)[0].status, "pending"); assert.equal(accounts.flows.get(id).client, claude.clients.at(-1));
+  await accounts.submitCode(alice, id, { code: "fixture-code#fixture-state" }); await waitFor(() => accounts.hasConnected(alice, "claude"));
+});
+
+for (const failure of ["revoked", "identity"]) test(`Claude rotated ${failure} access stays unavailable without losing the saved rotation`, async t => {
+  const { accounts, records } = await setup(t);
+  // Finish the native ceremony using the fixture before replacing network I/O.
+  const pending = await accounts.begin(alice, input), id = pending.account.id;
+  await accounts.submitCode(alice, id, { code: "fixture-code#fixture-state" }); await waitFor(() => accounts.hasConnected(alice, "claude"));
+  accounts.clientFactory = () => new ClaudeAccountClient({ claude: { bin: "unused" } }, { fetchImpl: async url => url.endsWith("/oauth/token")
+    ? new Response(JSON.stringify({ access_token: "rotated-access", refresh_token: "rotated-refresh", expires_in: 3600, scope: "user:inference" }))
+    : failure === "revoked" ? new Response("private auth diagnostic", { status: 401 }) : new Response(JSON.stringify({ account: { uuid: "wrong-user" }, organization: { uuid: "fixture-claude-company" } })) });
+  await assert.rejects(() => accounts.credentials(alice, id, chat, { refresh: true }), { statusCode: 409 });
+  const saved = await records.get("agent-account", id);
+  assert.equal(saved.status, "reconnect"); assert.equal(saved.subject, "fixture-claude-user"); assert.equal(saved.accountIdentity, "fixture-claude-company");
+  assert.equal(saved.auth.claudeAiOauth.refreshToken, "rotated-refresh");
+  await assert.rejects(() => accounts.credentials(alice, id, chat), { statusCode: 409 });
+  assert.doesNotMatch(JSON.stringify(accounts.list(alice)), /rotated-access|rotated-refresh|private auth diagnostic/);
 });
