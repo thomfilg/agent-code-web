@@ -173,6 +173,22 @@ transport acceptance item, not something a local `.localhost` alias provides.
 
 ## Durability and acceptance status
 
+Current application (2026-09-18 09:10 UTC): revision
+`b19b7362b16f8acc82750272399105701b8d9ff0`, digest
+`sha256:c4bf393d3f48949afb589a748280223c9d8a36ad5687872990e3f09d41a3dd7d`.
+CodeBuild `ImageBuild-t8BSbSkDsHYX:e30e293e-2f63-432e-8d0d-64f022cb57ca`
+used source version `2fG7w5FyzVPGoZ2KlgMRX9YAC5ubDpaV`; deploy SSM
+`7ae5f84e-89ef-40d9-ab3b-d60936820e52` completed healthy. The scoped Git/PR
+gateway, its complete request lifecycle and legacy source-only compatibility
+are deployed. The 948-test full regression and four new negative-probe tests
+passed without skips. Actual CloudFront checks then passed all 13 fixed Git/MCP
+denials with exact public bodies/no-store, readiness 200, anonymous SSE 401,
+and WSS 101 with bidirectional frames followed by unauthenticated close 1008.
+Pair the behavior-only denial receipt with this immutable deployment receipt;
+it alone does not identify code or establish authenticated GitHub access.
+See [deployed GitHub denials](deployed-github-denials.md) for the safe repeatable
+operator command. No provider operation, account import or model call was made.
+
 The database, encrypted account records, message/attachment data and controller
 SSH trust live on the retained encrypted data volume. Workers are disposable
 and do not own the conversation database. Retention is **not** a backup:
@@ -180,7 +196,7 @@ consistent backup/restore and failed-release rollback must each be exercised
 and documented before delivery is complete. Do not format, replace or restore
 over the live data volume to test those cases; use a separate disposable restore.
 
-Current evidence (2026-09-18): authorized infrastructure, immutable build and
+Historical evidence (2026-09-18): authorized infrastructure, immutable build and
 HTTPS rollout of `f0692eb` passed; `/readyz` is 200 and anonymous `/api/chats` is
 401. Cold backup/restore passed on encrypted EBS (retained snapshot
 `snap-08d0e108e9596b5df`); the distinct restored copy was verified and removed,
@@ -190,7 +206,7 @@ container, configuration and mounts. The operator did not update secrets or
 delete application data; it did not compare database fingerprints across restart.
 Evidence: acceptance `91246861-681f-485c-b85f-4b9051b071a4`, SSM
 `88faada5-24b1-493e-bb78-22cd1df09fde`. The normal single previous-container slot
-was consumed by this test; the healthy current image remains unchanged.
+was consumed by this test; its healthy baseline image remained unchanged.
 
 The 08:18 UTC worker checkpoint passed with `ami-06f979453243f2fc1`:
 fresh/resumed audits and exact test-instance/volume cleanup completed before its
@@ -198,14 +214,14 @@ fresh/resumed audits and exact test-instance/volume cleanup completed before its
 `ad2783e5-b450-4642-91d9-04273e8c8bc2`. The two earlier images remain unaccepted;
 the finalizer omission exposed by their authorized-key audit was corrected.
 The controller IAM policy-only update completed without resource replacements.
-Runtime admission checks are also deployed in `6de71bb`, immutable digest
+Runtime admission checks were first deployed in `6de71bb`, immutable digest
 `sha256:16a165a5b7011473034737d13a9489acabcb69e1975252898abaca6aef03a6b4`;
 SSM `e5b40bf3-d94f-456f-a5b7-1212d4634cce` completed healthy. The image-only
 configuration update preserved all other settings and credentials, and the
 previous healthy application was redeployed with that accepted-image setting
 before the runtime update to preserve a usable rollback baseline.
 
-The latest integrated regression at `e22fd45` passed 859 tests without skips,
+The earlier integrated regression at `e22fd45` passed 859 tests without skips,
 including native/SSH/operator fixtures and the opt-in official-MCP guest UI
 test in the same sequential run. Ten finalizer Python checks also passed.
 A fresh onboarding browser run passed 28 isolated fixtures: 16
