@@ -35,6 +35,7 @@ import { UserServices } from "./user-services.mjs";
 import { AgentAccounts } from "./agent-accounts.mjs";
 import { BrowserConnections } from "./browser-connections.mjs";
 import { zipSync } from "fflate";
+import { readinessProbe } from "./readiness.mjs";
 
 const MIME = {
   ".css": "text/css; charset=utf-8",
@@ -116,6 +117,8 @@ export async function createAgentWebServer(options = {}) {
   const sseClients = new Set();
   const sidebarClients = new Set();
   let stopping;
+  let draining = false;
+  let activeMutations = 0;
   const sidebarChanged = () => { for (const response of sidebarClients) response.write('data: {"type":"sidebar_changed"}\n\n'); };
   const agentAccounts = new AgentAccounts({ records, config, ...options.agentAccountsOptions,
     onChange: ownerId => { for (const response of sidebarClients) if (response.ownerId === ownerId) response.write('data: {"type":"agent_accounts_changed"}\n\n'); },
@@ -144,12 +147,42 @@ export async function createAgentWebServer(options = {}) {
     for (const response of sidebarClients) if (response.ownerId === user.id) response.end();
   };
   await googleAuth.initialize();
+  const ready = readinessProbe({ records, directories: [store.dataDir, store.chatsDir],
+    configured: () => !stopping && !draining && (!googleAuth.enabled || googleAuth.info().configured) });
 
   const server = http.createServer(async (request, response) => {
     if (stopping) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
     securityHeaders(response);
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
     try {
+      if (url.pathname.startsWith("/internal/deploy/")) {
+        // SSM runs this on the controller itself. Forwarded headers and browser
+        // cookies do not confer operator authority, and cross-origin requests
+        // must never toggle this state (including from a local browser).
+        const local = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(request.socket.remoteAddress);
+        if (!local || request.headers.origin || request.headers["sec-fetch-site"] || request.method !== "POST") return json(response, 404, { error: "Not found" });
+        if (url.pathname === "/internal/deploy/resume") {
+          draining = false;
+          return json(response, 200, { ok: true });
+        }
+        if (url.pathname !== "/internal/deploy/drain") return json(response, 404, { error: "Not found" });
+        const busy = activeMutations || agentAccounts.flows.size || store.list().some(chat =>
+          manager?.isBusy(chat.id) || manager?.sideChats.busy(chat.id) || ["starting", "stopping", "running", "waiting"].includes(chat.status));
+        if (busy) return json(response, 409, { ok: false, error: "Wait for active work and sign-in attempts to finish" });
+        draining = true;
+        return json(response, 200, { ok: true });
+      }
+      if (draining) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
+      if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+        activeMutations++;
+        let released = false;
+        const release = () => { if (!released) { released = true; activeMutations--; } };
+        response.once("finish", release); response.once("close", release);
+      }
+      if (url.pathname === "/readyz" && request.method === "GET") {
+        const ok = await ready();
+        return json(response, ok ? 200 : 503, { ok });
+      }
       if (await gateway.handle(request, response, url)) return;
       if (await resources.handleMcp(request, response, url)) return;
       if (await manager?.browsers?.handle(request, response, url)) return;
@@ -215,7 +248,7 @@ export async function createAgentWebServer(options = {}) {
       const { github, mcps, environments, organization, records } = await resources.forOwner(user?.id);
       // Authentication/resource lookup can outlive shutdown's stream cleanup.
       // Do not let an already accepted request open a new SSE stream afterward.
-      if (stopping) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
+      if (stopping || draining) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
       const visibleChats = () => store.list().filter(chat => browserUsers.canRead(chat, user));
       if (url.pathname === "/api/pets" || url.pathname.startsWith("/api/pets/")) {
         const scope = user?.id || "shared", guard = async () => {
