@@ -7,6 +7,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { aws, target, verifyTarget } from "./aws-deploy.mjs";
+import { assertWorkerImage } from "../src/worker-image.mjs";
 
 const execute = promisify(execFile);
 const project = "code-web", config = "stg_aws_mvp";
@@ -37,9 +38,7 @@ export function environmentFor(secrets, outputs, image, privateKey) {
   if (allowedEmails.some(email => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) throw new Error("Invalid deployment Google email allowlist");
   const url = new URL(outputs.PublicUrl);
   if (url.protocol !== "https:" || url.pathname !== "/" || url.search || url.hash || url.username || url.password) throw new Error("Expected canonical HTTPS origin");
-  if (image.State !== "available" || image.Architecture !== "x86_64") throw new Error("Worker image is not available x86_64");
-  const tags = Object.fromEntries((image.Tags || []).map(tag => [tag.Key, tag.Value]));
-  for (const [key, value] of Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: target.stack, AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" })) if (tags[key] !== value) throw new Error("Worker image does not match this deployment and native CLI versions");
+  assertWorkerImage(image, { imageId: image?.ImageId, account: target.account, deployment: target.stack, keyName: outputs.WorkerKeyName });
   if (!privateKey.startsWith("-----BEGIN OPENSSH PRIVATE KEY-----\n")) throw new Error("Invalid worker transport key");
   for (const key of ["WorkerSubnetId", "WorkerSecurityGroupId", "WorkerKeyName"]) if (!outputs[key]) throw new Error("Missing worker stack output");
   return { ...Object.fromEntries(required.map(key => [key, secrets[key]])),
@@ -100,9 +99,44 @@ export async function publishWorkerOnlyUpdate(secretArn, current, next, { awsCal
   }
 }
 
+export async function initializeWorkerKey(secretArn, privateKey, { awsCall = aws, secretFile = withSecretFile, version = randomUUID() } = {}) {
+  if (!/^arn:aws:secretsmanager:us-east-2:456808212788:secret:[A-Za-z0-9/_+=.@-]+$/.test(secretArn) || !privateKey.startsWith("-----BEGIN OPENSSH PRIVATE KEY-----\n") || !/^[a-f0-9-]{36}$/.test(version)) throw new Error("Invalid scoped worker-key bootstrap");
+  const metadata = await awsCall(["secretsmanager", "describe-secret"], ["--secret-id", secretArn]);
+  const versionMap = metadata.VersionIdsToStages === undefined ? {} : metadata.VersionIdsToStages;
+  if (metadata.ARN !== secretArn || metadata.DeletedDate || !versionMap || typeof versionMap !== "object" || Array.isArray(versionMap)) throw new Error("Worker-key bootstrap requires exact current secret metadata");
+  const versions = Object.entries(versionMap);
+  if (versions.some(([id, stages]) => !/^[a-zA-Z0-9-]{32,64}$/.test(id) || !Array.isArray(stages) || stages.some(stage => typeof stage !== "string"))) throw new Error("Worker-key bootstrap version metadata is malformed");
+  const currents = versions.filter(([, stages]) => stages.includes("AWSCURRENT"));
+  if (currents.length > 1 || !currents.length && versions.length) throw new Error("Worker-key bootstrap found an uncertain existing version; inspect it without overwriting");
+  const value = { AGENT_WORKER_SSH_KEY_BASE64: Buffer.from(privateKey).toString("base64") };
+  const previousVersion = currents[0]?.[0];
+  if (previousVersion) {
+    const current = await awsCall(["secretsmanager", "get-secret-value"], ["--secret-id", secretArn, "--version-id", previousVersion, "--version-stage", "AWSCURRENT"]);
+    if (current.ARN !== secretArn || current.VersionId !== previousVersion || !current.VersionStages?.includes("AWSCURRENT")) throw new Error("Worker-key bootstrap current version changed");
+    const existing = parsePublishedEnvironment(current.SecretString);
+    if (Object.keys(existing).length === 1 && existing.AGENT_WORKER_SSH_KEY_BASE64 === value.AGENT_WORKER_SSH_KEY_BASE64) return { changed: false };
+    if (Object.keys(existing).length) throw new Error("Worker-key bootstrap never overwrites existing configuration or credentials");
+  }
+  const stage = `relay-worker-bootstrap-${version}`;
+  try {
+    const written = await secretFile(value, filename => awsCall(["secretsmanager", "put-secret-value"], ["--secret-id", secretArn, "--client-request-token", version, "--version-stages", stage, "--secret-string", `file://${filename}`]));
+    if (written.ARN !== secretArn || written.VersionId !== version) throw new Error();
+    // AWS automatically marks its very first version AWSCURRENT, even with
+    // explicit custom stages. Moving it onto our own version is harmless;
+    // omission of RemoveFromVersionId rejects a different concurrent winner.
+    await awsCall(["secretsmanager", "update-secret-version-stage"], ["--secret-id", secretArn, "--version-stage", "AWSCURRENT", "--move-to-version-id", version, ...(previousVersion ? ["--remove-from-version-id", previousVersion] : [])]);
+    const observed = await awsCall(["secretsmanager", "get-secret-value"], ["--secret-id", secretArn, "--version-stage", "AWSCURRENT"]);
+    if (observed.ARN !== secretArn || observed.VersionId !== version || !observed.VersionStages?.includes("AWSCURRENT")) throw new Error();
+    const confirmed = parsePublishedEnvironment(observed.SecretString);
+    if (Object.keys(confirmed).length !== 1 || confirmed.AGENT_WORKER_SSH_KEY_BASE64 !== value.AGENT_WORKER_SSH_KEY_BASE64) throw new Error();
+    return { changed: true };
+  } catch { throw new Error("Worker-key bootstrap was not confirmed; inspect the current secret version before retrying. Private diagnostics suppressed."); }
+  finally { await awsCall(["secretsmanager", "update-secret-version-stage"], ["--secret-id", secretArn, "--version-stage", stage, "--remove-from-version-id", version]).catch(() => {}); }
+}
+
 export async function main(args) {
   const [action, flag, value] = args;
-  if (!["initialize", "check", "publish", "update-worker"].includes(action)) throw new Error("Usage: aws-secrets.mjs initialize --initialize-from-dev | check | publish --worker-ami ami-ID | update-worker --worker-ami ami-ID");
+  if (!["initialize", "check", "publish", "update-worker", "initialize-worker-key"].includes(action)) throw new Error("Usage: aws-secrets.mjs initialize --initialize-from-dev | check | initialize-worker-key | publish --worker-ami ami-ID | update-worker --worker-ami ami-ID");
   if (action === "initialize") {
     if (flag !== "--initialize-from-dev" || value) throw new Error("Explicit --initialize-from-dev is required to copy only Google/owner settings into the separate AWS config");
     const list = JSON.parse(await doppler(["configs", "--json"]));
@@ -123,28 +157,33 @@ export async function main(args) {
     console.log(JSON.stringify({ project, config, initialized: true, copied: required.slice(0, 3), generated: required.slice(3), localDevChanged: false }));
     return;
   }
-  let secrets = action === "update-worker" ? null : await values(config);
+  const bootstrap = action === "initialize-worker-key";
+  if (bootstrap && args.length !== 1) throw new Error("Worker-key bootstrap takes no credentials or AMI arguments");
+  let secrets = action === "update-worker" || bootstrap ? null : await values(config);
   if (action === "check") {
     const missing = required.filter(key => !secrets[key]?.trim());
     console.log(JSON.stringify({ project, config, configured: !missing.length, missing }));
     if (missing.length) throw new Error("Deployment secrets are incomplete");
     return;
   }
-  if (flag !== "--worker-ami" || !/^ami-[a-f0-9]{8,17}$/.test(value || "")) throw new Error("Publish requires --worker-ami ami-ID");
+  if (!bootstrap && (flag !== "--worker-ami" || !/^ami-[a-f0-9]{8,17}$/.test(value || ""))) throw new Error("Publish requires --worker-ami ami-ID");
   await verifyTarget();
   const stack = (await aws(["cloudformation", "describe-stacks"], ["--stack-name", target.stack])).Stacks?.[0];
-  if (!["CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE"].includes(stack?.StackStatus) || !stack.Tags?.some(tag => tag.Key === "ManagedBy" && tag.Value === "12-apps-ci")) throw new Error("Deployment stack is not ready or owned");
+  if (stack?.StackName !== target.stack || !stack.StackId?.startsWith(`arn:aws:cloudformation:${target.region}:${target.account}:stack/${target.stack}/`) || !["CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE"].includes(stack?.StackStatus) || !stack.Tags?.some(tag => tag.Key === "ManagedBy" && tag.Value === "12-apps-ci")) throw new Error("Deployment stack is not ready or owned");
   const outputs = Object.fromEntries(stack.Outputs.map(output => [output.OutputKey, output.OutputValue]));
   if (!outputs.SecretArn?.startsWith(`arn:aws:secretsmanager:${target.region}:${target.account}:secret:`)) throw new Error("Invalid deployment secret target");
   const resources = (await aws(["cloudformation", "list-stack-resources"], ["--stack-name", target.stack])).StackResourceSummaries;
-  if (!resources.some(resource => resource.ResourceType === "AWS::SecretsManager::Secret" && resource.PhysicalResourceId === outputs.SecretArn)) throw new Error("Secret is not owned by the deployment stack");
+  for (const [logical, type, output] of [["ApplicationSecret", "AWS::SecretsManager::Secret", "SecretArn"], ["WorkerKey", "AWS::EC2::KeyPair", "WorkerKeyName"]]) {
+    const matching = resources.filter(resource => resource.LogicalResourceId === logical && resource.ResourceType === type);
+    if (matching.length !== 1 || matching[0].PhysicalResourceId !== outputs[output]) throw new Error("Secret or transport key is not exactly owned by the deployment stack");
+  }
   let current;
   if (action === "update-worker") {
     current = await aws(["secretsmanager", "get-secret-value"], ["--secret-id", outputs.SecretArn, "--version-stage", "AWSCURRENT"]);
     secrets = parsePublishedEnvironment(current.SecretString);
   }
-  const image = (await aws(["ec2", "describe-images"], ["--image-ids", value, "--owners", target.account])).Images?.[0];
-  if (!image) throw new Error("Worker image is not owned by this account");
+  const image = bootstrap ? null : (await aws(["ec2", "describe-images"], ["--image-ids", value, "--owners", target.account])).Images?.[0];
+  if (!bootstrap && (!image || image.ImageId !== value)) throw new Error("Worker image is not owned by this account or does not match the requested AMI");
   const keyPath = path.join(os.homedir(), ".local/share/agent-relay-aws-mvp/worker-ed25519");
   const keyInfo = await lstat(keyPath);
   if (!keyInfo.isFile() || keyInfo.isSymbolicLink() || keyInfo.nlink !== 1 || keyInfo.mode & 0o077 || keyInfo.size > 16384) throw new Error("Worker private key must be an ordinary private file");
@@ -154,6 +193,11 @@ export async function main(args) {
   catch { throw new Error("Could not verify the worker private key; diagnostics suppressed"); }
   const pair = (await aws(["ec2", "describe-key-pairs"], ["--key-names", outputs.WorkerKeyName, "--include-public-key"])).KeyPairs?.[0];
   assertWorkerKey(derived, pair, outputs.WorkerKeyName);
+  if (bootstrap) {
+    const result = await initializeWorkerKey(outputs.SecretArn, key);
+    console.log(JSON.stringify({ workerKeyInitialized: result.changed, providerCredentialsCopied: false, environmentPublished: false, workerAdmitted: false }));
+    return;
+  }
   const environment = environmentFor(secrets, outputs, image, key);
   if (action === "update-worker") {
     const result = await publishWorkerOnlyUpdate(outputs.SecretArn, current, environment);

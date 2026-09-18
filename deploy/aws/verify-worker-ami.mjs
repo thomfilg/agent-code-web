@@ -6,6 +6,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { assertWorkerImage, workerAcceptanceVersion, workerImageIdentity, workerImageTags } from "../../src/worker-image.mjs";
 
 const execute = promisify(execFile);
 const privateIp = value => isIP(value) === 4 && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(value);
@@ -13,6 +14,8 @@ const tagsOf = resource => Object.fromEntries((resource?.Tags || []).map(({ Key,
 const quote = value => `'${String(value).replaceAll("'", `'"'"'`)}'`;
 const imageTags = { ManagedBy: "agent-relay", CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" };
 const probeFailureCategories = new Set(["worker-user", "native-version", "image-audit", "heartbeat", "sentinel", "invalid-receipt", "ssh-host-key", "ssh-permission-denied", "ssh-connection-refused", "ssh-network-unreachable", "remote-command-missing", "ssh-transport", "remote-command-failed", "ssh-probe-timeout", "ssh-executable-unavailable"]);
+const probeStages = new Set(["request", "identity", "native-version", "image-audit-run", "image-audit-json", "image-audit-validation", "heartbeat", "sentinel", "receipt"]);
+const exceptionClasses = new Set(["RuntimeError", "JSONDecodeError", "FileNotFoundError", "PermissionError", "TimeoutExpired", "CalledProcessError", "OSError", "ValueError", "TypeError", "KeyError", "IndexError", "AttributeError", "NameError", "UnboundLocalError", "ImportError", "ModuleNotFoundError", "UnicodeDecodeError", "AssertionError"]);
 
 function safeProbeFailure(output) {
   try {
@@ -23,7 +26,10 @@ function safeProbeFailure(output) {
     const categories = ["providerAuthFiles", "sshPrivateKeyFiles", "pemFiles", "ssmLibraryFiles", "ssmSnapFiles", "ssmSnapshotFiles", "ssmPackageFiles", "unexpectedAuthorizedKeys", "scanErrors"];
     const counts = diagnostic.category === "image-audit" ? categories.filter(key => Number.isInteger(diagnostic.credentialFailureCounts?.[key]) && diagnostic.credentialFailureCounts[key] >= 0 && diagnostic.credentialFailureCounts[key] <= 1000000).map(key => `${key}=${diagnostic.credentialFailureCounts[key]}`) : [];
     const metadata = diagnostic.category === "image-audit" && ["token-endpoint-accessible", "http-403-denied", "http-401-unauthorized", "unexpected-http-response", "network-unavailable", "unexpected-network-error"].includes(diagnostic.metadataProbe) ? diagnostic.metadataProbe : "";
-    return `; ${diagnostic.category}${Number.isInteger(diagnostic.exitCode) && diagnostic.exitCode >= -255 && diagnostic.exitCode <= 255 ? ` (exit ${diagnostic.exitCode})` : ""}${audit.length ? `; audit checks: ${audit.join(", ")}` : ""}${counts.length ? `; credential counts: ${counts.join(", ")}` : ""}${metadata ? `; metadata probe: ${metadata}` : ""}`;
+    const stage = probeStages.has(diagnostic.probeStage) ? diagnostic.probeStage : "";
+    const exceptions = ["exceptionClass", "helperExceptionClass"].filter(key => exceptionClasses.has(diagnostic[key])).map(key => `${key}=${diagnostic[key]}`);
+    const helperLine = stage === "image-audit-json" && Number.isInteger(diagnostic.helperLine) && diagnostic.helperLine >= 1 && diagnostic.helperLine <= 10000 ? diagnostic.helperLine : null;
+    return `; ${diagnostic.category}${Number.isInteger(diagnostic.exitCode) && diagnostic.exitCode >= -255 && diagnostic.exitCode <= 255 ? ` (exit ${diagnostic.exitCode})` : ""}${audit.length ? `; audit checks: ${audit.join(", ")}` : ""}${counts.length ? `; credential counts: ${counts.join(", ")}` : ""}${metadata ? `; metadata probe: ${metadata}` : ""}${stage ? `; probe stage: ${stage}` : ""}${exceptions.length ? `; ${exceptions.join(", ")}` : ""}${helperLine ? `; helper line: ${helperLine}` : ""}`;
   } catch { return ""; }
 }
 
@@ -60,7 +66,7 @@ async function defaultRun(args) {
 }
 
 export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), log = () => {}, pollLimit = 90 } = {}) {
-  if (o.dryRun) return { dryRun: true, account: o.account, deployment: o.deployment, imageId: o.imageId, region: o.region, actions: ["preflight", "private-worker-launch", "controller-SSM-SSH-audit", "stop-start-persistence", "terminate-exact-test-worker"], promptsSent: false, accountImports: false };
+  if (o.dryRun) return { dryRun: true, account: o.account, deployment: o.deployment, imageId: o.imageId, region: o.region, actions: ["preflight", "private-worker-launch", "controller-SSM-SSH-audit", "stop-start-persistence", "terminate-exact-test-worker", "observe-disposable-volume-deletion", "mark-exact-accepted-image"], promptsSent: false, accountImports: false };
   const aws = (...args) => run([...(o.profile ? ["--profile", o.profile] : []), "--region", o.region, "--no-cli-pager", ...args]);
   const json = async (...args) => JSON.parse(await aws(...args, "--output", "json"));
   const identity = await json("sts", "get-caller-identity");
@@ -87,6 +93,9 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
   if (ingress?.length !== 1 || ingress[0].IpProtocol !== "tcp" || ingress[0].FromPort !== 22 || ingress[0].ToPort !== 22 || ingress[0].UserIdGroupPairs?.length !== 1 || ingress[0].UserIdGroupPairs[0].GroupId !== controllerGroup || ingress[0].IpRanges?.length || ingress[0].Ipv6Ranges?.length || ingress[0].PrefixListIds?.length) throw new Error("Acceptance permits only controller-to-worker SSH ingress");
   const images = await json("ec2", "describe-images", "--image-ids", o.imageId, "--owners", o.account, "--query", "Images");
   const image = images?.[0], tags = tagsOf(image);
+  const imageScope = { imageId: o.imageId, account: o.account, deployment: o.deployment, keyName: outputs.WorkerKeyName };
+  assertWorkerImage(image, { ...imageScope, accepted: false });
+  const imageIdentity = workerImageIdentity(image);
   // Canonical images retain optional instance-store hints. The fixed t3.medium
   // verifier has no instance store; require an encrypted EBS root/all EBS disks
   // without treating those inert ephemeral hints as unencrypted EBS volumes.
@@ -109,6 +118,7 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
   const verificationId = randomUUID(), sentinel = randomUUID(), chatId = `chat_${randomBytes(16).toString("hex")}`;
   let workerId;
   let workerHost;
+  let disposableVolumes = [];
   let cleaned = false;
   async function worker(terminationObservation = false) {
     const matches = await json("ec2", "describe-instances", "--instance-ids", workerId, "--query", "Reservations[].Instances[]");
@@ -128,6 +138,15 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
       await sleep(5000);
     }
     throw new Error(`Acceptance timed out: ${description}`);
+  }
+  async function volume(volumeId, absentAllowed = false) {
+    const volumes = await json("ec2", "describe-volumes", "--filters", `Name=volume-id,Values=${volumeId}`, "--query", "Volumes");
+    if (absentAllowed && Array.isArray(volumes) && volumes.length === 0) return null;
+    const current = volumes?.[0], tags = tagsOf(current);
+    if (volumes?.length !== 1 || current.VolumeId !== volumeId || current.Encrypted !== true ||
+        tags.ManagedBy !== "agent-relay" || tags.AgentRelayDeployment !== o.deployment || tags.AgentRelayVerification !== verificationId || tags.AgentWebChat !== chatId ||
+        (!absentAllowed && (current.Attachments?.length !== 1 || current.Attachments[0].InstanceId !== workerId))) throw new Error("Acceptance volume ownership/isolation changed; cleanup is unconfirmed");
+    return current;
   }
   async function probe(phase, previous) {
     await controller();
@@ -164,6 +183,12 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
     workerId = launched;
     log(`Acceptance worker ${workerId} launched privately; no role or metadata access.`);
     await poll("fresh worker running", async () => (await worker()).State?.Name === "running");
+    const launchedWorker = await worker();
+    const workerDisks = launchedWorker.BlockDeviceMappings;
+    if (!Array.isArray(workerDisks) || workerDisks.length === 0 || workerDisks.some(mapping => !/^vol-[a-f0-9]{8,17}$/.test(mapping.Ebs?.VolumeId || "") || mapping.Ebs.DeleteOnTermination !== true)) throw new Error("Acceptance worker disks are not exact disposable volumes");
+    disposableVolumes = workerDisks.map(mapping => mapping.Ebs.VolumeId);
+    if (new Set(disposableVolumes).size !== disposableVolumes.length) throw new Error("Acceptance worker disks are ambiguous");
+    for (const volumeId of disposableVolumes) await volume(volumeId);
     const fresh = await probe("fresh");
     await worker();
     await aws("ec2", "stop-instances", "--instance-ids", workerId);
@@ -187,15 +212,36 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
           await aws("ec2", "terminate-instances", "--instance-ids", workerId);
         }
         await poll("test worker termination", async () => (await worker(true)).State?.Name === "terminated");
+        for (const volumeId of disposableVolumes) await poll("test worker volume deletion", async () => !(await volume(volumeId, true)));
         cleaned = true;
-        log(`Confirmed termination of only acceptance worker ${workerId} and its disposable encrypted root volume.`);
+        log(`Confirmed termination of only acceptance worker ${workerId}${disposableVolumes.length ? ` and deletion of ${disposableVolumes.length} disposable encrypted volume(s)` : "; volume deletion was not independently observed"}.`);
       } catch (error) {
         if (primaryFailure) throw new Error(`${primaryFailure.message}; cleanup unconfirmed for acceptance worker ${workerId}; inspect exact deployment-owned instance before any further mutation`, { cause: primaryFailure });
         throw error;
       }
     }
   }
-  return { ...receipt, cleanedUp: cleaned };
+  // No marker until both probes and confirmed cleanup have completed. Recheck
+  // owner/privacy/encryption/immutable snapshot identity immediately before
+  // tagging, then confirm the exact marker ID rather than trusting CreateTags.
+  async function checkedImage(accepted = false) {
+    const current = await json("ec2", "describe-images", "--image-ids", o.imageId, "--owners", o.account, "--query", "Images");
+    if (current?.length !== 1) throw new Error("Acceptance image disappeared or ownership changed");
+    assertWorkerImage(current[0], { ...imageScope, accepted });
+    if (workerImageIdentity(current[0]) !== imageIdentity) throw new Error("Acceptance image identity changed; refusing to mark it");
+    return current[0];
+  }
+  if (!receipt?.accepted || !cleaned || !disposableVolumes.length) throw new Error("Acceptance has no complete cleanup evidence; refusing to mark image");
+  await checkedImage();
+  try {
+    await aws("ec2", "create-tags", "--resources", o.imageId, "--tags", JSON.stringify([
+      { Key: "AgentRelayAcceptance", Value: workerAcceptanceVersion }, { Key: "AgentRelayAcceptanceId", Value: verificationId },
+    ]));
+    if (workerImageTags(await checkedImage(true)).AgentRelayAcceptanceId !== verificationId) throw new Error();
+  } catch {
+    throw new Error("Worker probes and cleanup passed, but acceptance marker was not confirmed; inspect only this AMI before retrying");
+  }
+  return { ...receipt, cleanedUp: cleaned, volumesRemoved: disposableVolumes.length, acceptance: { version: workerAcceptanceVersion, verificationId, confirmed: true } };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

@@ -29,7 +29,7 @@ function awsFixture(change = {}) {
       "list-stack-resources": resources,
       "describe-subnets": [{ SubnetId: outputs.WorkerSubnetId, OwnerId: t.account, Tags: owned, MapPublicIpOnLaunch: false, VpcId: "vpc-fixture" }],
       "describe-security-groups": [{ GroupId: outputs.WorkerSecurityGroupId, OwnerId: t.account, Tags: owned, VpcId: "vpc-fixture", IpPermissions: [{ IpProtocol: "tcp", FromPort: 22, ToPort: 22, UserIdGroupPairs: [{ GroupId: "sg-controller" }] }] }],
-      "describe-images": [{ ImageId: imageId, OwnerId: t.account, State: "available", Architecture: "x86_64", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true } }], Tags: tags({ ManagedBy: "agent-relay", AgentRelayDeployment: t.deployment, AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" }) }],
+      "describe-images": [{ ImageId: imageId, OwnerId: t.account, State: "available", Architecture: "x86_64", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true } }], Tags: tags({ ManagedBy: "agent-relay", AgentRelayDeployment: t.deployment, AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222", AgentRelayAcceptance: "verified-v1", AgentRelayAcceptanceId: id }) }],
       "describe-key-pairs": [{ KeyName: outputs.WorkerKeyName, Tags: owned, PublicKey: "ssh-ed25519 AAAAFixturePublic comment" }],
     };
     const key = operation === "describe-instances" ? (args.includes(t.controller) ? "controller" : "worker") : operation;
@@ -82,6 +82,17 @@ test("real-shaped Canonical AMI accepts inert hints but requires one encrypted E
     await assert.rejects(guardNativeTarget(options, awsFixture({ "describe-images": x => { x[0].BlockDeviceMappings = mapping; } }).json));
   }
   await assert.rejects(guardNativeTarget(options, awsFixture({ worker: x => { x[0].InstanceType = "i3.large"; } }).json));
+});
+
+test("native acceptance refuses missing, revoked or wrong-version AMI markers before worker access", async () => {
+  for (const mode of ["missing", "revoked", "id", "version"]) {
+    const f = awsFixture({ "describe-images": images => {
+      if (mode === "missing") images[0].Tags = images[0].Tags.filter(tag => !tag.Key.startsWith("AgentRelayAcceptance"));
+      else images[0].Tags.find(tag => tag.Key === (mode === "id" ? "AgentRelayAcceptanceId" : "AgentRelayAcceptance")).Value = mode === "version" ? "verified-v2" : "invalid";
+    } });
+    await assert.rejects(guardNativeTarget(options, f.json), /acceptance/);
+    assert.ok(!f.calls.some(args => args.includes(workerId)));
+  }
 });
 
 test("host credential reader transfers only access and detects source changes without restoring", async t => {
