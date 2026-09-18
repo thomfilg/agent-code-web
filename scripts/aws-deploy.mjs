@@ -74,7 +74,7 @@ export async function main(args, env = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [engine, ...options], { cwd: root, env, stdio: "inherit" });
     child.once("error", () => reject(new Error("Could not start the shared AWS engine")));
-    child.once("exit", code => resolve(code || 0));
+    child.once("exit", code => resolve(code ?? 1));
   });
 }
 
