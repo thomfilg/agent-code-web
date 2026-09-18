@@ -33,7 +33,7 @@ export class AppPreviews {
     manager.on("preview-revoke", this.onRevoke);
   }
   remember(user) {
-    if (!user || typeof user.id !== "string" || typeof user.sessionId !== "string" || !Number.isFinite(user.expiresAt) || user.expiresAt <= Date.now()) return null;
+    if (!user || typeof user.id !== "string" || typeof user.sessionId !== "string" || this.identity.revoked?.has(user.sessionId) || !Number.isFinite(user.expiresAt) || user.expiresAt <= Date.now()) return null;
     for (const [key, saved] of this.sessions) if (saved.expiresAt <= Date.now()) this.sessions.delete(key);
     const key = JSON.stringify([user.id, user.sessionId]);
     if (!this.sessions.has(key) && this.sessions.size >= 1024) throw fail("Too many preview sessions", 429);
