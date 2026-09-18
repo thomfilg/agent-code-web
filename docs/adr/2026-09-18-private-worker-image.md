@@ -44,3 +44,18 @@ subsequent stop/start must preserve that new identity and a test sentinel. An
 acceptance receipt requires both phases and exact-instance cleanup, not merely
 AMI availability. Provider/MCP round trips remain a separate user-authorized
 gate and are not performed by this no-prompts operator.
+
+Observed first AWS bake failed in cloud-init's package-install module; no image
+was published and the exact builder was terminated. Its console also showed
+needrestart restarting bootstrap/SSM services during package operations. The
+recipe now avoids a broad in-place OS upgrade during bootstrap and uses a
+builder-only service-specific restart override, removed before imaging. This is
+not a permanent security-update exemption. The next bake must establish whether
+this resolves the observed installation failure; local checks are not evidence
+of a successful AWS bake. An independent unit-ordering review also found that a
+normal service ordered before ssh.socket would cycle through basic.target; the
+host-key unit now uses DefaultDependencies=no and local-fs.target explicitly.
+
+References: [Ubuntu's service-specific needrestart policy](https://discourse.ubuntu.com/t/needrestart-changes-in-ubuntu-24-04-service-restarts/44671),
+[upstream needrestart configuration](https://github.com/liske/needrestart/blob/master/ex/needrestart.conf),
+[cloud-init package settings](https://docs.cloud-init.io/en/latest/reference/yaml_examples/package_update_upgrade.html).
