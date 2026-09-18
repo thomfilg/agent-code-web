@@ -9,13 +9,19 @@ details under Advanced. Company assignment replaces the extra environment-MCP
 selection. Ambiguous legacy MCP/GitHub bindings require an explicit company;
 preserve encrypted credentials without duplicating them or guessing the mapping.
 See [the decision](adr/2026-09-18-company-connections.md) and
-[local acceptance / publication blockers](validation-2026-09-18-company-chat.md).
+[acceptance and publication receipt](validation-2026-09-18-company-chat.md).
 The user confirmed `thomfilg + 12-apps` as one Relay company, independent of
 GitHub repository owners. Runtime `8bc0760` passes 144 scoped Node tests and 18
-final browser tests; its immutable AWS image is built, but production is not yet
-updated. The existing chat also contains a g2i repository under another GitHub
-connection; its cross-company-chat policy needs an explicit decision before
-migration. Do not drop that repository or reassign its login silently.
+final browser tests; its immutable AWS image was published and independently
+verified at 21:38–21:42 UTC. The user requires separate
+chats per company and explicitly authorized deleting the existing mixed-company
+`future-pay / clickdown` chat. The guarded operator migration preserves both
+GitHub credentials, binds Linear only to g2i and creates a blank g2i environment
+without copying private settings from the combined company. The exact mixed chat
+and its worker/disk are removed; both GitHubs and both agent accounts remain
+connected. Live Linear verification passed with 79 tools and an authenticated
+read. Publication evidence, recovery limits and exact cleanup targets are
+recorded in the receipt above.
 
 New-chat refinement (2026-09-18): replace the creation modal with an inline
 page, with the message composer at the bottom, a compact environment / repository

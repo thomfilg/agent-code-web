@@ -74,14 +74,14 @@ except Exception:
     print(json.dumps({'ok':False,'error':'Maintenance rollout failed; private diagnostics suppressed. Inspect before retrying.'}),flush=True)
     sys.exit(1)
 `;
-    // Keep SSM's IPC document small even though the reviewed engine and the
-    // offline planner are bundled for a single locked maintenance operation.
+    // Keep delivery bounded even though the reviewed engine and the offline
+    // planner are bundled for a single locked maintenance operation.
     const compressed = gzipSync(Buffer.from(python)).toString("base64");
     const digest = createHash("sha256").update(python).digest("hex");
     const staging = `/run/relay-company-migration-${digest}`;
-    // SSM's agent IPC rejected large documents before invoking the plugin.
     // Stage non-secret source in individually small, exclusive files; execution
-    // is a separate command and checks the complete source hash first.
+    // is separate and checks the complete source hash first. This is not a fix
+    // for disk exhaustion: image pulls also require sufficient host disk space.
     const chunks = compressed.match(/.{1,3500}/g);
     const staged = await Promise.all(chunks.map(async (chunk, index) => {
       const prepare = `import os,pathlib\np=pathlib.Path('${staging}')\ntry: p.mkdir(mode=0o700)\nexcept FileExistsError: pass\ns=p.lstat()\nif p.is_symlink() or not p.is_dir() or s.st_uid!=0 or s.st_mode&0o077: raise SystemExit(1)\nf=p/'part-${index}'\nwith f.open('x',encoding='ascii') as stream: stream.write('${chunk}')\nos.chmod(f,0o600)\nprint('source part staged; not executed')`;

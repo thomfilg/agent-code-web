@@ -15,6 +15,9 @@ both personal and organization repositories with one GitHub connection. **g2i**
 is a separate company, with its own GitHub connection and the existing Linear
 connection. Either repository owner can be primary in the combined company.
 Repository names under different owners remain separate projects in the sidebar.
+The user explicitly rejected mixed-company chats: conversations must be separate
+per company. They authorized deleting the existing `future-pay / clickdown`
+conversation, not rebinding either repository or widening either connection.
 
 A company has many MCP connections and at most one saved native GitHub
 connection, including pending/disconnected connections. Each connection belongs
