@@ -85,16 +85,19 @@ is the current prerequisite; item 20's unfinished doctor work stays paused.
 
 ## MVP release gate — 2026-09-17
 
-Continuation checkpoint (2026-09-18 12:13 UTC): the user renewed autonomous
+Continuation checkpoint (2026-09-18 12:25 UTC): the user renewed autonomous
 work for two hours, ending at 13:39:52 UTC (10:39:52 São Paulo). The isolated
 remote-app preview now has committed controller routing, persistent
 owner/chat/port CloudFront assignments, trusted-Relay browser bootstrap,
 explicit Open app UI and runtime/logout revocation. These changes are pushed
-on the integration branch, with component PRs 30–32. They are **not yet deployed**;
-the old dormant-preview deployment description below remains accurate for AWS.
-The reviewed infrastructure change set adds only the opt-in controller preview
-IAM policy; it replaces no controller or data volume. Runtime activation and
-actual AWS lifecycle/HTTP/WS acceptance are still in progress.
+on the integration branch, with component PRs 30–34. Runtime `14050df` is now
+deployed on AWS; local runtime `5487358` has identical application sources.
+The reviewed infrastructure change set added only the opt-in controller preview
+IAM policy; it replaced no controller or data volume. The narrow configuration
+update preserved all credentials and unrelated settings. A second same-digest
+rollout retained a preview-aware rollback container. The old dormant-preview
+description below is historical, not the current activation state. Actual AWS
+preview lifecycle and authenticated app-traffic acceptance remain open.
 
 New evidence: 29 focused controller/auth/config/runtime checks and an independent
 35-test review passed. Actual local HTTP/WS integration verifies cookie and host
@@ -103,9 +106,19 @@ foreign-origin denial before worker acquisition, and deploy-drain protection
 during an incomplete bootstrap request. A separate official Playwright MCP
 browser run proved that an active hostile app service worker cannot intercept
 the trusted Relay-origin bootstrap; blocked third-party cookies fail closed.
-The full UI-to-server browser acceptance and integrated regression are pending.
-These fixture checks do not replace Google/provider consent in the deployed
-product. The AWS Google callback still needs the user's console configuration.
+The full local UI-to-server browser acceptance passed through real HTTP/WS/SSE
+and revocation, with observed child cleanup and no prompts; root repeated it
+after all runtime fixes. Integrated regression passed 1083/1083 without skips
+or failures, plus 18 metadata-operator checks. These fixture checks do not replace
+Google/provider consent in the deployed product. The AWS Google callback still
+needs the user's console configuration. Public AWS login entry/denial/transport
+checks passed again after rollout; see [deployment receipts](aws-deployment.md).
+
+The authorized local restart preserved twelve readable encrypted records and
+the credential file byte-for-byte against its cold private checkpoint
+`checkpoint-4fMMFh`. There were zero chats and pending agent sign-ins before
+restart. No account was authorized or message sent; this is not a claim that
+every encrypted row was byte-compared against the archive.
 
 Latest local activation (2026-09-18 09:50 UTC): the integrated Codex/Claude,
 GitHub/Linear, scoped worker Git/PR gateway and account-deletion version is active

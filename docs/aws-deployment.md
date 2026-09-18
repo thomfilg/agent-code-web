@@ -191,7 +191,46 @@ transport acceptance item, not something a local `.localhost` alias provides.
 
 ## Durability and acceptance status
 
-Current application (2026-09-18 09:51 UTC): revision
+Current application (2026-09-18 12:25 UTC): revision
+`14050df15ec0cc1465fed4b7f929097ad010bb21`, immutable digest
+`sha256:9dbb6306863a60de96cf91118165b6164d053de72dbe04777fc5dfd296db6d9a`.
+CodeBuild `ImageBuild-t8BSbSkDsHYX:65d3f2a8-045f-487e-b407-7816a9ed56d0`
+used exact S3 source version `yEHpuZnlxYf5AefuNOl8lauwyGtF2KIq`.
+SSM rollout `a251be12-8297-44a9-91b9-76bbf3f76039` completed healthy;
+independent observation confirmed Success / exit 0.
+
+The reviewed `EnableAppPreviews=true` change set added only
+`PreviewHostingPolicy`; controller `i-08c991c22089589a5` and data volume
+`vol-0be8793d52d34ed1c` were unchanged. The preview-only configuration update
+used conditional secret-version promotion and verified every credential and
+unrelated setting byte-identical. No Doppler credential refresh occurred.
+Remote preview UI, strict Host routing, trusted browser bootstrap, durable
+host lifecycle and HTTP/WS proxy are now enabled, not dormant. No product
+preview host or fabricated production user was created by this rollout.
+
+The integrated regression passed **1083/1083**, no failures/skips, in 271.1s,
+with native GitHub and official-MCP guest UI enabled, sequentially on CPUs 0–1.
+The later metadata-only operator tests passed **18/18**. A root rerun of the
+complete local preview UI/API/bootstrap/HTTP/WS/SSE/revocation fixture also
+passed after all runtime security fixes, including observed process cleanup.
+This remains synthetic local OIDC/host/worker-boundary evidence, not real
+Google consent or deployed app traffic. See [the fixture](preview-ui-acceptance.md).
+
+At 12:22 UTC the deployed public checks passed all 13 fixed Git/MCP denials,
+readiness 200, anonymous SSE 401, WSS 101 with bidirectional frames and expected
+authentication rejection, and official-MCP login entry at 1600/390/320 pixels
+without horizontal overflow. These checks do not authenticate a user.
+Actual CloudFront preview-host provisioning/deletion acceptance is still pending;
+Google callback registration and real provider consent remain open.
+
+Before any preview host creation, the same verified digest/configuration was
+deployed a second time: SSM `d33ae45e-c52b-4d54-abbb-38203c8c4034` completed
+healthy (independently Success / exit 0). This retains a **preview-aware**
+previous container. Do not roll back to pre-router code while preview
+distributions remain enabled: revoking grants alone does not add strict Host
+routing to an old binary. Preserve this compatible rollback boundary.
+
+Historical application checkpoint (2026-09-18 09:51 UTC): revision
 `3a0b7b3c17956393a7c9f6e36dc1a5bc80a05edb`, digest
 `sha256:53cb37a8c558548bb256d90f1e840cc0a5aa9b80512f6fa13ef02022e401bad8`.
 CodeBuild `ImageBuild-t8BSbSkDsHYX:44d1e375-b925-4486-83fd-320772a16a33`
@@ -209,12 +248,12 @@ it alone does not identify code or establish authenticated GitHub access.
 See [deployed GitHub denials](deployed-github-denials.md) for the safe repeatable
 operator command. No provider operation, account import or model call was made.
 
-The reviewed preview grant/TCP/HTTP/SSE/WebSocket modules in this image are
-dormant. Their component tests do not establish working external app URLs:
+The reviewed preview grant/TCP/HTTP/SSE/WebSocket modules in that older image
+were dormant. Their component tests did not establish working external app URLs:
 isolated origin provisioning, bootstrap, lifecycle admission and the actual
-deployed HTTP/WS app round trip are still absent. No preview IAM or public route
-was activated by this rollout. The prior healthy `b19b736` image remains the
-normal one-slot rollback baseline.
+deployed HTTP/WS app round trip were absent at that checkpoint. No preview IAM
+or public route was activated by that rollout. Its `b19b736` rollback baseline
+has since been replaced by the preview-aware baseline above.
 
 The database, encrypted account records, message/attachment data and controller
 SSH trust live on the retained encrypted data volume. Workers are disposable
