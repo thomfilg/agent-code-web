@@ -125,6 +125,30 @@ test("a late failure from a cancelled Claude ceremony cannot cancel its replacem
   await accounts.submitCode(alice, id, { code: "fixture-code#fixture-state" }); await waitFor(() => accounts.hasConnected(alice, "claude"));
 });
 
+test("cancelling a verifying Claude flow cannot erase an already queued replacement", async t => {
+  const { accounts, claude } = await setup(t), first = await accounts.begin(alice, input), id = first.account.id;
+  const client = claude.clients.at(-1), snapshot = client.snapshot.bind(client), entered = Promise.withResolvers(), gate = Promise.withResolvers();
+  client.snapshot = async () => { entered.resolve(); await gate.promise; return snapshot(); };
+  client.approve(); await entered.promise;
+  const replacing = accounts.begin(alice, { ...input, id }); await new Promise(resolve => setImmediate(resolve));
+  const cancelling = accounts.cancel(alice, id); gate.resolve(); await Promise.all([replacing, cancelling]);
+  assert.equal(accounts.list(alice)[0].status, "pending");
+  assert.equal(accounts.flows.get(id).client, claude.clients.at(-1));
+  await accounts.submitCode(alice, id, { code: "fixture-code#fixture-state" }); await waitFor(() => accounts.hasConnected(alice, "claude"));
+});
+
+test("account disconnection still invalidates a replacement queued during cancelled verification", async t => {
+  const { accounts, claude, records } = await setup(t), first = await accounts.begin(alice, input), id = first.account.id;
+  const client = claude.clients.at(-1), snapshot = client.snapshot.bind(client), entered = Promise.withResolvers(), gate = Promise.withResolvers();
+  client.snapshot = async () => { entered.resolve(); await gate.promise; return snapshot(); };
+  client.approve(); await entered.promise;
+  const replacing = accounts.begin(alice, { ...input, id }); await new Promise(resolve => setImmediate(resolve));
+  const disconnecting = accounts.disconnect(alice, id); gate.resolve(); await Promise.all([replacing, disconnecting]);
+  claude.clients.at(-1).approve(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(accounts.list(alice)[0].status, "disconnected"); assert.equal(accounts.flows.has(id), false);
+  assert.equal((await records.get("agent-account", id)).auth, null);
+});
+
 for (const failure of ["revoked", "identity"]) test(`Claude rotated ${failure} access stays unavailable without losing the saved rotation`, async t => {
   const { accounts, records } = await setup(t);
   // Finish the native ceremony using the fixture before replacing network I/O.

@@ -108,6 +108,11 @@ retry and safe temporary errors over the private renewal channel. Final review
 of those corrections remains pending before integration. No live Relay
 controller was restarted or production account imported by this feature task.
 
+A follow-up review also reproduced a queued-replacement race: an old attempt's
+cancel could run after a newer begin acquired the account lock. Cancellation is
+now bound to the captured flow/revision; whole-account disconnect still cancels
+any replacement. Both orderings have gated regression tests.
+
 Pending release acceptance (not counted as completed browser consent): deploy
 the integrated build, have the user finish this named Claude account's browser
 authorization, send a consented turn, restart/resume that deployed chat, and
