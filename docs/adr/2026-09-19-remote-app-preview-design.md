@@ -1,13 +1,22 @@
 # Remote app previews on a separate browser origin
 
-Status: **end-to-end feature not implemented or deployed**. Gate 45 (HTTP and
-WebSocket app forwarding) remains open. No AWS mutation is authorized by this
-document. The existing browser-link helper only constructs local aliases.
-Reviewed grant, localhost TCP and HTTP/SSE/WebSocket proxy components now exist
-as dormant foundations; no public router, bootstrap, hostname provisioning or
-UI activates them. See [grant contracts](../preview-grants.md),
+Status: **implemented behind explicit configuration; deployed acceptance is a
+separate gate**. Controller routing, durable owner/chat/port host assignments,
+trusted-Relay bootstrap, Open app UI and lifecycle revocation are integrated.
+The [integrated local browser fixture](../preview-ui-acceptance.md) covers their
+combined HTTP/SSE/WebSocket flow; it is not AWS or real-consent evidence. This
+ADR authorizes no AWS mutation and does not close gate 45.
+
+The original fragment-ticket bootstrap and proposed PWA restriction below are
+superseded by the [browser bootstrap decision](2026-09-18-preview-browser-bootstrap.md).
+The user selected the [no-custom-DNS host lifecycle](2026-09-18-preview-host-lifecycle.md).
+See [operating limits and rollback](../app-preview-operations.md),
+[grant contracts](../preview-grants.md),
 [TCP transport](2026-09-19-worker-local-tcp-foundation.md) and
-[proxy boundaries](2026-09-19-worker-preview-proxy-foundation.md).
+[proxy boundaries](2026-09-19-worker-preview-proxy-foundation.md). The older
+component ADRs describe what each primitive alone does, not current integration
+or deployment status. Actual receipts remain in the [feature queue](../feature-queue.md)
+and [AWS operations](../aws-deployment.md).
 
 ## Feasibility and the origin decision
 
@@ -24,15 +33,15 @@ requests remain cross-chat risks. COOP/noopener is useful defense in depth, not
 a replacement for that separation. This follows directly from the
 [HTML origin and opener-policy model](https://html.spec.whatwg.org/multipage/browsers.html#same-origin).
 
-Choose one of these before implementation:
+The original alternatives were:
 
-1. **Preferred:** one preview distribution plus a dedicated wildcard preview
+1. **Custom DNS, not selected:** one preview distribution plus a dedicated wildcard preview
    domain and TLS certificate, with a stable random hostname per chat/port.
    CloudFront requires a certificate covering the alias and DNS control; it
    does not give us arbitrary subdomains under its generated distribution
    hostname. See [alternate-domain requirements](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/CNAMEs.html)
    and [distribution certificates](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesGeneral.html).
-2. **No custom DNS:** a separate generated CloudFront distribution hostname per
+2. **Selected: no custom DNS:** a separate generated CloudFront distribution hostname per
    chat/port. This is technically possible but adds distribution provisioning,
    deployed-state waits, retention/cleanup and scope checks to the runtime
    lifecycle. It is not a single second distribution. Current default quotas
@@ -45,16 +54,17 @@ authorized chat. Do not recycle a hostname across unrelated chats/users. A
 sandboxed opaque-origin wrapper would break ordinary app cookies/storage and
 does not satisfy the requested direct, fully functioning app URL.
 
-## Bounded proposed MVP
+## Implemented design and superseded proposal
 
 - The authenticated Relay UI offers **Open app** for an explicit localhost port
   and path. A same-origin POST checks owner, chat, selected VM and permitted
   port; it never accepts an arbitrary target hostname or controller address.
-- Relay returns a preview-host bootstrap URL with a short, single-use random
-  ticket in its fragment. The fixed trusted preview bootstrap exchanges it
-  through its own origin, removes the fragment and navigates to the original
-  path. Open with noopener/noreferrer; never place Relay cookies or a provider
-  token in the link.
+- The original preview-origin fragment-ticket proposal is **not implemented**.
+  Relay returns its own authenticated launch document instead. Credentialed
+  CORS requests bind a one-use ticket to an HttpOnly nonce in that browser;
+  a probe verifies the new grant cookie before navigating to the original app
+  path/query/fragment. Neither app URLs nor app documents receive the ticket.
+  Open with noopener/noreferrer; never place Relay/provider credentials in a link.
 - The preview origin sets its own short-lived, Secure, HttpOnly, host-only
   cookie. The server-side grant binds owner/current login, chat, port, exact
   preview hostname and lifecycle generation. It is neither a public permanent
@@ -66,8 +76,9 @@ does not satisfy the requested direct, fully functioning app URL.
   and run a fixed Node TCP bridge over SSH to **127.0.0.1 and the granted port**.
   Use a custom Duplex for Node HTTP proxying/upgrades; never run user request
   strings as shell commands or enable SSH port forwarding. The hardened SSH
-  launcher now carries the tested dormant TCP bridge/proxy framing; its actual
-  worker admission, routing and lifecycle integration still needs building.
+  launcher carries the tested TCP bridge/proxy framing. Admission and lifecycle
+  are wired by [AppPreviews](../../src/app-previews.mjs); deployed acceptance
+  remains distinct from local integration coverage.
 - Keep streaming/backpressure for HTTP, SSE, uploads and WebSocket upgrades.
   Strip the preview-auth cookie and all Relay/provider credentials before the
   app receives a request. Preserve app cookies only within that preview host;
@@ -88,9 +99,9 @@ does not satisfy the requested direct, fully functioning app URL.
   upgrade and application headers. AWS documents the WebSocket handshake
   requirements [here](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/distribution-working-with.websockets.html).
 
-## Work and acceptance estimate
+## Bootstrap threat model and acceptance
 
-### Unresolved bootstrap/service-worker boundary
+### Superseded bootstrap/service-worker proposals
 
 A reserved bootstrap URL on the application's own origin is not sufficient to
 keep that bootstrap trusted. A previously installed root-scope service worker
@@ -104,41 +115,36 @@ Threat-model clarification (2026-09-18): with a permanently assigned
 owner/chat/port origin and correct revocation, that interception is not by
 itself a cross-user, cross-chat or cross-port authority leak. The application's
 scripts and service worker already control that origin's documents and can make
-its authenticated app requests. The distinct unresolved risk is exporting the
+its authenticated app requests. The distinct risk in the old proposal was exporting the
 single-use bootstrap bearer to another browser before redemption, giving that
 browser the same scoped access until expiry/revocation. `PreviewGrants` binds
 Relay session metadata but does not authenticate the redeeming browser. This
-is not evidence of Relay/provider credential exposure. Investigate a
-browser-bound bootstrap exchange that preserves service-worker/PWA behavior;
-do not claim same-origin app-script secrecy or silently ban PWAs to close the
-gate. The required browser and lifecycle acceptance below remains outstanding.
+is not evidence of Relay/provider credential exposure. The implemented
+[PreviewBootstrap](../../src/preview-bootstrap.mjs) adds the browser binding;
+`PreviewGrants` alone still does not provide it. No same-origin app-script
+secrecy is promised.
 
-The smallest proposed initial policy is to start only on fresh origins and
-explicitly reject application service-worker script requests (the browser's
-`Service-Worker: script` request), across all proxy paths and methods, before
-upstream forwarding. This would intentionally exclude app service-worker/PWA
-registration from that first preview version; it is a product limitation that
-must be accepted and documented, not silently introduced. Keeping a bootstrap
-path out of app routing or stripping `Service-Worker-Allowed` alone is not a
-substitute. If service workers must work, design and review a bootstrap that
-cannot be intercepted by the app's worker instead.
+The historical suggestion to reject `Service-Worker: script` requests was not
+selected and is **not an operating requirement**. PWA/service-worker behavior
+is preserved. Merely reserving a URL or stripping `Service-Worker-Allowed`
+would not make an app-origin document trustworthy.
 
-This is an unresolved design and real-browser acceptance gate: there is no
-active route or service-worker restriction in this ADR or the dormant proxy.
-Before activation, verify first/repeated opens, script-request rejection and
-redirect variants, hostile root-scope registration attempts, reserved bootstrap
-handling, logout/expiry and two-user/two-chat isolation in real Chrome. Do not
-claim that bootstrap cookies or service-worker safety follow from the tested
-HTTP/WebSocket transport alone.
+The selected flow runs its bootstrap document on Relay's trusted origin, which
+the app's service worker does not control. A real isolated Chrome fixture
+proved first/repeated opens with an active hostile root worker and a positive
+same-origin interception control. Actual cross-site-cookie blocking produced
+the explicit fail-closed message. See the browser-bootstrap ADR for that receipt
+and its privacy limitation; do not infer this proof from HTTP unit tests.
+Deployed host routing, lifecycle and multi-owner negative/positive acceptance
+still require separate receipts before gate 45 can close.
 
 This is a bounded security-sensitive feature, not just adding a distribution.
 It has four implementation units: (1) grant/host lifecycle and isolated routing,
 (2) HTTP/SSE/WS SSH bridge, (3) UI open/revoke plus worker-presence integration,
-(4) deployment configuration and adversarial/end-to-end acceptance. A reasonable
-engineering estimate is multiple focused implementation/review sessions, with
-additional AWS/DNS/certificate deployment time; not a small patch to the existing
-local-alias helper. The no-DNS per-preview-distribution option adds a fifth,
-larger provisioning/cleanup state machine and broader operator IAM requirements.
+(4) deployment configuration and adversarial/end-to-end acceptance. The no-DNS
+per-preview-distribution option adds a fifth unit: the persistent provisioning/
+cleanup state machine and its operator IAM requirements. These units now exist;
+deployment latency and actual acceptance do not follow from fixture coverage.
 
 Required tests before closing gate 45:
 
@@ -156,18 +162,18 @@ Required tests before closing gate 45:
 - One complete deployed CloudFront HTTP and WS round trip after all fixture
   tests, not merely a locally passing reverse-proxy test.
 
-## No-DNS option: per-chat CloudFront lifecycle estimate
+## Selected no-DNS lifecycle
 
-No domain purchase/registration is proposed or authorized. If the no-DNS option
-is chosen, start with a fixed forwarded port for each generated hostname. Ports
+No domain purchase/registration is proposed or authorized. The selected design
+uses a fixed forwarded port for each generated hostname. Ports
 inside one chat VM can share its trust boundary, but one hostname still cannot
 transparently route simultaneous root-relative apps on different ports without
 an unambiguous routing mechanism. A single mutable port cookie would silently
 retarget older tabs. Use another hostname for another concurrently forwarded
-root app, or explicitly restrict the first MVP to one fixed port per chat.
+root app. Multiple assignments are supported within explicit caps.
 Every grant must still bind the exact port.
 
-Needed additional lifecycle:
+Implemented lifecycle contract (see the host-lifecycle ADR for exact guards):
 
 1. Persist a unique create intent/caller reference before the AWS request; lock
    per chat/port to prevent duplicate distributions. Reconcile timeout/restart
@@ -183,10 +189,11 @@ Needed additional lifecycle:
    updates and deletion support resource-tag conditions. See the
    [API](https://docs.aws.amazon.com/cloudfront/latest/APIReference/API_CreateDistributionWithTags.html)
    and [IAM action/condition table](https://docs.aws.amazon.com/service-authorization/latest/reference/list_cloudfront.html).
-   The exact create/tag policy still needs a negative IAM test: permission to
-   tag during creation must not let the controller adopt an unrelated untagged
-   distribution. Application ownership checks are mandatory too; tags alone
-   do not encode the browser user's identity or constrain every config field.
+   CloudFront IAM cannot distinguish tagging during creation from standalone
+   tagging like EC2's CreateAction condition can. The accepted trusted-controller
+   boundary is explicit in the host-lifecycle ADR: application ownership checks
+   are mandatory, not an IAM sandbox against a compromised controller. Tags alone
+   do not encode browser identity or constrain every configuration field.
 4. Persist distribution ID/hostname/ETag and never accept a browser-provided
    distribution ID as authority. Recheck deployment, purpose, chat and owner
    before any mutation. Explicitly deny Relay's own distribution ARN. Never
@@ -197,15 +204,10 @@ Needed additional lifecycle:
    hostnames or deleting a foreign resource. Enforce preview/quota limits and
    report useful pending/failed/retry states without exposing credentials.
 
-Estimate: **6–10 focused engineering hours** for the one-fixed-port version,
-including local adversarial lifecycle/streaming tests and independent review,
-plus deployment/real-browser acceptance time. This is an estimate, not an AWS
-latency guarantee. Supporting multiple simultaneous root apps per chat adds
-host provisioning and UX work. With roughly four hours left while AMI/native
-authentication acceptance is still running, treating this as a safely finished
-feature would be high risk. Keep gate 45 explicitly open unless the complete
-implementation and deployed negative/positive tests actually pass; do not count
-a second distribution alone as completion.
+The original **6–10 focused engineering hour** estimate was planning context,
+not an AWS latency guarantee or completion receipt. Keep gate 45 explicitly
+open until required deployed negative/positive tests pass; neither a second
+distribution nor the completed local fixture alone establishes that.
 
 ### Read-only account inventory — 2026-09-18 10:25 UTC
 
