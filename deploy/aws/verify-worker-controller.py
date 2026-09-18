@@ -25,10 +25,16 @@ CREDENTIAL_COUNTS = ('providerAuthFiles', 'sshPrivateKeyFiles', 'pemFiles', 'ssm
                      'unexpectedAuthorizedKeys', 'scanErrors')
 METADATA_RESULTS = ('token-endpoint-accessible', 'http-403-denied', 'http-401-unauthorized',
                     'unexpected-http-response', 'network-unavailable', 'unexpected-network-error')
+PROBE_STAGES = ('request', 'identity', 'native-version', 'image-audit-run', 'image-audit-json',
+                'image-audit-validation', 'heartbeat', 'sentinel', 'receipt')
+EXCEPTION_CLASSES = ('RuntimeError', 'JSONDecodeError', 'FileNotFoundError', 'PermissionError',
+                     'TimeoutExpired', 'CalledProcessError', 'OSError', 'ValueError', 'TypeError',
+                     'KeyError', 'IndexError', 'AttributeError', 'NameError', 'UnboundLocalError',
+                     'ImportError', 'ModuleNotFoundError', 'UnicodeDecodeError', 'AssertionError')
 
 
 class ProbeFailure(RuntimeError):
-    def __init__(self, category, exit_code=None, audit_checks=None, credential_counts=None, metadata_probe=None):
+    def __init__(self, category, exit_code=None, audit_checks=None, credential_counts=None, metadata_probe=None, details=None):
         super().__init__('Private worker SSH/audit failed; no key or private output emitted')
         self.diagnostic = {'stage': 'worker-probe', 'category': category}
         if isinstance(exit_code, int) and -255 <= exit_code <= 255:
@@ -45,6 +51,14 @@ class ProbeFailure(RuntimeError):
                 self.diagnostic['credentialFailureCounts'] = safe_counts
         if category == 'image-audit' and metadata_probe in METADATA_RESULTS:
             self.diagnostic['metadataProbe'] = metadata_probe
+        if isinstance(details, dict):
+            if details.get('probeStage') in PROBE_STAGES:
+                self.diagnostic['probeStage'] = details['probeStage']
+            for field in ('exceptionClass', 'helperExceptionClass'):
+                if details.get(field) in EXCEPTION_CLASSES:
+                    self.diagnostic[field] = details[field]
+            if details.get('probeStage') == 'image-audit-json' and type(details.get('helperLine')) is int and 1 <= details['helperLine'] <= 10000:
+                self.diagnostic['helperLine'] = details['helperLine']
 
 
 def probe_failure(result):
@@ -58,7 +72,7 @@ def probe_failure(result):
                     'image scrub audit failed': 'image-audit', 'boot heartbeat is stale': 'heartbeat',
                     'worker sentinel mismatch': 'sentinel', 'invalid-worker-receipt': 'invalid-receipt'}
     if reason in known_checks:
-        return ProbeFailure(known_checks[reason], result.returncode, worker_failure.get('auditChecks'), worker_failure.get('credentialFailureCounts'), worker_failure.get('metadataProbe'))
+        return ProbeFailure(known_checks[reason], result.returncode, worker_failure.get('auditChecks'), worker_failure.get('credentialFailureCounts'), worker_failure.get('metadataProbe'), worker_failure)
     stderr = (result.stderr or '').lower()
     if 'host key verification failed' in stderr or 'remote host identification has changed' in stderr:
         category = 'ssh-host-key'
@@ -86,22 +100,30 @@ def failure_receipt(error):
 
 
 WORKER_PROBE = r'''
-import json, os, pathlib, subprocess, sys, time
+import json, os, pathlib, re, subprocess, sys, time
 audit_checks = {}
 credential_counts = {}
 metadata_probe = None
+stage = 'request'
+audit = None
+exception_classes = ('RuntimeError', 'JSONDecodeError', 'FileNotFoundError', 'PermissionError', 'TimeoutExpired', 'CalledProcessError', 'OSError', 'ValueError', 'TypeError', 'KeyError', 'IndexError', 'AttributeError', 'NameError', 'UnboundLocalError', 'ImportError', 'ModuleNotFoundError', 'UnicodeDecodeError', 'AssertionError')
 try:
     request = json.loads(sys.argv[1])
+    stage = 'identity'
     if subprocess.check_output(['/usr/bin/id', '-un'], text=True).strip() != 'agent':
         raise RuntimeError('wrong worker user')
     versions = {}
+    stage = 'native-version'
     for command, expected in [('codex', 'codex-cli 0.154.0'), ('claude', '2.1.222 (Claude Code)')]:
         result = subprocess.run([command, '--version'], capture_output=True, text=True, timeout=30)
         if result.returncode or result.stdout.strip() != expected:
             raise RuntimeError('native version mismatch')
         versions[command] = expected
+    stage = 'image-audit-run'
     audit = subprocess.run(['/usr/bin/sudo', '-n', '/usr/local/sbin/agent-web-audit-image'], capture_output=True, text=True, timeout=30)
+    stage = 'image-audit-json'
     receipt = json.loads(audit.stdout)
+    stage = 'image-audit-validation'
     audit_checks = {key: receipt[key] for key in ('finalized', 'cloudInitDisabled', 'ssmDisabled', 'credentialsAbsent', 'transportKeyMatches', 'metadataReachable', 'freshIdentity', 'heartbeatEnabled', 'watchdogActive') if type(receipt.get(key)) is bool}
     counts = receipt.get('credentialFailureCounts', {})
     if isinstance(counts, dict):
@@ -110,10 +132,12 @@ try:
         metadata_probe = receipt['metadataProbe']
     if audit.returncode or receipt.get('valid') is not True:
         raise RuntimeError('image scrub audit failed')
+    stage = 'heartbeat'
     heartbeat = pathlib.Path('/opt/agent-web/.heartbeat')
     fresh = 0 <= time.time() - heartbeat.stat().st_mtime < 180
     if not fresh:
         raise RuntimeError('boot heartbeat is stale')
+    stage = 'sentinel'
     sentinel = pathlib.Path('/opt/agent-web/verify-' + request['verificationId'])
     if request['phase'] == 'fresh' and not sentinel.exists():
         fd = os.open(sentinel, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -122,10 +146,27 @@ try:
     persisted = sentinel.read_text() == request['sentinel']
     if not persisted:
         raise RuntimeError('worker sentinel mismatch')
+    stage = 'receipt'
     print(json.dumps({'audit': receipt, 'versions': versions, 'heartbeatFresh': fresh, 'sentinelPresent': persisted}))
 except Exception as error:
     reasons = ('wrong worker user', 'native version mismatch', 'image scrub audit failed', 'boot heartbeat is stale', 'worker sentinel mismatch')
     failure = {'error': 'Worker acceptance checks failed; no private diagnostics emitted', 'reason': str(error) if isinstance(error, RuntimeError) and str(error) in reasons else 'invalid-worker-receipt'}
+    failure['probeStage'] = stage
+    if type(error).__name__ in exception_classes:
+        failure['exceptionClass'] = type(error).__name__
+    if stage == 'image-audit-json' and audit is not None:
+        # Parse private stderr locally, returning only fixed class names and a
+        # bounded line number for the one immutable helper path. Never echo a
+        # message, arbitrary filename, source line, stdout or traceback.
+        stderr = audit.stderr if isinstance(audit.stderr, str) else ''
+        classes = re.findall(r'^([A-Za-z]+Error|TimeoutExpired|CalledProcessError):', stderr, re.MULTILINE)
+        if classes and classes[-1] in exception_classes:
+            failure['helperExceptionClass'] = classes[-1]
+        lines = re.findall(r'^  File "/usr/local/sbin/agent-web-audit-image", line ([0-9]{1,5}), in [A-Za-z_][A-Za-z0-9_]*$|^  File "/usr/local/sbin/agent-web-audit-image", line ([0-9]{1,5}), in <module>$', stderr, re.MULTILINE)
+        if lines:
+            number = int(lines[-1][0] or lines[-1][1])
+            if 1 <= number <= 10000:
+                failure['helperLine'] = number
     if failure['reason'] == 'image scrub audit failed':
         failure['auditChecks'] = audit_checks
         failure['credentialFailureCounts'] = credential_counts
