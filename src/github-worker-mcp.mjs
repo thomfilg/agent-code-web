@@ -90,26 +90,43 @@ export function githubWorkerMcpConfig(origin, token) {
 export async function handleGitHubWorkerMcp(request, response, url, { gateway }) {
   if (url.pathname !== endpoint) return false;
   const finish = (code, value) => {
-    response.writeHead(code, { "content-type": "application/json", "cache-control": "no-store" });
+    if (response.destroyed || response.writableEnded) return true;
+    response.writeHead(code, { "content-type": "application/json", "cache-control": "no-store", connection: "close" });
     response.end(JSON.stringify(value)); return true;
   };
   if (request.headers.origin !== undefined || url.search || request.url !== url.pathname + url.search) return finish(403, { error: "GitHub gateway accepts only agent capability requests" });
   const token = /^Bearer (cap_[A-Za-z0-9_-]{43})$/i.exec(request.headers.authorization || "")?.[1];
-  let repositories;
+  if (!token || request.rawHeaders?.filter((value, index) => index % 2 === 0 && value.toLowerCase() === "authorization").length !== 1) return finish(401, { error: messages.scope });
+  const disconnected = new AbortController();
+  const onClose = () => { if (!response.writableFinished) disconnected.abort(); };
+  response.once("close", onClose);
   try {
-    if (!token || request.rawHeaders?.filter((value, index) => index % 2 === 0 && value.toLowerCase() === "authorization").length !== 1) throw Error();
-    repositories = await gateway.listRepositories(token);
-  }
-  catch { return finish(401, { error: messages.scope }); }
-  if (request.method !== "POST") return finish(405, { error: "Use MCP POST requests" });
+    return await gateway.withRequest(token, async lease => {
+      if (request.method !== "POST") return finish(405, { error: "Use MCP POST requests" });
+      const abortBody = () => request.destroy();
+      lease.signal.addEventListener("abort", abortBody, { once: true });
+      try {
+        lease.signal.throwIfAborted();
+        return await handleTrackedRequest(request, response, { token, lease, finish });
+      } finally { lease.signal.removeEventListener("abort", abortBody); }
+    }, { signal: disconnected.signal });
+  } catch (error) { return finish(error?.statusCode === 429 ? 429 : 401, { error: messages.scope }); }
+  finally { response.removeListener("close", onClose); }
+}
+
+async function handleTrackedRequest(request, response, { token, lease, finish }) {
+  let repositories;
   let bytes = 0, input;
   const chunks = [];
   try {
     for await (const chunk of request) { bytes += chunk.length; if (bytes > 100000) return finish(413, { error: "GitHub request too large" }); chunks.push(chunk); }
     input = JSON.parse(Buffer.concat(chunks));
   } catch { return finish(400, { error: "Invalid MCP request" }); }
+  // One operation per reserved slot. A batch could bypass both the shared
+  // concurrency limit and the fixed pre-SDK argument-validation boundary.
+  if (!input || typeof input !== "object" || Array.isArray(input)) return finish(400, { error: "Invalid MCP request" });
   // A slow request body must not retain permissions captured before revocation.
-  try { repositories = await gateway.listRepositories(token); }
+  try { repositories = await lease.listRepositories(); }
   catch { return finish(401, { error: messages.scope }); }
   // SDK validation errors can include arbitrary argument names. Return a fixed
   // error for invalid tool arguments before passing anything to the SDK.
@@ -120,18 +137,17 @@ export async function handleGitHubWorkerMcp(request, response, url, { gateway })
   if (!Array.isArray(repositories) || repositories.length > 100 || repositories.some(repo => !Number.isSafeInteger(repo.id) || repo.id <= 0 || !fullName.safeParse(repo.fullName).success)) {
     return finish(401, { error: messages.scope });
   }
-  const abort = new AbortController();
   const server = new McpServer({ name: "relay-github-pull-requests", version: "1.0.0" });
+  const scopedGateway = { withRepository: (_token, repositoryId, callback) => lease.withRepository(repositoryId, callback) };
   const scope = repositories.map(repo => `${repo.id}: ${repo.fullName}`).join("; ");
   for (const [name, schema] of Object.entries(schemas)) server.registerTool(name, {
     description: `${name === "github_create_pull_request" ? "Create a pull request (draft by default) from an existing local branch in the selected repository; push that branch first." : "Edit only the title/body of an open pull request whose head belongs to the same selected repository and matches the expected head."} No forks, merge, state changes, review, admin, workflows or generic API. Selected repositories (repositoryId: repository): ${scope}. A failed result may follow an already-submitted write: inspect GitHub before retrying.`,
     inputSchema: schema,
     annotations: { readOnlyHint: false, destructiveHint: name === "github_edit_pull_request", idempotentHint: name === "github_edit_pull_request", openWorldHint: true },
-  }, input => runGitHubPrTool(gateway, token, name, input, { signal: abort.signal }));
+  }, input => runGitHubPrTool(scopedGateway, token, name, input, { signal: lease.signal }));
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   response.setHeader("cache-control", "no-store");
   response.once("close", () => {
-    if (!response.writableEnded) abort.abort();
     void transport.close().catch(() => {}); void server.close().catch(() => {});
   });
   try { await server.connect(transport); await transport.handleRequest(request, response, input); }

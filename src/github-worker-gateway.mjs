@@ -12,6 +12,14 @@ const owner = value => value ?? null;
 const connectionKey = (ownerId, id) => JSON.stringify([owner(ownerId), id]);
 const tokenHash = token => createHash("sha256").update(token).digest("hex");
 const publicRepo = repo => ({ id: repo.id, fullName: repo.fullName });
+function abortable(promise, signal) {
+  if (signal.aborted) return Promise.reject(fail());
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(fail());
+    signal.addEventListener("abort", abort, { once: true });
+    Promise.resolve(promise).then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
 function selection(chat) {
   if (!chat || chat.archived || chat.workflowState === "archived") throw fail();
   if (!Array.isArray(chat.repositories) || chat.repositories.length > 100) throw invalidSelection();
@@ -72,7 +80,9 @@ async function requestBody(request, signal) {
 // This broker is intentionally independent of model-provider capabilities.
 // No worker-controlled URL, credential, company or connection ID is accepted.
 export class GitHubWorkerGateway {
-  constructor({ store, servicesFor, ttlMs = 300000, fetchImpl = fetch, now = Date.now }) {
+  constructor({ store, servicesFor, ttlMs = 300000, fetchImpl = fetch, now = Date.now, requestTimeoutMs = 120000 }) {
+    if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 120000) throw fail(400);
+    this.requestTimeoutMs = requestTimeoutMs;
     this.store = store; this.servicesFor = servicesFor; this.fetch = fetchImpl;
     this.broker = new CapabilityBroker({ ttlMs, now });
     this.entries = new Map(); this.generations = new Map(); this.connectionEpochs = new Map(); this.active = 0; this.closed = false;
@@ -132,26 +142,42 @@ export class GitHubWorkerGateway {
     return entry.snapshot.repositories.map(publicRepo);
   }
   async withRepository(token, repositoryId, callback) {
-    const entry = this.entry(token), repo = entry.snapshot.repositories.find(value => value.id === repositoryId);
-    if (!repo) throw fail(403);
+    return this.withRequest(token, request => request.withRepository(repositoryId, callback));
+  }
+  // Reserve before the first await: authenticated HTTP bodies and connection
+  // checks belong to the same bounded, revocable operation as the tool itself.
+  async withRequest(token, callback, { signal } = {}) {
+    const entry = this.entry(token);
     if (entry.controllers.size >= 2 || this.active >= 4) throw fail(429);
-    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 120000); timeout.unref();
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs); timeout.unref();
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) controller.abort();
     entry.controllers.add(controller); this.active++;
     const assertCurrent = async () => {
       if (controller.signal.aborted || this.entry(token) !== entry) throw fail();
-      await this.assertConnections(entry);
+      await abortable(this.assertConnections(entry), controller.signal);
       if (controller.signal.aborted || this.entry(token) !== entry) throw fail();
     };
     try {
       await assertCurrent();
-      const identity = await entry.github.request(`/repos/${repo.fullName}`, { connectionId: repo.githubConnectionId, chatCompany: entry.snapshot.company, signal: controller.signal });
-      if (identity.id !== repo.id || identity.full_name?.toLowerCase() !== repo.fullName.toLowerCase()) throw fail();
-      await assertCurrent();
-      const result = await callback({ github: entry.github, repository: { ...repo }, connectionId: repo.githubConnectionId, chatCompany: entry.snapshot.company, signal: controller.signal, assertCurrent });
+      const result = await callback({ signal: controller.signal, assertCurrent,
+        listRepositories: async () => { await assertCurrent(); return entry.snapshot.repositories.map(publicRepo); },
+        withRepository: async (repositoryId, operation) => {
+          const repo = entry.snapshot.repositories.find(value => value.id === repositoryId);
+          if (!repo) throw fail(403);
+          await assertCurrent();
+          const identity = await entry.github.request(`/repos/${repo.fullName}`, { connectionId: repo.githubConnectionId, chatCompany: entry.snapshot.company, signal: controller.signal });
+          if (identity.id !== repo.id || identity.full_name?.toLowerCase() !== repo.fullName.toLowerCase()) throw fail();
+          await assertCurrent();
+          const value = await operation({ github: entry.github, repository: { ...repo }, connectionId: repo.githubConnectionId, chatCompany: entry.snapshot.company, signal: controller.signal, assertCurrent });
+          await assertCurrent(); return value;
+        },
+      });
       await assertCurrent(); return result;
     } catch (error) {
       throw fail([400, 401, 403, 404, 409, 413, 415, 429, 502].includes(error?.statusCode) ? error.statusCode : 502);
-    } finally { clearTimeout(timeout); controller.abort(); entry.controllers.delete(controller); this.active--; }
+    } finally { clearTimeout(timeout); signal?.removeEventListener("abort", abort); controller.abort(); entry.controllers.delete(controller); this.active--; }
   }
   async handle(request, response, url) {
     if (!url.pathname.startsWith(PREFIX)) return false;
@@ -163,6 +189,10 @@ export class GitHubWorkerGateway {
       let service;
       if (operation === "info/refs") {
         if (request.method !== "GET" || !/^\?service=git-(upload|receive)-pack$/.test(url.search)) throw fail(400);
+        // Git discovery has no body. Ignoring an unfinished GET body would
+        // leave its socket alive after the operation's lease is released.
+        if (request.headers["transfer-encoding"] !== undefined ||
+            request.headers["content-length"] !== undefined && request.headers["content-length"] !== "0") throw fail(400);
         service = url.search.slice("?service=".length);
       } else {
         service = operation;
@@ -199,7 +229,7 @@ export class GitHubWorkerGateway {
       });
     } catch (error) {
       if (response.headersSent) response.destroy();
-      else { response.writeHead([400, 401, 403, 404, 409, 413, 415, 429, 502].includes(error?.statusCode) ? error.statusCode : 502, { "content-type": "text/plain", "cache-control": "no-store" }); response.end("GitHub worker request denied. Resume the chat or reconnect GitHub.\n"); }
+      else { response.writeHead([400, 401, 403, 404, 409, 413, 415, 429, 502].includes(error?.statusCode) ? error.statusCode : 502, { "content-type": "text/plain", "cache-control": "no-store", ...(!request.complete ? { connection: "close" } : {}) }); response.end("GitHub worker request denied. Resume the chat or reconnect GitHub.\n"); }
     }
     return true;
   }

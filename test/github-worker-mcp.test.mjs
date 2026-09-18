@@ -22,6 +22,12 @@ function fixture() {
   const token = broker.issue({ chatId: "chat_alice", provider: "github-worker", validWhile: current });
   const assertCurrent = async candidate => { if (!broker.validate(candidate, "github-worker") || !current()) throw Error("PRIVATE-AUTH-STATE"); };
   const gateway = {
+    async withRequest(candidate, callback, { signal } = {}) {
+      await gateway.listRepositories(candidate);
+      return callback({ signal: signal || new AbortController().signal,
+        listRepositories: () => gateway.listRepositories(candidate),
+        withRepository: (id, operation) => gateway.withRepository(candidate, id, operation) });
+    },
     async listRepositories(candidate) { await assertCurrent(candidate); return [{ id: repository.id, fullName: repository.fullName }]; },
     async withRepository(candidate, id, callback) {
       await assertCurrent(candidate); if (id !== repository.id) throw Error("PRIVATE-WRONG-REPOSITORY");
