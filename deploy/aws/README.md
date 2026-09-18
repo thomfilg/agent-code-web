@@ -62,6 +62,15 @@ SSH, and never receive an operator private key, Doppler/provider secrets or user
 credentials. SSM needs private NAT egress (or appropriate VPC endpoints); the
 stack's builder role is temporary and never attached to final workers.
 
+AWS CLI failures expose only a fixed service/action and allowlisted error
+category (for example `ec2/run-instances: InvalidParameterValue`), never raw
+stderr, command arguments or user-data. Unknown failures remain redacted.
+The launch uses the bake UUID as its EC2 client token. Cleanup success is
+reported only after observing `terminated` for that exact ID, base image and
+ownership tags; a successful termination request alone is insufficient.
+If cleanup cannot be confirmed, inspect that exact builder before retrying.
+An earlier bootstrap failure remains in the error together with this warning.
+
 The image installs Node 22, **Codex 0.154.0**, **Claude Code 2.1.222**, Chrome with
 its native sandbox, Python/venv, Docker Engine/Compose/Buildx. Docker starts only
 when selected by the chat's environment. A failed bootstrap or finalizer does

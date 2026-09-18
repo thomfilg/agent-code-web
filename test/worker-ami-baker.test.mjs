@@ -3,16 +3,19 @@ import test from "node:test";
 import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { bakeWorkerImage, parseOptions, safeBootstrapReceipt, gzipWorkerUserData, EC2_USER_DATA_MAX_BYTES } from "../deploy/aws/bake-worker-ami.mjs";
+import { bakeWorkerImage, parseOptions, safeBootstrapReceipt, gzipWorkerUserData, EC2_USER_DATA_MAX_BYTES, safeBakerAwsFailure, runBakerAws } from "../deploy/aws/bake-worker-ami.mjs";
 
 const required = ["--expected-account", "123456789012", "--deployment", "relay-fixture", "--subnet-id", "subnet-aaaaaaaaaaaaaaaaa", "--security-group-id", "sg-aaaaaaaaaaaaaaaaa", "--key-name", "relay-fixture-worker", "--builder-instance-profile", "relay-fixture-builder", "--base-image-id", "ami-aaaaaaaaaaaaaaaaa"];
 const builderId = "i-aaaaaaaaaaaaaaaaa";
 const imageId = "ami-bbbbbbbbbbbbbbbbb";
-function fixture({ commandFailed = false, neverStops = false, foreignBuilder = false, baseOverride = {}, keyOverride = {}, account = "123456789012", subnetOverride = {}, groupOverride = {}, stackOverride = {}, roleOverride = {}, extraPolicy = false } = {}) {
+function fixture({ commandFailed = false, neverStops = false, foreignBuilder = false, baseOverride = {}, keyOverride = {}, account = "123456789012", subnetOverride = {}, groupOverride = {}, stackOverride = {}, roleOverride = {}, extraPolicy = false, terminationStates = ["shutting-down", "terminated"], mutateInstance = value => value, invocationNotVisible = false, externalTermination = false, detachedWhileTerminating = false } = {}) {
   const calls = [];
   let tags;
   let sent = 0;
   let userData;
+  let terminationRequested = false;
+  let terminationPolls = 0;
+  let invocationPolls = 0;
   const infrastructureTags = [{ Key: "AgentRelayDeployment", Value: "relay-fixture" }, { Key: "ManagedBy", Value: "12-apps-ci" }];
   const role = { RoleName: "fixture-builder-role", Arn: "arn:aws:iam::123456789012:role/fixture-builder-role", Tags: infrastructureTags, ...roleOverride };
   const run = async args => {
@@ -39,12 +42,19 @@ function fixture({ commandFailed = false, neverStops = false, foreignBuilder = f
       userData = gunzipSync(compressed).toString("utf8");
       return JSON.stringify(builderId);
     }
-    if (args.includes("describe-instances")) return JSON.stringify([{ InstanceId: builderId, State: { Name: sent >= 2 && !neverStops ? "stopped" : "running" }, Tags: foreignBuilder ? [] : tags, SubnetId: "subnet-aaaaaaaaaaaaaaaaa", SecurityGroups: [{ GroupId: "sg-aaaaaaaaaaaaaaaaa" }], KeyName: "relay-fixture-worker", IamInstanceProfile: { Arn: "arn:aws:iam::123456789012:instance-profile/relay-fixture-builder" } }]);
+    if (args.includes("describe-instances")) {
+      const value = { InstanceId: builderId, ImageId: "ami-aaaaaaaaaaaaaaaaa", State: { Name: terminationRequested ? terminationStates[Math.min(terminationPolls++, terminationStates.length - 1)] : sent >= 2 && !neverStops ? "stopped" : "running" }, Tags: foreignBuilder ? [] : tags, SubnetId: "subnet-aaaaaaaaaaaaaaaaa", SecurityGroups: [{ GroupId: "sg-aaaaaaaaaaaaaaaaa" }], KeyName: "relay-fixture-worker", IamInstanceProfile: { Arn: "arn:aws:iam::123456789012:instance-profile/relay-fixture-builder" } };
+      if (terminationRequested && detachedWhileTerminating) { delete value.SubnetId; delete value.IamInstanceProfile; value.SecurityGroups = []; }
+      return JSON.stringify([mutateInstance(value, { terminationRequested, calls })]);
+    }
     if (args.includes("describe-instance-information")) return JSON.stringify([{ InstanceId: builderId, PingStatus: "Online" }]);
     if (args.includes("send-command")) { sent++; return JSON.stringify({ Command: { CommandId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" } }); }
-    if (args.includes("get-command-invocation")) return JSON.stringify({ Status: commandFailed ? "Failed" : "Success", ResponseCode: commandFailed ? 1 : 0, StandardErrorContent: "must never be included in public errors" });
-    if (args.includes("create-image")) return JSON.stringify(imageId);
-    if (args.includes("terminate-instances")) return "";
+    if (args.includes("get-command-invocation")) {
+      if (invocationNotVisible && invocationPolls++ === 0) throw safeBakerAwsFailure(args, { stderr: "An error occurred (InvocationDoesNotExist) when calling the GetCommandInvocation operation: PRIVATE FIXTURE" });
+      return JSON.stringify({ Status: commandFailed ? "Failed" : "Success", ResponseCode: commandFailed ? 1 : 0, StandardErrorContent: "must never be included in public errors" });
+    }
+    if (args.includes("create-image")) { if (externalTermination) terminationRequested = true; return JSON.stringify(imageId); }
+    if (args.includes("terminate-instances")) { terminationRequested = true; return ""; }
     throw new Error("Unexpected AWS command in fixture");
   };
   return { run, calls, getUserData: () => userData };
@@ -87,9 +97,12 @@ test("AMI baker uses private SSM-only builder, tags image/snapshot, finalizes be
   const logs = [];
   const result = await bakeWorkerImage(parseOptions([...required, "--profile", "code-web"]), { run: f.run, sleep: async () => {}, log: line => logs.push(line) });
   assert.equal(result.imageId, imageId);
+  assert.equal(result.cleanedUp, true);
   const launch = f.calls.find(c => c.includes("run-instances"));
   assert.equal(JSON.parse(launch[launch.indexOf("--network-interfaces") + 1])[0].AssociatePublicIpAddress, false);
   assert.deepEqual(JSON.parse(launch[launch.indexOf("--iam-instance-profile") + 1]), { Name: "relay-fixture-builder" });
+  const instanceTags = JSON.parse(launch[launch.indexOf("--tag-specifications") + 1])[0].Tags;
+  assert.equal(launch[launch.indexOf("--client-token") + 1], instanceTags.find(tag => tag.Key === "AgentRelayBake").Value);
   assert.ok(launch.includes("CpuCredits=standard"));
   assert.ok(f.calls.every(c => c.includes("--profile") && c.includes("code-web")));
   assert.equal(f.calls.some(c => c.includes("stop-instances")), false);
@@ -111,6 +124,113 @@ test("AMI baker uses private SSM-only builder, tags image/snapshot, finalizes be
   assert.equal(f.getUserData().includes("__RELAY_WORKER_PUBLIC_KEY_BASE64__"), false);
   assert.ok(f.getUserData().includes("@openai/codex@0.154.0"));
   assert.equal(logs.join(" ").includes("AAAAC3"), false);
+  assert.ok(logs.some(line => line.startsWith("Confirmed termination")));
+  assert.ok(f.calls.slice(f.calls.indexOf(cleanup) + 1).filter(call => call.includes("describe-instances")).length >= 2);
+});
+
+test("AMI cleanup observes exact terminal state with detached network but never relaxes ownership", async () => {
+  for (const externalTermination of [false, true]) {
+    const f = fixture({ detachedWhileTerminating: true, externalTermination });
+    const result = await bakeWorkerImage(parseOptions(required), { run: f.run, sleep: async () => {} });
+    assert.equal(result.cleanedUp, true);
+    assert.equal(f.calls.filter(call => call.includes("terminate-instances")).length, externalTermination ? 0 : 1);
+  }
+  for (const patch of [{ Tags: [] }, { ImageId: "ami-ccccccccccccccccc" }, { InstanceId: "i-ccccccccccccccccc" }]) {
+    const f = fixture({ detachedWhileTerminating: true, mutateInstance: (value, state) => state.terminationRequested ? { ...value, ...patch } : value });
+    const logs = [];
+    await assert.rejects(bakeWorkerImage(parseOptions(required), { run: f.run, sleep: async () => {}, log: value => logs.push(value) }), /ownership\/network\/profile mismatch.*cleanup unconfirmed/);
+    assert.equal(logs.some(line => line.startsWith("Confirmed termination")), false);
+    assert.equal(f.calls.filter(call => call.includes("terminate-instances")).length, 1);
+  }
+});
+
+test("cleanup does a strict recheck before termination and rejects detached nonterminal instances", async () => {
+  for (const race of [false, true]) {
+    let cleanupReads = 0;
+    const f = fixture({ mutateInstance: (value, state) => {
+      if (state.calls.some(call => call.includes("create-image")) && ++cleanupReads >= (race ? 2 : 1)) return { ...value, SecurityGroups: [] };
+      return value;
+    } });
+    await assert.rejects(bakeWorkerImage(parseOptions(required), { run: f.run, sleep: async () => {} }), /cleanup unconfirmed/);
+    assert.equal(f.calls.some(call => call.includes("terminate-instances")), false);
+  }
+});
+
+test("termination timeout cannot claim cleanup and preserves the original failure", async () => {
+  for (const commandFailed of [false, true]) {
+    const f = fixture({ commandFailed, terminationStates: ["shutting-down"], detachedWhileTerminating: true });
+    const logs = [];
+    await assert.rejects(bakeWorkerImage(parseOptions(required), { run: f.run, sleep: async () => {}, pollLimit: 2, log: value => logs.push(value) }), error => {
+      assert.match(error.message, /temporary builder termination.*cleanup unconfirmed/);
+      assert.equal(error.message.includes("Builder SSM command failed"), commandFailed);
+      assert.doesNotMatch(error.message, /must never/);
+      return true;
+    });
+    assert.equal(logs.some(line => line.startsWith("Confirmed termination")), false);
+  }
+});
+
+test("failed termination keeps safe API classification and the original bootstrap failure", async () => {
+  const f = fixture({ commandFailed: true });
+  const run = args => args.includes("terminate-instances") ? runBakerAws(args, async () => {
+    throw Object.assign(Error("PRIVATE-COMMAND"), { stderr: "An error occurred (UnauthorizedOperation) when calling the TerminateInstances operation: PRIVATE-SECRET", stdout: "PRIVATE-STDOUT" });
+  }) : f.run(args);
+  const logs = [];
+  await assert.rejects(bakeWorkerImage(parseOptions(required), { run, sleep: async () => {}, log: value => logs.push(value) }), error => {
+    assert.match(error.message, /Builder SSM command failed.*AWS ec2\/terminate-instances failed \(UnauthorizedOperation\).*cleanup unconfirmed/);
+    assert.doesNotMatch(error.message, /PRIVATE/);
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+  assert.equal(logs.some(line => line.startsWith("Confirmed termination")), false);
+});
+
+test("SSM eventual consistency retry uses only the exact safe InvocationDoesNotExist code", async () => {
+  const f = fixture({ invocationNotVisible: true });
+  await bakeWorkerImage(parseOptions(required), { run: f.run, sleep: async () => {} });
+  assert.equal(f.calls.filter(call => call.includes("get-command-invocation")).length, 3);
+});
+
+test("malformed AWS JSON and unexpected SSM status never print private response data", async () => {
+  for (const malformed of [true, false]) {
+    const f = fixture();
+    const run = args => args.includes("get-command-invocation") ? malformed ? '{PRIVATE-SECRET' : JSON.stringify({ Status: "PRIVATE-SECRET", ResponseCode: 1 }) : f.run(args);
+    await assert.rejects(bakeWorkerImage(parseOptions(required), { run, sleep: async () => {} }), error => {
+      assert.doesNotMatch(error.message, /PRIVATE-SECRET/);
+      assert.match(error.message, malformed ? /AWS ssm\/get-command-invocation failed \(invalid-response\)/ : /SSM command failed \(unexpected-status\)/);
+      return true;
+    });
+  }
+});
+
+test("AWS process failures expose only fixed operation/category names, never stderr, argv or causes", async () => {
+  const args = ["--profile", "PRIVATE-PROFILE", "--region", "PRIVATE-REGION", "--no-cli-pager", "ec2", "run-instances", "--user-data", "PRIVATE-PAYLOAD"];
+  for (const code of ["InvalidParameterValue", "InvalidParameterCombination", "UnauthorizedOperation", "ExpiredToken", "RequestLimitExceeded"]) {
+    const raw = Object.assign(Error("PRIVATE-ERROR"), { stderr: `An error occurred (${code}) when calling the RunInstances operation: PRIVATE-SECRET`, stdout: "PRIVATE-STDOUT", cmd: "PRIVATE-COMMAND" });
+    await assert.rejects(runBakerAws(args, async () => { throw raw; }), error => {
+      assert.equal(error.message, `AWS ec2/run-instances failed (${code}); private diagnostics suppressed`);
+      assert.equal(error.code, code);
+      assert.equal(error.cause, undefined);
+      assert.doesNotMatch(JSON.stringify(error) + error.message, /PRIVATE/);
+      return true;
+    });
+  }
+  for (const [raw, expected] of [
+    [{ stderr: "PRIVATE-SECRET InvocationDoesNotExist InvalidParameterValue" }, "unclassified"],
+    [{ stderr: "An error occurred (PRIVATESECRET) when calling the RunInstances operation: PRIVATE" }, "unclassified"],
+    [{ stderr: "An error occurred (UnauthorizedOperation) when calling the DeleteSecret operation: PRIVATE" }, "unclassified"],
+    [{ stderr: "An error occurred (InvocationDoesNotExist) when calling the RunInstances operation: PRIVATE" }, "unclassified"],
+    [{ killed: true, signal: "SIGTERM", stderr: "PRIVATE" }, "timeout"],
+    [{ code: "ETIMEDOUT", stderr: "PRIVATE" }, "timeout"],
+    [{ code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", killed: true, signal: "SIGTERM", stderr: "PRIVATE" }, "output-limit"],
+    [{ code: "ENOENT", stderr: "PRIVATE" }, "executable-unavailable"],
+  ]) {
+    const error = safeBakerAwsFailure(args, raw);
+    assert.equal(error.code, expected);
+    assert.doesNotMatch(JSON.stringify(error) + error.message, /PRIVATE/);
+  }
+  const unknown = safeBakerAwsFailure(["PRIVATE-SERVICE", "PRIVATE-ACTION"], { stderr: "An error occurred (UnauthorizedOperation) when calling the RunInstances operation: PRIVATE" });
+  assert.equal(unknown.message, "AWS operation failed (unclassified); private diagnostics suppressed");
 });
 
 test("AMI baker supports IAM default chain and rejects failed bootstrap without publishing image", async () => {
