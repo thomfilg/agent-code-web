@@ -131,6 +131,12 @@ user's account. Codex/GitHub provide device URLs/codes; Claude provides its
 native authorization URL and asks for the complete returned code. Linear uses
 browser OAuth and a read-only workspace verification before claiming success.
 
+Actual public-browser check (2026-09-18 09:59 UTC): **Continue with Google**
+reached `accounts.google.com`, which rejected the cloud callback with
+`redirect_uri_mismatch` (Error 400). Register the exact URI above in the Google
+client; no Relay restart can substitute for that console configuration. No
+credentials or consent were entered by this check.
+
 ## Deploy, observe and roll back
 
 ```bash
@@ -173,15 +179,16 @@ transport acceptance item, not something a local `.localhost` alias provides.
 
 ## Durability and acceptance status
 
-Current application (2026-09-18 09:10 UTC): revision
-`b19b7362b16f8acc82750272399105701b8d9ff0`, digest
-`sha256:c4bf393d3f48949afb589a748280223c9d8a36ad5687872990e3f09d41a3dd7d`.
-CodeBuild `ImageBuild-t8BSbSkDsHYX:e30e293e-2f63-432e-8d0d-64f022cb57ca`
-used source version `2fG7w5FyzVPGoZ2KlgMRX9YAC5ubDpaV`; deploy SSM
-`7ae5f84e-89ef-40d9-ab3b-d60936820e52` completed healthy. The scoped Git/PR
-gateway, its complete request lifecycle and legacy source-only compatibility
-are deployed. The final integrated regression passed 952 tests without skips,
-including the native configuration, official-MCP guest UI and new denial-probe
+Current application (2026-09-18 09:51 UTC): revision
+`3a0b7b3c17956393a7c9f6e36dc1a5bc80a05edb`, digest
+`sha256:53cb37a8c558548bb256d90f1e840cc0a5aa9b80512f6fa13ef02022e401bad8`.
+CodeBuild `ImageBuild-t8BSbSkDsHYX:44d1e375-b925-4486-83fd-320772a16a33`
+used source version `tgNLJ1YJT7RnPo9WGChbzhx6HBGY5Of5`; deploy SSM
+`563c63a5-8029-4f29-b76d-862374aaa6c5` completed healthy; independent status
+confirmed Success/exit 0. The scoped Git/PR gateway, generic early-response HTTP
+lifecycle fix and legacy source-only compatibility are deployed. The integrated
+regression at this revision passed 1016 tests without skips,
+including native configuration, official-MCP guest UI and denial-probe
 suites. Actual CloudFront checks then passed all 13 fixed Git/MCP
 denials with exact public bodies/no-store, readiness 200, anonymous SSE 401,
 and WSS 101 with bidirectional frames followed by unauthenticated close 1008.
@@ -189,6 +196,13 @@ Pair the behavior-only denial receipt with this immutable deployment receipt;
 it alone does not identify code or establish authenticated GitHub access.
 See [deployed GitHub denials](deployed-github-denials.md) for the safe repeatable
 operator command. No provider operation, account import or model call was made.
+
+The reviewed preview grant/TCP/HTTP/SSE/WebSocket modules in this image are
+dormant. Their component tests do not establish working external app URLs:
+isolated origin provisioning, bootstrap, lifecycle admission and the actual
+deployed HTTP/WS app round trip are still absent. No preview IAM or public route
+was activated by this rollout. The prior healthy `b19b736` image remains the
+normal one-slot rollback baseline.
 
 The database, encrypted account records, message/attachment data and controller
 SSH trust live on the retained encrypted data volume. Workers are disposable

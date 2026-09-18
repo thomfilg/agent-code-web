@@ -85,9 +85,10 @@ is the current prerequisite; item 20's unfinished doctor work stays paused.
 
 ## MVP release gate — 2026-09-17
 
-Latest local activation (2026-09-18 09:07 UTC): the integrated Codex/Claude,
+Latest local activation (2026-09-18 09:50 UTC): the integrated Codex/Claude,
 GitHub/Linear, scoped worker Git/PR gateway and account-deletion version is active
-on `http://localhost:8787` (revision `b19b736`). A cold private checkpoint preceded
+on `http://localhost:8787` (revision `1f79d26`, same runtime as AWS `3a0b7b3`
+plus three integration tests). A cold private checkpoint preceded
 the restart; all 12 encrypted records remain readable and the credential file
 matches the pre-restart archive byte-for-byte. This restart did not compare
 every encrypted row's bytes against that archive.
@@ -108,13 +109,14 @@ Official Playwright MCP verified the Google entry screen at 1600, 390 and 320
 pixels without horizontal overflow. Google cloud consent remains pending the
 new callback registration; no production account or chat was fabricated.
 
-AWS checkpoint (2026-09-18 09:10 UTC):
+AWS checkpoint (2026-09-18 09:51 UTC):
 
-- Current deployed application: revision `b19b7362b16f8acc82750272399105701b8d9ff0`,
-  immutable digest `sha256:c4bf393d3f48949afb589a748280223c9d8a36ad5687872990e3f09d41a3dd7d`.
-  CodeBuild `e30e293e-2f63-432e-8d0d-64f022cb57ca` used exact source object
-  version `2fG7w5FyzVPGoZ2KlgMRX9YAC5ubDpaV`; deploy SSM
-  `7ae5f84e-89ef-40d9-ab3b-d60936820e52` completed healthy. Thirteen fixed
+- Current deployed application: revision `3a0b7b3c17956393a7c9f6e36dc1a5bc80a05edb`,
+  immutable digest `sha256:53cb37a8c558548bb256d90f1e840cc0a5aa9b80512f6fa13ef02022e401bad8`.
+  CodeBuild `44d1e375-b925-4486-83fd-320772a16a33` used exact source object
+  version `tgNLJ1YJT7RnPo9WGChbzhx6HBGY5Of5`; deploy SSM
+  `563c63a5-8029-4f29-b76d-862374aaa6c5` completed healthy (independently
+  confirmed Success/exit 0). Thirteen fixed
   negative Git/MCP requests passed through CloudFront, including anonymous,
   unissued-capability, browser-origin, unsupported path/method/query checks.
   Their exact public error bodies and no-store headers were checked, not just
@@ -122,15 +124,32 @@ AWS checkpoint (2026-09-18 09:10 UTC):
   it does not prove authenticated GitHub access. Readiness 200, anonymous SSE
   401, and real WSS 101/bidirectional frames/expected rejection 1008 passed again.
   No account imports, external provider writes, model prompts or test users.
-- Final integrated regression including the new deployed-probe suite passed
-  **952/952**, no skips/failures (186.8 seconds), on the published runtime plus
-  documentation-only updates. Both opt-ins were enabled: native GitHub
+- Integrated regression at the exact published revision passed **1016/1016**,
+  no skips/failures (223.0 seconds). Both opt-ins were enabled: native GitHub
   environment/configuration probes and official-MCP guest UI. Single test
   process at a time, CPUs 0–1 and nice 10.
+- The generic HTTP lifecycle fix now covers early responses outside the Git
+  gateway too. A completed response closes only its own unfinished input after
+  flushing; complete keepalive, gated authenticated saves and live SSE remain
+  intact. The raw half-open regression observes the actual server socket close
+  even when the client deliberately never sends FIN. Malformed request URLs
+  return a fixed 400 instead of escaping the asynchronous request handler.
+- Reviewed preview grants, TCP transport and HTTP/SSE/WS proxy foundations are
+  present but **dormant**. Scoped revocation, byte/time/fanout limits and exact
+  child cleanup have offline coverage; three later true grant-to-proxy fixtures
+  passed independently (SSE sibling isolation, WS expiry and no-spawn denial).
+  No preview router/bootstrap, permanent hostname registry, provisioner or UI
+  activates them. Gate 45 remains open, including service-worker/bootstrap
+  isolation and real deployed app HTTP/WS acceptance.
 - Official Playwright MCP rechecked the actual newly deployed Google entry
-  screen and anonymous chat denial at 1600/390/320 pixels, without horizontal
-  overflow; root inspected the desktop screenshot. No Google/provider consent
-  was performed. A read-only cleanup audit found only the intended controller
+  screen and anonymous chat denial at 1600/390/320 pixels on both cloud and
+  local origins, without horizontal overflow; root inspected the cloud mobile
+  screenshot. The initial post-click diagnostic failed because its MCP sandbox
+  lacked the global URL constructor, not because Relay failed. The corrected
+  check at 09:59 UTC reached `accounts.google.com` and observed Google's actual
+  `redirect_uri_mismatch` / Error 400: the new cloud callback is not accepted by
+  the OAuth client. No identity, password or provider consent was supplied.
+  The repeated 09:59 UTC read-only cleanup audit found only the intended controller
   running for this deployment, no active acceptance SSM sessions on it, and no
   remaining native-acceptance-tagged volumes. The controller, NAT and retained
   storage remain billable; this is not a claim that AWS resources were torn down.
@@ -342,8 +361,9 @@ The user permits adding reusable AWS support to `12-apps/ci` if appropriate.
 Reference review found only DigitalOcean and Cloudflare in that repository's
 current `main` vendor registry; there is no registered AWS deployment adapter.
 Use its vendor-extension pattern for the shared AWS implementation, with a thin
-Relay-specific consumer. This is planned work, not an assertion that AWS is
-already supported by the shared workflows.
+Relay-specific consumer. That was the original implementation plan. The pinned
+shared engine is now implemented and exercised by the operator deployment
+recorded above; the proposed CI workflow remains opt-in, unmerged and inactive.
 
 - **In `12-apps/ci`:** add a reusable AWS adapter, vendor registration and
   explicitly enabled caller job, off by default. Consume the already-built
@@ -498,8 +518,9 @@ References inspected for this request:
   real-turn/resume check. No real model prompt has been submitted.
   The two final mobile/reconnect browser checks also passed after message
   wording was shortened for a multi-user product.
-  The separate Delete account request is appended as non-MVP item 46, not
-  implemented or used as a reason to interrupt this authentication refinement.
+  At this historical checkpoint the separate Delete account request was
+  appended as item 46 and was not implemented. The later integrated account
+  deletion implementation and current acceptance status supersede that note.
 
 - Codex sign-in UX follow-up (2026-09-17): Add account now explicitly expands
   or collapses a focused form and retains the unsent name/company selection.

@@ -8,6 +8,12 @@ checks to pass a gate.
 
 ## 1. Google cloud sign-in
 
+Observed on 2026-09-18 at 09:59 UTC with official Playwright MCP: the deployed
+button reached `accounts.google.com`, which returned **Error 400:
+redirect_uri_mismatch**. No identity, password or consent was supplied. Register
+the exact cloud callback below before trying provider onboarding; restarting
+Relay or re-entering the Google client secret cannot register that URI.
+
 - [ ] Operator: confirm `AGENT_WEB_PUBLIC_URL` is
   `https://d20atclccf8cku.cloudfront.net`, the Google client's JavaScript origin
   matches it, and its registered redirect URI is exactly

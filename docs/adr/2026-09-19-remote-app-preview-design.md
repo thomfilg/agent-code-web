@@ -1,9 +1,13 @@
 # Remote app previews on a separate browser origin
 
-Status: **proposal only**, not implemented or deployed. Gate 45 (HTTP and
+Status: **end-to-end feature not implemented or deployed**. Gate 45 (HTTP and
 WebSocket app forwarding) remains open. No AWS mutation is authorized by this
-document. The existing browser-link helper only constructs local aliases; there
-is no reusable HTTP/WebSocket forwarding module in this repository.
+document. The existing browser-link helper only constructs local aliases.
+Reviewed grant, localhost TCP and HTTP/SSE/WebSocket proxy components now exist
+as dormant foundations; no public router, bootstrap, hostname provisioning or
+UI activates them. See [grant contracts](../preview-grants.md),
+[TCP transport](2026-09-19-worker-local-tcp-foundation.md) and
+[proxy boundaries](2026-09-19-worker-preview-proxy-foundation.md).
 
 ## Feasibility and the origin decision
 
@@ -62,7 +66,8 @@ does not satisfy the requested direct, fully functioning app URL.
   and run a fixed Node TCP bridge over SSH to **127.0.0.1 and the granted port**.
   Use a custom Duplex for Node HTTP proxying/upgrades; never run user request
   strings as shell commands or enable SSH port forwarding. The hardened SSH
-  launcher can carry the framing, but the TCP bridge/proxy still needs building.
+  launcher now carries the tested dormant TCP bridge/proxy framing; its actual
+  worker admission, routing and lifecycle integration still needs building.
 - Keep streaming/backpressure for HTTP, SSE, uploads and WebSocket upgrades.
   Strip the preview-auth cookie and all Relay/provider credentials before the
   app receives a request. Preserve app cookies only within that preview host;
