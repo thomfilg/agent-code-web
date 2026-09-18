@@ -148,6 +148,17 @@ test("chat admission and preferences use the registered company rather than GitH
   await assert.rejects(app.manager.createChat({ ...input, environmentId: isolated.id }), { statusCode: 403 });
   const response = await fetch(`${url}/api/preferences`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
   assert.equal(response.status, 200); assert.equal((await response.json()).preferences.repositories[0].companyId, "personal-projects");
+  // An environment can be remembered before its repository is chosen, without
+  // turning that incomplete draft into permission to run an unassigned chat.
+  const draft = { agent: "mock", environmentId: isolated.id, repositories: [] };
+  const remembered = await fetch(`${url}/api/preferences`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(draft) });
+  assert.equal(remembered.status, 200);
+  const loaded = (await (await fetch(`${url}/api/preferences`)).json()).preferences;
+  assert.equal(loaded.environmentId, isolated.id); assert.deepEqual(loaded.repositories, []);
+  const chatCount = app.store.list().length;
+  const denied = await fetch(`${url}/api/chats`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(draft) });
+  assert.equal(denied.status, 403); assert.equal(app.store.list().length, chatCount);
+  assert.equal((await environments.get(isolated.id)).allowUnassigned, false);
   const scratch = await app.manager.createChat({ agent: "mock", repositories: [] });
   assert.equal(companyForChat(scratch), null); assert.equal(scratch.repositories.length, 0);
 });

@@ -23,7 +23,7 @@ export class WorkspaceSettings {
       if (repositoryMenu.open) $("#repo-search").focus();
     });
     $("#refresh-repositories").addEventListener("click", () => this.loadRepositories(true).catch(error => toast(error.message)));
-    $("#environment-select").addEventListener("change", () => { this.updateCreateAvailability(); this.remember(); });
+    $("#environment-select").addEventListener("change", () => this.changeEnvironment());
     $("#agent-select").addEventListener("change", async () => { this.renderAccounts(); await this.updateModels(); this.remember(); });
     $("#new-agent-account").addEventListener("change", async () => {
       this.syncAccountAgent();
@@ -88,11 +88,32 @@ export class WorkspaceSettings {
   renderEnvironments() {
     const selected = $("#environment-select").value || this.preferences?.environmentId;
     const company = companyForChat({ repositories: this.selected });
-    const available = this.environments.filter(env => !env.archived && scopeAllows(env, company));
+    // Repository defaults must not hide the environment needed to switch companies.
+    // Availability is checked when sending; an explicit switch scopes the draft.
+    const available = this.environments.filter(env => !env.archived);
+    const chosen = available.find(env => env.id === selected) || available.find(env => scopeAllows(env, company)) || available[0];
     $("#environment-select").replaceChildren(...available.map(env => option(env.id, env.name)));
-    if (available.some(env => env.id === selected)) $("#environment-select").value = selected;
-    if (!available.length) $("#environment-select").append(option("", `No environment for ${company || "unassigned chats"} · configure companies`));
+    if (chosen) $("#environment-select").value = chosen.id;
+    else $("#environment-select").append(option("", "No active environments · manage environments"));
     this.renderAccounts();
+  }
+  selectedEnvironment() { return this.environments.find(env => env.id === $("#environment-select").value && !env.archived); }
+  changeEnvironment() {
+    const environment = this.selectedEnvironment();
+    if (!environment) { this.updateCreateAvailability(); return; }
+    const previous = this.selected.length;
+    this.selected = this.selected.filter(repo => scopeAllows(environment, companyForChat({ repositories: [repo] })));
+    $("#repo-search").value = ""; $("#create-chat-error").textContent = "";
+    this.renderSelected(); this.renderRepositories();
+    if (this.selected.length !== previous) this.toast(`Switched to ${environment.name}. Repositories from other companies were removed from this draft; your message is kept.`);
+    return this.remember();
+  }
+  environmentSelectionError() {
+    const environment = this.selectedEnvironment();
+    if (!environment) return "Choose an active environment before sending.";
+    if (!this.selected.length && !scopeAllows(environment, null)) return `Choose a repository for “${environment.name}” before sending.`;
+    if (this.selected.some(repo => !scopeAllows(environment, companyForChat({ repositories: [repo] })))) return `The selected repositories are not available in “${environment.name}”. Choose another environment or remove them.`;
+    return "";
   }
   renderAccounts() {
     const supported = this.state.config.features?.agentAccounts;
@@ -127,7 +148,10 @@ export class WorkspaceSettings {
   updateCreateAvailability() {
     const agent = $("#agent-select").value;
     const needed = this.state.config.features?.agentAccounts && ["codex", "claude"].includes(agent);
-    $("#create-chat-button").disabled = Boolean(this.selected.length && !this.github?.connected) || !$("#environment-select").value || !agent || Boolean(needed && !$("#new-agent-account").value);
+    const environmentError = this.environmentSelectionError();
+    $("#environment-selection-hint").textContent = environmentError;
+    $("#environment-selection-hint").hidden = !environmentError;
+    $("#create-chat-button").disabled = Boolean(this.selected.length && !this.github?.connected) || Boolean(environmentError) || !agent || Boolean(needed && !$("#new-agent-account").value);
   }
   updateModels(selected = {}) {
     const agent = $("#agent-select").value;
@@ -175,8 +199,11 @@ export class WorkspaceSettings {
     };
     if (this.repositoryLoading) return status("Loading repositories…");
     if (this.repositoryError) return status("Could not load repositories. Check your GitHub connection and retry.", { error: true, manage: true, retry: true });
-    const primaryCompany = companyForChat({ repositories: this.selected });
-    for (const repo of this.repositories.filter(repo => repo.fullName.toLowerCase().includes(query) && (!primaryCompany || !repo.companyId || repo.companyId === primaryCompany))) {
+    const primaryCompany = companyForChat({ repositories: this.selected }), environment = this.selectedEnvironment();
+    // Legacy repository responses have no companyId; retain their old display
+    // behavior, with environment admission still checked in payload and server.
+    const scoped = this.repositories.filter(repo => (!primaryCompany || !repo.companyId || repo.companyId === primaryCompany) && (!environment || !repo.companyId || scopeAllows(environment, repo.companyId)));
+    for (const repo of scoped.filter(repo => repo.fullName.toLowerCase().includes(query))) {
       const label = el("label", "repository-option"); const input = el("input"); input.type = "checkbox"; input.checked = this.selected.some(item => item.fullName === repo.fullName && (!item.githubConnectionId || item.githubConnectionId === repo.githubConnectionId));
       input.addEventListener("change", () => {
         if (input.checked) { this.selected = this.selected.filter(item => item.fullName !== repo.fullName); this.selected.push({ fullName: repo.fullName, branch: repo.defaultBranch, githubConnectionId: repo.githubConnectionId, ...(repo.companyId ? { companyId: repo.companyId } : {}) }); }
@@ -185,7 +212,10 @@ export class WorkspaceSettings {
       });
       label.append(input, el("span", "", repo.fullName), el("small", "", `${repo.private ? "Private" : "Public"}${repo.connectionName ? ` · ${repo.connectionName}` : ""}`)); results.append(label);
     }
-    if (!results.childElementCount) status(this.repositories.length ? "No repositories match your search." : "No repositories are available from your connected GitHub accounts. Check GitHub permissions or refresh the list.", { manage: !this.repositories.length, retry: !this.repositories.length });
+    if (!results.childElementCount) {
+      const unavailable = this.repositories.length && !scoped.length && environment;
+      status(unavailable ? `No repositories are available for “${environment.name}”. Check its GitHub connection or choose another environment.` : this.repositories.length ? "No repositories match your search." : "No repositories are available from your connected GitHub accounts. Check GitHub permissions or refresh the list.", { manage: Boolean(unavailable) || !this.repositories.length, retry: !this.repositories.length });
+    }
   }
   renderSelected() {
     this.renderEnvironments();
@@ -213,6 +243,8 @@ export class WorkspaceSettings {
   }
   payload() {
     if (this.selected.length && !this.github?.connected) throw new Error("Connect GitHub to use the selected repositories");
+    const environmentError = this.environmentSelectionError();
+    if (environmentError) throw new Error(environmentError);
     const agent = $("#agent-select").value, agentAccountId = $("#new-agent-account").value;
     if (!agent || this.state.config.features?.agentAccounts && ["codex", "claude"].includes(agent) && !agentAccountId) throw new Error("Connect and select an agent account first");
     return { agent, ...(agentAccountId && ["codex", "claude"].includes(agent) ? { agentAccountId } : {}), ...this.modelPicker.value(), environmentId: $("#environment-select").value, repositories: this.selected };
@@ -313,7 +345,9 @@ export class WorkspaceSettings {
     try {
       this.requireCompanyScopes();
       const { environment } = await this.api(this.draft.id ? `/api/environments/${this.draft.id}` : "/api/environments", { method: this.draft.id ? "PATCH" : "POST", body: JSON.stringify(this.draft) });
-      await this.load(); $("#environment-select").value = environment.id; await this.remember(); this.editEnvironment(environment); $("#environment-save-status").textContent = "Saved securely";
+      await this.load();
+      if (!environment.archived) { $("#environment-select").value = environment.id; await this.changeEnvironment(); }
+      this.editEnvironment(environment); $("#environment-save-status").textContent = "Saved securely";
     } catch (error) { $("#environment-error").textContent = error.message; }
     finally { event.submitter.disabled = false; }
   }

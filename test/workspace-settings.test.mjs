@@ -111,3 +111,53 @@ test("opening before config is loaded fails safely before any settings requests"
   await assert.rejects(() => workspace.openNew(), /still loading/);
   assert.equal(calls, 0);
 });
+
+test("changing an environment filters only the unsent repositories, preserving compatible branches and the message", async t => {
+  const document = documentFixture(t); document.querySelector("#environment-select").value = "g2i-env";
+  document.querySelector("#initial-prompt").value = "Keep my draft";
+  document.querySelector("#repo-search").value = "future-pay";
+  const keep = { fullName: "g2i-ai/clickdown", companyId: "g2i", branch: "dev", githubConnectionId: "work" };
+  const notices = []; let saved = 0, selectedRenders = 0, repositoryRenders = 0;
+  const workspace = Object.assign(Object.create(WorkspaceSettings.prototype), {
+    environments: [{ id: "g2i-env", name: "g2i", companies: ["g2i"] }],
+    selected: [{ fullName: "12-apps/future-pay", companyId: "personal", branch: "main" }, keep],
+    renderSelected() { selectedRenders++; }, renderRepositories() { repositoryRenders++; },
+    toast: text => notices.push(text), remember: async () => { saved++; },
+  });
+  await workspace.changeEnvironment();
+  assert.deepEqual(workspace.selected, [keep]); assert.equal(workspace.selected[0], keep);
+  assert.equal(document.querySelector("#initial-prompt").value, "Keep my draft");
+  assert.equal(document.querySelector("#repo-search").value, "");
+  assert.equal(saved, 1); assert.equal(selectedRenders, 1); assert.equal(repositoryRenders, 1);
+  assert.match(notices[0], /removed from this draft/);
+  await workspace.changeEnvironment(); assert.equal(notices.length, 1, "No misleading removal notice for a compatible selection");
+});
+
+test("draft admission and payload reject incompatible, unassigned and archived environments without changing their scope", t => {
+  const document = documentFixture(t); document.querySelector("#environment-select").value = "personal-env";
+  document.querySelector("#agent-select").value = "mock";
+  const environment = { id: "personal-env", name: "Personal", companies: ["personal"], allowUnassigned: false };
+  const workspace = Object.assign(Object.create(WorkspaceSettings.prototype), {
+    environments: [environment], state: { config: { features: {} } }, github: { connected: true },
+    modelPicker: { value: () => ({}) }, selected: [],
+  });
+  const checkBlocked = message => {
+    workspace.updateCreateAvailability();
+    assert.equal(document.querySelector("#create-chat-button").disabled, true);
+    assert.equal(document.querySelector("#environment-selection-hint").hidden, false);
+    assert.throws(() => workspace.payload(), message);
+  };
+  checkBlocked(/Choose a repository/);
+  workspace.selected = [{ fullName: "thomfilg/tools", companyId: "personal" }, { fullName: "12-apps/future-pay", companyId: "personal" }];
+  workspace.updateCreateAvailability(); assert.equal(document.querySelector("#create-chat-button").disabled, false);
+  assert.equal(document.querySelector("#environment-selection-hint").hidden, true);
+  assert.equal(workspace.payload().environmentId, environment.id);
+  workspace.selected.push({ fullName: "g2i-ai/clickdown", companyId: "g2i" }); checkBlocked(/not available/);
+  workspace.selected = [{ fullName: "g2i-ai/clickdown", companyId: "g2i" }]; checkBlocked(/not available/);
+  assert.deepEqual(environment.companies, ["personal"]); assert.equal(environment.allowUnassigned, false);
+  workspace.selected = []; environment.allowUnassigned = true;
+  workspace.updateCreateAvailability(); assert.equal(document.querySelector("#create-chat-button").disabled, false);
+  assert.deepEqual(workspace.payload().repositories, []);
+  environment.archived = true; checkBlocked(/active environment/);
+  document.querySelector("#environment-select").value = "missing"; checkBlocked(/active environment/);
+});

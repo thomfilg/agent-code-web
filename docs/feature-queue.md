@@ -1,5 +1,12 @@
 # Feature queue — original request order
 
+Environment selector correction (2026-09-18): remembered repositories must not
+hide another company's environment. Keep all active environments selectable;
+scope only the unsent repository draft on an explicit switch, preserve its text,
+and require a compatible repository before sending when unassigned access is not
+allowed. No company grant, existing chat or connection is changed by switching.
+See [the regression and publication receipt](validation-2026-09-18-environment-switch.md).
+
 Company/MCP refinement (2026-09-18): create a separate Companies page. Each
 company owns many MCP connections and at most one GitHub connection; a connection
 belongs to one company only. Agent accounts alone remain selectable across

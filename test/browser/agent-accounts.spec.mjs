@@ -169,7 +169,8 @@ test("single Agent selector offers every own account and remembers the choice by
   await page.getByRole("button", { name: "Make thomfilg/no-environment primary", exact: true }).click();
   await expect(accounts).toBeEnabled();
   await accounts.selectOption(relay.app.agentAccounts.list(owner).find(item => item.provider === "claude").id);
-  await expect(page.locator("#environment-select")).toHaveValue(""); await expect(page.locator("#create-chat-button")).toBeDisabled();
+  await expect(page.locator("#environment-select")).toHaveValue("environment-fixture"); await expect(page.locator("#create-chat-button")).toBeDisabled();
+  await expect(page.locator("#environment-selection-hint")).toContainText("The selected repositories are not available");
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.locator("#new-chat-page").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   expect(relay.app.store.list()).toEqual([]); expect(errors).toEqual([]);
