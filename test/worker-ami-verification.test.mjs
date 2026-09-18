@@ -25,7 +25,7 @@ function fixture({ account = "123456789012", stackOutputs = outputs, controllerO
     if (args.includes("list-stack-resources")) return reply(resources);
     if (args.includes("describe-subnets")) return reply([{ SubnetId: outputs.WorkerSubnetId, OwnerId: account, Tags: infrastructureTags, MapPublicIpOnLaunch: false, VpcId: "vpc-fixture", ...networkOverride }]);
     if (args.includes("describe-security-groups")) return reply([{ GroupId: outputs.WorkerSecurityGroupId, OwnerId: account, Tags: infrastructureTags, VpcId: "vpc-fixture", IpPermissions: [{ IpProtocol: "tcp", FromPort: 22, ToPort: 22, UserIdGroupPairs: [{ GroupId: "sg-ccccccccccccccccc" }] }] }]);
-    if (args.includes("describe-images")) return reply([{ ImageId: options.imageId, OwnerId: account, State: "available", Architecture: "x86_64", Public: false, RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true, VolumeSize: 20 } }], Tags: Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: "relay-fixture", AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" }).map(([Key, Value]) => ({ Key, Value })), ...imageOverride }]);
+    if (args.includes("describe-images")) return reply([{ ImageId: options.imageId, OwnerId: account, State: "available", Architecture: "x86_64", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true, VolumeSize: 20 } }], Tags: Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: "relay-fixture", AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" }).map(([Key, Value]) => ({ Key, Value })), ...imageOverride }]);
     if (args.includes("describe-key-pairs")) return reply([{ KeyName: outputs.WorkerKeyName, Tags: infrastructureTags, PublicKey: "ssh-ed25519 AAAAFixturePublicKey comment\n" }]);
     if (args.includes("describe-instances")) {
       if (args.includes(controllerId)) return reply([{ InstanceId: controllerId, State: { Name: "running" }, Tags: infrastructureTags, SubnetId: "subnet-ccccccccccccccccc", SecurityGroups: [{ GroupId: "sg-ccccccccccccccccc" }], IamInstanceProfile: { Arn: "arn:aws:iam::123456789012:instance-profile/fixture-controller" }, ...controllerOverride }]);
@@ -56,6 +56,18 @@ test("worker acceptance dry-run makes zero AWS calls and requires explicit accou
   assert.equal(result.dryRun, true);
   assert.equal(result.promptsSent, false);
   for (const args of [[], ["--expected-account", "123456789012"], ["--image-id", "ami-*"], ["--secret", "private"]]) assert.throws(() => parseVerificationOptions(args));
+});
+
+test("AMI acceptance recognizes inert Canonical instance-store hints but rejects missing or unencrypted EBS roots", async () => {
+  const root = { DeviceName: "/dev/sda1", Ebs: { Encrypted: true, VolumeSize: 20 } };
+  const hint = { DeviceName: "/dev/sdb", VirtualName: "ephemeral0" };
+  const valid = fixture({ imageOverride: { BlockDeviceMappings: [root, hint] } });
+  assert.equal((await verifyWorkerImage(options, { run: valid.run, sleep: async () => {} })).accepted, true);
+  for (const mapping of [[hint], [{ ...root, Ebs: { Encrypted: false } }, hint], [root, { DeviceName: "/dev/sdc" }], [root, { ...hint, VirtualName: "unknown" }], [root, { ...hint, NoDevice: "" }]]) {
+    const f = fixture({ imageOverride: { BlockDeviceMappings: mapping } });
+    await assert.rejects(verifyWorkerImage(options, { run: f.run, sleep: async () => {} }), /private encrypted/);
+    assert.ok(!f.calls.some(call => call.includes("run-instances")));
+  }
 });
 
 test("fresh acceptance proves isolated boot, stop/start persistence, pinned host identity and exact cleanup", async () => {
