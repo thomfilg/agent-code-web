@@ -106,7 +106,7 @@ Official Playwright MCP verified the Google entry screen at 1600, 390 and 320
 pixels without horizontal overflow. Google cloud consent remains pending the
 new callback registration; no production account or chat was fabricated.
 
-AWS checkpoint (2026-09-18 07:15 UTC):
+AWS checkpoint (2026-09-18 07:56 UTC):
 
 - Cold backup/restore passed on the actual encrypted EBS volume. Snapshot
   `snap-08d0e108e9596b5df` is retained; a distinct restored volume matched both
@@ -126,11 +126,21 @@ AWS checkpoint (2026-09-18 07:15 UTC):
   `88faada5-24b1-493e-bb78-22cd1df09fde`; independent public checks again returned
   readiness 200 and anonymous chats 401. The older previous-container slot was
   consumed under the normal single-slot rollout policy.
-- Worker AMI `ami-0511b35c0d21d5ee0` was built and finalized, but fresh boot
-  acceptance failed credential/metadata audit flags after SSH connected. All
-  three disposable verification workers were confirmed terminated. Typed safe
-  diagnostics, builder SSM purge and metadata-denial handling are implemented;
-  a new bake is pending. The old image is **not accepted for real chats**.
+- Worker AMI `ami-0511b35c0d21d5ee0` failed fresh credential/metadata acceptance.
+  The next bake, `ami-01358e3a58d2e7d20`, passed all identity, native-version,
+  SSM-removal, network/metadata and heartbeat checks, but still failed the
+  credential audit: `unexpectedAuthorizedKeys=1`, all other categories zero.
+  Exact location/content was not exposed. The finalizer's missing cleanup of
+  the agent SSH directory is being corrected; neither image is accepted.
+  Latest probe SSM `0b25c656-3777-471b-9c8a-28ead4b954e9`; disposable worker
+  `i-063b80e4d84599b35` and its encrypted volume were confirmed removed.
+- Worker admission now requires the exact private/pinned image to bear a
+  `verified-v1` acceptance marker, written only after fresh boot, stop/start
+  and confirmed disposable-instance/volume cleanup. The 64 focused tests pass.
+  CloudFormation change set `worker-ami-acceptance-20260918` reached
+  `UPDATE_COMPLETE`, modifying only the controller's IAM policy (no replacements)
+  to deny launches of unaccepted images. Controller runtime rollout of the
+  corresponding admission checks is still pending; the IAM restriction is live.
 - The cloud Google callback to register is
   `https://d20atclccf8cku.cloudfront.net/api/auth/callback/google`.
   Fresh product consent for Codex/Claude/GitHub/Linear, worker/native acceptance,

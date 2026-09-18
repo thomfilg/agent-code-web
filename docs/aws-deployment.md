@@ -192,6 +192,15 @@ Evidence: acceptance `91246861-681f-485c-b85f-4b9051b071a4`, SSM
 `88faada5-24b1-493e-bb78-22cd1df09fde`. The normal single previous-container slot
 was consumed by this test; the healthy current image remains unchanged.
 
+The 07:56 UTC worker checkpoint is still **not accepted**. The replacement
+`ami-01358e3a58d2e7d20` passed the identity, SSM-removal, metadata-denial and
+heartbeat checks but reported one unexpected authorized-keys file. The exact
+disposable worker and volume were removed. The controller IAM policy now
+requires a `verified-v1` image-acceptance marker; the policy-only CloudFormation
+update completed without replacing any resource. Markers require successful
+fresh/resumed audits and confirmed test-resource cleanup, not merely a successful
+AMI bake. Runtime admission changes passed 64 focused tests and await rollout.
+
 The latest full backend regression at `3a3adb3` passed 833 tests without skips,
 including native/SSH/operator fixtures. A fresh browser run passed 28 isolated fixtures: 16
 Codex/Claude, 4 Google, 4 GitHub/company scopes and 4 Linear. These are not real
