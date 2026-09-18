@@ -124,4 +124,9 @@ test("worker recipe removes builder identity, generates new host keys and does n
   for (const required of ["@openai/codex@0.154.0", "@anthropic-ai/claude-code@2.1.222", "cloud-init.disabled", "cloud-init clean --logs --seed --machine-id", "/var/lib/amazon/ssm", "/root/.aws", "ssh_host_${kind}_key", "ssh-keygen -A", "IMAGE_FINALIZED", "agent-web-heartbeat.service"]) assert.ok(recipe.includes(required), required);
   assert.ok(recipe.indexOf("Credential filename scan failed") < recipe.indexOf("systemctl poweroff"));
   assert.equal(recipe.includes("@openai/codex @anthropic-ai"), false);
+  assert.ok(recipe.includes('agent ALL=(root) NOPASSWD: /usr/local/sbin/agent-web-audit-image ""'));
+  assert.ok(recipe.includes("if os.geteuid() != 0 or len(sys.argv) != 1:"));
+  assert.ok(recipe.includes("#!/usr/bin/python3 -I"));
+  assert.ok(recipe.includes("agent-relay-builder-identity.json"));
+  assert.ok(recipe.includes("metadataReachable"));
 });
