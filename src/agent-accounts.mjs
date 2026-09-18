@@ -84,7 +84,7 @@ export class AgentAccounts {
       const record = { id, ownerId, provider: input.provider, name, ...scope, status: "pending", auth: null, email: null, plan: null, error: null,
         revision: (previous?.revision || 0) + 1, accountIdentity: previous?.accountIdentity || null, subject: previous?.subject || null };
       await this.save(record);
-      const flow = { ownerId, id, client: this.clientFactory(record.provider), expiresAt: this.now() + this.loginTimeoutMs };
+      const flow = { ownerId, id, revision: record.revision, client: this.clientFactory(record.provider), expiresAt: this.now() + this.loginTimeoutMs };
       this.flows.set(id, flow);
       try {
         await flow.client.start();
@@ -160,6 +160,9 @@ export class AgentAccounts {
     }
     return this.locked(id, async () => {
       const record = await this.get(ownerId, id), flow = this.flows.get(id);
+      // A begin already queued behind verification can acquire this lock
+      // before cancel does. This request only cancelled its captured attempt.
+      if (pending?.ownerId === ownerId && (record.revision !== pending.revision || flow && flow !== pending)) return this.status(ownerId, id);
       if (flow || pending?.ownerId === ownerId) {
         if (flow) {
           this.flows.delete(id); clearTimeout(flow.timer);
@@ -174,6 +177,14 @@ export class AgentAccounts {
     await this.cancel(ownerId, id);
     await this.locked(id, async () => {
       const record = await this.get(ownerId, id);
+      // Disconnect targets the whole saved account, unlike attempt-scoped
+      // cancellation. Invalidate a replacement queued before this lock too.
+      const flow = this.flows.get(id);
+      if (flow) {
+        flow.cancelled = true; flow.cancelMessage = "Account disconnected.";
+        this.flows.delete(id); clearTimeout(flow.timer);
+        await flow.client.cancel().catch(() => {}); await flow.client.close().catch(() => {});
+      }
       await this.save({ ...record, status: "disconnected", auth: null, revision: record.revision + 1, error: null });
     });
     // Invalidate admission before stopping workers; refresh callbacks can no
