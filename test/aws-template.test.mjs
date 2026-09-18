@@ -67,3 +67,35 @@ test("controller build is a secret-free allowlist context and pinned CLI version
   assert.match(dockerfile, /USER node/);
   assert.doesNotMatch(dockerfile, /COPY \. \.|ARG .*TOKEN|ARG .*SECRET|AGENT_ENABLE_MOCK=1/);
 });
+
+test("preview provisioning IAM is opt-in, isolated leaf policy and forbids Relay distribution", () => {
+  const t = relayTemplate(), r = t.Resources, p = r.PreviewHostingPolicy;
+  assert.equal(t.Parameters.EnableAppPreviews.Default, "false"); assert.equal(p.Condition, "AppPreviewsEnabled");
+  assert.deepEqual(t.Conditions.AppPreviewsEnabled, { "Fn::Equals": [{ Ref: "EnableAppPreviews" }, "true"] });
+  assert.deepEqual(p.Properties.Roles, [{ Ref: "ControllerRole" }]);
+  assert.doesNotMatch(JSON.stringify(r.ControllerRole), /cloudfront:|VpcOrigin|Distribution/);
+  const statements = p.Properties.PolicyDocument.Statement, deny = statements.find(s => s.Effect === "Deny");
+  assert.equal(deny.Action, "cloudfront:*"); assert.match(deny.Resource["Fn::Sub"], /distribution\/\$\{Distribution\}$/);
+  const create = statements.find(s => s.Action === "cloudfront:CreateDistribution"), tag = statements.find(s => s.Action === "cloudfront:TagResource");
+  assert.equal(create.Condition.StringEquals["aws:RequestTag/ManagedBy"], "agent-relay-preview");
+  assert.equal(create.Condition.StringEquals["aws:RequestTag/AgentRelayPurpose"], "app-preview-v1");
+  assert.equal(create.Condition.Null["aws:RequestTag/AgentRelayOwner"], "false");
+  assert.equal(create.Condition["ForAllValues:StringEquals"]["aws:TagKeys"].length, 7);
+  assert.match(tag.Resource["Fn::Sub"], /\$\{AWS::AccountId\}:distribution\/\*$/);
+  assert.deepEqual(tag.Condition.StringEqualsIfExists["aws:ResourceTag/AgentRelayDeployment"], { Ref: "AWS::StackName" });
+  const manage = statements.find(s => Array.isArray(s.Action) && s.Action.includes("cloudfront:DeleteDistribution"));
+  for (const action of ["cloudfront:GetDistribution", "cloudfront:ListTagsForResource", "cloudfront:UpdateDistribution"]) assert.ok(manage.Action.includes(action));
+  assert.equal(manage.Condition.StringEquals["aws:ResourceTag/AgentRelayPurpose"], "app-preview-v1");
+  const allowed = statements.filter(s => s.Effect === "Allow");
+  assert.doesNotMatch(JSON.stringify(allowed), /UntagResource|CreateVpcOrigin|UpdateVpcOrigin|DeleteVpcOrigin|acm:|route53:|PassRole|cloudfront:\*/);
+  assert.deepEqual(t.Outputs.VpcOriginId.Value, { "Fn::GetAtt": ["VpcOrigin", "Id"] });
+  assert.deepEqual(t.Outputs.PreviewHostingEnabled.Value, { Ref: "EnableAppPreviews" });
+  const refs = value => {
+    if (!value || typeof value !== "object") return [];
+    if (value.Ref) return [value.Ref]; if (value["Fn::GetAtt"]) return [value["Fn::GetAtt"][0]];
+    if (typeof value["Fn::Sub"] === "string") return [...value["Fn::Sub"].matchAll(/\$\{([^}]+)\}/g)].map(match => match[1].split(".")[0]);
+    return Object.values(value).flatMap(refs);
+  };
+  const visit = (name, chain = []) => { assert.ok(!chain.includes(name), "CloudFormation dependency cycle"); for (const next of new Set(refs(r[name]).filter(ref => r[ref]))) visit(next, [...chain, name]); };
+  for (const name of Object.keys(r)) visit(name);
+});

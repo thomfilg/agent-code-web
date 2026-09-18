@@ -1,8 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { environmentFor, assertWorkerKey, assertWorkerOnlyUpdate, publishWorkerOnlyUpdate, parsePublishedEnvironment, initializeWorkerKey } from "../scripts/aws-secrets.mjs";
+import { environmentFor, assertWorkerKey, assertWorkerOnlyUpdate, publishWorkerOnlyUpdate, parsePublishedEnvironment, initializeWorkerKey, previewEnvironment } from "../scripts/aws-secrets.mjs";
 const secrets = { GOOGLE_CLIENT_ID: "google-fixture", GOOGLE_CLIENT_SECRET: "google-secret-fixture", AGENT_OWNER_EMAIL: "owner@example.test", AUTH_SECRET: "x".repeat(48), AGENT_ENCRYPTION_KEY: Buffer.alloc(32).toString("base64"), DOPPLER_TOKEN: "DO-NOT-COPY", OPENAI_API_KEY: "DO-NOT-COPY", ANTHROPIC_API_KEY: "DO-NOT-COPY" };
 const outputs = { PublicUrl: "https://example.cloudfront.net", WorkerSubnetId: "subnet-fixture", WorkerSecurityGroupId: "sg-fixture", WorkerKeyName: "deployment-key" };
+
+test("preview env stays disabled until explicit flag and reviewed stack policy outputs agree", () => {
+  assert.deepEqual(previewEnvironment(undefined, outputs), { AGENT_PREVIEW_ENABLED: "0" });
+  const scope = { PreviewHostingEnabled: "true", VpcOriginId: "vo_fixture", ControllerInstanceId: "i-0123456789abcdef0", ControllerOriginDns: "ip-10-84-1-2.us-east-2.compute.internal", DistributionId: "ERELAYEXCLUDED" };
+  const enabled = previewEnvironment("1", scope); assert.equal(enabled.AGENT_PREVIEW_ENABLED, "1"); assert.equal(enabled.AGENT_PREVIEW_ACCOUNT_ID, "456808212788");
+  assert.equal(enabled.AGENT_PREVIEW_RELAY_DISTRIBUTION_ID, scope.DistributionId); assert.equal(Object.keys(enabled).length, 6);
+  for (const key of Object.keys(scope)) { const missing = { ...scope }; delete missing[key]; assert.throws(() => previewEnvironment("1", missing)); }
+  assert.throws(() => previewEnvironment("1", { ...scope, PreviewHostingEnabled: "false" }));
+  assert.throws(() => previewEnvironment("1", { ...scope, VpcOriginId: "vo_fixture\n" })); assert.throws(() => previewEnvironment("yes", scope));
+});
 const image = { ImageId: "ami-aaaaaaaaaaaaaaaaa", OwnerId: "456808212788", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true } }], State: "available", Architecture: "x86_64", Tags: Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: "agent-relay-mvp", AgentRelayWorkerKey: "deployment-key", CodexVersion: "0.154.0", ClaudeVersion: "2.1.222", AgentRelayAcceptance: "verified-v1", AgentRelayAcceptanceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }).map(([Key, Value]) => ({ Key, Value })) };
 const key = "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-test-key\n-----END OPENSSH PRIVATE KEY-----\n";
 
