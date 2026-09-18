@@ -106,7 +106,7 @@ Official Playwright MCP verified the Google entry screen at 1600, 390 and 320
 pixels without horizontal overflow. Google cloud consent remains pending the
 new callback registration; no production account or chat was fabricated.
 
-AWS checkpoint (2026-09-18 07:50 UTC):
+AWS checkpoint (2026-09-18 08:18 UTC):
 
 - Cold backup/restore passed on the actual encrypted EBS volume. Snapshot
   `snap-08d0e108e9596b5df` is retained; a distinct restored volume matched both
@@ -131,7 +131,7 @@ AWS checkpoint (2026-09-18 07:50 UTC):
   SSM-removal, network/metadata and heartbeat checks, but still failed the
   credential audit: `unexpectedAuthorizedKeys=1`, all other categories zero.
   Exact location/content was not exposed. The finalizer's missing cleanup of
-  the agent SSH directory is being corrected; neither image is accepted.
+  the agent SSH directory was corrected; neither old image is accepted.
   Latest probe SSM `0b25c656-3777-471b-9c8a-28ead4b954e9`; disposable worker
   `i-063b80e4d84599b35` and its encrypted volume were confirmed removed.
 - Worker admission now requires the exact private/pinned image to bear a
@@ -139,8 +139,21 @@ AWS checkpoint (2026-09-18 07:50 UTC):
   and confirmed disposable-instance/volume cleanup. The 64 focused tests pass.
   CloudFormation change set `worker-ami-acceptance-20260918` reached
   `UPDATE_COMPLETE`, modifying only the controller's IAM policy (no replacements)
-  to deny launches of unaccepted images. Controller runtime rollout of the
-  corresponding admission checks is still pending; the IAM restriction is live.
+  to deny launches of unaccepted images. Controller runtime admission is now
+  live too: revision `6de71bb`, digest
+  `sha256:16a165a5b7011473034737d13a9489acabcb69e1975252898abaca6aef03a6b4`,
+  deploy SSM `e5b40bf3-d94f-456f-a5b7-1212d4634cce`, readiness 200/chats 401.
+- Replacement AMI `ami-06f979453243f2fc1` passed actual fresh-boot and stop/start
+  acceptance, including credential absence, disabled metadata/no role, private
+  network, native versions, distinct/stable machine and SSH identity, heartbeat
+  and persisted sentinel. Verification `ad2783e5-b450-4642-91d9-04273e8c8bc2`;
+  fresh SSM `bb67ba23-4175-4a1c-aada-39b5e4e38430`, resumed SSM
+  `afd39ae5-d4c7-4196-b77d-1fed32f6697b`. Exact verification VM and encrypted
+  volume were removed before marking the image accepted. Builder
+  `i-088ce2690e3b8923e` is terminated with zero remaining bake-tagged volumes.
+  The image-only configuration publication preserved every credential/other
+  setting; a rollout of the prior healthy app established the accepted-image
+  rollback baseline before the new runtime rollout.
 - The cloud Google callback to register is
   `https://d20atclccf8cku.cloudfront.net/api/auth/callback/google`.
   Fresh product consent for Codex/Claude/GitHub/Linear, worker/native acceptance,

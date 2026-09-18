@@ -192,21 +192,25 @@ Evidence: acceptance `91246861-681f-485c-b85f-4b9051b071a4`, SSM
 `88faada5-24b1-493e-bb78-22cd1df09fde`. The normal single previous-container slot
 was consumed by this test; the healthy current image remains unchanged.
 
-The 07:50 UTC worker checkpoint is still **not accepted**. The replacement
-`ami-01358e3a58d2e7d20` passed the identity, SSM-removal, metadata-denial and
-heartbeat checks but reported one unexpected authorized-keys file. The exact
-disposable worker and volume were removed. The controller IAM policy now
-requires a `verified-v1` image-acceptance marker; the policy-only CloudFormation
-update completed without replacing any resource. Markers require successful
-fresh/resumed audits and confirmed test-resource cleanup, not merely a successful
-AMI bake. Runtime admission changes passed 64 focused tests and await rollout.
+The 08:18 UTC worker checkpoint passed with `ami-06f979453243f2fc1`:
+fresh/resumed audits and exact test-instance/volume cleanup completed before its
+`verified-v1` marker was written and confirmed. Verification ID
+`ad2783e5-b450-4642-91d9-04273e8c8bc2`. The two earlier images remain unaccepted;
+the finalizer omission exposed by their authorized-key audit was corrected.
+The controller IAM policy-only update completed without resource replacements.
+Runtime admission checks are also deployed in `6de71bb`, immutable digest
+`sha256:16a165a5b7011473034737d13a9489acabcb69e1975252898abaca6aef03a6b4`;
+SSM `e5b40bf3-d94f-456f-a5b7-1212d4634cce` completed healthy. The image-only
+configuration update preserved all other settings and credentials, and the
+previous healthy application was redeployed with that accepted-image setting
+before the runtime update to preserve a usable rollback baseline.
 
 The latest integrated regression at `e22fd45` passed 859 tests without skips,
 including native/SSH/operator fixtures and the opt-in official-MCP guest UI
 test in the same sequential run. Ten finalizer Python checks also passed.
 A fresh onboarding browser run passed 28 isolated fixtures: 16
 Codex/Claude, 4 Google, 4 GitHub/company scopes and 4 Linear. These are not real
-provider consent. Fresh-worker acceptance, native AWS account execution/resume,
+provider consent. Native AWS account execution/resume,
 cloud Google/provider consent, protected SSE/live-browser acceptance and remote
 application forwarding remain open. See the [feature queue](feature-queue.md)
 for the latest evidence and explicit release gates.
