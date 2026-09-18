@@ -93,6 +93,7 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
   if (ingress?.length !== 1 || ingress[0].IpProtocol !== "tcp" || ingress[0].FromPort !== 22 || ingress[0].ToPort !== 22 || ingress[0].UserIdGroupPairs?.length !== 1 || ingress[0].UserIdGroupPairs[0].GroupId !== controllerGroup || ingress[0].IpRanges?.length || ingress[0].Ipv6Ranges?.length || ingress[0].PrefixListIds?.length) throw new Error("Acceptance permits only controller-to-worker SSH ingress");
   const images = await json("ec2", "describe-images", "--image-ids", o.imageId, "--owners", o.account, "--query", "Images");
   const image = images?.[0], tags = tagsOf(image);
+  if (tags.AgentRelayHibernation) throw new Error("A hibernation candidate requires process-resume acceptance, not the ordinary stop/start verifier");
   const imageScope = { imageId: o.imageId, account: o.account, deployment: o.deployment, keyName: outputs.WorkerKeyName };
   assertWorkerImage(image, { ...imageScope, accepted: false });
   const imageIdentity = workerImageIdentity(image);

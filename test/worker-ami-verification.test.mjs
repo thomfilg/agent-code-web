@@ -111,6 +111,12 @@ test("fresh acceptance proves isolated boot, stop/start persistence, pinned host
   assert.ok(f.calls.slice(0, markerIndex).some(call => call.includes("describe-volumes")));
 });
 
+test("ordinary acceptance cannot mark a hibernation candidate", async () => {
+  const f = fixture({ imageOverride: { Tags: [{ Key: "AgentRelayHibernation", Value: "candidate-v1" }] } });
+  await assert.rejects(verifyWorkerImage(options, { run: f.run }), /requires process-resume acceptance/);
+  assert.equal(f.calls.some(c => c.includes("run-instances") || c.includes("create-tags")), false);
+});
+
 test("acceptance refuses foreign identity/network/image/controller/secret before creating resources", async () => {
   for (const change of [{ account: "999999999999" }, { networkOverride: { MapPublicIpOnLaunch: true } }, { imageOverride: { Public: true } }, { imageOverride: { Tags: [] } }, { imageOverride: { OwnerId: "999999999999" } }, { controllerOverride: { PublicIpAddress: "1.2.3.4" } }, { controllerOverride: { IamInstanceProfile: { Arn: "wrong" } } }, { stackOutputs: { ...outputs, SecretArn: "arn:aws:secretsmanager:us-east-2:123456789012:secret:unrelated" } }]) {
     const f = fixture(change);

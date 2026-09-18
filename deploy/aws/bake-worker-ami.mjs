@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
+import { hibernationCandidate, hibernationRecipe } from "./worker-hibernation.mjs";
 
 const recipePath = fileURLToPath(new URL("worker-cloud-init.yaml", import.meta.url));
 const exec = promisify(execFile);
@@ -75,6 +76,7 @@ export function parseOptions(args) {
   const keys = { "--expected-account": "expectedAccount", "--region": "region", "--profile": "profile", "--subnet-id": "subnetId", "--security-group-id": "securityGroupId", "--key-name": "keyName", "--builder-instance-profile": "builderInstanceProfile", "--base-image-id": "baseImageId", "--deployment": "deployment", "--instance-type": "instanceType", "--volume-gb": "volumeGb", "--name": "name" };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--dry-run") { options.dryRun = true; continue; }
+    if (args[i] === "--hibernation-candidate") { options.hibernationCandidate = true; continue; }
     const key = keys[args[i]];
     if (!key || !args[i + 1] || args[i + 1].startsWith("--")) throw new Error(`Unknown or incomplete baker argument: ${args[i]}`);
     options[key] = args[++i];
@@ -97,8 +99,9 @@ export async function runBakerAws(args, execute = exec) {
 
 export async function bakeWorkerImage(options, { run = runBakerAws, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), log = () => {}, recipe = null, pollLimit = 180 } = {}) {
   const o = options;
-  const plan = { expectedAccount: o.expectedAccount, deployment: o.deployment, region: o.region, subnetId: o.subnetId, securityGroupId: o.securityGroupId, keyName: o.keyName, builderInstanceProfile: o.builderInstanceProfile, baseImageId: o.baseImageId, versions: CLI_VERSIONS, privateOnly: true, finalWorkerRole: null, finalWorkerMetadata: "disabled" };
+  const plan = { expectedAccount: o.expectedAccount, deployment: o.deployment, region: o.region, subnetId: o.subnetId, securityGroupId: o.securityGroupId, keyName: o.keyName, builderInstanceProfile: o.builderInstanceProfile, baseImageId: o.baseImageId, versions: CLI_VERSIONS, privateOnly: true, finalWorkerRole: null, finalWorkerMetadata: "disabled", ...(o.hibernationCandidate ? { hibernationCandidate, productionReady: false } : {}) };
   recipe ||= await readFile(recipePath, "utf8");
+  if (o.hibernationCandidate) recipe = hibernationRecipe(recipe);
   for (const [pkg, version] of [["@openai/codex", CLI_VERSIONS.codex], ["@anthropic-ai/claude-code", CLI_VERSIONS.claude]]) if (!recipe.includes(`${pkg}@${version}`)) throw new Error("Worker recipe must contain the pinned CLI versions");
   gzipWorkerUserData(recipe); // Early local rejection, including dry-run.
   if (o.dryRun) return { dryRun: true, ...plan };
@@ -110,6 +113,7 @@ export async function bakeWorkerImage(options, { run = runBakerAws, sleep = ms =
   };
   const bakeId = randomUUID();
   const tags = [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: o.deployment }, { Key: "AgentRelayWorkerKey", Value: o.keyName }, { Key: "CodexVersion", Value: CLI_VERSIONS.codex }, { Key: "ClaudeVersion", Value: CLI_VERSIONS.claude }];
+  if (o.hibernationCandidate) tags.push({ Key: "AgentRelayHibernation", Value: hibernationCandidate });
   let builderId;
   let temporary;
   async function builder(terminationObservation = false) {
@@ -197,6 +201,7 @@ export async function bakeWorkerImage(options, { run = runBakerAws, sleep = ms =
     const userData = path.join(temporary, "cloud-init.yaml.gz");
     await writeFile(userData, compressedUserData, { mode: 0o600, flag: "wx" });
     const launched = await json("ec2", "run-instances", "--image-id", o.baseImageId, "--instance-type", o.instanceType, "--client-token", bakeId,
+      ...(o.hibernationCandidate ? ["--hibernation-options", "Configured=true"] : []),
       "--network-interfaces", JSON.stringify([{ DeviceIndex: 0, SubnetId: o.subnetId, Groups: [o.securityGroupId], AssociatePublicIpAddress: false, DeleteOnTermination: true }]),
       "--key-name", o.keyName, "--iam-instance-profile", JSON.stringify({ Name: o.builderInstanceProfile }), "--metadata-options", "HttpTokens=required,HttpEndpoint=enabled,HttpPutResponseHopLimit=1",
       "--instance-initiated-shutdown-behavior", "stop", "--credit-specification", "CpuCredits=standard",

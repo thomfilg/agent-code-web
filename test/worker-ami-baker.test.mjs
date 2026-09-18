@@ -144,6 +144,22 @@ test("AMI cleanup observes exact terminal state with detached network but never 
   }
 });
 
+test("hibernation bake is explicitly opt-in and cannot claim production acceptance", async () => {
+  const f = fixture();
+  const options = parseOptions([...required, "--hibernation-candidate"]);
+  const result = await bakeWorkerImage(options, { run: f.run, sleep: async () => {} });
+  assert.equal(result.hibernationCandidate, "candidate-v1");
+  assert.equal(result.productionReady, false);
+  const launch = f.calls.find(c => c.includes("run-instances"));
+  assert.equal(launch[launch.indexOf("--hibernation-options") + 1], "Configured=true");
+  const image = f.calls.find(c => c.includes("create-image"));
+  const tags = JSON.parse(image[image.indexOf("--tag-specifications") + 1])[0].Tags;
+  assert.ok(tags.some(tag => tag.Key === "AgentRelayHibernation" && tag.Value === "candidate-v1"));
+  assert.equal(tags.some(tag => tag.Key === "AgentRelayAcceptance"), false);
+  assert.match(f.getUserData(), /ec2-hibinit-agent/);
+  assert.doesNotMatch(f.getUserData(), /420.*shutdown/);
+});
+
 test("cleanup does a strict recheck before termination and rejects detached nonterminal instances", async () => {
   for (const race of [false, true]) {
     let cleanupReads = 0;
