@@ -100,6 +100,19 @@ owners prevents cross-chat origin reuse, but does not address this repeat-open
 case within the same chat. See the [service-worker fetch handling
 model](https://w3c.github.io/ServiceWorker/#handle-fetch).
 
+Threat-model clarification (2026-09-18): with a permanently assigned
+owner/chat/port origin and correct revocation, that interception is not by
+itself a cross-user, cross-chat or cross-port authority leak. The application's
+scripts and service worker already control that origin's documents and can make
+its authenticated app requests. The distinct unresolved risk is exporting the
+single-use bootstrap bearer to another browser before redemption, giving that
+browser the same scoped access until expiry/revocation. `PreviewGrants` binds
+Relay session metadata but does not authenticate the redeeming browser. This
+is not evidence of Relay/provider credential exposure. Investigate a
+browser-bound bootstrap exchange that preserves service-worker/PWA behavior;
+do not claim same-origin app-script secrecy or silently ban PWAs to close the
+gate. The required browser and lifecycle acceptance below remains outstanding.
+
 The smallest proposed initial policy is to start only on fresh origins and
 explicitly reject application service-worker script requests (the browser's
 `Service-Worker: script` request), across all proxy paths and methods, before
@@ -193,3 +206,18 @@ authentication acceptance is still running, treating this as a safely finished
 feature would be high risk. Keep gate 45 explicitly open unless the complete
 implementation and deployed negative/positive tests actually pass; do not count
 a second distribution alone as completion.
+
+### Read-only account inventory — 2026-09-18 10:25 UTC
+
+Using the authorized `code-web` profile, CloudFront listed five distributions
+in the account. Exactly one uses Relay's existing VPC origin
+`vo_4Fp0yW32vpmGPSJWgmyW9i`: Relay's own distribution `E2FQ8W4AL72G7G`.
+No preview distribution was created, adopted, changed or removed by this check.
+Do not treat the other four distributions as available preview resources.
+
+Service Quotas' default-value API returned 500 web distributions per account
+(`L-24B04930`) and 50 distributions per VPC origin (`L-947322B3`, marked
+non-adjustable). Its account-applied quota list returned no entries, so this
+receipt does **not** establish an effective account quota or reserve capacity.
+Recheck inventory and effective limits before provisioning; never derive an
+unconditional create budget by subtracting this snapshot from a default value.
