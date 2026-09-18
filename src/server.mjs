@@ -445,9 +445,13 @@ export async function createAgentWebServer(options = {}) {
         if (!Array.isArray(body.repositories) || body.repositories.length > 100 || body.repositories.some(repo => typeof repo.fullName !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(repo.fullName) || typeof repo.branch !== "string" || repo.branch.length > 250)) throw new Error("Invalid repository preferences");
         const modelSettings = await models.validate(body.agent, body, { ...body, ownerId: user?.id });
         if (body.repositories.some(repo => repo.githubConnectionId && !/^github(?:_[a-f0-9-]{36})?$/.test(repo.githubConnectionId))) throw new Error("Invalid GitHub connection preference");
+        const connections = github.connections ? await github.connections() : [];
         const preferences = { environmentId: body.environmentId, agent: ["codex", "claude", "mock"].includes(body.agent) ? body.agent : null,
           ...(["codex", "claude"].includes(body.agent) && body.agentAccountId ? { agentAccountId: body.agentAccountId } : {}),
-          ...modelSettings, repositories: body.repositories.map(({ fullName, branch, githubConnectionId }) => ({ fullName, branch, ...(githubConnectionId ? { githubConnectionId } : {}) })) };
+          ...modelSettings, repositories: body.repositories.map(({ fullName, branch, githubConnectionId }) => {
+            const companyId = connections.find(connection => connection.id === githubConnectionId)?.companyId;
+            return { fullName, branch, ...(githubConnectionId ? { githubConnectionId } : {}), ...(companyId ? { companyId } : {}) };
+          }) };
         await records.put("preferences", "new-chat", preferences);
         if (googleAuth.enabled) await agentAccounts.rememberProject(user.id, preferences);
         return json(response, 200, { preferences });

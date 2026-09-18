@@ -3,8 +3,8 @@ import { companyScope } from "../public/company-scope.js";
 const fail = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 export const validCompanyId = value => typeof value === "string" && /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(value);
 
-// Existing repository ownership is the stable company key. A display-name edit
-// must never retarget credentials or move conversations to another company.
+// A Relay company has its own stable key; it is not a GitHub organization.
+// Renaming it must never retarget credentials or move existing conversations.
 export function connectionCompany(record = {}) {
   if (record.companyId !== undefined) return validCompanyId(record.companyId) ? record.companyId : null;
   const scope = companyScope(record);
@@ -35,7 +35,7 @@ export class Companies {
       const old = id ? await this.get(id) : null;
       if (old && input.revision !== old.revision) throw fail("This company changed in another tab. Reload before saving.", 409);
       const key = id || String(input.id || "").trim().toLowerCase(), name = String(input.name || "").trim();
-      if (!validCompanyId(key)) throw fail("Use the company's GitHub organization or username as its identifier.");
+      if (!validCompanyId(key)) throw fail("Use a short company identifier containing lowercase letters, numbers and hyphens.");
       if (!name || name.length > 80 || /[\x00-\x1f]/.test(name)) throw fail("Company name must contain 1–80 characters.");
       if (old && input.id !== undefined && input.id !== id) throw fail("The company identifier cannot be changed.");
       const all = await this.list();

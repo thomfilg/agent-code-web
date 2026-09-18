@@ -10,7 +10,7 @@ test("Companies is a separate page with durable registration, stable identifiers
   await page.getByRole("button", { name: "Companies", exact: true }).click();
   await expect(page.locator("#companies-page")).toBeVisible(); await expect(page.locator("dialog[open]")).toHaveCount(0);
   await page.locator("#company-new").click(); await page.getByLabel("Company name", { exact: true }).fill("Browser Company");
-  await page.getByLabel("GitHub organization or username").fill("browser-company");
+  await page.getByLabel("Company identifier").fill("browser-company");
   await page.getByRole("button", { name: "Save company", exact: true }).click();
   const card = page.locator('[data-company-id="browser-company"]'); await expect(card).toContainText("Browser Company");
   await expect(card).toContainText("0 MCP connections"); await expect(card).toContainText("GitHub: not assigned");

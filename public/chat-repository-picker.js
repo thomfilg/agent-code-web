@@ -56,7 +56,7 @@ export class ChatRepositoryPicker {
       const render = () => {
         const existing = this.getChat()?.repositories || [];
         const company = companyForChat(this.getChat() || {});
-        const available = repositories.filter(repo => (!repo.companyId || repo.companyId === (company || repo.fullName.split("/")[0].toLowerCase())) && !existing.some(item => item.fullName.toLowerCase() === repo.fullName.toLowerCase()) && repo.fullName.toLowerCase().includes(search.value.toLowerCase()));
+        const available = repositories.filter(repo => (!company || !repo.companyId || repo.companyId === company) && !existing.some(item => item.fullName.toLowerCase() === repo.fullName.toLowerCase()) && repo.fullName.toLowerCase().includes(search.value.toLowerCase()));
         list.replaceChildren(...available.map(repo => {
           const button = el("button", "repository-option", repo.fullName); button.type = "button";
           if (repo.connectionName) button.append(el("small", "", repo.connectionName));

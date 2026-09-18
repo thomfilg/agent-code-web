@@ -3,9 +3,18 @@
 Status: accepted product direction, 2026-09-18. Rollout/acceptance tracked separately.
 
 Companies have their own page, durable per-Relay-user records, a display name,
-and an immutable identifier matching the GitHub owner of a primary repository.
+and an immutable Relay identifier independent of GitHub repository owners.
 Changing the display name never moves a chat or credential to another company.
-Secondary repositories do not change the chat's company.
+The selected primary repository's saved GitHub connection establishes the
+company; the controller persists that verified binding in repository metadata.
+Browser-supplied company metadata is not trusted at chat admission. Secondary
+repositories do not change the chat's company or borrow another company's login.
+
+Explicit user decision: **thomfilg + 12-apps is one Relay company**, containing
+both personal and organization repositories with one GitHub connection. **g2i**
+is a separate company, with its own GitHub connection and the existing Linear
+connection. Either repository owner can be primary in the combined company.
+Repository names under different owners remain separate projects in the sidebar.
 
 A company has many MCP connections and at most one saved native GitHub
 connection, including pending/disconnected connections. Each connection belongs

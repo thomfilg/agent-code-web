@@ -183,7 +183,8 @@ export class ChatSidebar {
     natural.append(el("div", "repository-groups-label", "Company / repository"));
     for (const company of grouped.companies) {
       const key = `company:${company.name.toLowerCase()}`;
-      const section = this.section(key, company.name, company.repositories.reduce((sum, repo) => sum + repo.chats.length, 0), { className: "company-group" });
+      const label = this.state.companies?.find(entry => entry.id === company.name.toLowerCase())?.name || company.name;
+      const section = this.section(key, label, company.repositories.reduce((sum, repo) => sum + repo.chats.length, 0), { className: "company-group" });
       for (const repo of company.repositories) {
         const repository = this.section(`${key}/${repo.name.toLowerCase()}`, repo.name, repo.chats.length, { className: "repository-group" });
         repository.append(...repo.chats.map(chat => this.row(chat)));

@@ -94,7 +94,7 @@
           <form id="company-form" class="company-edit" hidden>
             <h3 id="company-form-title">Add a company</h3>
             <label><span>Company name</span><input id="company-name" required maxlength="80" autocomplete="organization" placeholder="e.g. 12 Apps"></label>
-            <label><span>GitHub organization or username</span><input id="company-id" required maxlength="39" pattern="[A-Za-z0-9][A-Za-z0-9-]*" placeholder="e.g. 12-apps" autocomplete="off"></label>
+            <label><span>Company identifier</span><input id="company-id" required maxlength="39" pattern="[A-Za-z0-9][A-Za-z0-9-]*" placeholder="e.g. personal-projects" autocomplete="off"></label>
             <p class="muted">This identifier matches the owner of the chat's primary repository. It cannot be renamed; the display name can.</p>
             <p id="company-form-error" class="form-error" role="alert"></p>
             <div class="dialog-actions"><button type="button" class="secondary-button" id="company-cancel">Cancel</button><button type="submit" class="primary-button">Save company</button></div>

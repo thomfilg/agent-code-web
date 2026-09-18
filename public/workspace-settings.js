@@ -71,7 +71,10 @@ export class WorkspaceSettings {
     this.preferences = saved.preferences;
     this.projectAgents = saved.projectAgents || {};
     this.accounts = accounts.accounts;
-    if (!this.draftReady) this.selected = structuredClone(saved.preferences.repositories || []);
+    if (!this.draftReady) this.selected = structuredClone(saved.preferences.repositories || []).map(repo => {
+      const companyId = github.connections?.find(connection => connection.id === repo.githubConnectionId)?.companyId;
+      return { ...repo, ...(companyId ? { companyId } : {}) };
+    });
     $("#github-button").textContent = github.connected ? `GitHub · ${github.login}` : "Connect GitHub";
     $("#github-requirement").hidden = github.connected;
     $("#repository-picker").hidden = !github.connected && !this.selected.length;
@@ -137,7 +140,6 @@ export class WorkspaceSettings {
     $("#create-chat-error").textContent = "";
     await this.loadCurrent();
     if (!this.draftReady) {
-      this.selected = structuredClone(this.preferences.repositories || []);
       this.accountProject = undefined;
       if (this.preferences.agent && [...$("#agent-select").options].some(o => o.value === this.preferences.agent)) $("#agent-select").value = this.preferences.agent;
       this.modelPicker.key = null;
@@ -174,10 +176,10 @@ export class WorkspaceSettings {
     if (this.repositoryLoading) return status("Loading repositories…");
     if (this.repositoryError) return status("Could not load repositories. Check your GitHub connection and retry.", { error: true, manage: true, retry: true });
     const primaryCompany = companyForChat({ repositories: this.selected });
-    for (const repo of this.repositories.filter(repo => repo.fullName.toLowerCase().includes(query) && (!repo.companyId || repo.companyId === (primaryCompany || repo.fullName.split("/")[0].toLowerCase())))) {
+    for (const repo of this.repositories.filter(repo => repo.fullName.toLowerCase().includes(query) && (!primaryCompany || !repo.companyId || repo.companyId === primaryCompany))) {
       const label = el("label", "repository-option"); const input = el("input"); input.type = "checkbox"; input.checked = this.selected.some(item => item.fullName === repo.fullName && (!item.githubConnectionId || item.githubConnectionId === repo.githubConnectionId));
       input.addEventListener("change", () => {
-        if (input.checked) { this.selected = this.selected.filter(item => item.fullName !== repo.fullName); this.selected.push({ fullName: repo.fullName, branch: repo.defaultBranch, githubConnectionId: repo.githubConnectionId }); }
+        if (input.checked) { this.selected = this.selected.filter(item => item.fullName !== repo.fullName); this.selected.push({ fullName: repo.fullName, branch: repo.defaultBranch, githubConnectionId: repo.githubConnectionId, ...(repo.companyId ? { companyId: repo.companyId } : {}) }); }
         else this.selected = this.selected.filter(item => item.fullName !== repo.fullName);
         this.renderSelected(); this.renderRepositories(); this.remember();
       });
@@ -205,7 +207,9 @@ export class WorkspaceSettings {
       if (index) { const primary = button("↑", () => { this.selected.splice(index, 1); this.selected.unshift(repo); this.renderSelected(); this.remember(); }, "small-icon"); primary.setAttribute("aria-label", `Make ${repo.fullName} primary`); chip.append(primary); }
       const remove = button("×", () => { this.selected = this.selected.filter(item => item !== repo); this.renderSelected(); this.renderRepositories(); this.remember(); }, "small-icon"); remove.setAttribute("aria-label", `Remove ${repo.fullName}`); chip.append(remove); container.append(chip);
     }
-    $("#repository-group-hint").textContent = this.selected.length ? `Grouped under ${this.selected[0].fullName.replace("/", " → ")}. Use ↑ to choose another primary repository.` : "Select repositories. The first one determines the company and repository group.";
+    const company = companyForChat({ repositories: this.selected });
+    const label = this.state.companies?.find(entry => entry.id === company)?.name || company;
+    $("#repository-group-hint").textContent = this.selected.length ? `Grouped under ${label} → ${this.selected[0].fullName.split("/").at(-1)}. Use ↑ to choose another primary repository.` : "Select repositories. The first repository's GitHub connection determines the company.";
   }
   payload() {
     if (this.selected.length && !this.github?.connected) throw new Error("Connect GitHub to use the selected repositories");

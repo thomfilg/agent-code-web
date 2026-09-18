@@ -97,10 +97,15 @@ and revoke previous grants; it must not leave that credential usable by 12-apps
 or duplicate it into another connection.
 
 The user clarified that there are two GitHub connections: one for **g2i**, one for
-**thomfilg + 12-apps**. The latter still needs clarification: one registered company
-covering both repository owners, or two separate companies sharing a connection.
-The implemented one-company-per-connection model must not be deployed as if this
-ambiguity were already resolved. No existing token has been removed or reassigned.
+**thomfilg + 12-apps**, and then explicitly chose **one combined Relay company**
+for the latter. No GitHub multi-company exception is needed. Repository owners
+are now independent of company identity: the controller resolves and persists
+the company from the selected, user-owned GitHub connection. Reordering the two
+owners does not change company, and another company's credential remains denied.
+The follow-up scoped Node run passed **144 tests**, including forged company
+metadata, mixed-owner grouping, same-name repositories, environment admission,
+preferences and empty-repository chat creation. Log:
+`/tmp/relay-company-binding-final-node.log`.
 
 ## Publication status
 
@@ -111,8 +116,10 @@ not with an expired-credential classification. Public curl checks reported DNS
 timeouts for all three hosts. No resource mutation, build, migration, push or
 rollout was attempted after this guard failed. Do not ask for another AWS login
 on the basis of a DNS failure.
-The final bounded CloudFront retry also failed with a DNS timeout; this was not
-an application HTTP error or a successful deployed readiness check.
+An additional bounded retry failed with a DNS timeout; this was not an
+application HTTP error. Connectivity subsequently recovered: public readiness
+returned 200 and STS verified the expected account. Publication work resumed;
+these checks alone do not establish deployment of the new source.
 
 A clean detached release worktree at `/tmp/relay-company-release.gp7GOj` contains
 the exact runtime commit, excluding dirty hibernation foundations and unrelated

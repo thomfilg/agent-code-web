@@ -14,6 +14,8 @@ import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { temporaryDirectory, testConfig } from "./helpers.mjs";
 import { googleOidcFixture, googleTestEnv, cookieClient } from "./fixtures/google-oidc.mjs";
+import { companyForChat } from "../public/company-scope.js";
+import { groupChats } from "../public/chat-organization.js";
 
 async function setup(records = new MemoryRecords()) {
   const companies = new Companies(records);
@@ -84,6 +86,8 @@ function githubFixture(records, companies) {
     if (new URL(url).pathname === "/user") return Response.json({ login: "fixture", id: 1 });
     if (new URL(url).pathname === "/user/repos") return Response.json(["acme/app", "other/library"].map((full_name, i) => ({ full_name, id: i + 1, default_branch: "main" })));
     if (url.includes("/branches")) return Response.json([{ name: "main" }]);
+    const selected = /^\/repos\/([^/]+\/[^/]+)$/.exec(new URL(url).pathname);
+    if (selected) return Response.json({ full_name: selected[1], name: selected[1].split("/")[1], id: selected[1].length, default_branch: "main", size: 1 });
     return Response.json({});
   } });
   return { github, calls };
@@ -97,14 +101,55 @@ test("GitHub allows exactly one connection per company, including concurrent wri
   const acme = attempts.find(result => result.status === "fulfilled").value.connection;
   const other = (await github.connect({ companyId: "other", token: "fixture-other-token" })).connection;
   const count = calls.length;
-  await assert.rejects(github.request("/repos/acme/app", { connectionId: other.id }), { statusCode: 403 });
+  await assert.rejects(github.request("/repos/acme/app", { connectionId: other.id, chatCompany: "acme" }), { statusCode: 403 });
   await assert.rejects(github.request("/repos/other/library", { connectionId: other.id, chatCompany: "acme" }), { statusCode: 403 });
   assert.equal(calls.length, count);
   await github.request("/repos/other/library", { connectionId: acme.id, chatCompany: "acme" });
   assert.equal(calls.at(-1).auth, "Bearer fixture-acme-token", "Explicit secondary repos use the primary company's credential, not the secondary company's");
-  await github.request("/repos/acme/app"); assert.equal(calls.at(-1).auth, "Bearer fixture-acme-token");
+  await assert.rejects(github.request("/repos/acme/app"), { statusCode: 409 });
+  await github.request("/repos/acme/app", { connectionId: acme.id }); assert.equal(calls.at(-1).auth, "Bearer fixture-acme-token");
   await assert.rejects(github.update({ id: acme.id, revision: acme.revision, companyId: "other", name: "Move" }), { statusCode: 409 });
   await github.close();
+});
+
+test("one company groups personal and organization repositories without sharing its GitHub connection with another company", async () => {
+  const { records, companies } = await setup(), { github, calls } = githubFixture(records, companies);
+  await companies.save({ id: "personal-projects", name: "thomfilg + 12-apps" });
+  const personal = (await github.connect({ companyId: "personal-projects", token: "fixture-personal-token" })).connection;
+  const work = (await github.connect({ companyId: "other", token: "fixture-work-token" })).connection;
+  const selections = ["thomfilg/app", "12-apps/app"].map(fullName => ({ fullName, githubConnectionId: personal.id, companyId: "other", branch: "main" }));
+  const repositories = await github.resolveSelections(selections);
+  assert.ok(repositories.every(repo => repo.companyId === "personal-projects"), "Company comes from the saved connection, not forged browser metadata or repository owner");
+  assert.equal(companyForChat({ repositories }), "personal-projects");
+  assert.equal(companyForChat({ repositories: [...repositories].reverse() }), "personal-projects");
+  const grouped = groupChats(repositories.map((repo, i) => ({ id: `fixture-${i}`, repositories: [repo], updatedAt: "2026-09-18" })), [], "updated_desc");
+  assert.equal(grouped.companies.length, 1); assert.equal(grouped.companies[0].repositories.length, 2, "Same repo names under different GitHub owners stay separate projects");
+  const before = calls.length;
+  await assert.rejects(github.resolveSelections([selections[0], { fullName: "other/private", githubConnectionId: work.id }]), { statusCode: 403 });
+  assert.equal(calls.length, before, "Mixed-company credentials are rejected before provider requests");
+  await assert.rejects(github.tokenForRepository(repositories[0], chat("other")), { statusCode: 403 });
+  await github.close();
+});
+
+test("chat admission and preferences use the registered company rather than GitHub owner or submitted company metadata", async t => {
+  const root = await temporaryDirectory(t), records = new MemoryRecords(), { companies } = await setup(records);
+  await companies.save({ id: "personal-projects", name: "thomfilg + 12-apps" });
+  const { github } = githubFixture(records, companies);
+  const personal = (await github.connect({ companyId: "personal-projects", token: "fixture-personal-token" })).connection;
+  const app = await createAgentWebServer({ config: testConfig(root), records, github }); t.after(() => app.stop());
+  const { url } = await app.start();
+  const { environments } = await app.resources.forOwner(null);
+  const environment = await environments.save({ name: "Personal projects", backend: "local", companies: ["personal-projects"], allowUnassigned: false });
+  const isolated = await environments.save({ name: "Other company", backend: "local", companies: ["other"], allowUnassigned: false });
+  const input = { agent: "mock", environmentId: environment.id, repositories: [{ fullName: "thomfilg/app", githubConnectionId: personal.id, branch: "main", companyId: "other" }] };
+  const created = await app.manager.createChat(input);
+  assert.equal(companyForChat(created), "personal-projects");
+  assert.equal(companyForChat(app.store.get(created.id)), "personal-projects");
+  await assert.rejects(app.manager.createChat({ ...input, environmentId: isolated.id }), { statusCode: 403 });
+  const response = await fetch(`${url}/api/preferences`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+  assert.equal(response.status, 200); assert.equal((await response.json()).preferences.repositories[0].companyId, "personal-projects");
+  const scratch = await app.manager.createChat({ agent: "mock", repositories: [] });
+  assert.equal(companyForChat(scratch), null); assert.equal(scratch.repositories.length, 0);
 });
 
 test("unassigned GitHub credentials are preserved but unavailable until explicitly assigned", async () => {

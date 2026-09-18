@@ -1087,6 +1087,7 @@ export class RuntimeManager extends EventEmitter {
     const title = input.title ? clampText(input.title, 120, "title") : agent === "mock" ? "New mock conversation" : "New conversation";
     if (this.resources && !this.resources.isLegacy(ownerId) && input.source) throw new Error("Server-local workspace sources are private to the server owner");
     const source = typeof input.source === "string" ? input.source.trim() : this.resources && !this.resources.isLegacy(ownerId) ? "" : this.config.workspaceSource;
+    if (input.repositories !== undefined && !Array.isArray(input.repositories)) throw new Error("Repositories must be a list");
     const workspaceIdentity = { ownerId, repositories: input.repositories || [], source: input.repositories?.length ? "" : source };
     const services = await this.servicesFor(workspaceIdentity);
     const agentAccountId = ["codex", "claude"].includes(agent) ? input.agentAccountId || null : null;
@@ -1094,10 +1095,13 @@ export class RuntimeManager extends EventEmitter {
       if (!agentAccountId) throw new Error("Connect and select an agent account before creating a chat");
       await this.agentAccounts.select(ownerId, agentAccountId, { ...workspaceIdentity, agent });
     }
+    // Resolve company from the owner's selected GitHub connection, never trust
+    // company metadata supplied by the browser or infer it from a GitHub owner.
+    const repositories = input.repositories?.length ? await services.github.resolveSelections(input.repositories) : [];
+    workspaceIdentity.repositories = repositories;
     const environment = input.environmentId ? await services.environments?.runtime(input.environmentId, workspaceIdentity) : null;
     if (environment?.archived) throw new Error("Choose an environment that is not archived");
     if (environment && environment.backend !== this.config.workerBackend) throw new Error(`This server uses ${this.config.workerBackend} workers. Select an environment with that backend.`);
-    const repositories = input.repositories ? await services.github.resolveSelections(input.repositories) : [];
     const modelSettings = this.models ? await this.models.creationSettings(agent, { ...input, ownerId, agentAccountId }) : {};
     if (agentAccountId) await this.agentAccounts.rememberProject(ownerId, { agent, agentAccountId, repositories });
     const chat = await this.store.create({ title, agent, ownerId, agentAccountId, ...modelSettings, modelSelectionSet: Object.hasOwn(input, "model") || Object.hasOwn(input, "effort"), source: repositories.length ? "" : source, repositories,

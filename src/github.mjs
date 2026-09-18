@@ -59,7 +59,9 @@ export class GitHubConnection {
   async requireConnection({ connectionId, repository: name, chatCompany } = {}) {
     if (name) repoName(name);
     const candidates = connectionId ? [await this.get(connectionId)] : await this.connections();
-    const company = chatCompany === undefined ? name?.split("/")[0]?.toLowerCase() : chatCompany?.toLowerCase();
+    // Repository owners are not Relay companies. One selected company account
+    // can contain both personal and organization repositories.
+    const company = chatCompany?.toLowerCase();
     const active = candidates.filter(connection => this.public(connection).connected && (!this.companies || (connection.companyId && (!company || connection.companyId === company))));
     if (this.companies && !active.length && candidates.some(connection => this.public(connection).connected)) throw fail("Choose the GitHub connection assigned to this company. Assign unlinked accounts on the GitHub connections page.", 403);
     if (!active.length) throw fail("Connect GitHub to continue. Your saved connection is missing or expired.", 401);
@@ -201,7 +203,8 @@ export class GitHubConnection {
   }
   async resolveSelections(selections, { company } = {}) {
     if (!Array.isArray(selections) || !selections.length || selections.length > 100) throw fail("Select between 1 and 100 repositories");
-    const chatCompany = company ?? repoName(selections[0]?.fullName).split("/")[0];
+    const primary = await this.requireConnection({ connectionId: selections[0]?.githubConnectionId, repository: repoName(selections[0]?.fullName), chatCompany: company });
+    const chatCompany = company ?? (this.companies ? primary.companyId : undefined);
     const seen = new Set(), checked = [], resolved = [];
     for (const selection of selections) {
       const name = repoName(selection?.fullName);
@@ -217,7 +220,7 @@ export class GitHubConnection {
       if (typeof branch !== "string" || !branch || branch.length > 250 || /[\r\n\0]/.test(branch) || branch.startsWith("-")) throw fail("Invalid repository branch");
       // GitHub is the authority for private repo and branch access, not browser data.
       if (repo.size !== 0) await this.request(`/repos/${name}/branches/${encodeURIComponent(branch)}`, { connectionId, chatCompany });
-      resolved.push({ ...repository(repo), githubConnectionId: connectionId, branch, empty: repo.size === 0, cloneUrl: `https://github.com/${repo.full_name}.git`, directory: `${repo.full_name.replace("/", "--")}--${repo.id}` });
+      resolved.push({ ...repository(repo), githubConnectionId: connectionId, ...(this.companies ? { companyId: chatCompany } : {}), branch, empty: repo.size === 0, cloneUrl: `https://github.com/${repo.full_name}.git`, directory: `${repo.full_name.replace("/", "--")}--${repo.id}` });
     }
     return resolved;
   }
