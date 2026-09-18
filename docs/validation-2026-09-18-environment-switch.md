@@ -43,11 +43,41 @@ list contained the personal environments but omitted `g2i`.
 - Four account browser regressions also passed without retries: Claude sign-in,
   account onboarding, remembered per-project account choice and repository
   loading/error recovery. No environment warning disables the account selector.
+- Repeated acceptance in a clean detached release worktree at `83b391c` passed
+  all 40 Node cases and five browser cases (the four environment cases plus
+  startup ordering), without retries. Its first Node attempt lacked the normal
+  generated shared-auth bundle; running the repository's build-auth step fixed
+  test setup. No source or test assertion was changed to address that setup error.
+- The real preferences endpoint accepts and reloads an empty scoped draft;
+  the real chat endpoint still returns 403 for that draft and creates no chat.
 - These tests use fixtures, not real provider sign-in or paid model prompts.
 
 ## Publication
 
-Pending. This local receipt is not a claim of deployment. Dirty hibernation and
-Claude-doctor changes are outside this fix and must not enter its release image.
-Automatic rollout remains disabled; no worker-preserving handoff or hibernation
-capability is claimed here.
+Published and independently verified on 2026-09-18 at **22:51 UTC**.
+
+- Runtime source: `83b391c923d4c20cc27c76e38fb5264f5927b6ab`, built from clean
+  detached worktree `/tmp/relay-environment-release.RbPjLP`. Only the two public
+  runtime files differ from the previously deployed source. Dirty hibernation
+  and Claude-doctor changes were not included.
+- CodeBuild `ImageBuild-t8BSbSkDsHYX:7afc4371-e1cb-4c68-b603-da3e65b90cee`
+  succeeded using immutable source version `Yf_blg_CDbf8ulMOlYeWEZq8T0m1gb_1`.
+  Image: `456808212788.dkr.ecr.us-east-2.amazonaws.com/agent-relay-mvp-applicationrepository-sujdgarjwejp@sha256:32452c44d89c4164753d4b43921415e44d0f57196cec44ca13a11ee571b1763f`.
+- Read-only preflight SSM `4d64d34d-f2bc-47d7-84dd-1b0c20108c28` verified the
+  prior image and 15,219,625,984 free root bytes before publishing.
+- Manual pinned-engine rollout SSM `e21dd91e-e917-44fa-8dd2-4218db1977f8`
+  completed successfully and passed readiness. The previous application image
+  remains the rollback candidate. The deployment-owned worker inventory was
+  empty immediately before submission and after completion; no worker was
+  interrupted, created or deleted by this update.
+- Independent SSM `a2c6f3ac-ef51-411f-a887-2bc21cc783ca` returned Success/0 and
+  confirmed the running container's exact immutable image above.
+- The public `index.html` and `workspace-settings.js` SHA-256 values matched the
+  release files at 22:51:26 UTC. Public readiness returned 200 and anonymous
+  `/api/chats` returned 401. All 13 fixed GitHub/MCP denial probes passed.
+- No production data migration, connection-scope edit, chat deletion, new OAuth
+  consent or model prompt was performed. Authenticated UI behavior was tested
+  with local fixtures, not by impersonating the user's production session.
+
+Automatic rollout remains disabled. Worker-preserving handoff and two-minute
+hibernation remain separate unfinished work, not capabilities of this fix.
