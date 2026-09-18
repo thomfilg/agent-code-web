@@ -43,14 +43,21 @@ export async function guardNativeTarget(options, json) {
       ingress[0].UserIdGroupPairs[0].GroupId !== controllerGroup || ingress[0].IpRanges?.length || ingress[0].Ipv6Ranges?.length || ingress[0].PrefixListIds?.length) fail("Native acceptance worker network is not private/controller-only");
   const images = await json("ec2", "describe-images", "--image-ids", options.imageId, "--owners", t.account, "--query", "Images");
   const image = images?.[0];
+  const mappings = image?.BlockDeviceMappings || [];
+  const roots = mappings.filter(mapping => mapping.DeviceName === image?.RootDeviceName && mapping.Ebs);
+  // Canonical includes inert instance-store hints. The explicitly guarded
+  // t3.medium worker has no instance store; every actual EBS disk stays encrypted.
+  const disksValid = image?.RootDeviceType === "ebs" && roots.length === 1 && mappings.every(mapping => mapping.Ebs
+    ? mapping.Ebs.Encrypted === true && !mapping.VirtualName && !Object.hasOwn(mapping, "NoDevice")
+    : /^ephemeral\d+$/.test(mapping.VirtualName || "") && /^\/dev\/sd[b-z]$/.test(mapping.DeviceName || "") && !Object.hasOwn(mapping, "NoDevice"));
   if (images?.length !== 1 || image.ImageId !== options.imageId || image.OwnerId !== t.account || image.State !== "available" || image.Architecture !== "x86_64" || image.Public ||
-      !image.BlockDeviceMappings?.length || image.BlockDeviceMappings.some(m => !m.Ebs?.Encrypted) || Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: t.deployment,
+      !disksValid || Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: t.deployment,
         AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" }).some(([key, value]) => tagsOf(image)[key] !== value)) fail("Native acceptance requires the private pinned deployment AMI");
   const keys = await json("ec2", "describe-key-pairs", "--key-names", outputs.WorkerKeyName, "--include-public-key", "--query", "KeyPairs");
   if (keys?.length !== 1 || keys[0].KeyName !== outputs.WorkerKeyName || !owned(keys[0]) || !/^(ssh-ed25519|ssh-rsa) [A-Za-z0-9+/=]+(?: [^\r\n]*)?$/.test(keys[0].PublicKey?.trim() || "")) fail("Native acceptance requires the exact deployment public key");
   const workers = await json("ec2", "describe-instances", "--instance-ids", options.workerId, "--query", "Reservations[].Instances[]");
   const worker = workers?.[0], tags = tagsOf(worker);
-  if (workers?.length !== 1 || worker.InstanceId !== options.workerId || worker.InstanceId === t.controller || worker.State?.Name !== "running" ||
+  if (workers?.length !== 1 || worker.InstanceId !== options.workerId || worker.InstanceId === t.controller || worker.State?.Name !== "running" || worker.InstanceType !== "t3.medium" ||
       tags.ManagedBy !== "agent-relay" || tags.AgentRelayDeployment !== t.deployment || tags.AgentRelayNativeAcceptance !== options.acceptanceId || tags.AgentWebChat || tags.AgentRelayVerification ||
       worker.ImageId !== options.imageId || worker.SubnetId !== outputs.WorkerSubnetId || worker.SecurityGroups?.length !== 1 || worker.SecurityGroups[0].GroupId !== outputs.WorkerSecurityGroupId ||
       worker.KeyName !== outputs.WorkerKeyName || worker.IamInstanceProfile || worker.PublicIpAddress || worker.MetadataOptions?.HttpEndpoint !== "disabled" || !privateIp(worker.PrivateIpAddress) ||
