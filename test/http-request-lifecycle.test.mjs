@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { createConnection } from "node:net";
 import { once } from "node:events";
 import { EventEmitter } from "node:events";
 import { createAgentWebServer } from "../src/server.mjs";
@@ -67,6 +68,40 @@ test("chunked incomplete input is closed after a complete fixed denial", async t
     headers: { "Content-Length": undefined, "Transfer-Encoding": "chunked" } });
   assert.equal((await pending.result).status, 401); assert.equal(pending.state.response.complete, true);
   await waitFor(() => pending.state.socketClosed);
+});
+
+test("a raw half-open peer cannot keep the actual server socket or shutdown alive after a full denial", { timeout: 5000 }, async t => {
+  const f = await appFixture(t), target = new URL(f.url);
+  let serverSocket, serverClosed = false, clientEnded = false;
+  f.app.server.once("connection", socket => {
+    serverSocket = socket;
+    socket.once("close", () => { serverClosed = true; });
+  });
+  const client = createConnection({ host: target.hostname, port: Number(target.port), allowHalfOpen: true });
+  const chunks = [];
+  client.on("data", chunk => chunks.push(chunk));
+  client.once("end", () => { clientEnded = true; });
+  client.on("error", () => {});
+  try {
+    await once(client, "connect");
+    // Deliberately never call end(): even after receiving FIN, this raw peer
+    // leaves its writable half open instead of HTTP Agent's automatic FIN.
+    client.write("POST /api/chats HTTP/1.1\r\nHost: " + target.host + "\r\nContent-Length: 1000\r\nConnection: keep-alive\r\n\r\n{");
+    await waitFor(() => clientEnded && serverClosed);
+    const received = Buffer.concat(chunks), boundary = received.indexOf("\r\n\r\n");
+    assert.ok(boundary > 0);
+    const headers = received.subarray(0, boundary).toString(), body = received.subarray(boundary + 4);
+    assert.match(headers, /^HTTP\/1\.1 401 /);
+    assert.equal(body.length, Number(/\r\ncontent-length: (\d+)/i.exec(headers)?.[1]));
+    assert.match(JSON.parse(body.toString()).error, /authentication required/);
+    assert.equal(serverSocket.destroyed, true, "the captured server-side socket is closed");
+    assert.equal(client.writableEnded, false, "the peer never sent FIN");
+    assert.equal(client.destroyed, false, "client-side teardown did not make the server close");
+    let stopped = false;
+    const stopping = f.app.stop().then(() => { stopped = true; });
+    await waitFor(() => stopped); await stopping;
+    assert.equal(client.writableEnded, false);
+  } finally { client.destroy(); serverSocket?.destroy(); }
 });
 
 test("complete authenticated POST and subsequent requests preserve the same keepalive socket", async t => {
