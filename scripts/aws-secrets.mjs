@@ -2,7 +2,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm, lstat } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -55,6 +55,12 @@ export function environmentFor(secrets, outputs, image, privateKey) {
   };
 }
 
+export function assertWorkerKey(derived, pair, expectedName) {
+  const normalize = value => typeof value === "string" && /^ssh-ed25519 [A-Za-z0-9+/=]+(?: [^\r\n]*)?$/.test(value.trim()) ? value.trim().split(" ").slice(0, 2).join(" ") : null;
+  const publicKey = normalize(derived);
+  if (!publicKey || pair?.KeyName !== expectedName || normalize(pair.PublicKey) !== publicKey) throw new Error("Operator private key does not match the deployment's worker public key");
+}
+
 export async function main(args) {
   const [action, flag, value] = args;
   if (!["initialize", "check", "publish"].includes(action)) throw new Error("Usage: aws-secrets.mjs initialize --initialize-from-dev | check | publish --worker-ami ami-ID");
@@ -95,7 +101,15 @@ export async function main(args) {
   if (!resources.some(resource => resource.ResourceType === "AWS::SecretsManager::Secret" && resource.PhysicalResourceId === outputs.SecretArn)) throw new Error("Secret is not owned by the deployment stack");
   const image = (await aws(["ec2", "describe-images"], ["--image-ids", value, "--owners", target.account])).Images?.[0];
   if (!image) throw new Error("Worker image is not owned by this account");
-  const key = await readFile(path.join(os.homedir(), ".local/share/agent-relay-aws-mvp/worker-ed25519"), "utf8");
+  const keyPath = path.join(os.homedir(), ".local/share/agent-relay-aws-mvp/worker-ed25519");
+  const keyInfo = await lstat(keyPath);
+  if (!keyInfo.isFile() || keyInfo.isSymbolicLink() || keyInfo.nlink !== 1 || keyInfo.mode & 0o077 || keyInfo.size > 16384) throw new Error("Worker private key must be an ordinary private file");
+  const key = await readFile(keyPath, "utf8");
+  let derived;
+  try { derived = (await execute("ssh-keygen", ["-y", "-f", keyPath], { timeout: 10000, maxBuffer: 16384 })).stdout.trim(); }
+  catch { throw new Error("Could not verify the worker private key; diagnostics suppressed"); }
+  const pair = (await aws(["ec2", "describe-key-pairs"], ["--key-names", outputs.WorkerKeyName, "--include-public-key"])).KeyPairs?.[0];
+  assertWorkerKey(derived, pair, outputs.WorkerKeyName);
   const environment = environmentFor(secrets, outputs, image, key);
   await withSecretFile(environment, filename => aws(["secretsmanager", "put-secret-value"], ["--secret-id", outputs.SecretArn, "--secret-string", `file://${filename}`]));
   console.log(JSON.stringify({ published: true, source: `${project}/${config}`, publicUrl: outputs.PublicUrl, googleCallback: `${outputs.PublicUrl}/api/auth/callback/google`, credentialsPrinted: false, accountImports: false }));

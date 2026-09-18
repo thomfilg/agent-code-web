@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { environmentFor } from "../scripts/aws-secrets.mjs";
+import { environmentFor, assertWorkerKey } from "../scripts/aws-secrets.mjs";
 const secrets = { GOOGLE_CLIENT_ID: "google-fixture", GOOGLE_CLIENT_SECRET: "google-secret-fixture", AGENT_OWNER_EMAIL: "owner@example.test", AUTH_SECRET: "x".repeat(48), AGENT_ENCRYPTION_KEY: Buffer.alloc(32).toString("base64"), DOPPLER_TOKEN: "DO-NOT-COPY", OPENAI_API_KEY: "DO-NOT-COPY", ANTHROPIC_API_KEY: "DO-NOT-COPY" };
 const outputs = { PublicUrl: "https://example.cloudfront.net", WorkerSubnetId: "subnet-fixture", WorkerSecurityGroupId: "sg-fixture", WorkerKeyName: "deployment-key" };
 const image = { ImageId: "ami-fixture", State: "available", Architecture: "x86_64", Tags: Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: "agent-relay-mvp", AgentRelayWorkerKey: "deployment-key", CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" }).map(([Key, Value]) => ({ Key, Value })) };
@@ -26,4 +26,13 @@ test("secret publication rejects missing keys, plaintext origins and wrong worke
   assert.throws(() => environmentFor(secrets, outputs, { ...image, Tags: [] }, key));
   assert.throws(() => environmentFor(secrets, outputs, { ...image, Architecture: "arm64" }, key));
   assert.throws(() => environmentFor(secrets, outputs, image, "not-a-private-key"));
+});
+
+test("secret publication requires the private transport key to match the deployed public key", () => {
+  const key = "ssh-ed25519 ZmFrZS10ZXN0LWtleQ==";
+  const pair = { KeyName: "deployment-key", PublicKey: key + " deployment comment" };
+  assert.doesNotThrow(() => assertWorkerKey(key, pair, "deployment-key"));
+  assert.throws(() => assertWorkerKey(key, pair, "different-deployment"));
+  assert.throws(() => assertWorkerKey("ssh-ed25519 ZGlmZmVyZW50", pair, "deployment-key"));
+  assert.throws(() => assertWorkerKey("invalid", pair, "deployment-key"));
 });
