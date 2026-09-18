@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadConfig } from "../src/config.mjs";
 import { Ec2Backend } from "../src/worker-backends.mjs";
+import { once } from "node:events";
 
 const chat = { id: `chat_${"a".repeat(32)}`, workspace: "/tmp/relay-workspace-fixture" };
 function ec2Config(overrides = {}) {
@@ -101,4 +102,22 @@ test("EC2 requires deployment, private IP, safe origin and SSH target", () => {
   for (const origin of ["https://user:password@relay.test", "https://relay.test/path", "https://relay.test?key=secret"]) assert.throws(() => ec2Config({ AGENT_EC2_GATEWAY_ORIGIN: origin }), /without credentials/);
   const { backend } = fixture();
   for (const host of ["-oProxyCommand=bad", "example.com", "169.254.169.254", "127.0.0.1", "8.8.8.8"]) assert.throws(() => backend.sshArgs(host), /private IPv4/);
+});
+
+test("EC2 sends private environment and native arguments over stdin, never controller SSH argv", async () => {
+  const { backend } = fixture(), executor = await backend.acquire(chat);
+  // Emulate just SSH's transport input, without executing a remote command or
+  // touching real keys/network. The fixed remote source is an unused argv item.
+  backend.config.ec2.sshBin = process.execPath;
+  backend.sshArgs = () => ["-e", "process.stdin.pipe(process.stdout)"];
+  const child = executor.spawn("native-fixture", ["private-argument-fixture"], { env: { CLAUDE_CODE_OAUTH_TOKEN: "private-token-fixture" }, stdio: ["ignore", "pipe", "pipe"] });
+  let output = ""; child.stdout.on("data", chunk => output += chunk);
+  assert.ok(child.spawnargs.every(arg => !arg.includes("private-token-fixture") && !arg.includes("private-argument-fixture")));
+  assert.equal((await once(child, "close"))[0], 0);
+  const request = JSON.parse(output);
+  assert.equal(request.env.CLAUDE_CODE_OAUTH_TOKEN, "private-token-fixture");
+  assert.deepEqual(request.args, ["private-argument-fixture"]);
+  assert.equal(request.env.PATH, backend.config.ec2.remotePath);
+  assert.equal(request.cwd, executor.workspace);
+  assert.equal(request.heartbeat, executor.heartbeat);
 });
