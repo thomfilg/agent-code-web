@@ -192,7 +192,7 @@ Evidence: acceptance `91246861-681f-485c-b85f-4b9051b071a4`, SSM
 `88faada5-24b1-493e-bb78-22cd1df09fde`. The normal single previous-container slot
 was consumed by this test; the healthy current image remains unchanged.
 
-The 07:56 UTC worker checkpoint is still **not accepted**. The replacement
+The 07:50 UTC worker checkpoint is still **not accepted**. The replacement
 `ami-01358e3a58d2e7d20` passed the identity, SSM-removal, metadata-denial and
 heartbeat checks but reported one unexpected authorized-keys file. The exact
 disposable worker and volume were removed. The controller IAM policy now
