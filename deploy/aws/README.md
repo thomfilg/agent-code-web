@@ -64,6 +64,10 @@ protects only bootstrap/SSM services during installation and is removed before
 imaging. Normal worker security-update policy remains intact. Bootstrap failures
 include a validated stage/boolean receipt (installed tools, ready marker,
 cloud-init status and SSH ordering-cycle check), never raw private diagnostics.
+Ubuntu 24.04 dependencies use their real `t64` package names. Cloud-init filters
+the package catalogue before installation and rejects the old virtual aliases,
+even when `apt-get -s install` successfully resolves them. This distinction was
+reproduced on the deployed controller before correcting the failed bake.
 
 Final workers use **IMDS disabled**, no IAM profile and no public IP. Therefore
 the image retains only the deployment's selected **public** SSH key; it is tied
