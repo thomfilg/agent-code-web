@@ -124,24 +124,51 @@ class Ec2Executor {
 
   #uploadWorkspace(marker, directory = ".") {
     return new Promise((resolve, reject) => {
-      const tar = spawn("tar", ["-C", this.chat.workspace, "-cf", "-", "--", directory], { stdio: ["ignore", "pipe", "pipe"] });
       const remote = `tar -xf - -C ${shellQuote(this.workspace)} && touch ${shellQuote(marker)} ${shellQuote(this.heartbeat)}`;
-      const ssh = spawn(this.backend.config.ec2.sshBin, [...this.backend.sshArgs(this.host, this.instance.InstanceId), remote], { stdio: ["pipe", "ignore", "pipe"] });
-      tar.stdout.pipe(ssh.stdin);
-      let errors = "";
-      tar.stderr.on("data", (chunk) => { errors += chunk; });
-      ssh.stderr.on("data", (chunk) => { errors += chunk; });
-      let tarCode;
-      let sshCode;
+      let tar, ssh;
+      try {
+        const sshArgs = [...this.backend.sshArgs(this.host, this.instance.InstanceId), remote];
+        tar = spawn("tar", ["-C", this.chat.workspace, "-cf", "-", "--", directory], { stdio: ["ignore", "pipe", "pipe"] });
+        ssh = spawn(this.backend.config.ec2.sshBin, sshArgs, { stdio: ["pipe", "ignore", "pipe"] });
+      } catch {
+        const error = new Error("workspace upload failed before transport started; check worker configuration");
+        if (!tar) { reject(error); return; }
+        // A synchronous second-spawn failure still owns an archive process.
+        tar.stdout.resume(); tar.stderr.resume();
+        tar.once("error", () => {});
+        tar.once("close", () => reject(error));
+        tar.kill("SIGKILL");
+        return;
+      }
+      let tarCode, sshCode, failure = false, killTimer;
+      const terminate = child => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); };
+      const fail = () => {
+        if (failure) return;
+        failure = true;
+        tar.stdout.unpipe(ssh.stdin);
+        ssh.stdin.destroy();
+        terminate(tar); terminate(ssh);
+        killTimer = setTimeout(() => {
+          for (const child of [tar, ssh]) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        }, 2000);
+        killTimer.unref();
+      };
+      const timer = setTimeout(fail, 180000);
+      // A closed SSH pipe must reject this upload, never become an unhandled
+      // EPIPE on the controller. Drain diagnostics without retaining private
+      // filenames or arbitrary subprocess output in application errors.
+      tar.stderr.resume(); ssh.stderr.resume();
+      tar.stdout.on("error", fail); ssh.stdin.on("error", fail);
+      tar.once("error", fail); ssh.once("error", fail);
       const finish = () => {
         if (tarCode === undefined || sshCode === undefined) return;
-        if (tarCode === 0 && sshCode === 0) resolve();
-        else reject(new Error(`workspace upload failed (tar=${tarCode}, ssh=${sshCode}): ${errors.slice(-4_000)}`));
+        clearTimeout(timer); clearTimeout(killTimer);
+        if (!failure && tarCode === 0 && sshCode === 0) resolve();
+        else reject(new Error(`workspace upload failed (tar=${tarCode}, ssh=${sshCode}); check worker connectivity and retry`));
       };
-      tar.once("error", reject);
-      ssh.once("error", reject);
-      tar.once("exit", (code) => { tarCode = code; finish(); });
-      ssh.once("exit", (code) => { sshCode = code; finish(); });
+      tar.once("close", (code) => { tarCode = code; if (code !== 0) fail(); finish(); });
+      ssh.once("close", (code) => { sshCode = code; if (code !== 0) fail(); finish(); });
+      tar.stdout.pipe(ssh.stdin);
     });
   }
 }
