@@ -36,7 +36,12 @@ export class GuestSiteControl {
         const message = JSON.parse(line);
         if (message.event === "ready") { clearTimeout(this.deadline); this.resolveReady(message.value); }
         const pending = this.pending.get(message.id);
-        if (pending) { this.pending.delete(message.id); clearTimeout(pending.timeout); message.error ? pending.reject(Error("Guest fixture command failed")) : pending.resolve(message.value); }
+        if (pending) {
+          this.pending.delete(message.id); clearTimeout(pending.timeout);
+          message.error ? pending.reject(Object.assign(Error("Guest fixture command failed"), {
+            ...(["ownership", "scan-incomplete", "chrome-active"].includes(message.diagnostic) ? { guestSiteCode: message.diagnostic } : {}),
+          })) : pending.resolve(message.value);
+        }
       } catch { this.fail(); }
     });
     child.once("error", () => this.fail());

@@ -67,8 +67,9 @@ export function guestHtml() {
   new EventSource('/events').onmessage=e=>{document.querySelector('#live').textContent=e.data;document.querySelector('#live-tile').style.background='#00c040';report()};</script></body></html>`;
 }
 
-export async function startGuestSite(runId, { rootBase = "/opt/agent-web", sandbox = chromeSandboxReceipt } = {}) {
+export async function startGuestSite(runId, { rootBase = "/opt/agent-web", sandbox = chromeSandboxReceipt, cleanupTimeoutMs = 8000, cleanupPollMs = 100 } = {}) {
   requireValue(validGuestRun(runId) && process.getuid() > 0);
+  requireValue(Number.isInteger(cleanupTimeoutMs) && cleanupTimeoutMs >= 0 && cleanupTimeoutMs <= 10000 && Number.isInteger(cleanupPollMs) && cleanupPollMs > 0 && cleanupPollMs <= 1000);
   const root = path.join(rootBase, `guest-acceptance-${runId}`);
   await mkdir(root, { mode: 0o700 }); // Never reuse another or a stale run.
   await writeFile(path.join(root, "owner.json"), JSON.stringify({ runId, pid: process.pid }), { flag: "wx", mode: 0o600 });
@@ -99,9 +100,19 @@ export async function startGuestSite(runId, { rootBase = "/opt/agent-web", sandb
   const close = () => closing ||= (async () => {
     for (const event of events) event.end();
     const stopped = new Promise(resolve => server.close(resolve)); server.closeAllConnections(); await stopped;
-    const info = await lstat(root), marker = JSON.parse(await readFile(path.join(root, "owner.json"), "utf8"));
-    requireValue(info.isDirectory() && !info.isSymbolicLink() && info.uid === process.getuid() && !(info.mode & 0o077) && await realpath(root) === root && marker.runId === runId && marker.pid === process.pid);
-    const inventory = await sandbox(root); requireValue(inventory.scanComplete === true && inventory.processes === 0);
+    try {
+      const info = await lstat(root), marker = JSON.parse(await readFile(path.join(root, "owner.json"), "utf8"));
+      requireValue(info.isDirectory() && !info.isSymbolicLink() && info.uid === process.getuid() && !(info.mode & 0o077) && await realpath(root) === root && marker.runId === runId && marker.pid === process.pid);
+    } catch { throw Object.assign(Error("Guest fixture ownership failed"), { guestSiteCode: "ownership" }); }
+    // Chrome's root process exiting does not prove its renderer/crash handlers
+    // have exited. Wait boundedly for the unchanged complete zero-process audit.
+    const deadline = Date.now() + cleanupTimeoutMs;
+    while (true) {
+      const inventory = await sandbox(root);
+      if (inventory.scanComplete === true && inventory.processes === 0) break;
+      if (Date.now() >= deadline) throw Object.assign(Error("Guest fixture process cleanup unconfirmed"), { guestSiteCode: inventory.scanComplete === true ? "chrome-active" : "scan-incomplete" });
+      await new Promise(resolve => setTimeout(resolve, cleanupPollMs));
+    }
     await rm(root, { recursive: true, force: false });
   })();
   return { root, url: `http://127.0.0.1:${server.address().port}/`, close,
@@ -127,7 +138,7 @@ if (process.argv[1] === "--relay-guest-site") {
         requireValue(line.length <= 1024); value = JSON.parse(line); requireValue(Number.isSafeInteger(value.id));
         if (value.action === "stop") { await site.close(); await send({ id: value.id, value: { cleanedUp: true } }); input.close(); process.stdin.destroy(); return; }
         await send({ id: value.id, value: await site.command(value.action) });
-      } catch { await send({ id: value?.id, error: "Guest fixture action failed" }); }
+      } catch (error) { await send({ id: value?.id, error: "Guest fixture action failed", ...(["ownership", "scan-incomplete", "chrome-active"].includes(error?.guestSiteCode) ? { diagnostic: error.guestSiteCode } : {}) }); }
     });
     input.once("close", stop);
   } catch { process.stderr.write("Guest fixture failed; private diagnostics suppressed\n"); await stop(); }
