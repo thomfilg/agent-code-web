@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadConfig } from "../src/config.mjs";
 import { Ec2Backend } from "../src/worker-backends.mjs";
+import { once } from "node:events";
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
+import { temporaryDirectory } from "./helpers.mjs";
 
 const chat = { id: `chat_${"a".repeat(32)}`, workspace: "/tmp/relay-workspace-fixture" };
 function ec2Config(overrides = {}) {
@@ -101,4 +105,47 @@ test("EC2 requires deployment, private IP, safe origin and SSH target", () => {
   for (const origin of ["https://user:password@relay.test", "https://relay.test/path", "https://relay.test?key=secret"]) assert.throws(() => ec2Config({ AGENT_EC2_GATEWAY_ORIGIN: origin }), /without credentials/);
   const { backend } = fixture();
   for (const host of ["-oProxyCommand=bad", "example.com", "169.254.169.254", "127.0.0.1", "8.8.8.8"]) assert.throws(() => backend.sshArgs(host), /private IPv4/);
+});
+
+test("EC2 sends private environment and native arguments over stdin, never controller SSH argv", async () => {
+  const { backend } = fixture(), executor = await backend.acquire(chat);
+  // Emulate just SSH's transport input, without executing a remote command or
+  // touching real keys/network. The fixed remote source is an unused argv item.
+  backend.config.ec2.sshBin = process.execPath;
+  backend.sshArgs = () => ["-e", "process.stdin.pipe(process.stdout)"];
+  const child = executor.spawn("native-fixture", ["private-argument-fixture"], { env: { CLAUDE_CODE_OAUTH_TOKEN: "private-token-fixture" }, stdio: ["ignore", "pipe", "pipe"] });
+  let output = ""; child.stdout.on("data", chunk => output += chunk);
+  assert.ok(child.spawnargs.every(arg => !arg.includes("private-token-fixture") && !arg.includes("private-argument-fixture")));
+  assert.equal((await once(child, "close"))[0], 0);
+  const request = JSON.parse(output);
+  assert.equal(request.env.CLAUDE_CODE_OAUTH_TOKEN, "private-token-fixture");
+  assert.deepEqual(request.args, ["private-argument-fixture"]);
+  assert.equal(request.env.PATH, backend.config.ec2.remotePath);
+  assert.equal(request.cwd, executor.workspace);
+  assert.equal(request.heartbeat, executor.heartbeat);
+});
+
+test("EC2 workspace upload survives SSH pipe/spawn failures and drains the archive on success", async t => {
+  const directory = await temporaryDirectory(t);
+  await writeFile(path.join(directory, "large-fixture"), Buffer.alloc(2 * 1024 * 1024, 42));
+  for (const scenario of ["closed-pipe", "missing-ssh", "sync-spawn-failure", "sync-args-failure", "archive-failure", "success"]) {
+    const { backend } = fixture(), executor = await backend.acquire(chat);
+    executor.chat = { ...chat, workspace: scenario === "archive-failure" ? path.join(directory, "absent") : directory };
+    backend.sshCapture = async () => ""; // Unseeded guest, no network or real keys.
+    backend.config.ec2.sshBin = scenario === "missing-ssh" ? path.join(directory, "missing-ssh") : process.execPath;
+    if (scenario === "sync-spawn-failure") backend.config.ec2.sshBin = "invalid\0ssh";
+    const scripts = {
+      "closed-pipe": "process.stdin.destroy();process.stderr.write('PRIVATE-FIXTURE-DIAGNOSTIC');process.exit(255)",
+      "archive-failure": "setInterval(()=>{},1000)",
+      "success": "let n=0;process.stdin.on('data',c=>n+=c.length);process.stdin.on('end',()=>{process.exitCode=n>2097152?0:1;})",
+    };
+    backend.sshArgs = () => ["-e", scripts[scenario] || ""];
+    if (scenario === "sync-args-failure") backend.sshArgs = () => { throw Error("PRIVATE-FIXTURE-DIAGNOSTIC"); };
+    if (scenario === "success") await executor.prepare();
+    else await assert.rejects(executor.prepare(), error => {
+      assert.match(error.message, /workspace upload failed/);
+      assert.ok(!error.message.includes("PRIVATE-FIXTURE"));
+      return true;
+    });
+  }
 });

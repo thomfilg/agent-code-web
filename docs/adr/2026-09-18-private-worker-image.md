@@ -3,7 +3,12 @@
 Status: accepted implementation decision; actual AWS boot/round-trip gate pending.
 
 The MVP needs disposable, per-chat remote workers without giving untrusted
-agents the controller's AWS role or provider credentials. A reusable host login,
+agents the controller's AWS role, provider API keys or native refresh tokens.
+Named Codex/Claude accounts still deliver the selected account's access-only
+token to their native CLI inside that chat's VM. It is not hidden from code
+running with the same worker user/root privileges; see the
+[per-integration credential boundary](2026-09-19-remote-worker-credential-boundary.md).
+A reusable host login,
 public SSH builder, metadata-enabled final VM, or generic unscoped AMI does not
 meet this boundary.
 
