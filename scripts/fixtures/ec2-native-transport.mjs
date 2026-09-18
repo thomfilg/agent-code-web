@@ -44,6 +44,7 @@ async function reservePort() {
 
 export async function openNativeTunnel(target, directory, plugin, { run = runPrivate, signal, spawnImpl = spawn, reserve = reservePort,
   kill = (child, name) => process.kill(-child.pid, name), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+  if (!/^i-[a-f0-9]{8,17}$/.test(target.workerId || "")) throw new NativeAcceptanceError("ssm-tunnel", "invalid-request");
   const port = await reserve();
   // A verified wrapper also refuses the historical secret-in-argv contract.
   // Pinned AWS CLI 2.35.20 uses the env-name contract with this pinned plugin.
@@ -51,7 +52,9 @@ export async function openNativeTunnel(target, directory, plugin, { run = runPri
   const wrapper = `#!/bin/sh\n[ "$1" = --version ] || [ "$1" = AWS_SSM_START_SESSION_RESPONSE ] || exit 64\nexec ${quote(plugin.binary)} "$@"\n`;
   await writeFile(path.join(bin, "session-manager-plugin"), wrapper, { flag: "wx", mode: 0o700 });
   const params = { host: [target.host], portNumber: ["22"], localPortNumber: [String(port)] };
-  const child = spawnImpl("aws", awsArgs(["ssm", "start-session", "--target", nativeTarget.controller, "--document-name", "AWS-StartPortForwardingSessionToRemoteHost", "--parameters", JSON.stringify(params)]),
+  // Public, exact disposable-worker identity permits narrowly scoped recovery
+  // if interruption prevents the local process from observing its session ID.
+  const child = spawnImpl("aws", awsArgs(["ssm", "start-session", "--target", nativeTarget.controller, "--reason", `agent-relay-acceptance:${target.workerId}`, "--document-name", "AWS-StartPortForwardingSessionToRemoteHost", "--parameters", JSON.stringify(params)]),
     { env: { ...operatorEnv(), PATH: bin + ":" + process.env.PATH }, stdio: ["pipe", "pipe", "pipe"], detached: true });
   let sessionId, tail = "", ended = false, startupError = false, closing;
   const closed = new Promise(resolve => { child.once("close", () => { ended = true; resolve(); }); child.once("error", () => { startupError = true; ended = true; resolve(); }); });

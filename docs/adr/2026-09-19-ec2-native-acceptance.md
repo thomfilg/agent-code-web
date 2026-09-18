@@ -116,6 +116,10 @@ JSON receipt intentionally says `workerRetirementRequired: true` until the
 supervising operator records that separate cleanup evidence. Do not label the
 full acceptance complete without it. If the process was forcibly killed,
 also inspect/close its exact SSM session; never terminate all user sessions.
+The tunnel's public SSM reason is `agent-relay-acceptance:<exact worker ID>`.
+If interruption loses the local session ID, inspect only active sessions with
+that exact reason and the pinned controller target before recovering them;
+never select sessions merely because they belong to the same AWS account.
 
 ## Local evidence and limits
 

@@ -188,7 +188,7 @@ test("checked-in public AWS signing key has the pinned official fingerprint", as
 test("SSM tunnel uses only exact controller/private destination; cleanup targets its own session", async context => {
   const directory = await temp(context), child = new EventEmitter(), calls = [];
   Object.assign(child, { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: new EventEmitter() });
-  const tunnel = await openNativeTunnel({ host: "10.84.2.12" }, directory, { binary: "/private/verified/session-manager-plugin" }, {
+  const tunnel = await openNativeTunnel({ host: "10.84.2.12", workerId }, directory, { binary: "/private/verified/session-manager-plugin" }, {
     reserve: async () => 12345, spawnImpl: (cmd, args, o) => { calls.push({ cmd, args, o }); return child; },
     sleep: async () => child.stdout.emit("data", Buffer.from("Starting session with SessionId: fixture-session-id\nPort 12345 opened for sessionId fixture-session-id")),
     kill: (target, name) => { assert.equal(target, child); calls.push({ name }); queueMicrotask(() => child.emit("close", 0)); },
@@ -196,6 +196,7 @@ test("SSM tunnel uses only exact controller/private destination; cleanup targets
   });
   assert.equal(tunnel.port, 12345); await tunnel.close(); await tunnel.close();
   const launch = calls[0]; assert.ok(launch.args.includes(t.controller));
+  assert.equal(launch.args[launch.args.indexOf("--reason") + 1], `agent-relay-acceptance:${workerId}`);
   assert.deepEqual(JSON.parse(launch.args[launch.args.indexOf("--parameters") + 1]), { host: ["10.84.2.12"], portNumber: ["22"], localPortNumber: ["12345"] });
   assert.equal(calls.filter(c => c.args?.includes("terminate-session")).length, 1); assert.equal(calls.at(-1).args.at(-1), "fixture-session-id");
   const wrapper = await readFile(path.join(directory, "bin/session-manager-plugin"), "utf8");
@@ -334,13 +335,21 @@ test("standalone worker delivers a fixed failure envelope without running extern
 test("tunnel startup failure retains safe primary stage and unconfirmed session cleanup", async t => {
   const directory = await temp(t), child = new EventEmitter();
   Object.assign(child, { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: new EventEmitter() });
-  await assert.rejects(openNativeTunnel({ host: "10.84.2.12" }, directory, { binary: "/private/fixture" }, {
+  await assert.rejects(openNativeTunnel({ host: "10.84.2.12", workerId }, directory, { binary: "/private/fixture" }, {
     reserve: async () => 12345, spawnImpl: () => child, sleep: async () => child.emit("close", 1),
     kill: () => { throw Error("PRIVATE-KILL"); }, run: async () => { throw Error("PRIVATE-CLEANUP"); },
   }), error => {
     assert.deepEqual(error.diagnostic, { stage: "ssm-tunnel", category: "failed", sessionCloseAttempted: true, sessionClosed: false });
     assert.doesNotMatch(JSON.stringify(nativeFailureReceipt(error)), /PRIVATE/); return true;
   });
+});
+
+test("SSM recovery reason requires a fixed worker ID before any transport action", async () => {
+  for (const workerId of [undefined, "PRIVATE-ARBITRARY-REASON", "i-aaaaaaaaaaaaaaaaa\nextra"]) {
+    let called = false;
+    await assert.rejects(openNativeTunnel({ host: "10.84.2.12", workerId }, "/unused", {}, { reserve: async () => { called = true; return 12345; } }), error => error.diagnostic.stage === "ssm-tunnel" && error.diagnostic.category === "invalid-request");
+    assert.equal(called, false);
+  }
 });
 
 test("outer CLI fails with only a fixed diagnostic receipt before any AWS call", () => {
