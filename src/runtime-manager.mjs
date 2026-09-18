@@ -1631,6 +1631,13 @@ export class RuntimeManager extends EventEmitter {
       await adapter.start();
       checkCancelled();
       await this.#setStatus(chatId, "idle", "Runtime ready", null);
+      // Persistence above can overlap Stop/fatal handling. Only a current,
+      // fully ready runtime may restore preview admission after an error.
+      checkCancelled();
+      const current = this.store.get(chatId);
+      if (current && !current.archived && this.#runtimes.get(chatId) === runtime && !this.#previewStops.has(chatId)) {
+        this.#previewBlocked.delete(chatId);
+      }
       this.#emit(chatId, { type: "runtime_started", agent: chat.agent });
       return runtime;
     } catch (error) {
