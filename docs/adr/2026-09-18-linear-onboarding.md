@@ -29,7 +29,13 @@ permission. The user needs independent company accounts with the same MCP name.
 - Present pending, declined, cancelled, expired and failed flow states in the
   parent connection UI. Provide a manual link when popups are blocked. Cancel
   invalidates pending callbacks without disconnecting an already-authorized
-  account. Never save tokens from a cancelled in-flight exchange.
+  account. Guard the serialized database write on both sides of persistence;
+  cancellation waits for restoration of the previous record when necessary.
+  Public/token reads wait for that guarded operation to settle, and existing
+  worker grants are not revoked by a cancelled commit. Replacement and deletion
+  also wait for the prior operation, preventing late credentials from becoming
+  current. UI success matches a completed attempt ID distinct from OAuth state,
+  not an unrelated revision increase while old tokens still exist.
 - Forward explicit Authorization headers with fetch `credentials: omit`.
   Otherwise Node's fetch can attempt to replay a streamed body after a 401
   challenge and convert a revoked credential into a misleading 502. Preserve the

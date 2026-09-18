@@ -50,7 +50,7 @@ export class McpSettings {
     $("#mcp-delete").hidden = !this.current; this.transport(); this.renderStatus();
     this.renderSignIn();
     if (["pending", "connecting"].includes(connection?.signIn?.status)) {
-      this.pendingOAuth = { id: connection.id, revision: connection.revision, expires: connection.signIn.expiresAt };
+      this.pendingOAuth = { id: connection.id, attemptId: connection.signIn.id, expires: connection.signIn.expiresAt };
       clearTimeout(this.oauthTimer); this.oauthTimer = setTimeout(() => this.pollOAuth(), 1000);
     }
   }
@@ -117,10 +117,10 @@ export class McpSettings {
     this.oauthId = connection.id; this.busy = true; this.actions(); $("#mcp-error").textContent = "";
     $("#mcp-save-status").textContent = "Preparing secure sign-in…";
     try {
-      const { authorizationUrl } = await this.api(`/api/mcps/${connection.id}/oauth`, { method: "POST" });
+      const { authorizationUrl, attemptId } = await this.api(`/api/mcps/${connection.id}/oauth`, { method: "POST" });
       if (this.popup && !this.popup.closed) this.popup.location.replace(authorizationUrl);
       this.oauthLink = { id: connection.id, url: authorizationUrl };
-      clearTimeout(this.oauthTimer); this.pendingOAuth = { id: connection.id, revision: connection.revision, expires: Date.now() + 600000 };
+      clearTimeout(this.oauthTimer); this.pendingOAuth = { id: connection.id, attemptId, expires: Date.now() + 600000 };
       await this.load();
       if (this.current?.id === connection.id) {
         this.current = this.connections.find(c => c.id === connection.id); this.renderSignIn(); this.renderStatus();
@@ -139,7 +139,7 @@ export class McpSettings {
       const { connections } = await this.api("/api/mcps");
       if (this.pendingOAuth !== pending) return;
       const connection = connections.find(c => c.id === pending.id);
-      if (connection?.oauthConnected && connection.revision > pending.revision) {
+      if (connection?.oauthConnected && connection.signIn?.status === "complete" && connection.signIn.id === pending.attemptId) {
         this.pendingOAuth = null; await this.load();
         if (this.current?.id === pending.id && !this.dirty) { this.edit(connection); await this.action("test"); }
         else this.toast("MCP signed in. Open its connection to test tools.");

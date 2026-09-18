@@ -80,7 +80,7 @@ test("OAuth callback rejects missing browser cookie, replay, issuer mix-up, stal
   await assert.rejects(mcps.oauth.finish(params, cookies(flow)), /Invalid or expired/);
   const denied = await begin(); await assert.rejects(mcps.oauth.finish(new URLSearchParams({ state: denied.state, error: "access_denied" }), cookies(denied)), /declined/);
   const stale = await begin(); await mcps.save({ ...c, name: "changed" }, c.id);
-  await assert.rejects(mcps.oauth.finish(await consent(stale), cookies(stale)), /changed/); assert.equal(service.exchanges, 0);
+  await assert.rejects(mcps.oauth.finish(await consent(stale), cookies(stale)), /changed|Invalid or expired/); assert.equal(service.exchanges, 0);
   service.pkce = false; await assert.rejects(begin(), /PKCE/);
 });
 

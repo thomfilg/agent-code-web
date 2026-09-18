@@ -59,12 +59,13 @@ not substitute a shared developer account or request a broader OAuth grant.
 ## Verification evidence and remaining real-user gate
 
 Automated coverage uses independent local OAuth/MCP services, not real accounts.
-The 2026-09-18 implementation checkpoint passed **33/33** backend/security tests,
-**3/3** dedicated Linear browser scenarios and **4/4** existing MCP UI regressions:
+The 2026-09-18 implementation checkpoint passed **37/37** backend/security tests,
+**4/4** dedicated Linear browser scenarios and **4/4** existing MCP UI regressions:
 
 - Dynamic registration, least-privilege scopes and explicit write opt-in;
   PKCE/cookie/state/issuer checks; denied, expired and cancelled consent;
-  cancellation while token exchange is in flight; manual registration fallback.
+  cancellation while token exchange or credential persistence is in flight;
+  replacement/deletion at the persistence boundary; manual registration fallback.
 - Actual HTTP discovery and read verification, distinguishing failed reads from
   successful tool discovery; private result data is not persisted.
 - Same-name `g2i`/`12-apps` connections with distinct credentials, both provider
@@ -72,7 +73,9 @@ The 2026-09-18 implementation checkpoint passed **33/33** backend/security tests
   isolation. Revoked upstream access produces 401 and Sign-in required without
   retrying another workspace's token.
 - Browser consent, failed consent, cancellation, popup-blocked fallback,
-  360px layout, explicit write scopes and environment selection.
+  360px layout, explicit write scopes and environment selection. A settings edit
+  cannot masquerade as completed consent: UI success requires the exact completed
+  attempt ID, not merely existing tokens and an increased record revision.
 
 Commands (keep one browser worker and the machine's two-CPU limit):
 
