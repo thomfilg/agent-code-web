@@ -342,14 +342,14 @@ export class RuntimeManager extends EventEmitter {
     await guard(); const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(Error("Chat not found"), { statusCode: 404 });
     if (chat.agent !== "claude" || chat.archived || !["inspect", "confirm"].includes(action)) throw Error("Workspace trust requires an unarchived Claude chat and a valid action.");
-    if (this.config.claude.authMode !== "gateway") throw Object.assign(Error("Workspace trust requires this chat's private Claude profile. Shared host profiles remain locked; no worker was started."), { statusCode: 409 });
+    if (this.config.claude.authMode !== "gateway" && !chat.agentAccountId) throw Object.assign(Error("Workspace trust requires this chat's private Claude profile. Shared host profiles remain locked; no worker was started."), { statusCode: 409 });
     if (["starting", "stopping"].includes(chat.status) || this.isBusy(chatId) || this.sideChats.busy(chatId)) throw Object.assign(Error("Wait for this chat and its agents to be idle before reviewing workspace trust."), { statusCode: 409 });
     this.#switching.add(chatId);
     const version = this.#lifecycleVersions.get(chatId) || 0;
-    const scope = value => JSON.stringify([value.ownerId, value.environmentId, value.workspace, value.repositories, companyForChat(value)]), initialScope = scope(chat);
+    const scope = value => JSON.stringify([value.ownerId, value.environmentId, value.workspace, value.repositories, companyForChat(value), value.agentAccountId || null]), initialScope = scope(chat);
     const check = async () => {
       await guard(); const current = this.store.get(chatId);
-      if (!current || current.archived || current.agent !== "claude" || this.config.claude.authMode !== "gateway" || scope(current) !== initialScope || version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(Error("Workspace trust review is no longer current because the chat changed or stopped. If you submitted confirmation, trust may already have been saved; inspect again."), { statusCode: 409 });
+      if (!current || current.archived || current.agent !== "claude" || this.config.claude.authMode !== "gateway" && !current.agentAccountId || scope(current) !== initialScope || version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(Error("Workspace trust review is no longer current because the chat changed or stopped. If you submitted confirmation, trust may already have been saved; inspect again."), { statusCode: 409 });
     };
     let reviewedRuntime;
     try {
@@ -575,7 +575,7 @@ export class RuntimeManager extends EventEmitter {
       {
         id: "claude",
         label: "Claude Code",
-        enabled: !this.config.google?.enabled && ownsServerCredentials && (this.config.claude.authMode === "host" || Boolean(this.config.claude.providerKey)),
+        enabled: this.config.google?.enabled ? Boolean(this.agentAccounts?.hasConnected(ownerId, "claude")) : ownsServerCredentials && (this.config.claude.authMode === "host" || Boolean(this.config.claude.providerKey)),
         authMode: this.config.google?.enabled ? "account" : this.config.claude.authMode,
       },
       ...(this.config.enableMock ? [{ id: "mock", label: "Mock agent", enabled: true, authMode: "none" }] : []),
@@ -681,9 +681,9 @@ export class RuntimeManager extends EventEmitter {
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     if (!this.availableAgents(chat.ownerId).some(item => item.id === agent && item.enabled)) throw new Error("Choose an enabled agent for this user");
     if (this.isBusy(chatId) || chat.status === "stopping") throw Object.assign(new Error("Stop the working agent before switching"), { statusCode: 409 });
-    const agentAccountId = agent === "codex" ? input.agentAccountId ?? (agent === chat.agent ? chat.agentAccountId : null) : null;
-    if (agentAccountId || this.config.google?.enabled && agent === "codex") {
-      if (!agentAccountId) throw new Error("Choose a Codex account for this chat in Agent accounts");
+    const agentAccountId = ["codex", "claude"].includes(agent) ? input.agentAccountId ?? (agent === chat.agent ? chat.agentAccountId : null) : null;
+    if (agentAccountId || this.config.google?.enabled && ["codex", "claude"].includes(agent)) {
+      if (!agentAccountId) throw new Error(`Choose a ${agent === "claude" ? "Claude" : "Codex"} account for this chat in Agent accounts`);
       await this.agentAccounts.select(chat.ownerId, agentAccountId, { ...chat, agent });
     }
     if (agent === chat.agent && agentAccountId === (chat.agentAccountId || null)) return chat;
@@ -730,25 +730,26 @@ export class RuntimeManager extends EventEmitter {
 
   #checkClaudeConfiguration(chat, text, attachments) {
     if (chat.agent !== "claude") return;
-    if (claudeDebugRequest(text) && this.config.claude.authMode !== "gateway") throw Error(CLAUDE_DEBUG_PRIVATE_ERROR);
+    const privateProfile = Boolean(chat.agentAccountId) || this.config.claude.authMode === "gateway";
+    if (claudeDebugRequest(text) && !privateProfile) throw Error(CLAUDE_DEBUG_PRIVATE_ERROR);
     if (claudePluginReloadRequest(text)) {
       if (attachments.length) throw Error("/reload-plugins does not accept attachments. Remove them or send them in a separate message.");
-      if (this.config.claude.authMode !== "gateway") throw Error(CLAUDE_PLUGIN_PRIVATE_ERROR);
+      if (!privateProfile) throw Error(CLAUDE_PLUGIN_PRIVATE_ERROR);
     }
     const mcp = claudeMcpRequest(text);
     if (mcp) {
       if (attachments.length) throw new Error("/mcp does not accept attachments. Remove them or send them in a separate message.");
-      if (mcp.action && this.config.claude.authMode !== "gateway") throw new Error(CLAUDE_MCP_PRIVATE_ERROR);
+      if (mcp.action && !privateProfile) throw new Error(CLAUDE_MCP_PRIVATE_ERROR);
     }
     if (claudeFastRequest(text)) {
       if (attachments.length) throw new Error("/fast does not accept attachments. Remove them or send them in a separate message.");
-      if (this.config.claude.authMode !== "gateway") throw new Error("Fast changes require a private Claude profile; shared host profiles remain locked until company/profile isolation is complete.");
+      if (!privateProfile) throw new Error("Fast changes require a private Claude profile; shared host profiles remain locked until company/profile isolation is complete.");
     }
     const request = claudeConfigRequest(text);
     if (/^\/effort\s+status$/.test(text.trim()) && attachments.length) throw new Error("/effort status does not accept attachments. Remove them or send them in a separate message.");
     if (!request) return;
     if (attachments.length && request.kind !== "prompt") throw new Error(`${/^\/autocompact(?:\s|$)/.test(text) ? "/autocompact does" : "/config and /settings do"} not accept attachments. Remove them or send them in a separate message.`);
-    if (request.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
+    if (request.mutate && !privateProfile) throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
   }
 
   async #syncClaudeConfiguration(chatId, native, original, guard) {
@@ -975,9 +976,9 @@ export class RuntimeManager extends EventEmitter {
     const source = typeof input.source === "string" ? input.source.trim() : this.resources && !this.resources.isLegacy(ownerId) ? "" : this.config.workspaceSource;
     const workspaceIdentity = { ownerId, repositories: input.repositories || [], source: input.repositories?.length ? "" : source };
     const services = await this.servicesFor(workspaceIdentity);
-    const agentAccountId = agent === "codex" ? input.agentAccountId || null : null;
-    if (agentAccountId || this.config.google?.enabled && agent === "codex") {
-      if (!agentAccountId) throw new Error("Connect and select a Codex account before creating a chat");
+    const agentAccountId = ["codex", "claude"].includes(agent) ? input.agentAccountId || null : null;
+    if (agentAccountId || this.config.google?.enabled && ["codex", "claude"].includes(agent)) {
+      if (!agentAccountId) throw new Error("Connect and select an agent account before creating a chat");
       await this.agentAccounts.select(ownerId, agentAccountId, { ...workspaceIdentity, agent });
     }
     const environment = input.environmentId ? await services.environments?.runtime(input.environmentId, workspaceIdentity) : null;
@@ -1461,7 +1462,7 @@ export class RuntimeManager extends EventEmitter {
 
   async #start(chatId) {
     const chat = this.store.get(chatId);
-    if (chat?.agentAccountId && chat.agent === "codex") await this.agentAccounts.select(chat.ownerId, chat.agentAccountId, chat);
+    if (chat?.agentAccountId && ["codex", "claude"].includes(chat.agent)) await this.agentAccounts.select(chat.ownerId, chat.agentAccountId, chat);
     else if (chat?.agent !== "mock" && (this.config.google?.enabled || this.resources && !this.resources.isLegacy(chat?.ownerId))) throw new Error("Connect and select an agent account for this user before starting a worker");
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const checkCancelled = () => { if ((this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" }); };
@@ -1505,9 +1506,9 @@ export class RuntimeManager extends EventEmitter {
         if (current?.forkContextPending || forkGoal && current?.forkGoalPending) await this.store.update(chatId, { forkContextPending: false, ...(forkGoal ? { forkGoalPending: false } : {}) });
       },
       onLog: (text) => this.#emit(chatId, { type: "runtime_log", text }),
-      ...(chat.agent === "codex" && chat.agentAccountId ? { accountCredentials: async options => {
+      ...(["codex", "claude"].includes(chat.agent) && chat.agentAccountId ? { accountCredentials: async options => {
         const current = this.store.get(chatId);
-        if (!current || current.agent !== "codex" || current.ownerId !== chat.ownerId || current.agentAccountId !== chat.agentAccountId) throw new Error("The selected agent account changed");
+        if (!current || current.agent !== chat.agent || current.ownerId !== chat.ownerId || current.agentAccountId !== chat.agentAccountId) throw new Error("The selected agent account changed");
         checkCancelled();
         const credentials = await this.agentAccounts.credentials(current.ownerId, current.agentAccountId, current, options);
         checkCancelled(); return credentials;

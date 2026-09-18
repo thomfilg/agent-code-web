@@ -265,7 +265,7 @@ function renderActive() {
   accountButton.hidden = !state.config.features?.agentAccounts || chat.agent === "mock";
   accountButton.textContent = account ? `${account.name}${account.status !== "connected" ? " · reconnect" : ""}` : "Choose account";
   accountButton.disabled = switching;
-  activeModelPicker.setAgent(state.config.features?.agentAccounts && chat.agent === "codex" && (!account || account.status !== "connected") ? null : chat.agent, chat);
+  activeModelPicker.setAgent(state.config.features?.agentAccounts && ["codex", "claude"].includes(chat.agent) && (!account || account.status !== "connected") ? null : chat.agent, chat);
   if (switching) { activeModelPicker.model.disabled = true; activeModelPicker.effort.disabled = true; }
   renderMessages();
   renderApproval();
@@ -918,7 +918,7 @@ const activeModelPicker = new ModelPicker({ root: $("#composer-model-controls"),
 elements.agentPicker.addEventListener("change", async () => {
   const chat = state.active; if (!chat) return;
   const agent = elements.agentPicker.value;
-  if (agent === "codex" && state.config.features?.agentAccounts && chat.agent !== agent) {
+  if (["codex", "claude"].includes(agent) && state.config.features?.agentAccounts && chat.agent !== agent) {
     renderActive(); await agentAccountSettings.open(); return;
   }
   state.switchingChat = chat.id; renderActive();

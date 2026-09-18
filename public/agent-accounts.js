@@ -2,6 +2,7 @@ import { CompanyPicker, knownCompanies } from "./company-picker.js";
 import { scopeLabel, scopeAllows, companyForChat } from "./company-scope.js";
 
 const $ = selector => document.querySelector(selector);
+const providerLabel = provider => provider === "claude" ? "Claude" : "Codex";
 const node = (tag, text, className) => { const element = document.createElement(tag); if (text) element.textContent = text; if (className) element.className = className; return element; };
 const button = (text, action) => { const element = node("button", text, "secondary-button"); element.type = "button"; element.onclick = action; return element; };
 
@@ -19,6 +20,7 @@ export class AgentAccountSettings {
     };
     $("#agent-account-cancel").onclick = () => this.showForm(false);
     $("#agent-account-form").onsubmit = event => { event.preventDefault(); void this.connect(); };
+    $("#agent-account-provider").onchange = () => this.setConnecting(null);
     $("#agent-accounts-dialog").addEventListener("close", () => { this.generation++; clearTimeout(this.timer); });
     window.addEventListener("relay-agent-accounts-changed", () => { void this.refresh().catch(error => this.toast(error.message)); });
   }
@@ -47,7 +49,7 @@ export class AgentAccountSettings {
     this.rendered = key;
     const list = $("#agent-account-list"); list.replaceChildren();
     for (const account of this.accounts) {
-      const row = node("section", "", "agent-account-card"), heading = node("h3", `${account.name} · Codex`);
+      const row = node("section", "", "agent-account-card"), heading = node("h3", `${account.name} · ${providerLabel(account.provider)}`);
       row.dataset.accountId = account.id; heading.id = `heading-${account.id}`; row.setAttribute("aria-labelledby", heading.id);
       const status = account.status === "pending" ? this.logins.has(account.id) ? "Waiting for authorization" : "Connecting…" : account.status === "connected" ? "Connected" : "Not connected";
       row.append(heading);
@@ -71,7 +73,7 @@ export class AgentAccountSettings {
           }));
         }
         if (account.status === "connected") row.append(button("Disconnect", () => {
-          if (!confirm(`Disconnect “${account.name}”? Its running Codex chats will stop; conversations stay saved.`)) return;
+          if (!confirm(`Disconnect “${account.name}”? Its running ${providerLabel(account.provider)} chats will stop; conversations stay saved.`)) return;
           return this.act(account, "Disconnecting…", async () => this.accept(await this.api(`/api/agent-accounts/${account.id}/disconnect`, { method: "POST" })));
         }));
         else if (account.status === "pending") this.renderLogin(row, account);
@@ -83,20 +85,38 @@ export class AgentAccountSettings {
   }
   renderLogin(row, account) {
     const root = node("div", "", "agent-account-login"), login = this.logins.get(account.id);
-    const status = node("p", login ? `Sign in to Codex for “${account.name}”. Open the link and enter this one-time code. Keep it private.` : `Connecting to Codex for “${account.name}”… Preparing your sign-in link. This may take a moment; this panel updates automatically.`);
+    const provider = providerLabel(account.provider);
+    const status = node("p", login ? login.inputRequired ? `Sign in to ${provider} for “${account.name}”. Open the link, authorize, then paste the complete returned code below.` : `Sign in to ${provider} for “${account.name}”. Open the link and enter this one-time code. Keep it private.` : `Connecting to ${provider} for “${account.name}”… Preparing your sign-in link. This may take a moment; this panel updates automatically.`);
     status.setAttribute("role", "status");
     if (!login) status.className = "agent-account-progress";
     root.append(status);
     if (login) {
-      const link = node("a", "Open Codex sign-in", "primary-button");
+      const link = node("a", `Open ${provider} sign-in`, "primary-button");
       link.href = login.verificationUrl; link.target = "_blank"; link.rel = "noopener noreferrer";
-      link.setAttribute("aria-label", `Open Codex sign-in for ${account.name}`);
-      const code = node("code", login.userCode); code.setAttribute("aria-label", `Codex sign-in code for ${account.name}`);
-      const copy = button("Copy code", async () => {
-        try { await navigator.clipboard.writeText(login.userCode); if (copy.isConnected) copy.textContent = "Copied"; }
-        catch { this.errors.set(account.id, "Select and copy the code above."); this.renderList(); }
-      });
-      root.append(code, link, copy);
+      link.setAttribute("aria-label", `Open ${provider} sign-in for ${account.name}`);
+      if (login.inputRequired) {
+        root.append(link);
+        if (login.codeSubmitted) root.append(node("p", "Verifying sign-in… This panel updates automatically.", "agent-account-progress"));
+        else {
+          const form = node("form"), label = node("label"), input = node("input");
+          input.type = "password"; input.autocomplete = "off"; input.maxLength = 4096; input.required = true;
+          input.setAttribute("aria-label", `Claude authorization code for ${account.name}`);
+          input.placeholder = "Paste complete code (code#state)";
+          label.append(node("span", "Code returned by Claude"), input);
+          const submit = node("button", "Complete sign-in", "primary-button"); submit.type = "submit";
+          form.append(label, submit);
+          form.onsubmit = event => { event.preventDefault(); const code = input.value; input.value = "";
+            void this.act(account, "Verifying sign-in…", async () => this.accept(await this.api(`/api/agent-accounts/${account.id}/code`, { method: "POST", body: JSON.stringify({ code }) }))); };
+          root.append(form);
+        }
+      } else {
+        const code = node("code", login.userCode); code.setAttribute("aria-label", `Codex sign-in code for ${account.name}`);
+        const copy = button("Copy code", async () => {
+          try { await navigator.clipboard.writeText(login.userCode); if (copy.isConnected) copy.textContent = "Copied"; }
+          catch { this.errors.set(account.id, "Select and copy the code above."); this.renderList(); }
+        });
+        root.append(code, link, copy);
+      }
     }
     root.append(button("Cancel sign-in", () => this.act(account, "Cancelling sign-in…", async () => this.accept(await this.api(`/api/agent-accounts/${account.id}/cancel`, { method: "POST" })))));
     row.append(root);
@@ -112,7 +132,7 @@ export class AgentAccountSettings {
   async reconnect(account) {
     // Reconnection is not account creation: keep the saved name and exact
     // access scope, and show progress on this card without reopening a form.
-    await this.act(account, `Connecting to Codex for “${account.name}”…`, async () => {
+    await this.act(account, `Connecting to ${providerLabel(account.provider)} for “${account.name}”…`, async () => {
       this.accept(await this.api("/api/agent-accounts", { method: "POST", body: JSON.stringify({
         id: account.id, provider: account.provider, name: account.name,
         companies: account.companies, allowUnassigned: account.allowUnassigned,
@@ -121,7 +141,7 @@ export class AgentAccountSettings {
   }
   showForm(visible) {
     $("#agent-account-form").hidden = !visible;
-    $("#agent-account-new").textContent = visible ? "− Close account form" : "＋ Add Codex account";
+    $("#agent-account-new").textContent = visible ? "− Close account form" : "＋ Add agent account";
     $("#agent-account-new").setAttribute("aria-expanded", String(visible));
   }
   edit() {
@@ -159,13 +179,14 @@ export class AgentAccountSettings {
     $("#agent-account-fields").disabled = Boolean(name);
     $("#agent-account-new").disabled = Boolean(name);
     $("#agent-account-form").setAttribute("aria-busy", String(Boolean(name)));
-    $("#agent-account-submit").textContent = name ? "Connecting…" : "Sign in to Codex";
+    const provider = providerLabel($("#agent-account-provider").value);
+    $("#agent-account-submit").textContent = name ? "Connecting…" : `Sign in to ${provider}`;
     $("#agent-account-progress").hidden = !name;
-    $("#agent-account-progress").textContent = name ? `Connecting to Codex for “${name}”… Preparing your sign-in link. This may take a moment.` : "";
+    $("#agent-account-progress").textContent = name ? `Connecting to ${provider} for “${name}”… Preparing your sign-in link. This may take a moment.` : "";
   }
   async connect() {
     if (this.connecting) return;
-    const input = { provider: "codex", name: $("#agent-account-name").value,
+    const input = { provider: $("#agent-account-provider").value, name: $("#agent-account-name").value,
       ...this.companies.value() };
     const generation = this.generation;
     this.setConnecting(input.name); $("#agent-account-error").textContent = "";

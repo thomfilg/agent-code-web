@@ -6,8 +6,8 @@ import { companyForChat } from "../public/company-scope.js";
 import { createHash } from "node:crypto";
 const endpoint = "https://api.anthropic.com/api/claude_code_penguin_mode";
 const reasons = new Set(["free", "preference", "extra_usage_disabled", "network_error", "unknown", "not_first_party", "disabled_by_env", "model_not_allowed", "sdk_opt_in_required", "pending"]);
-export const claudeFastScope = chat => JSON.stringify([chat.id, chat.agent, chat.ownerId, chat.environmentId, chat.workspace, companyForChat(chat)]);
-export const claudeFastCredential = config => createHash("sha256").update(`relay-claude-fast\0${config.authMode}\0${config.providerKey || ""}`).digest("hex");
+export const claudeFastScope = chat => JSON.stringify([chat.id, chat.agent, chat.ownerId, chat.environmentId, chat.workspace, companyForChat(chat), ...(chat.agentAccountId ? [chat.agentAccountId] : [])]);
+export const claudeFastCredential = config => createHash("sha256").update(`relay-claude-fast\0${config.authMode}\0${config.accountId || config.providerKey || ""}`).digest("hex");
 export function claudeFastRequest(text) {
   const match = /^\/fast(?:\s+([\s\S]*))?$/.exec(text.trim());
   if (!match) return null;
@@ -22,7 +22,7 @@ export function claudeFastState(event) {
 }
 
 export async function checkClaudeFastAvailability(config, { signal, fetchImpl = fetch } = {}) {
-  if (config.authMode !== "gateway" || !config.providerKey) throw new Error("Fast requires a private Claude profile with configured gateway credentials.");
+  if (!(config.authMode === "account" && config.accessToken) && (config.authMode !== "gateway" || !config.providerKey)) throw new Error("Fast requires a private Claude profile with configured credentials.");
   // A key for a custom upstream must not be sent to a different provider.
   const upstream = new URL(config.upstreamBaseUrl);
   if (upstream.origin !== "https://api.anthropic.com" || upstream.pathname.replace(/\/$/, "") || upstream.username || upstream.password || upstream.search) {
@@ -31,7 +31,7 @@ export async function checkClaudeFastAvailability(config, { signal, fetchImpl = 
   let response;
   try {
     const bounded = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(5000)]);
-    response = await fetchImpl(endpoint, { method: "GET", headers: { "x-api-key": config.providerKey, accept: "application/json" }, redirect: "error", signal: bounded });
+    response = await fetchImpl(endpoint, { method: "GET", headers: { ...(config.authMode === "account" ? { Authorization: `Bearer ${config.accessToken}` } : { "x-api-key": config.providerKey }), accept: "application/json" }, redirect: "error", signal: bounded });
     if (!response.ok || !/application\/json/i.test(response.headers.get("content-type") || "")) throw new Error("Invalid availability response");
     let raw = "";
     for await (const chunk of response.body) { raw += new TextDecoder().decode(chunk); if (raw.length > 4096) throw new Error("Oversized availability response"); }
