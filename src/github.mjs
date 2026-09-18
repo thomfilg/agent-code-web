@@ -12,9 +12,10 @@ function repository(repo) {
 }
 
 export class GitHubConnection {
-  constructor({ records, config, fetchImpl = fetch, loginFactory = () => new GitHubLogin({ executable: config.cliPath || "gh" }) }) {
+  constructor({ records, config, fetchImpl = fetch, loginFactory = () => new GitHubLogin({ executable: config.cliPath || "gh" }), onChange = () => {} }) {
     this.records = records; this.config = config; this.fetch = fetchImpl;
     this.loginFactory = loginFactory;
+    this.onChange = onChange;
     this.cache = new Map(); this.pending = new Map(); this.queue = Promise.resolve();
     this.ready = this.recover();
   }
@@ -40,7 +41,12 @@ export class GitHubConnection {
     if (!record) throw fail("GitHub connection not found", 404);
     return { ...record, id };
   }
-  async put(connection) { await this.records.put(connection.id === "github" ? "connection" : "github_connection", connection.id, connection); this.cache.delete(connection.id); }
+  changed(id) { try { this.onChange(id); } catch { /* Notifications cannot break durable saves. */ } }
+  async put(connection) {
+    this.changed(connection.id);
+    try { await this.records.put(connection.id === "github" ? "connection" : "github_connection", connection.id, connection); }
+    finally { this.cache.delete(connection.id); this.changed(connection.id); }
+  }
   async status() {
     const connections = (await this.connections()).map(connection => this.public(connection)), active = connections.filter(connection => connection.connected);
     return { connections, connected: Boolean(active.length), login: active.length === 1 ? active[0].login : active.length ? `${active.length} connections` : null, expiresAt: active.length === 1 ? active[0].expiresAt : null, expired: Boolean(connections.length && !active.length), localAvailable: false, oauthAvailable: true };
@@ -88,6 +94,7 @@ export class GitHubConnection {
     return { ...await this.status(), connection: this.public(connection) };
   }
   disconnect(id) {
+    if (id) this.changed(id);
     const interrupted = [...this.pending.values()].filter(flow => flow.connectionId === id);
     for (const flow of interrupted) this.pending.delete(flow.id);
     const result = this.queue.then(async () => {
@@ -95,12 +102,14 @@ export class GitHubConnection {
       const connection = id ? await this.get(id) : await this.requireConnection();
       this.cache.delete(connection.id);
       for (const [flowId, flow] of this.pending) if (flow.connectionId === connection.id) { this.pending.delete(flowId); await flow.client.close(); }
-      await this.records.delete(connection.id === "github" ? "connection" : "github_connection", connection.id);
+      this.changed(connection.id);
+      try { await this.records.delete(connection.id === "github" ? "connection" : "github_connection", connection.id); }
+      finally { this.changed(connection.id); }
       return this.status();
     });
     this.queue = result.catch(() => {}); return result;
   }
-  async request(route, { token, raw = false, method = "GET", body, connectionId, repository: name, chatCompany } = {}) {
+  async request(route, { token, raw = false, method = "GET", body, connectionId, repository: name, chatCompany, signal } = {}) {
     if (typeof route !== "string" || !route.startsWith("/") || route.startsWith("//")) throw fail("Invalid GitHub API route");
     const routeRepository = /^\/repos\/([^/?]+\/[^/?]+)/.exec(route)?.[1];
     if (route === "/graphql" && !name && !token) throw fail("A repository is required for scoped GitHub GraphQL requests");
@@ -109,7 +118,7 @@ export class GitHubConnection {
     const response = await this.fetch(`${this.config.apiBase}${route}`, {
       method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       headers: { accept: "application/vnd.github+json", "content-type": "application/json", authorization: `Bearer ${auth}`, "x-github-api-version": "2022-11-28", "user-agent": "agent-code-web" },
-      signal: AbortSignal.timeout(20000), redirect: "error",
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20000)]) : AbortSignal.timeout(20000), redirect: "error",
     });
     if (response.status === 401) {
       if (connection) {
@@ -252,6 +261,7 @@ export class GitHubConnection {
     if (input.token !== undefined || input.method !== undefined || input.expiresAt !== undefined) throw fail("Use browser sign-in to connect GitHub.");
     if (!input.id) throw fail("Sign in to GitHub before choosing company access.");
     if ([...this.pending.values()].some(flow => flow.connectionId === input.id)) throw fail("Finish or cancel sign-in before editing this connection.", 409);
+    this.changed(input.id);
     return this.connect(input);
   }
 }
