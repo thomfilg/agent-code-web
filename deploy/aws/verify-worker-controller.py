@@ -17,25 +17,36 @@ import tempfile
 import time
 
 
+AUDIT_CHECKS = ('finalized', 'cloudInitDisabled', 'ssmDisabled', 'credentialsAbsent',
+                'transportKeyMatches', 'metadataReachable', 'freshIdentity',
+                'heartbeatEnabled', 'watchdogActive')
+
+
 class ProbeFailure(RuntimeError):
-    def __init__(self, category, exit_code=None):
+    def __init__(self, category, exit_code=None, audit_checks=None):
         super().__init__('Private worker SSH/audit failed; no key or private output emitted')
         self.diagnostic = {'stage': 'worker-probe', 'category': category}
         if isinstance(exit_code, int) and -255 <= exit_code <= 255:
             self.diagnostic['exitCode'] = exit_code
+        if category == 'image-audit' and isinstance(audit_checks, dict):
+            safe_checks = {key: audit_checks[key] for key in AUDIT_CHECKS
+                           if type(audit_checks.get(key)) is bool}
+            if safe_checks:
+                self.diagnostic['auditChecks'] = safe_checks
 
 
 def probe_failure(result):
     """Classify private subprocess output locally; never return its contents."""
     try:
-        reason = json.loads(result.stdout).get('reason')
+        worker_failure = json.loads(result.stdout)
+        reason = worker_failure.get('reason')
     except Exception:
         reason = None
     known_checks = {'wrong worker user': 'worker-user', 'native version mismatch': 'native-version',
                     'image scrub audit failed': 'image-audit', 'boot heartbeat is stale': 'heartbeat',
                     'worker sentinel mismatch': 'sentinel', 'invalid-worker-receipt': 'invalid-receipt'}
     if reason in known_checks:
-        return ProbeFailure(known_checks[reason], result.returncode)
+        return ProbeFailure(known_checks[reason], result.returncode, worker_failure.get('auditChecks'))
     stderr = (result.stderr or '').lower()
     if 'host key verification failed' in stderr or 'remote host identification has changed' in stderr:
         category = 'ssh-host-key'
@@ -64,6 +75,7 @@ def failure_receipt(error):
 
 WORKER_PROBE = r'''
 import json, os, pathlib, subprocess, sys, time
+audit_checks = {}
 try:
     request = json.loads(sys.argv[1])
     if subprocess.check_output(['/usr/bin/id', '-un'], text=True).strip() != 'agent':
@@ -76,6 +88,7 @@ try:
         versions[command] = expected
     audit = subprocess.run(['/usr/bin/sudo', '-n', '/usr/local/sbin/agent-web-audit-image'], capture_output=True, text=True, timeout=30)
     receipt = json.loads(audit.stdout)
+    audit_checks = {key: receipt[key] for key in ('finalized', 'cloudInitDisabled', 'ssmDisabled', 'credentialsAbsent', 'transportKeyMatches', 'metadataReachable', 'freshIdentity', 'heartbeatEnabled', 'watchdogActive') if type(receipt.get(key)) is bool}
     if audit.returncode or receipt.get('valid') is not True:
         raise RuntimeError('image scrub audit failed')
     heartbeat = pathlib.Path('/opt/agent-web/.heartbeat')
@@ -93,7 +106,10 @@ try:
     print(json.dumps({'audit': receipt, 'versions': versions, 'heartbeatFresh': fresh, 'sentinelPresent': persisted}))
 except Exception as error:
     reasons = ('wrong worker user', 'native version mismatch', 'image scrub audit failed', 'boot heartbeat is stale', 'worker sentinel mismatch')
-    print(json.dumps({'error': 'Worker acceptance checks failed; no private diagnostics emitted', 'reason': str(error) if isinstance(error, RuntimeError) and str(error) in reasons else 'invalid-worker-receipt'}))
+    failure = {'error': 'Worker acceptance checks failed; no private diagnostics emitted', 'reason': str(error) if isinstance(error, RuntimeError) and str(error) in reasons else 'invalid-worker-receipt'}
+    if failure['reason'] == 'image scrub audit failed':
+        failure['auditChecks'] = audit_checks
+    print(json.dumps(failure))
     sys.exit(1)
 '''
 
@@ -159,6 +175,7 @@ def main():
         worker_request = {key: request[key] for key in ('verificationId', 'phase', 'sentinel')}
         command = 'python3 -I -c ' + shlex.quote(WORKER_PROBE) + ' ' + shlex.quote(json.dumps(worker_request))
         deadline = time.monotonic() + 240
+        audit_attempts = 0
         while True:
             try:
                 probed = subprocess.run(ssh + [command], capture_output=True, text=True, timeout=100)
@@ -167,6 +184,14 @@ def main():
             except OSError:
                 raise ProbeFailure('ssh-executable-unavailable') from None
             failure = probe_failure(probed) if probed.returncode else None
+            if failure and failure.diagnostic['category'] == 'image-audit':
+                audit_attempts += 1
+                # A just-booted systemd unit can settle after SSH is available.
+                # Give it two short retries, not the network's four-minute
+                # retry budget, then expose only the fixed boolean checks.
+                if audit_attempts < 3 and time.monotonic() < deadline:
+                    time.sleep(2)
+                    continue
             if not failure or probed.returncode != 255 or failure.diagnostic['category'] not in ('ssh-connection-refused', 'ssh-network-unreachable', 'ssh-transport') or time.monotonic() >= deadline:
                 break
             time.sleep(5)
