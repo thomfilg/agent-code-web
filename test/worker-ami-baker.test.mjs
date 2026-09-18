@@ -145,3 +145,14 @@ test("bootstrap diagnostics expose only fixed stages and booleans, never private
   assert.equal(safeBootstrapReceipt(JSON.stringify({ ...receipt, checks: { ...receipt.checks, node: "SECRET" } })), null);
   assert.equal(safeBootstrapReceipt("raw private error"), null);
 });
+
+test("Ubuntu 24.04 dependencies use actual t64 package names accepted by cloud-init", async () => {
+  const recipe = await readFile(new URL("../deploy/aws/worker-cloud-init.yaml", import.meta.url), "utf8");
+  const packages = recipe.split("packages:\n")[1].split("\nusers:")[0].split("\n").map(line => line.trim().replace(/^- /, ""));
+  // apt-get resolves these virtual aliases, but cloud-init first filters via
+  // apt-cache pkgnames and rejects aliases not present in the package catalogue.
+  for (const legacy of ["libatk-bridge2.0-0", "libatk1.0-0", "libatspi2.0-0", "libcups2", "libgtk-3-0"]) {
+    assert.ok(packages.includes(`${legacy}t64`));
+    assert.ok(!packages.includes(legacy));
+  }
+});
