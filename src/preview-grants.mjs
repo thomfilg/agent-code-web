@@ -182,6 +182,10 @@ export class PreviewGrants {
     if (!id(ownerId) || !id(chatId)) deny();
     return this.#revoke(value => value.ownerId === ownerId && value.chatId === chatId);
   }
+  revokeHostname(observedHostname) {
+    if (!hostname(observedHostname)) deny();
+    return this.#revoke(value => value.hostname === observedHostname);
+  }
   revokeGrant(grant) {
     if (typeof grant !== "string" || grant.length !== 47 || !/^psg_[A-Za-z0-9_-]{43}$/.test(grant)) return false;
     const entry = this.#entries.get(digest(grant).toString("hex"));
