@@ -93,6 +93,9 @@ Read-only AWS preflight at 15:46 UTC verified the expected account/stack,
 healthy controller, encrypted attached data volume, SSM and readiness. At
 15:50 UTC, an exact-deployment tag-filtered query counted one running worker.
 The current controller shutdown also stops EC2 workers; its drain check does
-not prove retained native Bash tasks are idle. The user was asked whether the
-background task has finished. No drain, stop or rollout was performed for this
-checkpoint.
+not prove retained native Bash tasks are idle. After this was explained, the
+user explicitly authorized interruption for today's manual update and clarified
+that future automatic deployments must preserve running instances. See the
+[continuity gate](adr/2026-09-18-automatic-rollouts-preserve-workers.md).
+Build `ImageBuild-t8BSbSkDsHYX:9e1863c3-73b8-493e-b6a7-ececd7004785` is preparing
+immutable runtime revision `e7689a7`; rollout verification remains pending.

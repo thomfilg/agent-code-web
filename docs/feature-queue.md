@@ -1,5 +1,12 @@
 # Feature queue — original request order
 
+Deployment clarification (2026-09-18): today's manual setup/update may stop
+workers if necessary, explicitly authorized by the user. **When deployments
+become automatic, they must not bring down running instances.** Keep automatic
+rollout disabled until worker/task-preserving controller handoff and rollback
+are implemented and verified; do not carry today's interruption exception into
+automation. See [the continuity requirement](adr/2026-09-18-automatic-rollouts-preserve-workers.md).
+
 Latest chat follow-up (2026-09-18): incoming agent messages were not followed by
 the viewport. The defect was reproduced and a frontend fix now passes 14/14
 unit/window cases and 5/5 browser follow/navigation cases, preserving intentional

@@ -1,5 +1,12 @@
 # AWS MVP operations
 
+Automatic-deployment requirement (2026-09-18): automatic publication must
+preserve already-running worker instances and their work. The current shutdown
+path does not satisfy that requirement, so the existing workflow remains
+manual-only and off by default. Today's manually operated update may interrupt
+workers under the user's explicit setup authorization; that is not permission
+for future disruptive automation. See [the required continuity gate](adr/2026-09-18-automatic-rollouts-preserve-workers.md).
+
 Current product clarification (2026-09-18): the GitHub company-selection step
 described in historical receipts below is superseded by
 [provider-authorized repository access](adr/2026-09-18-github-provider-permissions.md).
