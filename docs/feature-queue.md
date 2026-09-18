@@ -106,7 +106,7 @@ Official Playwright MCP verified the Google entry screen at 1600, 390 and 320
 pixels without horizontal overflow. Google cloud consent remains pending the
 new callback registration; no production account or chat was fabricated.
 
-AWS checkpoint (2026-09-18 08:28 UTC):
+AWS checkpoint (2026-09-18 08:32 UTC):
 
 - Cold backup/restore passed on the actual encrypted EBS volume. Snapshot
   `snap-08d0e108e9596b5df` is retained; a distinct restored volume matched both
@@ -164,6 +164,20 @@ AWS checkpoint (2026-09-18 08:28 UTC):
   removed. Reported cost upper bound: USD 0.014650. This proves the native AWS
   turn/resume path, not fresh product browser consent or selected-product-account
   onboarding. Guest Chrome and public workspace transfer remain separate gates.
+- Actual public workspace transfer passed on a separate accepted AWS worker:
+  run `1d6404c4-a76d-4293-a56e-1ae94f6ff712`, VM `i-02c330d1779ba2526`.
+  The unchanged product `Ec2Executor.prepare` cloned/uploaded the fixed public
+  repository, matched the remote Git HEAD, kept `.git/config` credential-free,
+  and preserved a remote sentinel on the second prepare. Fixture and SSM cleanup
+  passed; VM and one encrypted volume were confirmed removed. This used an
+  isolated local controller and no provider credentials/model turns. It does
+  not test deployed-controller admission, private GitHub selection or stop/start.
+- Actual AWS guest Chrome has not passed: the first UI wait remained at
+  "Connecting", and fixture cleanup reported an unconfirmed result. The exact
+  disposable VM `i-0e21228e8ba04d18b` and encrypted volume were then removed;
+  no active recovery SSM session remained. Safe phase/cleanup diagnostics and
+  the bounded remote-start wait are under investigation, with sandbox auditing
+  unchanged. Passing local pixel/UI fixtures do not close this AWS gate.
 - The cloud Google callback to register is
   `https://d20atclccf8cku.cloudfront.net/api/auth/callback/google`.
   Fresh product consent for Codex/Claude/GitHub/Linear, selected-account execution,

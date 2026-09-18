@@ -216,7 +216,16 @@ accepted AWS worker image: run `bc21e4dc-52aa-4234-b2f8-87c1f2ab61fd`, worker
 the host source stayed unchanged, no refresh token was copied, the private test
 profile/session were cleaned, and the VM and encrypted volume were removed.
 Reported cost upper bound was USD 0.014650. This is not product-account onboarding.
-Cloud Google/provider consent, selected-product-account execution, guest Chrome
-and public workspace transfer, protected SSE/live-browser acceptance and remote
+Public workspace upload also passed through the unchanged product
+`Ec2Executor.prepare` on a separate accepted AWS worker: run
+`1d6404c4-a76d-4293-a56e-1ae94f6ff712`, VM `i-02c330d1779ba2526`.
+Remote HEAD matched, Git config had no credentials, and a second prepare retained
+the remote sentinel. Fixture/SSM and exact VM/encrypted-volume cleanup passed.
+This isolated local-controller test used no credentials/models; it does not
+establish private selected-GitHub or deployed-controller admission.
+Guest Chrome's actual AWS UI attempt failed while connecting and remains open;
+its VM and disk were retired. The Chrome sandbox gate has not been weakened.
+Cloud Google/provider consent, selected-product-account execution, guest Chrome,
+protected SSE/live-browser acceptance and remote
 application forwarding remain open. See the [feature queue](feature-queue.md)
 for the latest evidence and explicit release gates.
