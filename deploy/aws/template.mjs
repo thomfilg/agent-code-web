@@ -99,6 +99,28 @@ touch /var/lib/relay-controller-ready
   resource("DataAttachment", "AWS::EC2::VolumeAttachment", { Device: "/dev/sdf", InstanceId: ref("Controller"), VolumeId: ref("DataVolume") });
   resource("VpcOrigin", "AWS::CloudFront::VpcOrigin", { VpcOriginEndpointConfig: { Name: sub("${AWS::StackName}-origin"), Arn: sub("arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Controller}"), HTTPPort: 8787, HTTPSPort: 443, OriginProtocolPolicy: "http-only" }, Tags: tags() });
   resource("Distribution", "AWS::CloudFront::Distribution", { DistributionConfig: { Enabled: true, Comment: sub("${AWS::StackName}: private Relay origin, no response caching"), HttpVersion: "http2and3", IPV6Enabled: true, PriceClass: "PriceClass_100", ViewerCertificate: { CloudFrontDefaultCertificate: true }, Origins: [{ Id: "controller", DomainName: get("Controller", "PrivateDnsName"), VpcOriginConfig: { VpcOriginId: get("VpcOrigin", "Id"), OriginReadTimeout: 60, OriginKeepaliveTimeout: 60 } }], DefaultCacheBehavior: { TargetOriginId: "controller", ViewerProtocolPolicy: "redirect-to-https", AllowedMethods: ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"], CachedMethods: ["GET", "HEAD"], Compress: false, CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", OriginRequestPolicyId: "216adef6-5c7f-47e4-b989-5492eafa07d3" }, CustomErrorResponses: [400, 403, 404, 405, 414, 416, 500, 501, 502, 503, 504].map(ErrorCode => ({ ErrorCode, ErrorCachingMinTTL: 0 })) }, Tags: tags() });
+  // A leaf policy avoids a ControllerRole -> VpcOrigin -> Controller cycle.
+  // Workers receive neither this role nor any CloudFront/IMDS credentials.
+  const previewTags = { ManagedBy: "agent-relay-preview", AgentRelayDeployment: ref("AWS::StackName"), AgentRelayPurpose: "app-preview-v1" };
+  const previewTagKeys = [...Object.keys(previewTags), "AgentRelayPreview", "AgentRelayOwner", "AgentRelayChat", "AgentRelayPort"];
+  const resourceConditions = Object.fromEntries(Object.entries(previewTags).map(([key, value]) => [`aws:ResourceTag/${key}`, value]));
+  const createConditions = {
+    StringEquals: Object.fromEntries(Object.entries(previewTags).map(([key, value]) => [`aws:RequestTag/${key}`, value])),
+    "ForAllValues:StringEquals": { "aws:TagKeys": previewTagKeys },
+    Null: Object.fromEntries(previewTagKeys.map(key => [`aws:RequestTag/${key}`, "false"])),
+  };
+  resource("PreviewHostingPolicy", "AWS::IAM::Policy", { PolicyName: "ScopedAppPreviewHosts", Roles: [ref("ControllerRole")], PolicyDocument: { Version: "2012-10-17", Statement: [
+    { Sid: "NeverUseRelayDistribution", Effect: "Deny", Action: "cloudfront:*", Resource: sub("arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}") },
+    { Sid: "RecoverSavedCreateIntent", ...allow("cloudfront:ListDistributions", "*") },
+    { Sid: "ReadExactExistingVpcOrigin", ...allow("cloudfront:GetVpcOrigin", sub("arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:vpcorigin/${VpcOrigin.Id}")) },
+    { Sid: "CreateTaggedPreviewOnly", ...allow("cloudfront:CreateDistribution", "*", createConditions) },
+    // CloudFront has no ec2:CreateAction equivalent. Required request tags
+    // constrain creation but are not an IAM-only anti-adoption boundary for
+    // unrelated untagged distributions. Durable callerReference/config checks
+    // in trusted controller code are mandatory; no standalone TagResource API.
+    { Sid: "TagAtPreviewCreation", ...allow("cloudfront:TagResource", sub("arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*"), { ...createConditions, StringEqualsIfExists: resourceConditions }) },
+    { Sid: "ManageOwnedPreviewOnly", ...allow(["cloudfront:GetDistribution", "cloudfront:ListTagsForResource", "cloudfront:UpdateDistribution", "cloudfront:DeleteDistribution"], sub("arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*"), { StringEquals: resourceConditions }) },
+  ] } }, { Condition: "AppPreviewsEnabled" });
   resource("BuildLog", "AWS::Logs::LogGroup", { RetentionInDays: 14, Tags: tags() });
   resource("ImageBuildRole", "AWS::IAM::Role", { AssumeRolePolicyDocument: assume("codebuild.amazonaws.com"), Tags: tags(), Policies: [policy("ImageBuild", [
     allow(["s3:GetObject", "s3:GetObjectVersion"], sub("${ArtifactBucket.Arn}/source/*")),
@@ -111,13 +133,14 @@ touch /var/lib/relay-controller-ready
   return {
     AWSTemplateFormatVersion: "2010-09-09", Description: "Agent Relay MVP isolated controller and per-chat EC2 workers; single-AZ and retained encrypted data",
     Parameters: {
+      EnableAppPreviews: { Type: "String", Default: "false", AllowedValues: ["false", "true"], Description: "Explicitly allow trusted controller per-chat CloudFront preview lifecycle" },
       AvailabilityZone: { Type: "AWS::EC2::AvailabilityZone::Name" },
       BaseImageId: { Type: "AWS::EC2::Image::Id", Description: "Pin the resolved Ubuntu 24.04 amd64 AMI; do not implicitly replace the controller during an application update" },
       CloudFrontPrefixListId: { Type: "String", AllowedPattern: "pl-[a-f0-9]+" },
       WorkerPublicKey: { Type: "String", AllowedPattern: "ssh-ed25519 [A-Za-z0-9+/=]+(?: .*)?" },
-    }, Resources: r,
+    }, Conditions: { AppPreviewsEnabled: { "Fn::Equals": [ref("EnableAppPreviews"), "true"] } }, Resources: r,
     Outputs: Object.fromEntries(Object.entries({
-      ControllerInstanceId: ref("Controller"), ArtifactBucket: ref("ArtifactBucket"), ApplicationRepositoryUri: get("ApplicationRepository", "RepositoryUri"), SecretArn: ref("ApplicationSecret"), PublicUrl: sub("https://${Distribution.DomainName}"), DataVolumeId: ref("DataVolume"), DistributionId: ref("Distribution"), WorkerSubnetId: ref("WorkerSubnet"), WorkerSecurityGroupId: ref("WorkerGroup"), WorkerKeyName: ref("WorkerKey"), BuilderInstanceProfile: ref("BuilderProfile"), BaseImageId: ref("BaseImageId"), DeploymentName: ref("AWS::StackName"), ImageBuildProject: ref("ImageBuild"), ControllerRoleArn: get("ControllerRole", "Arn"),
+      ControllerInstanceId: ref("Controller"), ArtifactBucket: ref("ArtifactBucket"), ApplicationRepositoryUri: get("ApplicationRepository", "RepositoryUri"), SecretArn: ref("ApplicationSecret"), PublicUrl: sub("https://${Distribution.DomainName}"), DataVolumeId: ref("DataVolume"), DistributionId: ref("Distribution"), WorkerSubnetId: ref("WorkerSubnet"), WorkerSecurityGroupId: ref("WorkerGroup"), WorkerKeyName: ref("WorkerKey"), BuilderInstanceProfile: ref("BuilderProfile"), BaseImageId: ref("BaseImageId"), DeploymentName: ref("AWS::StackName"), ImageBuildProject: ref("ImageBuild"), ControllerRoleArn: get("ControllerRole", "Arn"), VpcOriginId: get("VpcOrigin", "Id"), ControllerOriginDns: get("Controller", "PrivateDnsName"), PreviewHostingEnabled: ref("EnableAppPreviews"),
     }).map(([key, Value]) => [key, { Value }]))
   };
 }

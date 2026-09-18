@@ -41,7 +41,9 @@ export function environmentFor(secrets, outputs, image, privateKey) {
   assertWorkerImage(image, { imageId: image?.ImageId, account: target.account, deployment: target.stack, keyName: outputs.WorkerKeyName });
   if (!privateKey.startsWith("-----BEGIN OPENSSH PRIVATE KEY-----\n")) throw new Error("Invalid worker transport key");
   for (const key of ["WorkerSubnetId", "WorkerSecurityGroupId", "WorkerKeyName"]) if (!outputs[key]) throw new Error("Missing worker stack output");
+  const preview = previewEnvironment(secrets.AGENT_PREVIEW_ENABLED, outputs);
   return { ...Object.fromEntries(required.map(key => [key, secrets[key]])),
+    ...preview,
     AGENT_WEB_PUBLIC_URL: url.origin, AGENT_GOOGLE_AUTH: "1", AGENT_COOKIE_SECURE: "1", AGENT_ALLOWED_EMAILS: allowedEmails.join(","),
     AGENT_WEB_HOST: "0.0.0.0", AGENT_WEB_PORT: "8787", AGENT_DATABASE_MODE: "embedded",
     AGENT_CONTROL_DIR: "/var/lib/relay/control", AGENT_DATA_DIR: "/var/lib/relay/state", AGENT_ENABLE_MOCK: "0",
@@ -52,6 +54,16 @@ export function environmentFor(secrets, outputs, image, privateKey) {
     AGENT_EC2_KEY_NAME: outputs.WorkerKeyName, AGENT_EC2_USE_PUBLIC_IP: "0", AGENT_EC2_INSTANCE_TYPE: "t3.medium",
     AGENT_WORKER_SSH_KEY_BASE64: Buffer.from(privateKey).toString("base64"),
   };
+}
+
+export function previewEnvironment(enabled = "0", outputs) {
+  if (!["0", "1", "false", "true"].includes(enabled)) throw new Error("AGENT_PREVIEW_ENABLED must be explicit 0/1/false/true");
+  if (["0", "false"].includes(enabled)) return { AGENT_PREVIEW_ENABLED: "0" };
+  if (outputs.PreviewHostingEnabled !== "true" || !/^vo_[A-Za-z0-9]+$/.test(outputs.VpcOriginId || "") || !/^i-[a-f0-9]{8,17}$/.test(outputs.ControllerInstanceId || "") ||
+    !/^[A-Z0-9]{6,32}$/.test(outputs.DistributionId || "") || !/^ip-[0-9-]+(?:\.[a-z0-9-]+)?\.(?:compute\.internal|ec2\.internal)$/.test(outputs.ControllerOriginDns || "") ||
+    Object.values(outputs).some(value => typeof value === "string" && /[\r\n\u2028\u2029]/.test(value))) throw new Error("Enable the reviewed preview IAM policy and exact owned stack outputs before publishing preview settings");
+  return { AGENT_PREVIEW_ENABLED: "1", AGENT_PREVIEW_ACCOUNT_ID: target.account, AGENT_PREVIEW_VPC_ORIGIN_ID: outputs.VpcOriginId,
+    AGENT_PREVIEW_CONTROLLER_INSTANCE_ID: outputs.ControllerInstanceId, AGENT_PREVIEW_CONTROLLER_ORIGIN_DNS: outputs.ControllerOriginDns, AGENT_PREVIEW_RELAY_DISTRIBUTION_ID: outputs.DistributionId };
 }
 
 export function assertWorkerKey(derived, pair, expectedName) {
@@ -143,7 +155,7 @@ export async function main(args) {
     const configs = Array.isArray(list) ? list : list.configs;
     if (!configs.some(item => item.name === config)) await doppler(["configs", "create", config, "--environment", "stg"]);
     const existing = await values(config);
-    if (Object.keys(existing).some(key => !key.startsWith("DOPPLER_") && !required.includes(key) && key !== "AGENT_ALLOWED_EMAILS")) throw new Error("Deployment config contains unrelated settings; refusing to overwrite them");
+    if (Object.keys(existing).some(key => !key.startsWith("DOPPLER_") && !required.includes(key) && !["AGENT_ALLOWED_EMAILS", "AGENT_PREVIEW_ENABLED"].includes(key))) throw new Error("Deployment config contains unrelated settings; refusing to overwrite them");
     const source = await values("dev");
     for (const key of required.slice(0, 3)) if (!source[key]?.trim()) throw new Error(`Missing ${key} in the explicitly selected source`);
     // A new Doppler branch can inherit its environment's Google settings.
@@ -153,6 +165,7 @@ export async function main(args) {
     selected.AUTH_SECRET = existing.AUTH_SECRET || randomBytes(48).toString("base64url");
     selected.AGENT_ENCRYPTION_KEY = existing.AGENT_ENCRYPTION_KEY || randomBytes(32).toString("base64");
     selected.AGENT_ALLOWED_EMAILS = existing.AGENT_ALLOWED_EMAILS || "";
+    selected.AGENT_PREVIEW_ENABLED = existing.AGENT_PREVIEW_ENABLED || "0";
     await withSecretFile(selected, filename => doppler(["secrets", "upload", filename, "--config", config, "--silent"]));
     console.log(JSON.stringify({ project, config, initialized: true, copied: required.slice(0, 3), generated: required.slice(3), localDevChanged: false }));
     return;
