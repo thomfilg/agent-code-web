@@ -147,3 +147,36 @@ rejection, CLI error redaction, off-default env/IAM and acyclic CloudFormation.
 Real role permissions/provisioning/deletion, authenticated bootstrap, original
 paths/assets/uploads/SSE/WebSocket and owner/chat/session isolation remain root's
 separate end-to-end acceptance obligations. Gate 45 is not closed by this file.
+
+## Existing-environment activation without credential republication
+
+`node scripts/aws-secrets.mjs update-previews --enable` is an explicit operator
+mutation, not a default startup action. It verifies STS, the owned completed
+stack, exact secret/controller/distribution/VPC-origin resource IDs, and the
+active preview leaf policy. It reads only that secret's current version and
+requires the existing Google/EC2/public-origin deployment identity. It does not
+read Doppler, a local worker private key, or another credential source.
+
+The candidate spreads the complete existing environment and changes exactly
+the six values returned by `previewEnvironment`; every other key/value remains
+identical, including unknown future settings and preview quota settings. The
+temporary private file is on `/dev/shm`, removed in `finally`. CLI arguments
+contain a filename, not credential values. A uniquely labelled candidate version
+is promoted with `RemoveFromVersionId` pointing to the observed current version;
+a concurrent writer wins rather than having its credentials overwritten. The
+entire returned snapshot and current version must match before success. An
+ambiguous write is never retried automatically or rolled back; only this run's
+temporary label is removed. Fixed errors instruct inspection before retry.
+
+Offline cases cover no-op/invalid metadata with no writes, unchanged arbitrary
+private values, concurrent promotion, ambiguous write, superseded version and
+malformed/changed readback, plus CLI argument rejection before credential reads.
+
+Authorized CloudFormation activation on 2026-09-18 used the reviewed
+`enable-app-previews-20260918-1211` change set: its only resource change was Add
+`PreviewHostingPolicy` (no replacements). All four prior parameter values were
+confirmed identical. It reached `UPDATE_COMPLETE`; exact controller and data
+volume IDs were unchanged, and `PreviewHostingEnabled=true` was observed. This
+is IAM/template activation evidence only, not preview-host lifecycle acceptance
+or authenticated product consent. No secret activation was performed as part
+of that change-set operation.

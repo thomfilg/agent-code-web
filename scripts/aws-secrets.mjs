@@ -78,6 +78,15 @@ export function assertWorkerOnlyUpdate(current, next) {
   if (JSON.stringify(keys) !== JSON.stringify(Object.keys(next).sort()) || keys.some(key => typeof current[key] !== "string" || typeof next[key] !== "string" || key !== "AGENT_EC2_AMI_ID" && current[key] !== next[key])) throw new Error("Worker-only update cannot change credentials, identity, access or other settings; use Doppler publication");
 }
 
+export function workerOnlyEnvironment(current, outputs, image, privateKey) {
+  // Validate the image/key/config as publication does, but never apply newly
+  // introduced defaults or discard existing optional settings on an AMI change.
+  environmentFor(current, outputs, image, privateKey);
+  const next = { ...current, AGENT_EC2_AMI_ID: image.ImageId };
+  assertWorkerOnlyUpdate(current, next);
+  return next;
+}
+
 export function parsePublishedEnvironment(serialized) {
   try {
     if (typeof serialized !== "string" || serialized.length > 1048576) throw new Error();
@@ -85,6 +94,39 @@ export function parsePublishedEnvironment(serialized) {
     if (!value || Array.isArray(value) || typeof value !== "object" || Object.keys(value).length > 128 || Object.entries(value).some(([key, item]) => !/^[A-Z][A-Z0-9_]{0,127}$/.test(key) || typeof item !== "string" || item.length > 262144)) throw new Error();
     return value;
   } catch { throw new Error("Published AWS environment is malformed; private contents suppressed"); }
+}
+
+export function previewOnlyEnvironment(current, outputs) {
+  const previous = parsePublishedEnvironment(JSON.stringify(current));
+  if (required.some(key => !previous[key]?.trim()) || previous.AGENT_GOOGLE_AUTH !== "1" || previous.AGENT_WORKER_BACKEND !== "ec2" ||
+    previous.AGENT_EC2_DEPLOYMENT !== target.stack || previous.AWS_REGION !== target.region || previous.AGENT_WEB_PUBLIC_URL !== outputs.PublicUrl ||
+    !/^https:\/\/d[a-z0-9]+\.cloudfront\.net$/.test(outputs.PublicUrl || "")) throw new Error("Preview update requires the existing exact deployed Google/EC2 environment");
+  // Spread the existing snapshot, never rebuild it via Doppler or environmentFor:
+  // every value outside these six derived metadata fields remains byte-identical.
+  return { ...previous, ...previewEnvironment("1", outputs) };
+}
+
+export async function publishPreviewOnlyUpdate(secretArn, current, outputs, { awsCall = aws, secretFile = withSecretFile, version = randomUUID() } = {}) {
+  let staged = false;
+  const stage = `relay-preview-${version}`;
+  try {
+    if (!/^arn:aws:secretsmanager:us-east-2:456808212788:secret:[A-Za-z0-9/_+=.@-]+$/.test(secretArn) || current?.ARN !== secretArn ||
+      !current.VersionStages?.includes("AWSCURRENT") || !/^[a-zA-Z0-9-]{32,64}$/.test(current.VersionId || "") || !/^[a-f0-9-]{36}$/.test(version)) throw new Error();
+    const previous = parsePublishedEnvironment(current.SecretString), next = previewOnlyEnvironment(previous, outputs);
+    const equal = (a, b) => Object.keys(a).length === Object.keys(b).length && Object.keys(a).every(key => a[key] === b[key]);
+    if (equal(previous, next)) return { changed: false };
+    staged = true;
+    const written = await secretFile(next, filename => awsCall(["secretsmanager", "put-secret-value"], ["--secret-id", secretArn, "--client-request-token", version, "--version-stages", stage, "--secret-string", `file://${filename}`]));
+    if (written.ARN !== secretArn || written.VersionId !== version) throw new Error();
+    await awsCall(["secretsmanager", "update-secret-version-stage"], ["--secret-id", secretArn, "--version-stage", "AWSCURRENT", "--move-to-version-id", version, "--remove-from-version-id", current.VersionId]);
+    const observed = await awsCall(["secretsmanager", "get-secret-value"], ["--secret-id", secretArn, "--version-stage", "AWSCURRENT"]);
+    if (observed.ARN !== secretArn || observed.VersionId !== version || !observed.VersionStages?.includes("AWSCURRENT") || !equal(next, parsePublishedEnvironment(observed.SecretString))) throw new Error();
+    return { changed: true };
+  } catch { throw new Error("Preview metadata update was not confirmed; inspect the current secret version before retrying. Private diagnostics suppressed."); }
+  finally {
+    // Never undo AWSCURRENT or any concurrent writer; remove only our own label.
+    if (staged) await awsCall(["secretsmanager", "update-secret-version-stage"], ["--secret-id", secretArn, "--version-stage", stage, "--remove-from-version-id", version]).catch(() => {});
+  }
 }
 
 export async function publishWorkerOnlyUpdate(secretArn, current, next, { awsCall = aws, secretFile = withSecretFile, version = randomUUID() } = {}) {
@@ -148,7 +190,9 @@ export async function initializeWorkerKey(secretArn, privateKey, { awsCall = aws
 
 export async function main(args) {
   const [action, flag, value] = args;
-  if (!["initialize", "check", "publish", "update-worker", "initialize-worker-key"].includes(action)) throw new Error("Usage: aws-secrets.mjs initialize --initialize-from-dev | check | initialize-worker-key | publish --worker-ami ami-ID | update-worker --worker-ami ami-ID");
+  if (!["initialize", "check", "publish", "update-worker", "initialize-worker-key", "update-previews"].includes(action)) throw new Error("Usage: aws-secrets.mjs initialize --initialize-from-dev | check | initialize-worker-key | publish --worker-ami ami-ID | update-worker --worker-ami ami-ID | update-previews --enable");
+  const previews = action === "update-previews";
+  if (previews && (args.length !== 2 || flag !== "--enable")) throw new Error("Preview metadata update requires exactly update-previews --enable");
   if (action === "initialize") {
     if (flag !== "--initialize-from-dev" || value) throw new Error("Explicit --initialize-from-dev is required to copy only Google/owner settings into the separate AWS config");
     const list = JSON.parse(await doppler(["configs", "--json"]));
@@ -172,14 +216,14 @@ export async function main(args) {
   }
   const bootstrap = action === "initialize-worker-key";
   if (bootstrap && args.length !== 1) throw new Error("Worker-key bootstrap takes no credentials or AMI arguments");
-  let secrets = action === "update-worker" || bootstrap ? null : await values(config);
+  let secrets = action === "update-worker" || bootstrap || previews ? null : await values(config);
   if (action === "check") {
     const missing = required.filter(key => !secrets[key]?.trim());
     console.log(JSON.stringify({ project, config, configured: !missing.length, missing }));
     if (missing.length) throw new Error("Deployment secrets are incomplete");
     return;
   }
-  if (!bootstrap && (flag !== "--worker-ami" || !/^ami-[a-f0-9]{8,17}$/.test(value || ""))) throw new Error("Publish requires --worker-ami ami-ID");
+  if (!bootstrap && !previews && (flag !== "--worker-ami" || !/^ami-[a-f0-9]{8,17}$/.test(value || ""))) throw new Error("Publish requires --worker-ami ami-ID");
   await verifyTarget();
   const stack = (await aws(["cloudformation", "describe-stacks"], ["--stack-name", target.stack])).Stacks?.[0];
   if (stack?.StackName !== target.stack || !stack.StackId?.startsWith(`arn:aws:cloudformation:${target.region}:${target.account}:stack/${target.stack}/`) || !["CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE"].includes(stack?.StackStatus) || !stack.Tags?.some(tag => tag.Key === "ManagedBy" && tag.Value === "12-apps-ci")) throw new Error("Deployment stack is not ready or owned");
@@ -189,6 +233,19 @@ export async function main(args) {
   for (const [logical, type, output] of [["ApplicationSecret", "AWS::SecretsManager::Secret", "SecretArn"], ["WorkerKey", "AWS::EC2::KeyPair", "WorkerKeyName"]]) {
     const matching = resources.filter(resource => resource.LogicalResourceId === logical && resource.ResourceType === type);
     if (matching.length !== 1 || matching[0].PhysicalResourceId !== outputs[output]) throw new Error("Secret or transport key is not exactly owned by the deployment stack");
+  }
+  if (previews) {
+    previewEnvironment("1", outputs);
+    for (const [logical, type, output] of [["Controller", "AWS::EC2::Instance", "ControllerInstanceId"], ["Distribution", "AWS::CloudFront::Distribution", "DistributionId"], ["VpcOrigin", "AWS::CloudFront::VpcOrigin", "VpcOriginId"]]) {
+      const matching = resources.filter(resource => resource.LogicalResourceId === logical && resource.ResourceType === type);
+      if (matching.length !== 1 || matching[0].PhysicalResourceId !== outputs[output]) throw new Error("Preview resources are not exactly owned by the deployment stack");
+    }
+    const policies = resources.filter(resource => resource.LogicalResourceId === "PreviewHostingPolicy" && resource.ResourceType === "AWS::IAM::Policy");
+    if (policies.length !== 1 || !["CREATE_COMPLETE", "UPDATE_COMPLETE"].includes(policies[0].ResourceStatus)) throw new Error("Reviewed preview policy is not active");
+    const current = await aws(["secretsmanager", "get-secret-value"], ["--secret-id", outputs.SecretArn, "--version-stage", "AWSCURRENT"]);
+    const result = await publishPreviewOnlyUpdate(outputs.SecretArn, current, outputs);
+    console.log(JSON.stringify({ previewMetadataUpdated: result.changed, credentialsChanged: false, otherSettingsChanged: false, source: "Existing AWS environment", restartRequired: result.changed }));
+    return;
   }
   let current;
   if (action === "update-worker") {
@@ -211,12 +268,13 @@ export async function main(args) {
     console.log(JSON.stringify({ workerKeyInitialized: result.changed, providerCredentialsCopied: false, environmentPublished: false, workerAdmitted: false }));
     return;
   }
-  const environment = environmentFor(secrets, outputs, image, key);
   if (action === "update-worker") {
+    const environment = workerOnlyEnvironment(secrets, outputs, image, key);
     const result = await publishWorkerOnlyUpdate(outputs.SecretArn, current, environment);
     console.log(JSON.stringify({ workerUpdated: result.changed, workerImage: value, credentialsChanged: false, source: "Existing Doppler-published AWS environment", restartRequired: result.changed }));
     return;
   }
+  const environment = environmentFor(secrets, outputs, image, key);
   await withSecretFile(environment, filename => aws(["secretsmanager", "put-secret-value"], ["--secret-id", outputs.SecretArn, "--secret-string", `file://${filename}`]));
   console.log(JSON.stringify({ published: true, source: `${project}/${config}`, publicUrl: outputs.PublicUrl, googleCallback: `${outputs.PublicUrl}/api/auth/callback/google`, credentialsPrinted: false, accountImports: false }));
 }

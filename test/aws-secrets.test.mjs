@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { environmentFor, assertWorkerKey, assertWorkerOnlyUpdate, publishWorkerOnlyUpdate, parsePublishedEnvironment, initializeWorkerKey, previewEnvironment } from "../scripts/aws-secrets.mjs";
+import { environmentFor, assertWorkerKey, assertWorkerOnlyUpdate, publishWorkerOnlyUpdate, parsePublishedEnvironment, initializeWorkerKey, previewEnvironment, previewOnlyEnvironment, publishPreviewOnlyUpdate, workerOnlyEnvironment, main } from "../scripts/aws-secrets.mjs";
 const secrets = { GOOGLE_CLIENT_ID: "google-fixture", GOOGLE_CLIENT_SECRET: "google-secret-fixture", AGENT_OWNER_EMAIL: "owner@example.test", AUTH_SECRET: "x".repeat(48), AGENT_ENCRYPTION_KEY: Buffer.alloc(32).toString("base64"), DOPPLER_TOKEN: "DO-NOT-COPY", OPENAI_API_KEY: "DO-NOT-COPY", ANTHROPIC_API_KEY: "DO-NOT-COPY" };
 const outputs = { PublicUrl: "https://example.cloudfront.net", WorkerSubnetId: "subnet-fixture", WorkerSecurityGroupId: "sg-fixture", WorkerKeyName: "deployment-key" };
 
@@ -184,5 +184,79 @@ test("transport bootstrap conditional promotion detects concurrent publication a
     await assert.rejects(f.run(), error => /not confirmed/.test(error.message) && !error.message.includes("PRIVATE"));
     assert.equal(f.calls.filter(([op, args]) => op[1] === "update-secret-version-stage" && args.includes("AWSCURRENT")).length, 1);
     assert.ok(f.calls.at(-1)[1].includes("relay-worker-bootstrap-11111111-2222-4333-8444-555555555555"));
+  }
+});
+
+const previewOutputs = { ...outputs, PublicUrl: "https://dfixture.cloudfront.net", PreviewHostingEnabled: "true", VpcOriginId: "vo_fixture", ControllerInstanceId: "i-0123456789abcdef0", ControllerOriginDns: "ip-10-84-1-2.us-east-2.compute.internal", DistributionId: "ERELAYEXCLUDED" };
+const previewBefore = () => ({ ...environmentFor(secrets, previewOutputs, image, key), UNRECOGNIZED_PRIVATE_SETTING: "PRIVATE-UNCHANGED\n\u2603", AGENT_PREVIEW_MAX_HOSTS: "4" });
+function previewUpdateFixture({ fault, before = previewBefore(), currentOverride } = {}) {
+  const arn = "arn:aws:secretsmanager:us-east-2:456808212788:secret:fixture", old = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", version = "11111111-2222-4333-8444-555555555555", calls = [];
+  const current = { ARN: arn, VersionId: old, VersionStages: ["AWSCURRENT"], SecretString: JSON.stringify(before), ...currentOverride };
+  let saved;
+  const awsCall = async (operation, args) => {
+    calls.push([operation, args]); const flag = name => args[args.indexOf(name) + 1];
+    if (operation[1] === "put-secret-value") {
+      assert.equal(flag("--version-stages"), `relay-preview-${version}`); assert.equal(flag("--secret-string"), "file:///private-tmpfs/fixture.json");
+      if (fault === "write-ambiguous") throw Error("PRIVATE-WRITE-DIAGNOSTIC");
+      return { ARN: arn, VersionId: version };
+    }
+    if (operation[1] === "get-secret-value") return { ARN: arn, VersionId: fault === "superseded" ? old : version, VersionStages: ["AWSCURRENT"], SecretString: fault === "malformed" ? "PRIVATE-RESPONSE" : JSON.stringify(fault === "changed-secret" ? { ...saved, GOOGLE_CLIENT_SECRET: "PRIVATE-CHANGED" } : saved) };
+    if (flag("--version-stage") === "AWSCURRENT") {
+      assert.equal(flag("--remove-from-version-id"), old); assert.equal(flag("--move-to-version-id"), version);
+      if (fault === "concurrent") throw Error("PRIVATE-CONCURRENT-WRITER");
+    }
+    return {};
+  };
+  return { calls, run: () => publishPreviewOnlyUpdate(arn, current, previewOutputs, { awsCall, version, secretFile: async (value, fn) => { saved = value; return fn("/private-tmpfs/fixture.json"); } }), saved: () => saved };
+}
+
+test("preview metadata derivation preserves every unrelated value and rejects foreign environment", () => {
+  const before = previewBefore(), next = previewOnlyEnvironment(before, previewOutputs), fields = Object.keys(previewEnvironment("1", previewOutputs));
+  for (const [name, value] of Object.entries(before)) if (!fields.includes(name)) assert.equal(next[name], value);
+  assert.equal(next.AGENT_PREVIEW_MAX_HOSTS, "4"); assert.equal(next.AGENT_PREVIEW_ENABLED, "1");
+  assert.deepEqual(Object.keys(next).filter(name => !(name in before)).sort(), fields.filter(name => !(name in before)).sort());
+  for (const field of ["AGENT_GOOGLE_AUTH", "AGENT_WORKER_BACKEND", "AGENT_EC2_DEPLOYMENT", "AWS_REGION", "AGENT_WEB_PUBLIC_URL", "GOOGLE_CLIENT_SECRET"]) assert.throws(() => previewOnlyEnvironment({ ...before, [field]: "" }, previewOutputs));
+  assert.throws(() => previewOnlyEnvironment(before, { ...previewOutputs, PreviewHostingEnabled: "false" }));
+});
+
+test("preview-only secret publication CAS preserves credentials and writes no private argv", async () => {
+  const fixture = previewUpdateFixture(); assert.deepEqual(await fixture.run(), { changed: true });
+  assert.deepEqual(fixture.saved(), previewOnlyEnvironment(previewBefore(), previewOutputs));
+  assert.equal(fixture.calls.filter(([op, args]) => op[1] === "update-secret-version-stage" && args.includes("AWSCURRENT")).length, 1);
+  assert.ok(fixture.calls.at(-1)[1].includes("relay-preview-11111111-2222-4333-8444-555555555555"));
+  assert.doesNotMatch(JSON.stringify(fixture.calls), /PRIVATE|google-secret|fake-test-key/);
+});
+
+test("preview update never retries or rolls back a concurrent writer and suppresses arbitrary failures", async () => {
+  for (const fault of ["write-ambiguous", "concurrent", "superseded", "malformed", "changed-secret"]) {
+    const fixture = previewUpdateFixture({ fault });
+    await assert.rejects(fixture.run(), error => error.message === "Preview metadata update was not confirmed; inspect the current secret version before retrying. Private diagnostics suppressed.");
+    assert.equal(fixture.calls.filter(([op]) => op[1] === "put-secret-value").length, 1);
+    assert.equal(fixture.calls.filter(([op, args]) => op[1] === "update-secret-version-stage" && args.includes("AWSCURRENT")).length, fault === "write-ambiguous" ? 0 : 1);
+    assert.ok(fixture.calls.at(-1)[1].includes("relay-preview-11111111-2222-4333-8444-555555555555"));
+  }
+});
+
+test("preview update no-op and invalid exact versions never write", async () => {
+  const noop = previewUpdateFixture({ before: previewOnlyEnvironment(previewBefore(), previewOutputs) });
+  assert.deepEqual(await noop.run(), { changed: false }); assert.equal(noop.calls.length, 0);
+  for (const currentOverride of [{ ARN: "foreign" }, { VersionStages: [] }, { VersionId: "bad" }, { SecretString: "PRIVATE" }]) {
+    const fixture = previewUpdateFixture({ currentOverride }); await assert.rejects(fixture.run()); assert.equal(fixture.calls.length, 0);
+  }
+});
+
+test("preview CLI rejects nonexact authority before provider, Doppler or credential reads", async () => {
+  for (const args of [["update-previews"], ["update-previews", "--disable"], ["update-previews", "--enable", "extra"], ["update-previews", "--worker-ami", "ami-0123456789abcdef0"]]) await assert.rejects(main(args), /requires exactly/);
+});
+
+test("worker AMI updates preserve old missing preview flags and all new enabled preview settings", () => {
+  const old = previewBefore(); delete old.AGENT_PREVIEW_ENABLED;
+  const enabled = previewOnlyEnvironment(previewBefore(), previewOutputs);
+  for (const current of [old, enabled]) {
+    const next = workerOnlyEnvironment(current, previewOutputs, { ...image, ImageId: "ami-1234567890abcdef0" }, key);
+    assert.deepEqual(Object.keys(next), Object.keys(current));
+    for (const name of Object.keys(current)) if (name !== "AGENT_EC2_AMI_ID") assert.equal(next[name], current[name]);
+    assert.equal(next.AGENT_EC2_AMI_ID, "ami-1234567890abcdef0");
+    assert.throws(() => workerOnlyEnvironment(current, previewOutputs, { ...image, Public: true }, key));
   }
 });
