@@ -108,6 +108,55 @@ taskset -c 0,1 nice -n 10 node --test --test-concurrency=1 \
   test/config-auth.test.mjs test/runtime-manager.test.mjs
 ```
 
+### Fresh worker acceptance operator
+
+After baking, publish the preliminary controller environment/SSH key to the
+stack's existing application secret. The application itself need not be running;
+the controller bootstrap and its SSM agent must be ready. Publishing preliminary
+configuration does **not** make an image accepted. Do not start real chats until
+the operator below succeeds:
+
+```bash
+node deploy/aws/verify-worker-ami.mjs \
+  --profile code-web --region us-east-2 --expected-account 123456789012 \
+  --deployment YOUR_STACK --image-id ami-0123456789abcdef0 --dry-run
+```
+
+Remove `--dry-run` for the explicit, billable acceptance run. It verifies STS,
+exact stack resources, private network/controller identity, and encrypted,
+deployment-tagged native-version AMI. It launches one uniquely tagged disposable
+worker without IAM/public IP/IMDS and asks the controller, through SSM, to SSH
+into that worker. The controller fetches **only its own application secret**
+locally using its instance role. Its SSH key is decoded into root-only `0600`
+files in a private `/dev/shm` directory, matched against the deployment's public
+key, and removed on success or failure. No private key enters an SSM parameter,
+operator output, source archive, worker image or worker filesystem.
+
+The image contains a root-owned, fixed-path audit helper. Its narrowly scoped
+sudo rule permits the chat agent to run only that no-argument, read-only audit.
+It emits public identity hashes and booleans, never credential contents. The
+operator verifies the finalization marker, credential scrub, inactive/disabled
+SSM, inaccessible metadata, new machine/SSH host identity, exact CLI versions,
+boot heartbeat and watchdog. It writes a disposable sentinel, stops/starts the
+VM, then verifies the sentinel and machine/host identities persisted. SSH host
+pins are isolated from the product's known-hosts file and retained across both
+probe phases. No model prompt is sent and no user account is imported.
+
+Success is a structured `accepted: true, cleanedUp: true` receipt with checks,
+instance/image IDs, SSM command IDs and public hashes. It is emitted only after
+the two audits and confirmed termination of that exact disposable VM/root
+volume. An ownership change blocks cleanup; inspect the logged instance ID
+manually rather than weakening scope checks. Failed SSM output contains only
+fixed stage descriptions; no private diagnostics are printed. The original
+controller, AMI, stack secret and product data are not deleted or modified.
+
+Additional local fixture checks:
+
+```bash
+taskset -c 0,1 nice -n 10 node --test test/worker-ami-verification.test.mjs
+taskset -c 0,1 nice -n 10 python3 -B test/worker-controller-verification.py
+```
+
 Implementation references: [SSM Run Command parameters](https://docs.aws.amazon.com/cli/latest/reference/ssm/send-command.html),
 [EC2 launch options](https://docs.aws.amazon.com/cli/latest/reference/ec2/run-instances.html),
 and [AWS CLI IAM role credentials](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-role.html).
