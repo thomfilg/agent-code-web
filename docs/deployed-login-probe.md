@@ -66,6 +66,25 @@ does not infer deployment identity from public UI behavior or caller input.
 It cannot close authenticated SSE, provider consent, selected-account native
 turn/resume, or GitHub/Linear integration acceptance gates.
 
+## Legacy entrypoint
+
+`scripts/smoke-deployed-browser.mjs` is now a thin compatibility wrapper, not a
+second browser implementation. Its existing no-argument or exact AWS-origin
+positional invocation still performs a live anonymous readiness/entry check;
+it delegates all browser work and confirmed cleanup to this operator, without
+clicking Google. New callers should use the explicit `--run` command above.
+The legacy localhost positional argument now fails with a fixed migration
+message before network/browser/file activity: it is never silently redirected
+to AWS and does not widen this operator's fixed-origin policy. Local acceptance
+uses the repository's isolated browser fixtures instead. Unknown/additional
+arguments also fail without echoing their contents.
+
+The wrapper preserves the canonical receipt and adds only its compatibility
+marker and readiness result. Screenshot locations use the canonical private
+per-run directory rather than the old fixed `aws-mcp` directory. Its offline
+coverage is `test/deployed-browser-compat.test.mjs`; no extra live browser run
+is required to exercise the delegation itself.
+
 ## Recorded deployed observation
 
 On 2026-09-18 at 10:10 UTC, the reviewed operator ran against the separately
