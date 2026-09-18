@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, writeFile, readFile, rm, lstat, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, lstat, symlink, chmod } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import os from "node:os";
 import path from "node:path";
 import { parseNativeOptions, smokeEc2Native, readNativeAccess, validateProbeReceipt } from "../scripts/smoke-ec2-native.mjs";
 import { guardNativeTarget, nativeTarget as t } from "../scripts/fixtures/ec2-native-guards.mjs";
-import { runNativeProbe, validateNativeResult } from "../scripts/fixtures/ec2-native-worker.mjs";
+import { runNativeProbe, validateNativeResult, NativeAcceptanceError, nativeFailureReceipt, remoteNativeFailure } from "../scripts/fixtures/ec2-native-worker.mjs";
 import { prepareSessionPlugin, pluginSigner } from "../scripts/fixtures/session-manager-plugin.mjs";
 import { nativeProbeOverSsh, runPrivate, openNativeTunnel } from "../scripts/fixtures/ec2-native-transport.mjs";
 
@@ -159,7 +159,7 @@ test("preflight and cleanup never use model or profile APIs; cleanup refuses sym
 test("recovery cleanup refuses a still-live probe instead of falsely claiming credential removal", async t => {
   const directory = await temp(t), profile = path.join(directory, "native-acceptance-" + id);
   await mkdir(profile, { mode: 0o700 }); await writeFile(path.join(profile, "owner.json"), JSON.stringify({ runId: id, pid: process.pid }), { mode: 0o600 });
-  await assert.rejects(runNativeProbe({ action: "cleanup", runId: id }, { rootBase: directory }), /still be running/);
+  await assert.rejects(runNativeProbe({ action: "cleanup", runId: id }, { rootBase: directory }), error => error.diagnostic.category === "profile-active" && error.diagnostic.profileCleanupConfirmed === false);
   assert.equal((await lstat(profile)).isDirectory(), true);
 });
 
@@ -226,10 +226,118 @@ test("orchestrator gates credentials after native preflight, safely allowlists r
   events.length = 0;
   await assert.rejects(smokeEc2Native({ ...options, sshKey: key }, { ...deps, probe: async ({ request }) => { events.push(request.action); if (request.action === "run") throw Error("PRIVATE-DO-NOT-PRINT"); return { schema: 1, runId: id, preflight: true, credentialFree: true, cleanedUp: true }; } }));
   assert.ok(events.includes("cleanup")); assert.ok(events.includes("unchanged")); assert.ok(events.includes("closed"));
+  events.length = 0;
+  await assert.rejects(smokeEc2Native({ ...options, sshKey: key }, { ...deps, probe: async ({ request }) => {
+    events.push(request.action);
+    if (request.action === "run") return { ...goodReceipt, runId: "wrong", cleanedUp: true };
+    return { schema: 1, runId: id, preflight: true, credentialFree: true, cleanedUp: true };
+  } }));
+  assert.ok(events.includes("cleanup"), "unvalidated cleanedUp cannot suppress exact recovery");
 });
 
 test("private subprocess errors suppress stdout/stderr/arguments and terminate on timeout", async () => {
   await assert.rejects(runPrivate(process.execPath, ["-e", "console.error('fixture-secret'); process.exit(2)"]), error => !error.message.includes("fixture-secret"));
   await assert.rejects(runPrivate(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], { timeout: 20 }));
   assert.throws(() => validateProbeReceipt({ ...goodReceipt, turns: 3 }, id, "run"));
+});
+
+test("source diagnostics distinguish schema, scope, expired, short-lived and unsafe files without values", async t => {
+  const directory = await temp(t), file = path.join(directory, "PRIVATE-PATH");
+  const credential = { accessToken: "PRIVATE-ACCESS", refreshToken: "PRIVATE-REFRESH", expiresAt: Date.now() + 3600000, scopes: ["user:inference"] };
+  for (const [value, category] of [["PRIVATE-NOT-JSON", "source-schema"], [JSON.stringify({ claudeAiOauth: { ...credential, scopes: [] } }), "source-scope"],
+    [JSON.stringify({ claudeAiOauth: { ...credential, expiresAt: Date.now() - 1 } }), "source-access-expired"],
+    [JSON.stringify({ claudeAiOauth: { ...credential, expiresAt: Date.now() + 10000 } }), "source-access-too-short"]]) {
+    await writeFile(file, value, { mode: 0o600 });
+    await assert.rejects(readNativeAccess(file), error => {
+      const receipt = nativeFailureReceipt(error); assert.equal(receipt.diagnostic.category, category); assert.equal(receipt.diagnostic.stage, "source-access");
+      assert.doesNotMatch(JSON.stringify(receipt), /PRIVATE/); assert.equal(error.cause, undefined); return true;
+    });
+  }
+  await chmod(file, 0o644); await assert.rejects(readNativeAccess(file), error => error.diagnostic.category === "source-file-permissions");
+  await assert.rejects(readNativeAccess(path.join(directory, "missing")), error => error.diagnostic.category === "source-file-unavailable");
+});
+
+test("remote failure envelope is bound to schema, run and action, and excludes private or arbitrary fields", async () => {
+  const request = { action: "run", runId: id };
+  const envelope = remoteNativeFailure(new NativeAcceptanceError("first-turn", "command-timeout", { profileCleanupAttempted: true, profileCleanupConfirmed: true }), request);
+  const invoke = value => nativeProbeOverSsh({ options, directory: "/private/fixture", tunnel: { port: 12345 }, request,
+    run: async () => JSON.stringify(value) });
+  await assert.rejects(invoke({ ...envelope, PRIVATE: "PRIVATE-SECRET", diagnostic: { ...envelope.diagnostic, cause: "PRIVATE-PATH" } }), error => {
+    assert.deepEqual(error.diagnostic, { stage: "first-turn", category: "command-timeout", profileCleanupAttempted: true, profileCleanupConfirmed: true });
+    assert.doesNotMatch(JSON.stringify(nativeFailureReceipt(error)), /PRIVATE/); return true;
+  });
+  for (const value of [{ ...envelope, schema: 2 }, { ...envelope, runId: "foreign" }, { ...envelope, action: "cleanup" },
+    { ...envelope, diagnostic: { ...envelope.diagnostic, stage: "PRIVATE-STAGE" } },
+    { ...envelope, diagnostic: { ...envelope.diagnostic, category: "PRIVATE-ERROR" } },
+    { ...envelope, diagnostic: { ...envelope.diagnostic, profileCleanupConfirmed: "true" } }]) {
+    await assert.rejects(invoke(value), error => error.diagnostic.stage === "ssh-receipt" && error.diagnostic.category === "invalid-receipt");
+  }
+  assert.deepEqual(nativeFailureReceipt(Object.assign(Error("PRIVATE"), { diagnostic: { stage: "PRIVATE", category: "PRIVATE" }, cause: Error("PRIVATE") })).diagnostic, { stage: "unknown", category: "failed" });
+});
+
+test("worker fixed phases distinguish identity denial, rate limit, first result and resume failures", async t => {
+  const directory = await temp(t), request = { action: "run", runId: id, accessToken: "fixture-access", expiresAt: Date.now() + 3600000 };
+  for (const status of [401, 429]) {
+    await assert.rejects(runNativeProbe(request, { ...workerFixture(), rootBase: directory, fetchImpl: async () => new Response("PRIVATE-PROVIDER-BODY", { status }) }), error => {
+      assert.equal(error.diagnostic.stage, "identity-before"); assert.equal(error.diagnostic.category, status === 401 ? "identity-auth-rejected" : "identity-rate-limited");
+      assert.equal(error.diagnostic.profileCleanupConfirmed, true); assert.doesNotMatch(JSON.stringify(nativeFailureReceipt(error)), /PRIVATE/); return true;
+    });
+  }
+  for (const failedTurn of [1, 2]) {
+    const f = workerFixture(); let turn = 0;
+    await assert.rejects(runNativeProbe(request, { ...f, rootBase: directory, run: async (command, args, opts) => {
+      if (args.includes("--print") && ++turn === failedTurn) return "PRIVATE-INVALID-JSON";
+      return f.run(command, args, opts);
+    } }), error => {
+      assert.equal(error.diagnostic.stage, failedTurn === 1 ? "first-result" : "resume-result"); assert.equal(error.diagnostic.category, "invalid-json");
+      assert.equal(error.diagnostic.profileCleanupConfirmed, true); assert.doesNotMatch(JSON.stringify(nativeFailureReceipt(error)), /PRIVATE/); return true;
+    });
+  }
+});
+
+test("worker preserves primary identity failure when exact profile cleanup is refused", async t => {
+  const directory = await temp(t), request = { action: "run", runId: id, accessToken: "fixture-access", expiresAt: Date.now() + 3600000 };
+  await assert.rejects(runNativeProbe(request, { ...workerFixture(), rootBase: directory, fetchImpl: async () => {
+    await writeFile(path.join(directory, "native-acceptance-" + id, "owner.json"), JSON.stringify({ runId: "different", pid: process.pid }));
+    return new Response("PRIVATE-BODY", { status: 401 });
+  } }), error => {
+    assert.equal(error.diagnostic.category, "identity-auth-rejected"); assert.equal(error.diagnostic.stage, "identity-before");
+    assert.equal(error.diagnostic.profileCleanupAttempted, true); assert.equal(error.diagnostic.profileCleanupConfirmed, false); return true;
+  });
+});
+
+test("operator preserves primary failure and reports independent cleanup/source flags", async t => {
+  const directory = await temp(t), key = path.join(directory, "key"); await writeFile(key, "fixture", { mode: 0o600 });
+  const primary = new NativeAcceptanceError("first-turn", "command-failed");
+  const deps = { run: async (cmd, args) => cmd === "aws" && args[0] === "--version" ? "aws-cli/2.35.20 fixture" : "ssh-ed25519 AAAAFixturePublic",
+    guard: async () => ({ publicKey: "ssh-ed25519 AAAAFixturePublic", host: "10.84.2.12" }), plugin: async () => ({}),
+    tunnel: async () => ({ close: async () => { throw Error("PRIVATE-SESSION"); } }),
+    readAccess: async () => ({ accessToken: "PRIVATE-ACCESS", expiresAt: 1, assertUnchanged: async () => { throw Error("PRIVATE-SOURCE"); } }),
+    probe: async ({ request }) => { if (request.action === "preflight") return { schema: 1, runId: id, preflight: true, credentialFree: true }; if (request.action === "run") throw primary; throw Error("PRIVATE-CLEANUP"); } };
+  await assert.rejects(smokeEc2Native({ ...options, sshKey: key }, deps), error => {
+    assert.deepEqual(error.diagnostic, { stage: "first-turn", category: "command-failed", profileCleanupAttempted: true, profileCleanupConfirmed: false,
+      sourceCheckAttempted: true, sourceUnchanged: false, sessionCloseAttempted: true, sessionClosed: false, localCleanupAttempted: true, localCleanupConfirmed: true });
+    assert.doesNotMatch(JSON.stringify(nativeFailureReceipt(error)), /PRIVATE/); return true;
+  });
+  await assert.rejects(smokeEc2Native(options, { run: async () => { throw Error("PRIVATE-AWS-OUTPUT"); } }), error => error.diagnostic.stage === "aws-cli");
+});
+
+test("standalone worker delivers a fixed failure envelope without running external commands", async () => {
+  const source = await readFile(new URL("../scripts/fixtures/ec2-native-worker.mjs", import.meta.url), "utf8");
+  const output = await runPrivate(process.execPath, ["--input-type=module", "-e", source, "--", "--relay-native-probe"], { input: JSON.stringify({ runId: id, action: "PRIVATE-INVALID-ACTION", token: "PRIVATE-TOKEN" }) });
+  const envelope = JSON.parse(output);
+  assert.equal(envelope.failed, true); assert.equal(envelope.schema, 1); assert.equal(envelope.runId, id); assert.equal(envelope.action, null);
+  assert.deepEqual(envelope.diagnostic, { stage: "worker-request", category: "invalid-request" }); assert.doesNotMatch(output, /PRIVATE/);
+});
+
+test("tunnel startup failure retains safe primary stage and unconfirmed session cleanup", async t => {
+  const directory = await temp(t), child = new EventEmitter();
+  Object.assign(child, { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: new EventEmitter() });
+  await assert.rejects(openNativeTunnel({ host: "10.84.2.12" }, directory, { binary: "/private/fixture" }, {
+    reserve: async () => 12345, spawnImpl: () => child, sleep: async () => child.emit("close", 1),
+    kill: () => { throw Error("PRIVATE-KILL"); }, run: async () => { throw Error("PRIVATE-CLEANUP"); },
+  }), error => {
+    assert.deepEqual(error.diagnostic, { stage: "ssm-tunnel", category: "failed", sessionCloseAttempted: true, sessionClosed: false });
+    assert.doesNotMatch(JSON.stringify(nativeFailureReceipt(error)), /PRIVATE/); return true;
+  });
 });
