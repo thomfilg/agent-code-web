@@ -132,6 +132,72 @@ class ImageAuditTest(unittest.TestCase):
         self.assertLess(finalizer.index('snap remove --purge'), finalizer.index('touch /opt/agent-web/IMAGE_FINALIZED'))
         self.assertNotIn('autoremove', finalizer)
 
+    def test_finalizer_removes_known_nontransport_keys_and_checks_the_only_retained_key(self):
+        finalizer = script_at('/usr/local/sbin/agent-web-finalize-image')
+        block = finalizer.split('# Remove nontransport SSH state,', 1)[1].split('# Remove builder host identity', 1)[0]
+        block = '# Remove nontransport SSH state,' + block
+        self.assertLess(finalizer.index('# Remove nontransport SSH state,'), finalizer.index('touch /opt/agent-web/IMAGE_FINALIZED'))
+        public = b'ssh-ed25519 AAAAFixturePublicOnly\n'
+        cases = ('clean', 'builder-keys', 'removal-failed', 'residual-directory', 'other-user-key', 'alternate-key', 'changed-transport-key', 'wrong-file-owner', 'wrong-directory-owner', 'loose-file', 'loose-directory', 'key-symlink', 'directory-symlink')
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix='relay-finalizer-keys-') as directory:
+                scope = pathlib.Path(directory)
+                for relative in ('root', 'home/agent', 'home/ubuntu/.ssh', 'opt/agent-web'):
+                    (scope / relative).mkdir(parents=True, exist_ok=True)
+                ssh = scope / 'home/ubuntu/.ssh'
+                ssh.chmod(0o700)
+                key = ssh / 'authorized_keys'
+                key.write_bytes(public)
+                key.chmod(0o600)
+                # Files/modes/find/removal are real; only ownership names are
+                # supplied because fixtures must never chown to system users.
+                prefix = 'CASE=' + case + '''\nset -eu
+stat() {
+  if [ "$2" = '%U:%G' ]; then
+    case "$CASE:$3" in
+      wrong-file-owner:*/authorized_keys|wrong-directory-owner:*/.ssh) printf root:root ;;
+      *) printf ubuntu:ubuntu ;;
+    esac
+  else command stat "$@"; fi
+}
+'''
+                if case in ('builder-keys', 'removal-failed', 'residual-directory'):
+                    for relative in ('root/.ssh', 'home/agent/.ssh'):
+                        (scope / relative).mkdir()
+                        (scope / relative / 'authorized_keys').write_text('PRIVATE-UNEXPECTED-KEY')
+                        (scope / relative / 'id_ed25519').write_text('PRIVATE-UNEXPECTED-KEY')
+                if case == 'removal-failed': prefix += 'rm() { return 1; }\n'
+                if case == 'residual-directory': prefix += 'rm() { return 0; }\n'
+                if case == 'other-user-key':
+                    extra = scope / 'home/other/.ssh'; extra.mkdir(parents=True)
+                    (extra / 'authorized_keys').write_text('PRIVATE-UNEXPECTED-KEY')
+                if case == 'alternate-key': (ssh / 'authorized_keys2').write_text('PRIVATE-UNEXPECTED-KEY')
+                if case == 'changed-transport-key': key.write_text('PRIVATE-UNEXPECTED-KEY')
+                if case == 'loose-file': key.chmod(0o644)
+                if case == 'loose-directory': ssh.chmod(0o755)
+                if case == 'key-symlink':
+                    target = scope / 'public-fixture'; target.write_bytes(public); target.chmod(0o600)
+                    key.unlink(); key.symlink_to(target)
+                if case == 'directory-symlink':
+                    target = scope / 'public-directory'; ssh.rename(target); ssh.symlink_to(target, target_is_directory=True)
+                safe_block = block.replace('/root', str(scope / 'root')).replace('/home', str(scope / 'home')).replace('/opt/agent-web', str(scope / 'opt/agent-web')).replace('__RELAY_WORKER_PUBLIC_KEY_BASE64__', base64.b64encode(public).decode())
+                result = subprocess.run(['/bin/sh'], input=prefix + safe_block + '\nprintf FINALIZER_CONTINUED\n', text=True, capture_output=True)
+                successful = case in ('clean', 'builder-keys')
+                self.assertEqual(result.returncode == 0, successful, result.stderr)
+                self.assertEqual('FINALIZER_CONTINUED' in result.stdout, successful)
+                self.assertNotIn('PRIVATE', result.stdout + result.stderr)
+                if successful:
+                    self.assertEqual(key.read_bytes(), public)
+                    self.assertFalse((scope / 'root/.ssh').exists())
+                    self.assertFalse((scope / 'home/agent/.ssh').exists())
+
+    def test_audit_still_rejects_each_nontransport_authorized_key(self):
+        for unexpected in ('/root/.ssh/authorized_keys', '/home/agent/.ssh/authorized_keys'):
+            with self.subTest(path=unexpected), patch.object(namespace['os'], 'walk', return_value=[]), patch.object(pathlib.Path, 'is_file', lambda p: str(p) == unexpected), patch.object(pathlib.Path, 'is_dir', return_value=False), patch.object(pathlib.Path, 'glob', return_value=iter([])), patch.object(namespace['os'].path, 'lexists', return_value=False):
+                counts = namespace['credential_failures']()
+                self.assertEqual(counts['unexpectedAuthorizedKeys'], 1)
+                self.assertEqual(sum(counts.values()), 1)
+
     def test_removal_failure_or_residual_package_prevents_finalizer_continuation(self):
         finalizer = script_at('/usr/local/sbin/agent-web-finalize-image')
         block = finalizer.split('# Builder-only package removal.', 1)[1].split('cloud-init clean', 1)[0]
