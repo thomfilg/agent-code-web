@@ -115,3 +115,40 @@ If Docker creates a stopped container but its creation response is lost before
 the ID is captured, the launcher fails without guessing an ID. Recover only the
 exact unique name after checking its acceptance label, run UUID and pinned image;
 do not infer that a failed launcher means no container exists.
+
+## Actual isolated controller-role receipt — 2026-09-18
+
+The independently reviewed helper (`8c25fa9`) and pinned launcher (`12c3b3c`)
+ran once on the exact controller through SSM command
+`5af3fbe1-d454-4fca-875d-1bd83c7a3481`, run UUID
+`bc990864-a254-4628-9568-043c512a434f`. The application image was the immutable
+`9dbb6306863a60de96cf91118165b6164d053de72dbe04777fc5dfd296db6d9a` digest above.
+It completed `Success` / response code0 before12:47UTC.
+
+Observed receipt:
+
+- Exact controller instance-role identity verified before creation and during
+  reconciliation; image/isolation limits verified before starting the container.
+- One successful CreateDistributionWithTags, one disabling UpdateDistribution,
+  and one DeleteDistribution. The temporary distribution was
+  `E14TAC9WOH9EWH`, hostname `dngyzzb0q1auc.cloudfront.net`, record
+  `pp_3b4fa96c-90a6-4f24-9fb1-48cbc95b9676`.
+- Ready configuration and tags verified. A newly constructed provider in the
+  same isolated operator process initially denied lookup, then revalidated the
+  same saved distribution/hostname without another creation. This is provider
+  cache/reinitialization evidence, not an EC2 or controller-process reboot.
+- Lookup invalidated synchronously on revoke; disabled configuration reached
+  Deployed, deletion was submitted and complete inventory confirmed exact absence.
+  An independent operator `GetDistribution` at12:46:48UTC returned the exact
+  `NoSuchDistribution` category, without exposing raw AWS diagnostics.
+- Operator container was observed stopped, removed, and absent from Docker's
+  exact-ID inventory. Its journal lock closed and the host rollout lock released.
+  The nonsecret private audit journal/helper remain under
+  `/srv/relay-preview-acceptance/bc990864-a254-4628-9568-043c512a434f`.
+
+No product user, Google consent, application credential, model prompt, product
+data mount or listener was used. The optional public hostname-denial probe was
+skipped because teardown had already started; do not infer CloudFront Host
+forwarding or app HTTP/SSE/WebSocket acceptance from this run. This closes the
+real provider/IAM create/revalidate/revoke/delete primitive gate only. Deployed
+authenticated product-flow and cold-worker acceptance remain separate gates.
