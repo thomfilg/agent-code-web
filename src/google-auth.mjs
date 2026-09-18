@@ -129,7 +129,9 @@ export class GoogleAuth {
   async revoke(user) {
     this.revoked.set(user.sessionId, user.expiresAt);
     for (const [id, expiry] of this.revoked) if (expiry <= this.now()) this.revoked.delete(id);
-    await this.records.delete("relay-session", user.sessionId); await this.onSignOut(user);
+    // In-memory browser/preview capabilities must end before potentially slow
+    // database persistence. Await both operations without an unhandled rejection.
+    await Promise.all([Promise.resolve(this.onSignOut(user)), this.records.delete("relay-session", user.sessionId)]);
   }
   public(user) { return publicUser(user); }
   require(user) { if (!user) throw fail("Sign in with Google first", 401); return user; }

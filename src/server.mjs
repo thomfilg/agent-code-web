@@ -39,6 +39,7 @@ import { BrowserConnections } from "./browser-connections.mjs";
 import { zipSync } from "fflate";
 import { readinessProbe } from "./readiness.mjs";
 import { closeIncompleteRequestAfterResponse } from "./http-request-lifecycle.mjs";
+import { AppPreviews } from "./app-previews.mjs";
 
 const MIME = {
   ".css": "text/css; charset=utf-8",
@@ -144,10 +145,12 @@ export async function createAgentWebServer(options = {}) {
     ...(options.githubWorkerFetch ? { fetchImpl: options.githubWorkerFetch } : {}) });
   await environments.initialize();
   let manager = null;
+  let previews = null, previewHosts = null;
   const browserSockets = new WebSocketServer({ noServer: true, maxPayload: 100000, perMessageDeflate: false });
   const personalSockets = new WebSocketServer({ noServer: true, maxPayload: 48 * 1024 * 1024, perMessageDeflate: false });
   const releaseIdentity = async user => {
     if (!user) return;
+    previews?.revokeOwner(user.id);
     await manager?.browsers.personal?.revokeOwner(user.id);
     for (const client of sseClients) if (client.ownerId === user.id) client.close();
     for (const socket of browserSockets.clients) if (socket.ownerId === user.id) socket.close(1000, "Signed out");
@@ -160,10 +163,24 @@ export async function createAgentWebServer(options = {}) {
   const server = http.createServer(async (request, response) => {
     closeIncompleteRequestAfterResponse(request, response);
     if (stopping) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
-    securityHeaders(response);
     let url;
     try { url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`); }
     catch { return json(response, 400, { error: "Invalid request URL" }); }
+    if (config.preview?.enabled) {
+      if (!request.url.startsWith("/") || request.url.startsWith("//") || request.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === "host").length !== 1) return json(response, 400, { error: "Invalid request target" });
+      if (previewHosts?.lookup(request.headers.host)) {
+        if (!previews || draining) return json(response, 503, { error: "App previews are restarting" });
+        try { await previews.handleHttp(request, response, url); }
+        catch { if (!response.headersSent) json(response, 403, { error: "App access unavailable" }); else response.end(); }
+        return;
+      }
+      const relayHost = new URL(googleAuth.config.origin).host;
+      const internalHost = new URL(config.ec2.gatewayOrigin).host;
+      const localHost = ["127.0.0.1", "localhost", "[::1]"].some(host => request.headers.host === `${host}:${server.address()?.port}`);
+      const internalPath = url.pathname === "/readyz" || url.pathname.startsWith("/gateway/") || url.pathname.startsWith("/internal/deploy/");
+      if (request.headers.host !== relayHost && !((request.headers.host === internalHost || localHost) && internalPath)) return json(response, 421, { error: "Unknown Relay host" });
+    }
+    securityHeaders(response);
     let mutationPending = false;
     try {
       if (url.pathname.startsWith("/internal/deploy/")) {
@@ -179,7 +196,7 @@ export async function createAgentWebServer(options = {}) {
         if (url.pathname !== "/internal/deploy/drain") return json(response, 404, { error: "Not found" });
         const providerLogin = resources.all().some(service => service.github.pending?.size ||
           [...service.mcps.oauth.flows.values()].some(flow => flow.expiresAt > Date.now()));
-        const busy = activeMutations || githubWorkers.active || browserAttachments || agentAccounts.flows.size || providerLogin || store.list().some(chat =>
+        const busy = activeMutations || githubWorkers.active || previews?.active || browserAttachments || agentAccounts.flows.size || providerLogin || store.list().some(chat =>
           manager?.isBusy(chat.id) || manager?.sideChats.busy(chat.id) || ["starting", "stopping", "running", "waiting"].includes(chat.status));
         if (busy) return json(response, 409, { ok: false, error: "Wait for active work and sign-in attempts to finish" });
         draining = true;
@@ -188,6 +205,7 @@ export async function createAgentWebServer(options = {}) {
         return json(response, 200, { ok: true });
       }
       if (draining) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
+      if (previews && ["/app-preview/open", "/api/app-preview/bootstrap"].includes(url.pathname) && await previews.handleRelay(request, response, url)) return;
       if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method) ||
           ["/api/auth/callback/google", "/oauth/mcp/callback"].includes(url.pathname)) {
         activeMutations++;
@@ -464,6 +482,32 @@ export async function createAgentWebServer(options = {}) {
         const { chatId, tail } = routed;
         request.guardChat = () => { if (!browserUsers.canRead(store.get(chatId), user)) throw Object.assign(new Error("Chat not found"), { statusCode: 404 }); };
         request.guardChat();
+        if (["app-preview", "app-preview/open"].includes(tail)) {
+          if (!previews) {
+            const selectedPort = request.method === "GET" ? Number(url.searchParams.get("port")) : (await bodyJson(request, 10000)).port;
+            if (!Number.isSafeInteger(selectedPort) || selectedPort < 1024 || selectedPort > 65535) return json(response, 400, { error: "Select an app port between 1024 and 65535" });
+            return json(response, 200, { preview: { status: "unavailable", port: selectedPort, hostname: null, message: "Remote app previews are not configured on this Relay.", retryable: false, canRevoke: false } });
+          }
+          const check = async () => {
+            request.guardChat();
+            const current = await googleAuth.session(request);
+            if (!current || current.id !== user?.id || current.sessionId !== user?.sessionId) throw Object.assign(new Error("The Relay account changed. Reopen the app preview."), { statusCode: 401 });
+          };
+          await check();
+          let result, status = 200;
+          if (tail === "app-preview" && request.method === "GET") {
+            const selected = url.searchParams.get("port");
+            if (url.searchParams.size !== 1 || !/^\d{4,5}$/.test(selected || "")) throw Object.assign(new Error("Select an app port"), { statusCode: 400 });
+            result = await previews.status(user, chatId, Number(selected));
+          } else if (["POST", "DELETE"].includes(request.method)) {
+            const input = await bodyJson(request, 10000); await check();
+            if (tail === "app-preview/open" && request.method === "POST") result = await previews.open(user, chatId, input.port, input.path);
+            else if (tail === "app-preview" && request.method === "POST") { result = await previews.ensure(user, chatId, input.port); status = result.preview.status === "ready" ? 200 : 202; }
+            else if (tail === "app-preview" && request.method === "DELETE") result = await previews.remove(user, chatId, input.port);
+            else return json(response, 405, { error: "Unsupported app preview action" });
+          } else return json(response, 405, { error: "Unsupported app preview action" });
+          await check(); return json(response, status, result);
+        }
         if (tail === "presence" && request.method === "POST") return json(response, 200, await manager.setPresence(chatId, await bodyJson(request, 1000)));
         if (tail === "browser/access" && request.method === "GET") return json(response, 200, manager.browsers.personal.info(chatId, user));
         if (tail === "browser/access" && request.method === "PATCH") {
@@ -721,6 +765,10 @@ export async function createAgentWebServer(options = {}) {
   server.on("upgrade", async (request, socket, head) => {
     const reject = code => { socket.end(`HTTP/1.1 ${code}\r\nConnection: close\r\n\r\n`); };
     if (stopping || draining) { reject("503 Service Unavailable"); return; }
+    if (config.preview?.enabled && request.headers.host !== new URL(googleAuth.config.origin).host) {
+      if (!previews || !previewHosts?.lookup(request.headers.host)) { reject("421 Misdirected Request"); return; }
+      await previews.handleUpgrade(request, socket, head); return;
+    }
     let url, origin;
     try { url = new URL(request.url, `http://${request.headers.host}`); origin = new URL(request.headers.origin); }
     catch { reject("403 Forbidden"); return; }
@@ -798,6 +846,17 @@ export async function createAgentWebServer(options = {}) {
       manager.browsers.touch(chatId);
       for (const socket of manager.browsers.entries.get(chatId)?.viewers || []) socket.close(4001, "Browser access changed");
     });
+    if (config.preview?.enabled) {
+      try {
+        const { PreviewHosts } = options.previewHosts ? {} : await import("./preview-hosts.mjs");
+        const { PreviewBootstrap } = options.previewBootstrapFactory ? {} : await import("./preview-bootstrap.mjs");
+        previewHosts = options.previewHosts || new PreviewHosts({ records, config: config.preview, onChange: () => { previews?.grants.prune(); sidebarChanged(); } });
+        await previewHosts.initialize();
+        previews = new AppPreviews({ hosts: previewHosts, identity: googleAuth, store, manager, relayOrigin: googleAuth.config.origin,
+          bootstrapFactory: options.previewBootstrapFactory || (options => new PreviewBootstrap(options)), ...(options.appPreviewOptions || {}) });
+        previews.start();
+      } catch (error) { await manager.shutdown(); await new Promise(resolve => server.close(resolve)); throw error; }
+    }
     manager.on("event", event => { if (["chat_updated", "message", "chat_deleted"].includes(event.type)) sidebarChanged(); });
     manager.pullRequests.start();
     return { host: config.host, port, url: `http://${config.host.includes(":") ? `[${config.host}]` : config.host}:${port}` };
@@ -811,6 +870,7 @@ export async function createAgentWebServer(options = {}) {
     // Stop accepting connections before closing SSE. Otherwise a browser may
     // reconnect while workers shut down and keep server.close() waiting forever.
     const closed = new Promise(resolve => server.close(resolve));
+    await previews?.close();
     if (manager) await manager.shutdown();
     await agentAccounts.close();
     await Promise.all(resources.all().map(entry => entry.github.close?.()));
@@ -826,7 +886,7 @@ export async function createAgentWebServer(options = {}) {
     if (!options.records) await records.close();
   }
 
-  return { server, store, records, organization, broker, config, browserUsers, googleAuth, resources, agentAccounts, start, stop, get manager() { return manager; } };
+  return { server, store, records, organization, broker, config, browserUsers, googleAuth, resources, agentAccounts, start, stop, get manager() { return manager; }, get previews() { return previews; } };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
