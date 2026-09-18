@@ -50,6 +50,7 @@ test("guest control rejects further commands after malformed/oversized output or
     if (failure === "oversized") child.stdout.write("x".repeat(262145) + "\n");
     if (failure === "closed") child.emit("close");
     await assert.rejects(pending, /disconnected/); await assert.rejects(control.command("stop"), /disconnected/);
+    assert.equal(child.stdout.isPaused(), true, "failed protocol stops consuming unbounded output");
     for (const stream of [child.stdin, child.stdout, child.stderr]) stream.destroy();
   }
 });
@@ -57,9 +58,11 @@ test("guest HTTP fixture is loopback-only, bounded and removes only its own priv
   const base = await temp(t), fixture = await startGuestSite(id, { rootBase: base, sandbox: async () => ({ processes: 0, scanComplete: true }) });
   assert.match(fixture.url, /^http:\/\/127\.0\.0\.1:/); assert.equal((await lstat(fixture.root)).mode & 0o777, 0o700);
   assert.match(await (await fetch(fixture.url)).text(), /devicePixelRatio/);
-  const metric = { documentId: id, width: 640, height: 960, dpr: 2, clicks: 1, text: "fixture", live: "Waiting", ignored: "not exposed" };
+  const metric = { documentId: id, sequence: 2, width: 640, height: 960, dpr: 2, clicks: 1, text: "fixture", live: "Waiting", ignored: "not exposed" };
   assert.equal((await fetch(fixture.url + "observed", { method: "POST", body: JSON.stringify(metric) })).status, 200);
   assert.equal((await fixture.command("status")).ignored, undefined);
+  await fetch(fixture.url + "observed", { method: "POST", body: JSON.stringify({ ...metric, sequence: 1, text: "old" }) });
+  assert.equal((await fixture.command("status")).text, "fixture", "out-of-order HTTP delivery must not overwrite the latest observation");
   assert.equal((await fetch(fixture.url + "observed", { method: "POST", body: "x".repeat(5000) })).status, 400);
   assert.equal((await fetch(fixture.url + "private-file")).status, 404);
   await fixture.close(); await fixture.close(); await assert.rejects(lstat(fixture.root), { code: "ENOENT" });
@@ -78,10 +81,10 @@ test("guest cleanup refuses an incomplete zero-process inventory", async t => {
 });
 test("sandbox audit requires non-root renderer seccomp/namespaces and catches orphan Chrome", async t => {
   const proc = await temp(t), root = "/opt/agent-web/guest-acceptance-fixture";
-  async function processFixture(pid, ppid, args, { namespace = "host", seccomp = 2 } = {}) {
+  async function processFixture(pid, ppid, args, { namespace = "host", seccomp = 2, uid = process.getuid() } = {}) {
     const directory = path.join(proc, String(pid)); await mkdir(path.join(directory, "ns"), { recursive: true });
     await writeFile(path.join(directory, "comm"), "chrome\n");
-    await writeFile(path.join(directory, "cmdline"), args.join("\0") + "\0"); await writeFile(path.join(directory, "status"), `Uid:\t${process.getuid()}\t${process.getuid()}\t${process.getuid()}\t${process.getuid()}\nPPid:\t${ppid}\nSeccomp:\t${seccomp}\nNSpid:\t${pid}${namespace === "renderer" ? " 5" : ""}\n`);
+    await writeFile(path.join(directory, "cmdline"), args.join("\0") + "\0"); await writeFile(path.join(directory, "status"), `Uid:\t${uid}\t${uid}\t${uid}\t${uid}\nPPid:\t${ppid}\nSeccomp:\t${seccomp}\nNSpid:\t${pid}${namespace === "renderer" ? " 5" : ""}\n`);
     await symlink(root + "/workspace", path.join(directory, "cwd"));
     for (const kind of ["pid", "user"]) await symlink(`${kind}:[${namespace}]`, path.join(directory, "ns", kind));
   }
@@ -90,6 +93,11 @@ test("sandbox audit requires non-root renderer seccomp/namespaces and catches or
   await writeFile(path.join(proc, "101/comm"), "Chrome_ChildIOT\n");
   await writeFile(path.join(proc, "101/cmdline"), "/opt/google/chrome/chrome --type=renderer --lang=en-US\0");
   requireSandbox(await chromeSandboxReceipt(root, { proc }));
+  await processFixture(102, 100, ["/opt/google/chrome/chrome", "--type=renderer"], { namespace: "renderer", uid: 0 });
+  const rootChild = await chromeSandboxReceipt(root, { proc });
+  assert.equal(rootChild.processes, 3); assert.equal(rootChild.renderers, 2); assert.equal(rootChild.nonRoot, false);
+  assert.throws(() => requireSandbox(rootChild), "a changed-UID child cannot hide behind healthy renderers");
+  await rm(path.join(proc, "102"), { recursive: true });
   await chmod(path.join(proc, "101/ns"), 0);
   requireSandbox(await chromeSandboxReceipt(root, { proc })); // namespace symlinks can be inaccessible on actual Chrome.
   await chmod(path.join(proc, "101/ns"), 0o700);

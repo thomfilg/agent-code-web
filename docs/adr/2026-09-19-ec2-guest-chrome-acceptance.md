@@ -43,7 +43,9 @@ after success or failure; it never creates, stops or terminates EC2 instances.
   no sandbox-bypass flag, and have renderer Seccomp mode 2 plus deeper NSpid
   nesting than the browser root. This is kernel process evidence, not only a
   browser self-report. Nondumpable processes may have root-owned proc entries:
-  effective UID comes from `/proc/PID/status`, never directory ownership.
+  effective UID comes from `/proc/PID/status`, never directory ownership. Every
+  run-owned process must have the fixture's intended non-root effective UID;
+  changed-UID descendants are retained and fail the check, not filtered out.
 - Stop Chrome left a complete process inventory with zero run-owned processes.
   The private fixture directory was removed only after checking its exact path,
   owner, permissions, marker UUID/PID and complete zero-process inventory.
@@ -109,7 +111,7 @@ and exact VM retirement have both been observed.
 Implementation evidence: 9/9 dedicated tests passed with the real local MCP UI
 test enabled. The focused guest/native/SSH/resize run passed 33 tests, with its
 one opt-in UI test skipped because the real browser run had already completed.
-The zero-call plan also ran successfully. Review found two initial proof gaps
-(incomplete process inventory and checking only guest state for live updates);
-both were corrected before the successful real UI run. No AWS or model calls
+The zero-call plan also ran successfully. Review found proof gaps in incomplete
+process inventories, changed-UID descendants, and checking only guest state for
+live updates; all were corrected with regressions. No AWS or model calls
 were made for this implementation evidence.
