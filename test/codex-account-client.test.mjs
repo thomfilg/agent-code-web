@@ -125,14 +125,17 @@ test("account readiness has a total deadline and never accepts a different auth 
   const flow = await client.login();
   rpc.emit("notification", { method: "account/login/completed", params: { loginId: "login-fixture", success: true } });
   await flow.completed;
+  // Advance the deadline clock deliberately. Host wall-clock adjustments must
+  // not make this protocol-budget assertion flaky on a loaded test machine.
+  let accountClock = 1000;
+  t.mock.method(Date, "now", () => accountClock);
   const reads = [];
   rpc.request = async (method, params, timeoutMs) => {
-    if (method === "account/read") { reads.push({ params, timeoutMs }); return { account: null }; }
+    if (method === "account/read") { reads.push({ params, timeoutMs }); accountClock += 20; return { account: null }; }
     return request(method, params, timeoutMs);
   };
   await assert.rejects(() => client.snapshot({ refresh: true }), { code: "verification_timeout" });
-  assert.ok(reads.length > 0);
-  assert.ok(reads.every(read => read.timeoutMs > 0 && read.timeoutMs <= 40));
+  assert.deepEqual(reads.map(read => read.timeoutMs), [40, 20]);
   assert.equal(reads[0].params.refreshToken, true);
   assert.ok(reads.slice(1).every(read => read.params.refreshToken === false));
   let otherReads = 0;
