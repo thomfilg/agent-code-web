@@ -20,7 +20,10 @@ function safeProbeFailure(output) {
     if (diagnostic?.stage !== "worker-probe" || !probeFailureCategories.has(diagnostic.category)) return "";
     const checks = ["finalized", "cloudInitDisabled", "ssmDisabled", "credentialsAbsent", "transportKeyMatches", "metadataReachable", "freshIdentity", "heartbeatEnabled", "watchdogActive"];
     const audit = diagnostic.category === "image-audit" ? checks.filter(key => typeof diagnostic.auditChecks?.[key] === "boolean").map(key => `${key}=${diagnostic.auditChecks[key]}`) : [];
-    return `; ${diagnostic.category}${Number.isInteger(diagnostic.exitCode) && diagnostic.exitCode >= -255 && diagnostic.exitCode <= 255 ? ` (exit ${diagnostic.exitCode})` : ""}${audit.length ? `; audit checks: ${audit.join(", ")}` : ""}`;
+    const categories = ["providerAuthFiles", "sshPrivateKeyFiles", "pemFiles", "ssmLibraryFiles", "ssmSnapFiles", "ssmSnapshotFiles", "ssmPackageFiles", "unexpectedAuthorizedKeys", "scanErrors"];
+    const counts = diagnostic.category === "image-audit" ? categories.filter(key => Number.isInteger(diagnostic.credentialFailureCounts?.[key]) && diagnostic.credentialFailureCounts[key] >= 0 && diagnostic.credentialFailureCounts[key] <= 1000000).map(key => `${key}=${diagnostic.credentialFailureCounts[key]}`) : [];
+    const metadata = diagnostic.category === "image-audit" && ["token-endpoint-accessible", "http-403-denied", "http-401-unauthorized", "unexpected-http-response", "network-unavailable", "unexpected-network-error"].includes(diagnostic.metadataProbe) ? diagnostic.metadataProbe : "";
+    return `; ${diagnostic.category}${Number.isInteger(diagnostic.exitCode) && diagnostic.exitCode >= -255 && diagnostic.exitCode <= 255 ? ` (exit ${diagnostic.exitCode})` : ""}${audit.length ? `; audit checks: ${audit.join(", ")}` : ""}${counts.length ? `; credential counts: ${counts.join(", ")}` : ""}${metadata ? `; metadata probe: ${metadata}` : ""}`;
   } catch { return ""; }
 }
 

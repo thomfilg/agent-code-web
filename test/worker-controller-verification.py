@@ -131,10 +131,21 @@ class ControllerProbeTest(unittest.TestCase):
         self.assertEqual(calls, 3)
         self.assertEqual(sleeps, [2, 2])
 
+    def test_credential_counts_and_metadata_diagnostics_are_bounded_allowlists(self):
+        for metadata in ('http-403-denied', 'PRIVATE-SECRET'):
+            worker = {'reason': 'image scrub audit failed', 'credentialFailureCounts': {
+                'providerAuthFiles': 0, 'ssmSnapFiles': 2, 'pemFiles': True, 'scanErrors': -1,
+                'ssmLibraryFiles': 1000001, 'ssmPackageFiles': 'PRIVATE-SECRET', 'private': 'PRIVATE-SECRET'}, 'metadataProbe': metadata}
+            safe = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(worker), stderr='')))
+            self.assertEqual(safe['diagnostic']['credentialFailureCounts'], {'providerAuthFiles': 0, 'ssmSnapFiles': 2})
+            self.assertEqual(safe['diagnostic'].get('metadataProbe'), 'http-403-denied' if metadata == 'http-403-denied' else None)
+            self.assertNotIn('PRIVATE-', json.dumps(safe))
+
     def test_embedded_worker_failure_filters_audit_output_before_ssh(self):
         audit = {'valid': False, 'finalized': True, 'ssmDisabled': False,
                  'metadataReachable': False, 'freshIdentity': 'PRIVATE-SECRET',
-                 'watchdogActive': 1, 'secret': 'PRIVATE-SECRET', 'machine': 'PRIVATE-SECRET'}
+                 'watchdogActive': 1, 'secret': 'PRIVATE-SECRET', 'machine': 'PRIVATE-SECRET',
+                 'credentialFailureCounts': {'ssmSnapFiles': 2, 'pemFiles': True, 'scanErrors': -1, 'private': 'PRIVATE-SECRET'}, 'metadataProbe': 'http-403-denied'}
         def run(args, **kwargs):
             if args[0] == 'codex':
                 return types.SimpleNamespace(returncode=0, stdout='codex-cli 0.154.0')
@@ -147,6 +158,8 @@ class ControllerProbeTest(unittest.TestCase):
                 exec(probe.WORKER_PROBE, {})
         self.assertEqual(raised.exception.code, 1)
         self.assertEqual(json.loads(output.getvalue())['auditChecks'], {'finalized': True, 'ssmDisabled': False, 'metadataReachable': False})
+        self.assertEqual(json.loads(output.getvalue())['credentialFailureCounts'], {'ssmSnapFiles': 2})
+        self.assertEqual(json.loads(output.getvalue())['metadataProbe'], 'http-403-denied')
         self.assertNotIn('PRIVATE-', output.getvalue())
 
 

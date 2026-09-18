@@ -83,13 +83,35 @@ write_files:
           exit 1
         fi
       done
+      # Builder-only package removal. --purge is essential: ordinary snap
+      # removal creates an automatic snapshot containing the registration.
+      if command -v snap >/dev/null 2>&1; then
+        snap_inventory=$(timeout 30 snap list 2>/dev/null) || { echo 'Builder snap inventory failed.' >&2; exit 1; }
+        if printf '%s\n' "$snap_inventory" | grep -q '^amazon-ssm-agent[[:space:]]'; then
+          timeout 180 snap remove --purge amazon-ssm-agent >/dev/null 2>&1 || { echo 'Builder SSM snap removal failed.' >&2; exit 1; }
+        fi
+      fi
+      ssm_package_status=$(dpkg-query -W -f='${Status}' amazon-ssm-agent 2>/dev/null || true)
+      if [ -n "$ssm_package_status" ] && [ "$ssm_package_status" != 'unknown ok not-installed' ]; then
+        timeout 180 dpkg --purge amazon-ssm-agent >/dev/null 2>&1 || { echo 'Builder SSM package removal failed.' >&2; exit 1; }
+      fi
+      # No deletion of unrelated snaps, packages or snapshots. Unexpected
+      # old SSM snapshots fail closed, even though this purge creates none.
+      for archive in /var/lib/snapd/snapshots/*_amazon-ssm-agent_*.zip; do
+        [ ! -e "$archive" ] || { echo 'Builder SSM snapshot remains.' >&2; exit 1; }
+      done
+      for binary in /snap/amazon-ssm-agent/current /usr/bin/amazon-ssm-agent /usr/local/bin/amazon-ssm-agent; do
+        [ ! -e "$binary" ] && [ ! -L "$binary" ] || { echo 'Builder SSM package remains.' >&2; exit 1; }
+      done
+      systemctl daemon-reload
+      systemctl mask amazon-ssm-agent.service snap.amazon-ssm-agent.amazon-ssm-agent.service
       cloud-init clean --logs --seed --machine-id
       rm -f /etc/needrestart/conf.d/99-agent-relay-build.conf
       # Cloud-init's original netplan may match the builder NIC's MAC address.
       # Fresh workers use plain DHCP and do not contact IMDS for networking.
       rm -f /etc/netplan/50-cloud-init.yaml
       printf '%s\n' agent-worker > /etc/hostname
-      rm -rf -- /var/lib/amazon/ssm /var/log/amazon/ssm /var/snap/amazon-ssm-agent/common /root/.aws /root/.ssh /root/.codex /root/.claude /root/.npm /root/.cache /home/ubuntu/.aws /home/ubuntu/.codex /home/ubuntu/.claude /home/agent/.aws /home/agent/.codex /home/agent/.claude
+      rm -rf -- /var/lib/amazon/ssm /var/log/amazon/ssm /var/snap/amazon-ssm-agent /root/snap/amazon-ssm-agent /home/ubuntu/snap/amazon-ssm-agent /home/agent/snap/amazon-ssm-agent /root/.aws /root/.ssh /root/.codex /root/.claude /root/.npm /root/.cache /home/ubuntu/.aws /home/ubuntu/.codex /home/ubuntu/.claude /home/agent/.aws /home/agent/.codex /home/agent/.claude
       rm -f -- /root/.bash_history /root/.claude.json /home/ubuntu/.bash_history /home/ubuntu/.ssh/known_hosts /home/ubuntu/.claude.json /home/agent/.claude.json
       for kind in rsa ecdsa ed25519; do
         rm -f -- "/etc/ssh/ssh_host_${kind}_key" "/etc/ssh/ssh_host_${kind}_key.pub"
@@ -109,8 +131,64 @@ write_files:
     content: |
       #!/usr/bin/python3 -I
       # Fixed read-only checks. No paths/commands/arguments come from the caller;
-      # only booleans and public-identity hashes leave this root helper.
-      import base64, hashlib, json, os, pathlib, subprocess, sys, urllib.request, urllib.error
+      # Only fixed-category counts, booleans and public identity hashes leave
+      # this root helper; credential names, paths and contents never do.
+      import base64, errno, hashlib, json, os, pathlib, subprocess, sys, urllib.request, urllib.error
+
+      def credential_failures():
+          counts = dict.fromkeys(('providerAuthFiles', 'sshPrivateKeyFiles', 'pemFiles', 'ssmLibraryFiles', 'ssmSnapFiles', 'ssmSnapshotFiles', 'ssmPackageFiles', 'unexpectedAuthorizedKeys', 'scanErrors'), 0)
+          def scan_error(_error):
+              counts['scanErrors'] += 1
+          for root in ('/root', '/home', '/opt/agent-web'):
+              for folder, dirs, files in os.walk(root, followlinks=False, onerror=scan_error):
+                  for name in files:
+                      if name in ('auth.json', '.credentials.json', 'credentials'):
+                          counts['providerAuthFiles'] += 1
+                      elif name in ('id_rsa', 'id_ed25519'):
+                          counts['sshPrivateKeyFiles'] += 1
+                      elif name.endswith('.pem'):
+                          counts['pemFiles'] += 1
+          for location, category in (('/var/lib/amazon/ssm', 'ssmLibraryFiles'), ('/var/snap/amazon-ssm-agent', 'ssmSnapFiles'), ('/root/snap/amazon-ssm-agent', 'ssmSnapFiles'), ('/home/ubuntu/snap/amazon-ssm-agent', 'ssmSnapFiles'), ('/home/agent/snap/amazon-ssm-agent', 'ssmSnapFiles'), ('/root/.ssh/authorized_keys', 'unexpectedAuthorizedKeys'), ('/home/agent/.ssh/authorized_keys', 'unexpectedAuthorizedKeys')):
+              candidate = pathlib.Path(location)
+              try:
+                  if candidate.is_file():
+                      counts[category] += 1
+                  elif candidate.is_dir():
+                      for folder, dirs, files in os.walk(location, followlinks=False, onerror=scan_error):
+                          counts[category] += len(files)
+              except OSError:
+                  counts['scanErrors'] += 1
+          try:
+              counts['ssmSnapshotFiles'] = sum(1 for entry in pathlib.Path('/var/lib/snapd/snapshots').glob('*_amazon-ssm-agent_*.zip'))
+              counts['ssmPackageFiles'] = sum(1 for location in ('/snap/amazon-ssm-agent/current', '/usr/bin/amazon-ssm-agent', '/usr/local/bin/amazon-ssm-agent') if os.path.lexists(location))
+          except OSError:
+              counts['scanErrors'] += 1
+          # Bound diagnostics, not the scan: any nonzero category still fails.
+          return {key: min(value, 1000000) for key, value in counts.items()}
+
+      def metadata_probe():
+          # A tokenless GET returning 401 proves IMDSv2 is required, not that
+          # IMDS is disabled. Probe its exact token endpoint instead. Do not
+          # read, retain, print or use a returned token; status alone fails.
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          request = urllib.request.Request('http://169.254.169.254/latest/api/token', data=b'', method='PUT', headers={'X-aws-ec2-metadata-token-ttl-seconds': '1'})
+          try:
+              with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=2) as response:
+                  return True, 'token-endpoint-accessible' if response.status == 200 else 'unexpected-http-response'
+          except urllib.error.HTTPError as error:
+              # AWS documents 403 as request denied OR IMDS turned off. This
+              # is only evidence of denied access; the operator separately
+              # requires EC2 HttpEndpoint=disabled and no instance role.
+              if error.code == 403:
+                  return False, 'http-403-denied'
+              return True, 'http-401-unauthorized' if error.code == 401 else 'unexpected-http-response'
+          except (OSError, urllib.error.URLError) as error:
+              reason = error.reason if isinstance(error, urllib.error.URLError) else error
+              if isinstance(reason, TimeoutError) or isinstance(reason, OSError) and reason.errno in (errno.ETIMEDOUT, errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH):
+                  return False, 'network-unavailable'
+              return True, 'unexpected-network-error'
       if os.geteuid() != 0 or len(sys.argv) != 1:
           sys.exit(64)
       digest = lambda value: hashlib.sha256(value).hexdigest()
@@ -119,29 +197,15 @@ write_files:
       host_keys = {p.name: digest(p.read_bytes().split()[1]) for p in pathlib.Path('/etc/ssh').glob('ssh_host_*_key.pub')}
       unit_ready = lambda action, unit: subprocess.run(['/usr/bin/systemctl', action, '--quiet', unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
       ssm_disabled = all(not unit_ready(action, unit) for action in ('is-active', 'is-enabled') for unit in ('amazon-ssm-agent.service', 'snap.amazon-ssm-agent.amazon-ssm-agent.service'))
-      credentials_absent = True
-      for root in ('/root', '/home', '/opt/agent-web'):
-          for folder, dirs, files in os.walk(root, followlinks=False):
-              if any(name in ('auth.json', '.credentials.json', 'credentials', 'id_rsa', 'id_ed25519') or name.endswith('.pem') for name in files):
-                  credentials_absent = False
-      for location in ('/var/lib/amazon/ssm', '/var/snap/amazon-ssm-agent/common', '/root/.ssh/authorized_keys', '/home/agent/.ssh/authorized_keys'):
-          candidate = pathlib.Path(location)
-          if candidate.is_file() or (candidate.is_dir() and any(p.is_file() for p in candidate.rglob('*'))):
-              credentials_absent = False
+      credential_counts = credential_failures()
+      credentials_absent = not any(credential_counts.values())
       expected_key = base64.b64decode('__RELAY_WORKER_PUBLIC_KEY_BASE64__').strip()
       transport_key_matches = pathlib.Path('/home/ubuntu/.ssh/authorized_keys').read_bytes().strip() == expected_key
-      metadata_reachable = False
-      try:
-          with urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://169.254.169.254/latest/meta-data/', timeout=2):
-              metadata_reachable = True
-      except urllib.error.HTTPError:
-          metadata_reachable = True
-      except (OSError, urllib.error.URLError):
-          pass
+      metadata_reachable, metadata_result = metadata_probe()
       fresh_identity = len(host_keys) >= 1 and all(value not in builder['hostKeys'].values() for value in host_keys.values()) and machine != builder['machine']
       finalized = pathlib.Path('/opt/agent-web/IMAGE_FINALIZED').is_file() and not pathlib.Path('/opt/agent-web/BUILD_PENDING').exists()
       cloud_init_disabled = pathlib.Path('/etc/cloud/cloud-init.disabled').is_file()
-      receipt = {'schema': 1, 'finalized': finalized, 'cloudInitDisabled': cloud_init_disabled, 'ssmDisabled': ssm_disabled, 'credentialsAbsent': credentials_absent, 'transportKeyMatches': transport_key_matches, 'metadataReachable': metadata_reachable, 'freshIdentity': fresh_identity, 'machine': machine, 'hostKeys': host_keys, 'heartbeatEnabled': unit_ready('is-enabled', 'agent-web-heartbeat.service'), 'watchdogActive': unit_ready('is-active', 'agent-web-idle-watchdog.timer')}
+      receipt = {'schema': 1, 'finalized': finalized, 'cloudInitDisabled': cloud_init_disabled, 'ssmDisabled': ssm_disabled, 'credentialsAbsent': credentials_absent, 'credentialFailureCounts': credential_counts, 'transportKeyMatches': transport_key_matches, 'metadataReachable': metadata_reachable, 'metadataProbe': metadata_result, 'freshIdentity': fresh_identity, 'machine': machine, 'hostKeys': host_keys, 'heartbeatEnabled': unit_ready('is-enabled', 'agent-web-heartbeat.service'), 'watchdogActive': unit_ready('is-active', 'agent-web-idle-watchdog.timer')}
       receipt['valid'] = all(receipt[name] for name in ('finalized', 'cloudInitDisabled', 'ssmDisabled', 'credentialsAbsent', 'transportKeyMatches', 'freshIdentity', 'heartbeatEnabled', 'watchdogActive')) and not metadata_reachable
       print(json.dumps(receipt))
       sys.exit(0 if receipt['valid'] else 1)

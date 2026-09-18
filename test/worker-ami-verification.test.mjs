@@ -162,6 +162,19 @@ test("image audit errors expose only fixed-name boolean checks from the controll
   });
 });
 
+test("image audit diagnostics expose only bounded category counts and metadata enum", async () => {
+  for (const metadataProbe of ["http-403-denied", "PRIVATE SECRET"]) {
+    const f = fixture({ commandFailed: true, mutateReceipt: () => ({ diagnostic: { stage: "worker-probe", category: "image-audit", exitCode: 1, metadataProbe,
+      credentialFailureCounts: { providerAuthFiles: 0, ssmSnapFiles: 2, pemFiles: true, scanErrors: -1, ssmLibraryFiles: 1000001, ssmPackageFiles: "PRIVATE SECRET", private: "PRIVATE SECRET" } } }) });
+    await assert.rejects(verifyWorkerImage(options, { run: f.run, sleep: async () => {} }), error => {
+      assert.match(error.message, /credential counts: providerAuthFiles=0, ssmSnapFiles=2/);
+      assert.equal(error.message.includes("metadata probe: http-403-denied"), metadataProbe === "http-403-denied");
+      assert.doesNotMatch(error.message, /PRIVATE SECRET|pemFiles=|scanErrors=|ssmLibraryFiles=|ssmPackageFiles=/);
+      return true;
+    });
+  }
+});
+
 test("receipt validation compares identity values independently of object key ordering", () => {
   const context = { verificationId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", workerId, phase: "fresh" };
   const first = receipt(context);
