@@ -127,6 +127,13 @@ AWS checkpoint (2026-09-18 09:10 UTC):
   documentation-only updates. Both opt-ins were enabled: native GitHub
   environment/configuration probes and official-MCP guest UI. Single test
   process at a time, CPUs 0–1 and nice 10.
+- Official Playwright MCP rechecked the actual newly deployed Google entry
+  screen and anonymous chat denial at 1600/390/320 pixels, without horizontal
+  overflow; root inspected the desktop screenshot. No Google/provider consent
+  was performed. A read-only cleanup audit found only the intended controller
+  running for this deployment, no active acceptance SSM sessions on it, and no
+  remaining native-acceptance-tagged volumes. The controller, NAT and retained
+  storage remain billable; this is not a claim that AWS resources were torn down.
 
 - Cold backup/restore passed on the actual encrypted EBS volume. Snapshot
   `snap-08d0e108e9596b5df` is retained; a distinct restored volume matched both
