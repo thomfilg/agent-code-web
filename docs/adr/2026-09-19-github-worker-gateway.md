@@ -134,3 +134,52 @@ combined selected GitHub connection → deployed CloudFront gateway → EC2 nati
 Git push/PR path. That combined gate requires the real user's selected GitHub
 connection and a normal isolated worker after deployment; fresh interactive
 product consent remains user-owned. Until then this gate is explicitly pending.
+
+### Actual PR creation — ordinary feature PR 22
+
+The scoped `github_create_pull_request` MCP tool also passed against actual
+GitHub using the next ordinary feature delivery, not an unrelated test PR:
+`fix/guest-chrome-diagnostics` at
+`086db984f22a5213f13bcc5a7b4bf86d71e6d118` into `feat/codex-account-login`, in
+`thomfilg/agent-code-web`. Creation was coordinated with that feature's author;
+their ordinary PR command was held. Read-only preflight confirmed no existing PR
+in any state for this head and verified the exact remote branch tip.
+
+Exactly **one create attempt, zero retries** produced draft
+[PR 22](https://github.com/thomfilg/agent-code-web/pull/22). A subsequent read-only
+GitHub request confirmed the number, open/draft state, repository identities,
+expected head SHA, head/base refs, title and body. The operator did not edit
+another PR, push a branch or modify main. Its predeclared ambiguous-write policy
+was read-only inspection, never automatic retry.
+
+```json
+{
+  "schema": 1,
+  "fixture": "isolated-controller-MCP-actual-GitHub-not-EC2",
+  "branch": "fix/guest-chrome-diagnostics",
+  "revision": "086db984f22a5213f13bcc5a7b4bf86d71e6d118",
+  "createAttempts": 1,
+  "actorAndRepositoryVerified": true,
+  "branchTipVerified": true,
+  "pullRequest": 22,
+  "url": "https://github.com/thomfilg/agent-code-web/pull/22",
+  "readOnlyConfirmation": true,
+  "scopedMcpCreateConfirmed": true,
+  "grantRevoked": true,
+  "memoryCredentialRemoved": true,
+  "sourceCredentialUnchanged": true,
+  "gitConfigUnchangedAndSecretFree": true,
+  "accepted": true
+}
+```
+
+The specifically selected native GitHub credential existed only in the isolated
+controller's RAM records; no product record, global account selection, disk
+credential copy or worker credential was created. Private before/after hashes
+confirmed source token/store and Git config were unchanged; only boolean checks
+were emitted. The grant was revoked and RAM credential removed. Service code was
+the reviewed gateway from `5723ba6` and PR MCP from `b4fa736`.
+
+This is **isolated-fixture + real GitHub** acceptance. It proves scoped real PR
+creation, not the deployed AWS gateway, not an EC2 execution path, and not a
+user's fresh product OAuth consent. Those pending boundaries are unchanged.
