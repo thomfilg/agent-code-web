@@ -70,7 +70,7 @@ class LocalBackend {
   async destroy() {}
 }
 
-class Ec2Executor {
+export class Ec2Executor {
   constructor({ backend, chat, instance, host }) {
     this.backend = backend;
     this.chat = chat;
