@@ -186,7 +186,8 @@ HTTPS rollout of `f0692eb` passed; `/readyz` is 200 and anonymous `/api/chats` i
 `snap-08d0e108e9596b5df`); the distinct restored copy was verified and removed,
 and the original controller recovered. Controlled failed-rollout recovery also
 passed: candidate exit 1/readiness failure restored the exact original
-container, configuration and mounts, with no secret or application-data change.
+container, configuration and mounts. The operator did not update secrets or
+delete application data; it did not compare database fingerprints across restart.
 Evidence: acceptance `91246861-681f-485c-b85f-4b9051b071a4`, SSM
 `88faada5-24b1-493e-bb78-22cd1df09fde`. The normal single previous-container slot
 was consumed by this test; the healthy current image remains unchanged.

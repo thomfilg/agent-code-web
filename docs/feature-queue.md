@@ -120,7 +120,8 @@ AWS checkpoint (2026-09-18 07:15 UTC):
   candidate inherited the exact current filesystem, deliberately exited 1 and
   failed readiness. The shared engine restored the exact original container,
   configuration and mounts, verified the persistent EBS volume, and removed
-  the failed candidate. No secret or application data changed. Run
+  the failed candidate. The operator did not update secrets or delete application
+  data; this test did not compare database fingerprints across restart. Run
   `91246861-681f-485c-b85f-4b9051b071a4`, SSM
   `88faada5-24b1-493e-bb78-22cd1df09fde`; independent public checks again returned
   readiness 200 and anonymous chats 401. The older previous-container slot was
