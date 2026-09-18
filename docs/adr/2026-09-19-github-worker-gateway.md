@@ -116,3 +116,21 @@ including decompression limits, per-grant/global concurrency and client abort.
 Runtime lifecycle/native CLI wiring remains a separately reviewed companion
 change. This receipt must not be presented as deployed EC2 worker Git evidence
 or as a fresh user's interactive GitHub consent.
+
+### Combined AWS Git acceptance remains pending
+
+The accepted worker image intentionally disables TCP forwarding for the SSH
+transport user (`Match User ubuntu`, `AllowTcpForwarding no`), while the native
+operator clears all forwarding requests. Therefore exposing the isolated local
+gateway on worker loopback with SSH `-R` is not an available shortcut. We did
+not relax SSH policy, change security groups, invent a product user, import a
+provider credential into production records, or introduce an unreviewed reverse
+HTTP bridge merely to obtain an acceptance receipt.
+
+The current evidence consists of distinct checks: local native Git through this
+gateway to actual GitHub; native CLI capability/environment protocol fixtures;
+and separately the accepted EC2 workspace transport. None of those proves the
+combined selected GitHub connection → deployed CloudFront gateway → EC2 native
+Git push/PR path. That combined gate requires the real user's selected GitHub
+connection and a normal isolated worker after deployment; fresh interactive
+product consent remains user-owned. Until then this gate is explicitly pending.
