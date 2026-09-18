@@ -177,6 +177,8 @@ test("independent same-name workspace OAuth reaches both selected provider envir
       } finally { await client.close(); }
     }, send: async () => ({ text: "verified" }), stop: async () => {} }) });
   await app.start(); t.after(() => app.stop());
+  await app.records.put("connection", "github", { id: "github", token: "synthetic-linear-github", revision: 1, companies: ["12-apps", "g2i"] });
+  app.manager.github.fetch = async () => { throw new Error("Unexpected external GitHub request in Linear fixture"); };
   const mcps = app.manager.mcps; mcps.fetch = fetchImpl;
   const ids = [];
   for (const company of fixtures.keys()) {
@@ -194,8 +196,9 @@ test("independent same-name workspace OAuth reaches both selected provider envir
   const environment = await app.manager.environments.save({ name: "Scoped Linear", backend: "local", companies: ["12-apps", "g2i"], allowUnassigned: true, mcpIds: ids });
   for (const agent of ["codex", "claude"]) for (const company of fixtures.keys()) {
     const chat = await app.manager.createChat({ agent, title: "Fixture scoped runtime", environmentId: environment.id });
-    // Test repository metadata only; no real clone or user account is involved.
-    await app.store.update(chat.id, { repositories: [{ fullName: `${company}/fixture` }, { fullName: `${company === "g2i" ? "12-apps" : "g2i"}/secondary` }] });
+    // Complete synthetic selections preserve real GitHub admission while the
+    // fixture exercises Linear; no clone or upstream GitHub call is involved.
+    await app.store.update(chat.id, { repositories: [{ id: 31, githubConnectionId: "github", fullName: `${company}/fixture` }, { id: 32, githubConnectionId: "github", fullName: `${company === "g2i" ? "12-apps" : "g2i"}/secondary` }] });
     await app.manager.send(chat.id, "fixture read");
     assert.equal(seen.at(-1).agent, agent); assert.equal(seen.at(-1).workspace, company);
     const token = seen.at(-1).server.headers.Authorization.slice(7);

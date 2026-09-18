@@ -45,7 +45,7 @@ test("import images copy inline/workspace bytes only; external URLs, outside pat
   await assert.rejects(copyImportedImages(messages, "/original/project", workspace, () => { throw new Error("Access revoked"); }), /revoked/);
 });
 
-async function fixture(t) {
+async function fixture(t, { legacySource = false } = {}) {
   const root = await temporaryDirectory(t), calls = { forks: 0, releases: [], discards: [], starts: [], inputs: [], gate: null }, operationId = randomUUID(), sessionId = "a".repeat(64), rootThreadId = randomUUID();
   const app = await createAgentWebServer({ config: testConfig(root, { AGENT_WEB_AUTH_TOKEN: "import-open", AGENT_IDLE_TIMEOUT_MS: "60000" }),
     models: { creationSettings: async () => ({}), turnSettings: async () => ({}) },
@@ -59,15 +59,28 @@ async function fixture(t) {
       send: async text => { calls.inputs.push({ chatId: chat.id, text }); await hooks.onInputStarted({ forkGoal: false }); return { text: "Continued imported fixture" }; },
     }) });
   const { url } = await app.start(); t.after(() => app.stop()); const source = await app.manager.createChat({ agent: "codex", title: "Import destination" });
-  await app.store.update(source.id, { agentSessionId: rootThreadId, repositories: [{ owner: "12-apps", name: "future-pay", fullName: "12-apps/future-pay" }] });
+  // Complete saved selection, as resolveSelections returns in the product.
+  // Keep real scoped gateway admission active; no provider request is needed.
+  await app.records.put("connection", "github", { id: "github", token: "synthetic-import-github", revision: 1, companies: ["12-apps"] });
+  app.manager.github.fetch = async () => { throw new Error("Unexpected external GitHub request in import fixture"); };
+  await app.store.update(source.id, { agentSessionId: rootThreadId, repositories: [{ id: 31, githubConnectionId: "github", owner: "12-apps", name: "future-pay", fullName: "12-apps/future-pay" }] });
+  if (legacySource) {
+    const saved = app.store.get(source.id); delete saved.repositories;
+    saved.source = path.join(root, "original-source");
+    await app.records.put("chat", source.id, saved);
+    await app.store.initialize();
+    // Restore the old schema through the real loader; a connected account
+    // exists, but source-only history must never silently adopt it.
+    app.manager.github.requireConnection = async () => { throw Error("Legacy source must not select a GitHub account"); };
+  }
   await writeFile(path.join(source.workspace, "project.txt"), "original workspace");
   const input = { operationId, sessionId, threadId: rootThreadId, confirm: true };
   const request = (data = input) => fetch(`${url}/api/chats/${source.id}/imports/open`, { method: "POST", headers: { authorization: "Bearer import-open", "content-type": "application/json" }, body: JSON.stringify(data) });
   return { root, app, source, calls, request, input, url };
 }
 
-test("opening imported history creates one independent stopped chat, copies attachments and resumes its native bundle only on input", async t => {
-  const f = await fixture(t), original = f.app.store.get(f.source.id), response = await f.request();
+for (const legacySource of [false, true]) test(`opening ${legacySource ? "restarted legacy source" : "selected repository"} imported history creates one independent stopped chat and resumes only on input`, async t => {
+  const f = await fixture(t, { legacySource }), original = f.app.store.get(f.source.id), response = await f.request();
   assert.equal(response.status, 200, await response.clone().text()); const { chat } = await response.json();
   assert.notEqual(chat.id, f.source.id); assert.equal(chat.status, "stopped"); assert.equal(chat.title, "Imported source conversation"); assert.deepEqual(chat.repositories, original.repositories);
   assert.deepEqual(chat.messages.map(item => item.role), ["user", "tool", "assistant"]); assert.equal(chat.messages[0].text, "Original user text");
@@ -82,6 +95,7 @@ test("opening imported history creates one independent stopped chat, copies atta
   await f.app.manager.send(chat.id, "Continue this conversation");
   assert.equal(f.calls.starts.at(-1).restoreFork.threadId, chat.agentSessionId); assert.match(f.calls.inputs[0].text, /Continue this conversation/); assert.equal(f.calls.inputs[0].chatId, chat.id);
   assert.equal((await f.app.records.get("native-fork", chat.id)).initialized, true);
+  if (legacySource) assert.equal(f.app.manager.githubWorkers.entries.size, 0);
 });
 
 test("import opening requires confirmation, authenticated ownership and a recorded opaque session choice", async t => {

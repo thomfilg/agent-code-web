@@ -49,7 +49,9 @@ async function fixture(t) {
 test("fork API preserves company/settings/files, rebinds attachments, deduplicates and leaves the working source alone", async t => {
   const { app, source, calls, request } = await fixture(t);
   app.manager.environments.runtime = async (id, chat) => { assert.equal(id, "env_fixture"); assert.equal(chat.repositories[0].fullName, "12-apps/future-pay"); return { id, backend: "local", software: [], mcpIds: [], variables: {} }; };
-  await app.store.update(source.id, { environmentId: "env_fixture", environmentName: "12-apps", repositories: [{ fullName: "12-apps/future-pay", directory: "12-apps--future-pay" }], mode: "auto", serviceTier: "fast", personality: "friendly", pinned: true, customGroupId: "not-inherited" });
+  await app.records.put("connection", "github", { id: "github", token: "synthetic-fork-github", revision: 1, companies: ["12-apps"] });
+  app.manager.github.fetch = async () => { throw new Error("Unexpected external GitHub request in fork fixture"); };
+  await app.store.update(source.id, { environmentId: "env_fixture", environmentName: "12-apps", repositories: [{ id: 31, githubConnectionId: "github", fullName: "12-apps/future-pay", directory: "12-apps--future-pay" }], mode: "auto", serviceTier: "fast", personality: "friendly", pinned: true, customGroupId: "not-inherited" });
   const originalFile = await app.manager.attachments.upload(source.id, { name: "image.png", mime: "image/png", data: Buffer.from("fixture image").toString("base64") });
   await app.store.appendMessage(source.id, { role: "user", text: "Original user message", attachments: [{ ...originalFile, path: "/original-worker/uploads/image.png" }] });
   await app.store.appendMessage(source.id, { role: "user", text: "Never inherit a synthetic sample", meta: { renderingSample: true } });

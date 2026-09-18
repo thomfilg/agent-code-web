@@ -7,17 +7,19 @@ import { companyForChat } from "../public/company-scope.js";
 
 const PREFIX = "/gateway/github/git/", MAX_REQUEST = 32 * 1024 * 1024, MAX_RESPONSE = 256 * 1024 * 1024;
 const fail = (statusCode = 403) => Object.assign(new Error("GitHub worker access is unavailable. Resume the chat or reconnect GitHub."), { statusCode });
+const invalidSelection = () => Object.assign(new Error("This chat's saved GitHub repository selection is incomplete or invalid. Select the repository and intended GitHub account again in a new chat."), { statusCode: 403 });
 const owner = value => value ?? null;
 const connectionKey = (ownerId, id) => JSON.stringify([owner(ownerId), id]);
 const tokenHash = token => createHash("sha256").update(token).digest("hex");
 const publicRepo = repo => ({ id: repo.id, fullName: repo.fullName });
 function selection(chat) {
-  if (!chat || chat.archived || chat.workflowState === "archived" || !Array.isArray(chat.repositories) || chat.repositories.length > 100) throw fail();
+  if (!chat || chat.archived || chat.workflowState === "archived") throw fail();
+  if (!Array.isArray(chat.repositories) || chat.repositories.length > 100) throw invalidSelection();
   const seen = new Set();
   const repositories = chat.repositories.map(repo => {
-    if (!Number.isSafeInteger(repo.id) || repo.id <= 0 || seen.has(repo.id) ||
+    if (!Number.isSafeInteger(repo?.id) || repo.id <= 0 || seen.has(repo.id) ||
       typeof repo.fullName !== "string" || repo.fullName.length > 201 || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo.fullName) ||
-      repo.fullName.split("/").some(part => part === "." || part === "..") || typeof repo.githubConnectionId !== "string") throw fail();
+      repo.fullName.split("/").some(part => part === "." || part === "..") || typeof repo.githubConnectionId !== "string" || !repo.githubConnectionId) throw invalidSelection();
     seen.add(repo.id);
     return { id: repo.id, fullName: repo.fullName, githubConnectionId: repo.githubConnectionId, branch: repo.branch, defaultBranch: repo.defaultBranch };
   });

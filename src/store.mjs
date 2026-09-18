@@ -5,7 +5,10 @@ import { runtimeWorkflowPatch } from "../public/chat-organization.js";
 
 function restored(chat) {
   chat = { ...chat, archived: chat.archived ?? chat.workflowState === "archived" };
-  return { pinned: false, customGroupId: null, workflowState: "idle", ...chat,
+  // The original source-only schema predates saved repository selections.
+  // An absent field means no GitHub grant, not permission to infer a connection.
+  // Explicit null/malformed selections remain intact so admission rejects them.
+  return { repositories: [], pinned: false, customGroupId: null, workflowState: "idle", ...chat,
     ...runtimeWorkflowPatch(chat, "stopped"), status: "stopped", pendingRequest: null, idleDeadlineAt: null,
     queuePaused: Boolean(chat.queuedMessages?.length) || Boolean(chat.queuePaused) };
 }
