@@ -147,6 +147,9 @@ AWS checkpoint (2026-09-18 07:15 UTC):
 - The fresh integrated browser regression passed **28/28** isolated fixtures:
   Codex/Claude accounts 16, Google 4, GitHub/company scopes 4 and Linear 4.
   Suites ran sequentially with one browser worker, CPUs 0–1 and nice 10.
+- The subsequent full backend regression at `3a3adb3` passed **833/833**, with
+  no skips or failures, one test process at a time on CPUs 0–1/nice 10. It
+  includes local integration/operator fixtures, not real AWS or model calls.
 
 Parallel implementation checkpoint (2026-09-18):
 

@@ -192,8 +192,8 @@ Evidence: acceptance `91246861-681f-485c-b85f-4b9051b071a4`, SSM
 `88faada5-24b1-493e-bb78-22cd1df09fde`. The normal single previous-container slot
 was consumed by this test; the healthy current image remains unchanged.
 
-The core regression checkpoint passed 783 backend tests plus 21 native/SSH
-checks. A fresh integrated browser run passed 28 isolated fixtures: 16
+The latest full backend regression at `3a3adb3` passed 833 tests without skips,
+including native/SSH/operator fixtures. A fresh browser run passed 28 isolated fixtures: 16
 Codex/Claude, 4 Google, 4 GitHub/company scopes and 4 Linear. These are not real
 provider consent. Fresh-worker acceptance, native AWS account execution/resume,
 cloud Google/provider consent, protected SSE/live-browser acceptance and remote
