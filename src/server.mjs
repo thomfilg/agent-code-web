@@ -146,6 +146,9 @@ export async function createAgentWebServer(options = {}) {
   await environments.initialize();
   let manager = null;
   let previews = null, previewHosts = null;
+  // Provisioning can be disabled while its old CloudFront origins still exist.
+  // Their Host must never fall through to Relay's authenticated UI/API routes.
+  const isolatePublicHosts = config.preview?.enabled || config.workerBackend === "ec2" && googleAuth.enabled && googleAuth.config.origin?.startsWith("https://");
   const browserSockets = new WebSocketServer({ noServer: true, maxPayload: 100000, perMessageDeflate: false });
   const personalSockets = new WebSocketServer({ noServer: true, maxPayload: 48 * 1024 * 1024, perMessageDeflate: false });
   const releaseIdentity = async user => {
@@ -166,7 +169,7 @@ export async function createAgentWebServer(options = {}) {
     let url;
     try { url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`); }
     catch { return json(response, 400, { error: "Invalid request URL" }); }
-    if (config.preview?.enabled) {
+    if (isolatePublicHosts) {
       if (!request.url.startsWith("/") || request.url.startsWith("//") || request.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === "host").length !== 1) return json(response, 400, { error: "Invalid request target" });
       if (previewHosts?.lookup(request.headers.host)) {
         if (!previews || draining) return json(response, 503, { error: "App previews are restarting" });
@@ -765,7 +768,7 @@ export async function createAgentWebServer(options = {}) {
   server.on("upgrade", async (request, socket, head) => {
     const reject = code => { socket.end(`HTTP/1.1 ${code}\r\nConnection: close\r\n\r\n`); };
     if (stopping || draining) { reject("503 Service Unavailable"); return; }
-    if (config.preview?.enabled && request.headers.host !== new URL(googleAuth.config.origin).host) {
+    if (isolatePublicHosts && request.headers.host !== new URL(googleAuth.config.origin).host) {
       if (!previews || !previewHosts?.lookup(request.headers.host)) { reject("421 Misdirected Request"); return; }
       await previews.handleUpgrade(request, socket, head); return;
     }

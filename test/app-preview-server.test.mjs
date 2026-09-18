@@ -11,7 +11,7 @@ import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
 // Real Relay HTTP/Auth.js/bootstrap/proxy routes; only OIDC, CloudFront host
 // registry and worker acquisition are local fixtures. No production login/AWS.
 const relayOrigin = "https://relay.fixture.example", previewHost = "dpreviewfixture.cloudfront.net";
-async function fixture(t) {
+async function fixture(t, { previewsEnabled = true } = {}) {
   const root = await temporaryDirectory(t), provider = googleOidcFixture(), rows = [], children = [], observed = [];
   const upstream = http.createServer((request, response) => {
     observed.push({ path: request.url, headers: request.headers });
@@ -28,7 +28,7 @@ async function fixture(t) {
   };
   let acquisitions = 0;
   const config = testConfig(root, { ...googleTestEnv, AGENT_WEB_PUBLIC_URL: relayOrigin, AUTH_SECRET: "app-preview-synthetic-test-secret-".repeat(2),
-    AGENT_WORKER_BACKEND: "ec2", AGENT_EC2_GATEWAY_ORIGIN: "https://gateway.fixture.example", AGENT_PREVIEW_ENABLED: "1",
+    AGENT_WORKER_BACKEND: "ec2", AGENT_EC2_GATEWAY_ORIGIN: "https://gateway.fixture.example", AGENT_PREVIEW_ENABLED: previewsEnabled ? "1" : "0",
     AGENT_PREVIEW_ACCOUNT_ID: "111122223333", AGENT_EC2_DEPLOYMENT: "relay-fixture", AGENT_PREVIEW_VPC_ORIGIN_ID: "vo_fixture",
     AGENT_PREVIEW_CONTROLLER_INSTANCE_ID: "i-0123456789abcdef0", AGENT_PREVIEW_CONTROLLER_ORIGIN_DNS: "ip-10-0-0-1.us-east-2.compute.internal", AGENT_PREVIEW_RELAY_DISTRIBUTION_ID: "ERELAYFIXTURE", AGENT_IDLE_TIMEOUT_MS: "10000" });
   const app = await createAgentWebServer({ config, googleAuthOptions: { fetchImpl: provider.fetch }, previewHosts: hosts,
@@ -90,6 +90,32 @@ test("complete Relay login-to-preview HTTP route retains path and isolates hosts
   assert.deepEqual(f.app.store.get(f.chatId).messages, []);
   await f.browser.call(`/api/chats/${f.chatId}/stop`, { method: "POST", body: {} });
   assert.equal((await f.preview.call("/future-drink/menu")).status, 403);
+});
+
+test("disabling preview provisioning never exposes Relay routes on a former app hostname", async t => {
+  const f = await fixture(t, { previewsEnabled: false });
+  assert.equal(f.app.previews, null);
+  for (const path of ["/", "/api/auth/session", "/api/chats", "/api/sidebar/events", "/app.js", "/internal/deploy/drain"]) {
+    const result = await f.preview.call(path);
+    assert.equal(result.status, 421, path); assert.equal(result.headers["set-cookie"], undefined);
+    assert.deepEqual(result.json(), { error: "Unknown Relay host" });
+  }
+  const info = await f.browser.call(f.api + "?port=" + f.port);
+  assert.equal(info.status, 200); assert.equal(info.json().preview.status, "unavailable"); assert.equal(info.json().preview.port, f.port);
+  assert.equal((await f.browser.call("/api/chats")).status, 200);
+  assert.equal(f.acquisitions, 0);
+  const socket = new WebSocket(`ws://127.0.0.1:${f.localPort}/browser/connect`, { headers: { host: previewHost, origin: "https://" + previewHost } });
+  t.after(() => socket.terminate()); socket.on("error", () => {});
+  const rejected = await new Promise((resolve, reject) => {
+    socket.once("unexpected-response", (_request, response) => { const status = response.statusCode; response.resume(); response.once("end", () => resolve(status)); });
+    socket.once("open", () => reject(new Error("Former preview host upgraded into Relay")));
+    socket.once("error", reject);
+  });
+  assert.equal(rejected, 421); assert.equal(f.acquisitions, 0);
+  const drain = await fetch(`http://127.0.0.1:${f.localPort}/internal/deploy/drain`, { method: "POST" });
+  assert.equal(drain.status, 200); await drain.body.cancel();
+  const resumed = await fetch(`http://127.0.0.1:${f.localPort}/internal/deploy/resume`, { method: "POST" });
+  assert.equal(resumed.status, 200); await resumed.body.cancel();
 });
 
 test("real WebSocket preview round trip closes immediately on Relay logout", async t => {
