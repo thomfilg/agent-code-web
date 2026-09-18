@@ -419,6 +419,7 @@ async function resolveRequest(payload, target) {
 }
 
 async function openNewChat() {
+  if (!state.newChatReady) { toast("Relay is still loading. Try again in a moment."); return; }
   elements.newForm.reset();
   renderSecurityHint();
   $("#create-chat-error").textContent = "";
@@ -676,6 +677,8 @@ function toast(message, { outsideDialog = false } = {}) {
 }
 
 async function boot() {
+  state.newChatReady = false;
+  for (const id of ["#new-chat-button", "#welcome-new-chat"]) { $(id).disabled = true; $(id).title = "Loading your accounts and repositories…"; }
   setupPanelResizers();
   const auth = await api("/api/auth");
   googleLogin.render(auth);
@@ -700,7 +703,9 @@ async function boot() {
     option.value = agent.id;
     elements.agentSelect.append(option);
   }
-  await workspaceSettings.load();
+  await workspaceSettings.loadCurrent();
+  state.newChatReady = true;
+  for (const id of ["#new-chat-button", "#welcome-new-chat"]) { $(id).disabled = false; $(id).title = "Create a conversation"; }
   $("#isolation-label").textContent = state.config.workerBackend === "ec2"
     ? "One EC2 worker per chat"
     : state.config.processIsolation === "namespace" ? "Private PID namespaces" : "Process isolation disabled";

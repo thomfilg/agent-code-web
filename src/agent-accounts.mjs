@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { CodexAccountClient, CodexAccountError } from "./codex-account-client.mjs";
 import { ClaudeAccountClient, ClaudeAccountError } from "./claude-account-client.mjs";
 import { companyForChat, normalizeCompanyScope, scopeAllows } from "../public/company-scope.js";
+import { claudeCommandMetadata } from "./command-catalog.mjs";
 
 const fail = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const owner = value => { if (typeof value !== "string" || !/^user_[a-f0-9]{32}$/.test(value)) throw fail("Sign in with Google to connect agent accounts", 401); return value; };
@@ -17,6 +18,7 @@ export class AgentAccounts {
   constructor({ records, config, clientFactory = provider => provider === "claude" ? new ClaudeAccountClient(config) : new CodexAccountClient(config), now = Date.now, loginTimeoutMs = 600000, onChange = () => {}, onRevoke = async () => {} }) {
     Object.assign(this, { records, config, clientFactory, now, loginTimeoutMs, onChange, onRevoke });
     this.metadata = new Map(); this.flows = new Map(); this.locks = new Map(); this.removing = new Map(); this.closed = false;
+    this.commandCatalogs = new Map(); this.commandGeneration = 0;
   }
   async initialize() {
     for (const record of await this.records.list("agent-account")) {
@@ -58,6 +60,8 @@ export class AgentAccounts {
     const visible = { ownerId: record.ownerId, ...publicAccount(record) };
     const changed = JSON.stringify(this.metadata.get(record.id)) !== JSON.stringify(visible);
     this.metadata.set(record.id, visible);
+    const commands = this.commandCatalogs.get(record.id);
+    if (record.status !== "connected" || commands && !this.commandRecordMatches(commands, record)) this.commandCatalogs.delete(record.id);
     if (changed) this.onChange(record.ownerId);
     return publicAccount(record);
   }
@@ -68,6 +72,28 @@ export class AgentAccounts {
     if (!scopeAllows(record, companyForChat(chat))) throw fail("This agent account is not available for this chat's company", 403);
     if (connected && (this.flows.has(id) || record.status !== "connected" || !record.auth)) throw fail(reconnectError(record.provider), 409);
     return record;
+  }
+  commandRecordMatches(cached, record) {
+    return cached.ownerId === record.ownerId && cached.revision === record.revision
+      && cached.accountIdentity === record.accountIdentity && cached.subject === record.subject && record.provider === "claude";
+  }
+  async cachedCommands(ownerId, id, chat) {
+    const record = await this.select(ownerId, id, chat);
+    if (this.closed) throw fail("Agent accounts are shutting down", 503);
+    const cached = this.commandCatalogs.get(id);
+    const current = cached && this.commandRecordMatches(cached, record) ? cached : null;
+    return { commands: structuredClone(current?.commands || []), revision: `${record.revision}:${current?.generation || 0}` };
+  }
+  async cacheCommands(record, initialized) {
+    const commands = claudeCommandMetadata(initialized?.commands);
+    if (!commands || this.closed || this.removing.has(record.id) || this.flows.has(record.id)) return;
+    const current = await this.records.get("agent-account", record.id);
+    // Verification and persistence are asynchronous. Do not attach late native
+    // metadata to a replacement/revoked account, even if a storage write races.
+    if (this.closed || this.removing.has(record.id) || this.flows.has(record.id) || !current || !this.commandRecordMatches(record, current)
+      || current.status !== "connected" || !current.auth) return;
+    this.commandCatalogs.set(record.id, { ownerId: record.ownerId, revision: record.revision, accountIdentity: record.accountIdentity,
+      subject: record.subject, commands, generation: ++this.commandGeneration });
   }
   async begin(ownerId, input = {}) {
     owner(ownerId);
@@ -206,6 +232,7 @@ export class AgentAccounts {
     // Owner-checked invalidation must happen before any asynchronous lock or
     // database operation, including a currently gated credential refresh.
     const removal = { ownerId }; this.removing.set(id, removal);
+    this.commandCatalogs.delete(id);
     const flow = this.flows.get(id);
     if (flow) {
       flow.cancelled = true; flow.cancelMessage = "Account deleted."; clearTimeout(flow.timer);
@@ -278,6 +305,7 @@ export class AgentAccounts {
           if (identity(snapshot) !== record.accountIdentity || snapshot.subject !== record.subject) throw fail("Agent account identity changed");
           await this.save({ ...record, ...snapshot, error: null });
           if (this.removing.has(id)) throw fail("Agent account not found", 404);
+          await this.cacheCommands(record, client.initialized);
           return models;
         }
         const models = []; let cursor;
@@ -306,6 +334,7 @@ export class AgentAccounts {
   }
   async close() {
     this.closed = true;
+    this.commandCatalogs.clear();
     // A begin() may still be saving its record before registering the flow.
     // Drain starts first so shutdown cannot leave an untracked login process.
     await Promise.allSettled([...this.locks.values()]);

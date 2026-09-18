@@ -7,6 +7,7 @@ import { ClaudeControlChannel } from "./claude-mcp.mjs";
 import { terminateWorker } from "./worker-process.mjs";
 import { ClaudeRequests } from "./claude-requests.mjs";
 import { ClaudeDebugLog } from "./claude-debug.mjs";
+import { claudeCommandMetadata } from "./command-catalog.mjs";
 
 const flag = (args, name) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
 
@@ -381,7 +382,9 @@ export class ClaudeSession {
     this.pending = true;
     try {
       if (!this.initialized) {
-        await this.control.request("initialize");
+        const initialized = await this.control.request("initialize");
+        const commands = claudeCommandMetadata(initialized?.commands);
+        if (commands && !this.stopping && !this.ended) await this.onBackgroundEvent({ type: "command_catalog", commands });
         if (resetEffort) await this.control.request("apply_flag_settings", { settings: { effortLevel: null } });
         this.initialized = true;
       }

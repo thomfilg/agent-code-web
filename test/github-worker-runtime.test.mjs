@@ -147,7 +147,7 @@ test("real named-service mutation hooks abort only that owner's work before dura
   const chats = {}, grants = {}, services = {};
   for (const ownerId of ["legacy", "alice", "bob"]) {
     const service = services[ownerId] = await resources.forOwner(ownerId);
-    await (service.records || records).put("connection", "github", { id: "github", token: `synthetic-${ownerId}-private-token`, revision: 1, name: "Selected", companies: ["company"] });
+    await (service.records || records).put("connection", "github", { id: "github", token: `synthetic-${ownerId}-private-token`, revision: 1, name: "Selected", companies: [] });
     service.github.fetch = async () => Response.json({ id: repo.id, full_name: repo.fullName });
     const chat = chats[ownerId] = await store.create({ agent: "codex", ownerId, repositories: [{ ...repo, githubConnectionId: "github" }] });
     grants[ownerId] = await gateway.runtime(chat.id, "https://relay.example");
@@ -158,7 +158,7 @@ test("real named-service mutation hooks abort only that owner's work before dura
   }); const rejected = assert.rejects(active); await began.promise;
   const write = Promise.withResolvers(), entered = Promise.withResolvers(), put = records.put.bind(records);
   records.put = async (kind, ...args) => { if (kind === "user:alice:connection") { entered.resolve(); await write.promise; } return put(kind, ...args); };
-  const saving = services.alice.github.update({ id: "github", revision: 1, name: "Renamed", companies: ["company"] });
+  const saving = services.alice.github.update({ id: "github", revision: 1, name: "Renamed" });
   assert.equal(aborted, true); await entered.promise;
   await assert.rejects(gateway.listRepositories(grants.alice.token));
   await gateway.listRepositories(grants.bob.token); await gateway.listRepositories(grants.legacy.token);
@@ -179,7 +179,7 @@ test("server → local executor → both native adapters persist only sanitized 
     const adapter = new Adapter({ ...options, config, store: app.store, broker: app.broker }); instances.push(adapter); return adapter;
   } });
   t.after(() => app.stop()); await app.start();
-  await app.records.put("connection", "github", { id: "github", token: "controller-private-fixture-not-for-worker", revision: 1, companies: ["company"] });
+  await app.records.put("connection", "github", { id: "github", token: "controller-private-fixture-not-for-worker", revision: 1, companies: [] });
   for (const provider of ["codex", "claude"]) {
     const chat = await app.store.create({ agent: provider, title: "Real adapters fixture", repositories: [{ ...repo, githubConnectionId: "github" }] });
     await app.store.update(chat.id, { workspaceReady: true }); await mkdir(chat.workspace, { recursive: true });

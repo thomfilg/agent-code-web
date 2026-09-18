@@ -35,6 +35,7 @@ function transport(f) {
   };
   f.respond = packet => {
     let response = {};
+    if (packet.request.subtype === "initialize" && f.initializeSnapshot) response = f.initializeSnapshot;
     if (f.mcp && packet.request.subtype === "mcp_toggle" && f.refuse !== "mcp_toggle") {
       f.mcp.find(server => server.name === packet.request.serverName).status = packet.request.enabled ? "connected" : "disabled";
     }
@@ -85,6 +86,32 @@ async function fixture(t, { interactive = false } = {}) {
   t.after(() => adapter.stop());
   return Object.assign(f, { adapter, config, broker, chat, store });
 }
+
+test("native initialization commands and early system metadata survive before the first logical turn", async t => {
+  const f = await fixture(t, { interactive: true }); f.hold = "initialize";
+  f.initializeSnapshot = { commands: [{ name: "goal", description: "Native goal", privateAccount: "must-not-publish" }], account: "must-not-publish" };
+  const sending = f.adapter.send("Explicit synthetic turn"); sending.catch(() => {});
+  await waitFor(() => f.controls?.some(packet => packet.request.subtype === "initialize"));
+  f.emit({ type: "system", subtype: "init", slash_commands: ["goal", "fixture:plugin"], mcp_servers: [], claude_code_version: "fixture", privateAccount: "must-not-publish" });
+  await waitFor(() => f.events.some(event => event.type === "session_capabilities"));
+  assert.deepEqual(f.events.find(event => event.type === "session_capabilities").slashCommands, ["goal", "fixture:plugin"]);
+  assert.deepEqual(f.inputs, [], "Native discovery does not send a user message");
+  f.respond(f.controls.find(packet => packet.request.subtype === "initialize"));
+  await sending;
+  assert.equal(f.events.find(event => event.type === "command_catalog").commands[0].name, "goal");
+  assert.doesNotMatch(JSON.stringify(f.events), /must-not-publish|privateAccount/);
+  assert.equal(f.inputs.length, 1); assert.equal(f.inputs[0].message.content, "Explicit synthetic turn");
+  await f.adapter.stop(); const count = f.events.length;
+  f.adapter.backgroundEvent({ type: "command_catalog", commands: [{ name: "late" }] });
+  f.adapter.backgroundEvent({ type: "system", subtype: "init", slash_commands: ["late"] });
+  assert.equal(f.events.length, count, "A stopped adapter cannot publish a late catalog");
+});
+
+test("missing initialize commands do not erase a previously known catalog", async t => {
+  const f = await fixture(t, { interactive: true });
+  await f.adapter.send("Explicit synthetic turn");
+  assert(!f.events.some(event => event.type === "command_catalog"));
+});
 
 test("untrusted-workspace warnings survive native startup without leaking private paths or granting trust", async t => {
   const f = await fixture(t, { interactive: true }); f.hold = "initialize";

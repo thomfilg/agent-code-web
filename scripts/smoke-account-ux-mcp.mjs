@@ -38,6 +38,9 @@ async function call(name, args = {}) {
     let sanitized = value;
     for (const secret of privateFixtureValues) sanitized = sanitized.replaceAll(secret, "[fixture session redacted]");
     console.error(sanitized.slice(0, 1200));
+    // This driver only opens its disposable fixture. Preserve its failed UI
+    // before cleanup so an empty or stale picker can be diagnosed visually.
+    await client.callTool({ name: "browser_take_screenshot", arguments: { filename: path.join(screenshots, "failed-fixture.png"), fullPage: true, scale: "css" } }).catch(() => {});
   }
   assert.notEqual(result.isError, true, `${name} fixture action failed`);
   return (result.content || []).filter(item => item.type === "text").map(item => item.text).join("\n");
@@ -102,9 +105,9 @@ try {
   }
   assert.equal(app.store.list().length, 0);
   assert.equal(app.agentAccounts.list(app.googleAuth.legacyOwnerId).length, 2);
-  // Reproduce the reported company-bound accounts + connected-but-unscoped
-  // GitHub onboarding gap. These records and upstream responses are fixtures;
-  // no production account or company permission is changed.
+  // GitHub permission is provider-owned: even an old empty Relay company list
+  // must not require a second setup step. Agent/environment scopes stay intact.
+  // All records and upstream responses below belong to disposable fixtures.
   for (const account of app.agentAccounts.list(app.googleAuth.legacyOwnerId)) {
     const saved = await app.agentAccounts.get(app.googleAuth.legacyOwnerId, account.id);
     await app.agentAccounts.save({ ...saved, companies: ["12-apps", "thomfilg"], allowUnassigned: false });
@@ -120,7 +123,8 @@ try {
   };
   await app.resources.legacy.github.connect({ token: "fixture_github_credential_only", name: "Fixture GitHub", companies: [], allowUnassigned: false });
   await run(`await page.reload(); await page.locator('#welcome-new-chat').click();
-    await page.locator('#repository-results').getByRole('button',{name:/GitHub/}).waitFor();
+    await page.locator('#repository-results').getByRole('checkbox').waitFor();
+    if(await page.locator('#github-companies').count())throw Error('GitHub must not have an extra company selector');
     if (!(await page.locator('#new-agent-account').isDisabled())) throw Error('Unassigned chat must not offer company accounts');
     if (!(await page.locator('#create-chat-button').isDisabled())) throw Error('Incomplete setup must not create chats');
     const order=await page.evaluate(()=>document.querySelector('#repository-picker').compareDocumentPosition(document.querySelector('#new-agent-account-field'))&Node.DOCUMENT_POSITION_FOLLOWING);
@@ -128,16 +132,10 @@ try {
     await page.getByRole('button',{name:'Manage agent accounts',exact:true}).click();
     await page.locator('#agent-account-new').waitFor();
     await page.getByRole('button',{name:'Close agent accounts',exact:true}).click();`);
-  assert.equal(repositoryReads, 0, "No repository request before explicit GitHub company permission");
+  assert.ok(repositoryReads > 0, "Connected GitHub lists provider-authorized repositories without another permission step");
   await call("browser_resize", { width: 390, height: 1000 });
-  await shot("05-repository-first-incomplete-company-setup.png");
-  await run(`await page.locator('#repository-results').getByRole('button',{name:/GitHub/}).click();
-    await page.locator('#github-access-form').waitFor();
-    if(await page.locator('#github-companies input[type=checkbox]:checked').count())throw Error('Company permission must not be automatic');
-    await page.locator('#github-companies').getByRole('checkbox',{name:'12-apps',exact:true}).check();
-    await page.locator('#github-save-scope').click();
-    await page.locator('#github-dialog').waitFor({state:'hidden'});
-    await page.locator('#repository-results').getByRole('checkbox').check();
+  await shot("05-repositories-immediately-available.png");
+  await run(`await page.locator('#repository-results').getByRole('checkbox').check();
     await page.locator('#agent-select').selectOption('codex');
     await page.locator('#new-agent-account').selectOption({label:'Personal · codex@example.test'});
     await page.locator('#new-model-controls[data-status=ready]').waitFor();
@@ -165,7 +163,7 @@ try {
   assert.deepEqual(created[0].messages, []); assert.equal(created[0].workspaceReady, false);
   console.log(JSON.stringify({ browserTransport: "official Playwright MCP", disposableFixtures: true,
     missingAgentOnboarding: true, scopedCodexLink: true, pendingAccountDeletion: true, claudeCodeCompletion: true,
-    repositoryFirst: true, agentSettingsIcon: true, explicitGitHubCompanyAccess: true, selectedProviderAccounts: true,
+    repositoryFirst: true, agentSettingsIcon: true, githubProviderPermissions: true, noGitHubCompanySetup: true, selectedProviderAccounts: true,
     explicitEnvironmentCompanyAccess: true, retainedAccounts: 2, chatsCreated: 1, realProviderConsents: 0, modelPrompts: 0,
     responsiveWidths: [320, 390, 1600], screenshots }));
 } finally {

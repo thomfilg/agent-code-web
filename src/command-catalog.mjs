@@ -7,27 +7,54 @@ import readline from "node:readline";
 import { webCommands } from "../public/web-commands.js";
 
 const clean = item => ({ name: String(item.name || "").replace(/^\//, "").slice(0, 160), description: String(item.description || "").slice(0, 600), kind: item.kind || "CLI command", aliases: (item.aliases || []).filter(n => typeof n === "string"), ...(item.path ? { path: item.path } : {}) });
+
+// Native initialize metadata, not an invented list of terminal commands. Keep
+// only display fields: private account details and paths never enter this cache.
+export function claudeCommandMetadata(value) {
+  if (!Array.isArray(value) || value.length > 5000) return null;
+  const validName = name => typeof name === "string" && name.length > 0 && name.length <= 160 && !/[^\w:.-]/.test(name) && !name.startsWith("__");
+  const commands = new Map();
+  for (const raw of value) {
+    const item = typeof raw === "string" ? { name: raw } : raw;
+    if (!item || !validName(item.name)) continue;
+    commands.set(item.name, { name: item.name, description: typeof item.description === "string" ? item.description.slice(0, 600) : "",
+      aliases: Array.isArray(item.aliases) ? item.aliases.slice(0, 100).filter(validName) : [], kind: "CLI command" });
+  }
+  return [...commands.values()];
+}
+
+const reportedCommands = chat => Array.isArray(chat.commandCatalog) && chat.commandCatalog.length ? [...chat.commandCatalog]
+  : (Array.isArray(chat.slashCommands) ? chat.slashCommands : []).filter(name => typeof name === "string").map(name => ({ name }));
 export class CommandCatalog {
   constructor(config, models = null) { this.config = config; this.models = models; this.cache = new Map(); this.pending = new Map(); }
   async list(chat) {
-    const key = `${chat.id}:${chat.agent}:${chat.model || "default"}:${chat.commandCatalogRevision || 0}`;
+    // Admission is repeated even on cache hits. Merely opening the menu never
+    // launches a selected-account CLI, provider request or sleeping worker.
+    const account = chat.agent === "claude" && chat.agentAccountId && this.models?.accounts?.cachedCommands
+      ? await this.models.accounts.cachedCommands(chat.ownerId, chat.agentAccountId, chat) : null;
+    const key = `${chat.id}:${chat.agent}:${chat.model || "default"}:${chat.commandCatalogRevision || 0}:${chat.ownerId || ""}:${chat.agentAccountId || ""}:${account?.revision || ""}`;
     if (this.cache.get(key)?.expires > Date.now()) return this.cache.get(key).value;
     if (this.pending.has(key)) return this.pending.get(key);
-    const promise = this.discover(chat).then(value => { if (this.pending.get(key) === promise) this.cache.set(key, { value, expires: Date.now() + 60000 }); return value; }).finally(() => { if (this.pending.get(key) === promise) this.pending.delete(key); });
+    const promise = this.discover(chat, account).then(value => { if (this.pending.get(key) === promise) this.cache.set(key, { value, expires: Date.now() + 60000 }); return value; }).finally(() => { if (this.pending.get(key) === promise) this.pending.delete(key); });
     this.pending.set(key, promise); return promise;
   }
   invalidate(chatId) {
     for (const map of [this.cache, this.pending]) for (const key of map.keys()) if (key.startsWith(`${chatId}:`)) map.delete(key);
   }
-  async discover(chat) {
+  async discover(chat, account = null) {
     let items = [], note = "";
     if (chat.agent === "mock") items = [];
-    else if (this.config.workerBackend === "ec2") {
-      items = [...(chat.commandCatalog || (chat.slashCommands || []).map(name => ({ name })))];
-      note = "Last worker-reported commands. Sleeping cloud workers are not started to refresh this list.";
+    else if (this.config.workerBackend === "ec2" || chat.agent === "claude" && chat.agentAccountId) {
+      items = reportedCommands(chat);
+      // A worker's inventory (including an explicitly reported empty list) is
+      // authoritative. Account discovery supplies only the pre-worker fallback.
+      if (!items.length && !chat.commandCatalogRevision && account?.commands?.length) {
+        items = [...account.commands];
+        note = "Commands reported by Claude for the selected account. Workspace commands appear after its worker reports them.";
+      } else note = "Last worker-reported commands. Sleeping cloud workers are not started to refresh this list.";
     } else {
       try { items = chat.agent === "codex" ? await this.codex(chat) : await this.claude(chat); }
-      catch { items = chat.commandCatalog || (chat.slashCommands || []).map(name => ({ name })); note = "Command discovery unavailable. Showing web controls and last reported commands."; }
+      catch { items = reportedCommands(chat); note = "Command discovery unavailable. Showing web controls and last reported commands."; }
     }
     // skills/list gives executable Codex skills, not terminal UI settings. Old
     // cached terminal placeholders must not return as broken menu entries.

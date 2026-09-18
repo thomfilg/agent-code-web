@@ -88,14 +88,24 @@ test("capabilities are replaced on resume and isolate exact owner connection rev
   f.gateway.revokeConnection(null, cid); await assert.rejects(f.gateway.listRepositories(legacy.token));
 });
 
-test("connection revision, credential, expiry and company scope are rechecked from saved owner service", async t => {
-  for (const patch of [{ revision: 2 }, { token: "different-private-fixture" }, { expiresAt: "2000-01-01T00:00:00Z" }, { companies: ["excluded"] }]) {
+test("connection revision, credential and expiry are rechecked from saved owner service", async t => {
+  for (const patch of [{ revision: 2 }, { token: "different-private-fixture" }, { expiresAt: "2000-01-01T00:00:00Z" }]) {
     const f = await fixture(t), grant = await f.gateway.runtime(f.chat.id, "https://relay.example");
     await f.records.put("github_connection", cid, { ...await f.github.get(cid), ...patch });
     await assert.rejects(f.gateway.listRepositories(grant.token));
   }
   const f = await fixture(t), grant = await f.gateway.runtime(f.chat.id, "https://relay.example");
   await f.records.delete("github_connection", cid); await assert.rejects(f.gateway.listRepositories(grant.token));
+});
+
+test("obsolete GitHub company metadata never limits the selected repository capability", async t => {
+  const f = await fixture(t), grant = await f.gateway.runtime(f.chat.id, "https://relay.example");
+  for (const companies of [[], ["excluded"]]) {
+    await f.records.put("github_connection", cid, { ...await f.github.get(cid), companies });
+    assert.deepEqual(await f.gateway.listRepositories(grant.token), [{ id: repo.id, fullName: repo.fullName }]);
+    assert.equal(await f.gateway.withRepository(grant.token, repo.id, () => "allowed-by-github"), "allowed-by-github");
+    await assert.rejects(f.gateway.withRepository(grant.token, repo.id + 1, () => assert.fail("unselected repository")), { statusCode: 403 });
+  }
 });
 
 test("immutable repository identity is checked before any callback; no caller chooses URLs or connection", async t => {
@@ -106,7 +116,7 @@ test("immutable repository identity is checked before any callback; no caller ch
   assert.equal(executed, false);
 });
 
-test("connection scope save revokes active work BEFORE a delayed durable write", async t => {
+test("connection rename revokes active work BEFORE a delayed durable write and reissue waits for it", async t => {
   const f = await fixture(t), grant = await f.gateway.runtime(f.chat.id, "https://relay.example");
   let entered = false, aborted = false;
   const pending = f.gateway.withRepository(grant.token, 1, async ({ signal }) => {
@@ -116,13 +126,13 @@ test("connection scope save revokes active work BEFORE a delayed durable write",
   while (!entered) await tick();
   let release, writing = false; const original = f.records.put.bind(f.records);
   f.records.put = async (...args) => { writing = true; await new Promise(resolve => { release = resolve; }); return original(...args); };
-  const updating = f.github.update({ id: cid, revision: 1, name: "Personal", companies: [] });
+  const updating = f.github.update({ id: cid, revision: 1, name: "Personal" });
   assert.equal(aborted, true);
   while (!writing) await tick();
   let reissued = false;
-  const next = f.gateway.runtime(f.chat.id, "https://relay.example").then(() => { reissued = true; }); const nextRejected = assert.rejects(next);
+  const next = f.gateway.runtime(f.chat.id, "https://relay.example").then(() => { reissued = true; });
   await tick(); assert.equal(reissued, false);
-  release(); await updating; await rejected; await nextRejected;
+  release(); await updating; await rejected; await next; assert.equal(reissued, true);
 });
 
 test("disconnect immediately aborts a request during provider identity fetch and never runs callback", async t => {

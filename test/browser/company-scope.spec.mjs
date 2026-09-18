@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-test("GitHub, environments and MCPs persist multi-company availability and exclude other company credentials", async ({ page, request }) => {
+test("environments and MCPs retain company boundaries while GitHub uses its own account permissions", async ({ page, request }) => {
   const githubIds = [], mcpIds = [], environmentIds = [];
   const addCompanies = async (root, value) => {
     await page.locator(root).getByLabel("Add companies", { exact: true }).fill(value);
@@ -8,18 +8,10 @@ test("GitHub, environments and MCPs persist multi-company availability and exclu
   };
   try {
     await page.goto("/");
-    for (const [name, companies] of [["Future GitHub", "12-apps, thomfilg"], ["G2i GitHub", "g2i"]]) {
-      await page.locator("#github-button").click(); await page.locator("#github-new").click();
-      await expect(page.locator("#github-access-form")).toBeVisible();
-      await page.locator("#github-companies summary").click();
-      await page.locator("#github-connection-name").fill(name); await addCompanies("#github-companies", companies);
-      await page.getByRole("button", { name: "Save company access", exact: true }).click();
-      await expect(page.locator("#github-dialog")).not.toBeVisible();
-      const { connections } = await (await request.get("/api/github")).json(); githubIds.push(connections.find(connection => connection.name === name).id);
-    }
-    const github = await (await request.get("/api/github")).json();
-    expect(github.connections.find(connection => connection.id === githubIds[0]).companies).toEqual(["12-apps", "thomfilg"]);
-    const denied = await request.get(`/api/github/branches?repository=g2i/project&connection=${githubIds[0]}`); expect(denied.status()).toBe(403);
+    const login = await (await request.post("/api/github/device", { data: {} })).json(); githubIds.push(login.connection.id);
+    await expect.poll(async () => (await (await request.get("/api/github")).json()).connections.find(connection => connection.id === login.connection.id)?.connected).toBe(true);
+    const repositories = (await (await request.get("/api/github/repositories")).json()).repositories.filter(repo => repo.githubConnectionId === login.connection.id);
+    expect(repositories.map(repo => repo.fullName)).toContain("Other/library");
     for (const [companies, secret] of [["12-apps, thomfilg", "future-fixture"], ["g2i", "g2i-fixture"]]) {
       await page.getByRole("button", { name: "MCP connections", exact: true }).click();
       await page.locator("#mcp-new").click(); await page.locator("#mcp-name").fill("linear-team");
@@ -39,7 +31,11 @@ test("GitHub, environments and MCPs persist multi-company availability and exclu
     await page.getByRole("button", { name: "Save environment", exact: true }).click(); await expect(page.locator("#environment-save-status")).toContainText("Saved securely");
     const { environments } = await (await request.get("/api/environments")).json(), saved = environments.find(environment => environment.name === "Future company environment");
     environmentIds.push(saved.id); expect(saved.companies).toEqual(["12-apps", "thomfilg"]); expect(saved.mcpIds).toEqual([mcpIds[0]]);
-    for (const company of ["g2i", "umg"]) expect((await request.post("/api/chats", { data: { agent: "mock", environmentId: saved.id, repositories: [{ fullName: `${company}/project` }] } })).status()).toBe(403);
+    // GitHub really permits this repository; the independent environment scope
+    // must still reject its company before any worker/model is started.
+    const denied = await request.post("/api/chats", { data: { agent: "mock", environmentId: saved.id, repositories: [{ fullName: "Other/library", githubConnectionId: login.connection.id }] } });
+    expect(denied.status()).toBe(403);
+    expect((await denied.json()).error).toMatch(/^Environment .* is not available for other/);
     await page.reload(); await page.getByRole("button", { name: "Environments", exact: true }).click();
     await page.locator("#environment-tabs").getByRole("button", { name: "Future company environment", exact: true }).click({ trial: true });
     page.once("dialog", dialog => dialog.accept()); await page.locator("#environment-tabs").getByRole("button", { name: "Future company environment", exact: true }).click();

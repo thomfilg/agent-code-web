@@ -15,6 +15,7 @@ import { ClaudeSession, claudeCallResult, CLAUDE_SCHEDULE_DIAGNOSTICS } from "..
 import { claudePluginReloadRequest, reloadClaudePlugins, CLAUDE_PLUGIN_PRIVATE_ERROR } from "../claude-plugins.mjs";
 import { claudeDebugRequest, CLAUDE_DEBUG_PRIVATE_ERROR } from "../claude-debug.mjs";
 import { ClaudeWorkspaceTrust, claudeTrustProbe } from "../claude-workspace-trust.mjs";
+import { claudeCommandMetadata } from "../command-catalog.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch, now = Date.now }) {
@@ -341,7 +342,10 @@ export class ClaudeAdapter {
     try {
       if (this.applicationSession?.ended) this.applicationSession = null;
       const manage = launchArgs => {
-        const session = new ClaudeSession(spawn(launchArgs), args, env, event => this.backgroundEvent(event), {
+        const session = new ClaudeSession(spawn(launchArgs), args, env, event => {
+          if (this.stopped || ![this.turnSession, this.applicationSession].includes(session)) return;
+          return this.backgroundEvent(event);
+        }, {
           ...(interactive ? { requestHooks: this.hooks, cwd: this.workspace } : {}),
           onSchedulesChanged: () => {
             if (this.stopped || ![this.turnSession, this.applicationSession].includes(session)) return;
@@ -498,8 +502,7 @@ export class ClaudeAdapter {
         if (usage) this.hooks.onEvent?.({ type: "context_usage", usage });
       }
       if (event.type === "system" && event.subtype === "init") {
-        this.hooks.onEvent?.({ type: "session_capabilities", connectors: (event.mcp_servers || []).map(server => ({ name: server.name, status: server.status })), slashCommands: event.slash_commands || [] });
-        this.hooks.onEvent?.({ type: "session_details", details: safeSessionDetails("claude", { cwd: this.workspace, model: event.model, cliVersion: event.claude_code_version }) });
+        this.sessionMetadata(event);
       }
       if (event.type === "assistant") {
         for (const block of event.message?.content || []) {
@@ -680,10 +683,23 @@ export class ClaudeAdapter {
     catch { failed(); }
   }
 
+  sessionMetadata(event) {
+    const commands = claudeCommandMetadata(event.slash_commands);
+    this.hooks.onEvent?.({ type: "session_capabilities", ...(Array.isArray(event.mcp_servers) ? { connectors: event.mcp_servers.map(server => ({ name: server.name, status: server.status })) } : {}),
+      ...(commands ? { slashCommands: commands.map(command => command.name) } : {}) });
+    this.hooks.onEvent?.({ type: "session_details", details: safeSessionDetails("claude", { cwd: this.workspace, model: event.model, cliVersion: event.claude_code_version }) });
+  }
+
   backgroundEvent(event) {
     const raw = event;
     event = this.redactAccount(event);
     this.permissionMode(event);
+    if (!this.stopped && event.type === "command_catalog") {
+      const commands = claudeCommandMetadata(event.commands);
+      if (commands) return this.hooks.onEvent?.({ type: "command_catalog", commands });
+      return;
+    }
+    if (!this.stopped && event.type === "system" && event.subtype === "init") { this.sessionMetadata(event); return; }
     if (!this.stopped && event.type === "workspace_trust_notice") {
       this.hooks.onEvent?.({ type: "notice", text: "Claude is ignoring project permission grants because this workspace has not been trusted. Saving allow rules does not enable them. Open Chat actions → Workspace trust to review and explicitly trust this chat's private workspace; existing approval requirements remain in force." });
       return;

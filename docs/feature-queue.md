@@ -1,5 +1,19 @@
 # Feature queue — original request order
 
+Source checkpoint (2026-09-18, 15:24 UTC; rollout still pending): GitHub's extra
+company gate is removed, existing connections need no migration, and the
+default duplicate footer is hidden with observed branches in the PR strip.
+Official Playwright MCP reproduced and helped fix a startup race in New chat;
+the final disposable flow now lists GitHub repositories without a company form,
+keeps explicit agent/environment access, selects both providers and creates one
+empty Codex chat. Zero real consents/model prompts were generated. Evidence:
+1,132/1,132 full Node tests before subsequent targeted startup/Claude changes;
+17/17 startup/footer units; 46 browser cases across GitHub, account onboarding,
+scope preservation, footer/preview and early New chat; mobile/desktop inspected.
+Claude command initialization and selected-account metadata reuse passed a
+separate 125/125 focused suite and independent source review. Fable cold-start
+discovery is still being finalized; Ultracode is a separate next commit.
+
 Active objective: implement **all MVP** features requested in this conversation,
 one at a time, in original order unless an explicit priority update below says
 otherwise. New reports append without interrupting the current item and stay
@@ -23,6 +37,49 @@ user-only consent where necessary), commit/push, then take the next feature.
 This queue supersedes the narrower gap list in `remaining-goal.md`. Existing
 source changes are retained, but are not treated as deployed merely because
 tests pass. Deployment and external-account verification remain explicit gates.
+
+Latest GitHub clarification (2026-09-18): connecting a GitHub account makes all
+repositories that GitHub permits available to its owning Relay user, without
+another company form. Remove the GitHub-only allowlist; existing records work
+without migration or reconnect. User ownership, explicit connections, provider
+denials and selected-repository/branch worker grants remain enforced. Agent,
+environment and MCP scopes are unchanged. This supersedes GitHub company-step
+requirements and the historical 14:11 receipt below; see the
+[decision](adr/2026-09-18-github-provider-permissions.md). Validation is in
+progress; this refinement is not yet claimed deployed.
+
+Composer refinement (2026-09-18, item 14): remove the redundant default footer
+containing model/effort, context and branch. Keep model controls and the context
+ring; show the branch in the PR/repository strip, including before a PR exists.
+Deliberately configured custom status lines remain available.
+
+Claude model-list correction (2026-09-18): the user's installed native model
+menu includes Fable and a version-disabled Fable 5.1; Relay omits both and shows
+two Default choices. Align discovery/rendering with actual CLI/account options,
+remove duplicate default entries, and retain disabled-option reasons rather
+than inventing support. This refines the existing model/agent picker; validation
+is pending and no model prompt is authorized by this report.
+
+Ultracode clarification (2026-09-18): the user requests the missing Ultracode
+option. Inspection of the installed Claude 2.1.222 identifies a separate native
+`ultracode` setting combining xhigh effort with workflow orchestration, not an
+extra member of `supportedEffortLevels`. Implement the actual mode and its
+capability checks; relabeling xhigh alone would not satisfy this request.
+
+Claude runtime reports (2026-09-18): the command picker returns no matches for
+`/goal`; investigate the installed native command catalog and its advertised
+web capabilities rather than claiming all commands are absent from one query.
+The user also reports disabled composer controls after background Docker/pnpm
+tasks. Reproduce the actual transition and distinguish expected temporary
+switch/stop restrictions from a stuck state. Both remain open refinements of
+items 14/20; no success is inferred from the screenshot or unrelated tests.
+
+User-reported AWS acceptance (2026-09-18, 14:45 UTC): the user confirmed
+“funcionou” with a deployed screenshot of a Personal Codex/Luna chat under
+`12-apps/future-pay`, a user message and the agent response. This establishes
+user-reported deployed chat creation and Codex response in addition to earlier
+Google/Codex/Claude login confirmation. It does not establish Claude execution,
+worker restart/resume, Linear consent or authenticated preview acceptance.
 
 Delivery instruction (2026-09-16): when the current feature work is verified,
 create or update its PR and push the reviewed work so it is saved remotely.
@@ -467,7 +524,7 @@ mock or unauthenticated MCP handshake does not satisfy this gate.
 | --- | --- | --- |
 | Codex | Detect missing authentication; show a working Connect action and the supported native browser authorization URL/code. Complete sign-in from the user's browser, select a named account for the chat, run a consented real turn and resume that account after restart. Surface expired/revoked access and reconnect without falling back to the host CLI | 43/44: implementation and local/AWS activation passed; 16 account-browser fixtures pass jointly with Claude. Personal/umg are disconnected; fresh product consent and selected-account real turn/resume remain open |
 | Claude | The same complete onboarding and reconnect path, using Claude's supported native authentication flow. The selected named personal/company account must actually be used for a consented real turn and restored after restart | 43/44: implementation, local/AWS activation, reviewed regressions and authorized isolated real turn/resume passed locally and on a fresh accepted AWS worker. Fresh product browser consent and selected-product-account execution remain open |
-| GitHub | A simple Relay sign-in action runs `gh auth login` in a private account profile and gives the user the authorization URL/code. Remove token-entry and host-login options. Explicitly scope companies/repositories; list, select and clone a repository, read PR/check status, then use the selected worker's scoped Git fetch/push and PR create/edit tools. Denied/revoked access must never borrow another connection | 21: onboarding implementation and activation passed. Worker gateway integration, actual isolated Git push and scoped PR edit/create passed; fresh product consent and combined deployed selected-connection/EC2 acceptance remain open |
+| GitHub | Native `gh auth login` in a private profile returns URL/code. No token entry, host import or second company step. All repositories GitHub permits for the user-owned connection are available; worker fetch/push/PR access stays bound to selected repositories/branches. Denied/revoked access never borrows another connection | 21: native onboarding and worker gateway active; removal of redundant GitHub company gate in progress. User-reported deployed Codex chat creation passed; full selected-connection clone/write/restart acceptance remains separate |
 | Linear | Complete real browser OAuth, discover tools and perform a non-mutating authenticated workspace read through the selected agent/environment. Support independent g2i and 12-apps connections, including the same MCP name, with no cross-company credential fallback | 02/03/04/10/21: OAuth/DCR/PKCE, scoped environment integration and fixture workspace-read checks implemented and activated. Four browser fixtures pass; real browser consent and selected-environment authenticated workspace read remain open |
 | AWS deployment | A documented, repeatable script deploys the complete application at a stable HTTPS URL, validates readiness, preserves data across updates and supports rollback; verify all four integrations on the deployed application | 45: authorized infrastructure, HTTPS rollout, backup/restore, failed-rollout recovery, fresh/resumed worker, isolated native Claude, real guest Chrome and public workspace upload passed. Product integration consent/selected-account execution, authenticated deployed transports, combined selected-GitHub→EC2 acceptance and remote app forwarding remain open |
 
@@ -490,8 +547,9 @@ Common authentication acceptance:
   show “Saved” as proof of authenticated access.
 - GitHub onboarding clarification (2026-09-17): request only the inputs needed
   for native `gh auth login`, then display the authorization URL and code.
-  Keep the first screen simple; account naming and explicit company availability
-  can follow successful authentication. Remove both personal-access-token entry
+  Keep the first screen simple; optional naming can follow authentication.
+  The 2026-09-18 clarification removes the GitHub company step.
+  Remove both personal-access-token entry
   and the host-login import button. Use a separate private `gh` profile for each
   Relay account; do not switch or reuse the developer's active global account.
   This refines the already-required GitHub MVP login, not a new parallel feature.
@@ -591,7 +649,7 @@ References inspected for this request:
 | 18 | `/plan` works from the web composer | Reopened for delivery: prior task/read-only, busy-queue and failure-preservation checks; current provider runtime configuration and deployed acceptance pending |
 | 19 | Send now on individual queued messages, retaining the rest | Reopened for delivery: prior interruption/FIFO, Stop race, retry, attachment and draft checks; current deployed acceptance pending |
 | 20 | `/goal` and every available native/installed slash command work, without unsupported-terminal placeholders | Paused for the user's priority delivery re-audit of 01–14/16–19; preserve doctor MCP work, then resume remaining gaps in `command-support.md`; provider runtime/deployed native acceptance pending |
-| 21 | GitHub, environments and MCPs have explicit multi-company availability; no credential fallback/crossover, including secondary repos | MVP requirement: working GitHub login plus company-scoped GitHub/Linear use. Relay scope tests pass; audit inherited host-CLI credentials/config too; live onboarding, migration and scope acceptance pending |
+| 21 | GitHub follows provider permissions without an extra company step; agents, environments and MCPs retain company availability. No cross-user credential fallback, including secondary repos | MVP refinement in progress: remove legacy GitHub-only gate while retaining explicit connections and exact repository/branch worker grants. Historical company-save requirement superseded; full integration acceptance tracked separately |
 | 22 | Resize sidebar, chat and third-column panels | Existing source; dedicated interaction verification pending |
 | 23 | Shared Chrome viewport presets: xxs, xs, sm, md, lg, xlg | All six passed on an actual isolated AWS guest at DPR 2; authenticated deployed-product acceptance remains open |
 | 24 | Resizing changes the actual viewport correctly, without stretching or needing a new tab | Actual isolated AWS guest passed same-tab/document resizing and revisit with preserved input; authenticated deployed-product acceptance remains open |

@@ -81,7 +81,7 @@ async function finish(github, client, token = "fixture_github_token") {
   assert.equal(github.pending.size, 0);
   return (await github.status()).connections[0];
 }
-test("native start is immediate; owner-only codes stay in memory; success requires explicit company access", async () => {
+test("native start is immediate; owner-only codes stay in memory; GitHub permissions apply immediately after consent", async () => {
   const { github, clients, records } = fixture();
   const flow = await github.beginDevice();
   assert.equal(flow.connection.signIn.state, "starting"); assert.equal(flow.connection.connected, false);
@@ -90,25 +90,25 @@ test("native start is immediate; owner-only codes stay in memory; success requir
   assert.equal(JSON.stringify(await records.list("github_connection")).includes("AAAA-BBBB"), false);
   const connected = await finish(github, clients[0]);
   assert.equal(connected.login, "fixture-user"); assert.equal(connected.name, "fixture-user"); assert.equal(connected.connected, true);
-  assert.deepEqual(connected.companies, []); assert.equal(connected.allowUnassigned, false); assert.equal(connected.token, undefined);
-  await assert.rejects(github.requireConnection({ repository: "allowed/repo" }), { statusCode: 403 });
-  await github.update({ id: connected.id, revision: connected.revision, name: "Personal", companies: ["allowed"] });
-  assert.deepEqual((await github.repositories()).map(repo => repo.fullName), ["allowed/repo"]);
+  assert.equal(connected.repositoryAccess, "github"); assert.equal(connected.companies, undefined); assert.equal(connected.allowUnassigned, undefined); assert.equal(connected.scopeNeedsReview, undefined); assert.equal(connected.token, undefined);
+  assert.equal((await github.requireConnection({ repository: "allowed/repo" })).id, connected.id);
+  assert.deepEqual((await github.repositories()).map(repo => repo.fullName), ["allowed/repo", "excluded/repo"]);
+  await github.update({ id: connected.id, revision: connected.revision, name: "Personal" });
   assert.equal((await github.resolveSelections([{ fullName: "allowed/repo", githubConnectionId: connected.id }]))[0].githubConnectionId, connected.id);
   await github.close();
 });
-test("cancel and shutdown beat late authentication; retry retains id and scope; another account cannot replace it", async () => {
+test("cancel and shutdown beat late authentication; retry retains id; another account cannot replace it", async () => {
   const { github, clients, records } = fixture();
   const flow = await github.beginDevice();
   await github.cancelDevice(flow.id); clients[0].resolve("fixture_github_token"); await tick();
   let saved = await github.get(flow.connection.id); assert.equal(saved.token, null); assert.equal(clients[0].closed, true);
   await github.beginDevice({ id: saved.id, revision: saved.revision });
   let connected = await finish(github, clients[1]);
-  await github.update({ id: connected.id, revision: connected.revision, name: "Personal", companies: ["allowed"] });
+  await github.update({ id: connected.id, revision: connected.revision, name: "Personal" });
   connected = (await github.status()).connections[0];
   await github.beginDevice({ id: connected.id, revision: connected.revision });
   await finish(github, clients[2], "other_github_token");
-  saved = await github.get(connected.id); assert.equal(saved.token, null); assert.match(saved.error, /different GitHub/); assert.deepEqual(saved.companies, ["allowed"]);
+  saved = await github.get(connected.id); assert.equal(saved.token, null); assert.match(saved.error, /different GitHub/); assert.equal(saved.companies, undefined);
   await github.beginDevice({ id: saved.id, revision: saved.revision });
   await github.close(); assert.equal((await records.get("github_connection", saved.id)).token, null); assert.equal(clients[3].closed, true);
 });
@@ -122,6 +122,16 @@ test("restart never revives lost native processes; user namespaces reject anothe
   const saved = (await recovered.github.status()).connections[0];
   assert.equal(saved.connected, false); assert.equal(saved.signIn, undefined); assert.match(saved.error, /restarted/);
   await alice.github.close(); await bob.github.close(); await recovered.github.close();
+});
+test("a connected owner's repositories and credential remain invisible to another Google user", async () => {
+  const records = new MemoryRecords(), alice = fixture(userRecords(records, "alice")), bob = fixture(userRecords(records, "bob"));
+  const connected = (await alice.github.connect({ token: "fixture_github_token" })).connection;
+  assert.equal((await alice.github.repositories()).length, 2);
+  assert.deepEqual(await bob.github.repositories(), []);
+  await assert.rejects(bob.github.requireConnection({ connectionId: connected.id, repository: "allowed/repo" }), { statusCode: 404 });
+  await assert.rejects(bob.github.resolveSelections([{ fullName: "allowed/repo", githubConnectionId: connected.id }]), { statusCode: 404 });
+  assert.equal(bob.calls.length, 0);
+  await alice.github.close(); await bob.github.close();
 });
 test("cancellation during GitHub identity verification cannot persist a late token", async () => {
   const { github, clients } = fixture();
@@ -141,6 +151,70 @@ test("public update endpoints reject token and server profile imports regardless
   }
   await assert.rejects(github.connect({ method: "local" }), /Server credentials/);
   await github.close();
+});
+test("obsolete public company updates fail explicitly without changing the saved connection", async () => {
+  const { github, records } = fixture();
+  const connected = (await github.connect({ token: "fixture_github_token" })).connection;
+  const before = await github.get(connected.id);
+  for (const input of [{ companies: [] }, { companies: ["allowed"] }, { organization: "allowed" }, { allowUnassigned: true }]) {
+    const value = { id: connected.id, revision: connected.revision, name: "Unapplied rename", ...input };
+    await assert.rejects(github.update(value), error => error.statusCode === 400 && /Reload Relay/.test(error.message));
+    await assert.rejects(github.beginDevice(value), error => error.statusCode === 400 && /Reload Relay/.test(error.message));
+  }
+  assert.deepEqual(await github.get(connected.id), before);
+  assert.equal(github.pending.size, 0);
+  await github.close();
+});
+test("listing started with an old credential cannot continue pagination or publish cache after reconnect", async () => {
+  const { github, records } = fixture();
+  const connected = (await github.connect({ token: "fixture_github_token" })).connection;
+  let release, started = false, requests = 0;
+  github.fetch = async () => { requests++; started = true; return new Promise(resolve => { release = () => resolve(Response.json(Array.from({ length: 100 }, (_, index) => ({ id: index + 1, full_name: `old/repo${index}`, name: `repo${index}` })))); }); };
+  const listing = assert.rejects(github.repositories(), { statusCode: 409 }); while (!started) await tick();
+  await records.put("github_connection", connected.id, { ...await github.get(connected.id), revision: connected.revision + 1, token: "fixture_reconnected_token" });
+  release(); await listing; assert.equal(github.cache.has(connected.id), false); assert.equal(requests, 1);
+  await github.close();
+});
+test("cached repository lists bind both credential identity and revision", async () => {
+  const { github, records } = fixture();
+  const connected = (await github.connect({ token: "fixture_github_token" })).connection;
+  assert.equal((await github.repositories()).length, 2);
+  await records.put("github_connection", connected.id, { ...await github.get(connected.id), token: "fixture_new_credential" });
+  let requests = 0;
+  github.fetch = async (_url, options) => { requests++; assert.equal(options.headers.authorization, "Bearer fixture_new_credential"); return Response.json([{ id: 42, full_name: "current/repo", name: "repo" }]); };
+  assert.deepEqual((await github.repositories()).map(repo => repo.fullName), ["current/repo"]);
+  assert.equal(requests, 1); await github.close();
+});
+test("a multi-account listing rechecks earlier connections after later provider work", async () => {
+  const { github, records } = fixture();
+  const first = (await github.connect({ token: "fixture_first_token" })).connection;
+  await github.connect({ token: "fixture_second_token" });
+  let release, held = false;
+  github.fetch = async (_url, options) => {
+    if (options.headers.authorization === "Bearer fixture_first_token") return Response.json([{ id: 1, full_name: "first/repo", name: "repo" }]);
+    held = true; return new Promise(resolve => { release = () => resolve(Response.json([])); });
+  };
+  const listing = assert.rejects(github.repositories(), { statusCode: 409 }); while (!held) await tick();
+  await records.delete("github_connection", first.id); release(); await listing; await github.close();
+});
+test("a mutation during the final multi-account validation cannot publish an earlier stale connection", async () => {
+  const { github, records } = fixture();
+  const first = (await github.connect({ token: "fixture_first_token" })).connection;
+  const second = (await github.connect({ token: "fixture_second_token" })).connection;
+  await github.repositories(); // Exercise the compact cached path, not provider work.
+  const originalGet = records.get.bind(records); let secondReads = 0, release, held = false;
+  records.get = async (kind, id) => {
+    const snapshot = await originalGet(kind, id);
+    if (kind === "github_connection" && id === second.id && ++secondReads === 3) {
+      held = true; await new Promise(resolve => { release = resolve; });
+    }
+    return snapshot;
+  };
+  const listing = assert.rejects(github.repositories(), { statusCode: 409 });
+  for (let attempt = 0; attempt < 100 && !held; attempt++) await tick();
+  assert.equal(held, true, "second connection's final read must be gated");
+  await github.update({ id: first.id, revision: first.revision, name: "Renamed while listing" });
+  release(); await listing; await github.close();
 });
 test("failed sign-in output stays private and outstanding native processes are bounded per user", async () => {
   const { github, clients } = fixture();

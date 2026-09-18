@@ -1,5 +1,18 @@
 # AWS MVP operations
 
+Current product clarification (2026-09-18): the GitHub company-selection step
+described in historical receipts below is superseded by
+[provider-authorized repository access](adr/2026-09-18-github-provider-permissions.md).
+The refinement is being validated, not yet claimed deployed. Existing saved
+connections will work without migration or new consent. Other user/agent/
+environment/MCP and selected-worker-repository boundaries remain enforced.
+
+At 14:45 UTC the user reported successful deployed chat creation and supplied a
+Personal Codex/Luna response screenshot under `12-apps/future-pay`. This is
+user-reported real execution evidence, not a fixture or operator-submitted
+prompt. Claude execution, restart/resume, Linear and preview remain separate
+acceptance gates.
+
 Deployment target authorized on 2026-09-18:
 
 | Setting | Value |

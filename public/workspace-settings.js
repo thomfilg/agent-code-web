@@ -1,5 +1,5 @@
 import { ModelPicker } from "./model-picker.js";
-import { companyForChat, companyScope, scopeAllows, scopeLabel, scopesOverlap } from "./company-scope.js";
+import { companyForChat, scopeAllows, scopeLabel, scopesOverlap } from "./company-scope.js";
 import { CompanyPicker, knownCompanies } from "./company-picker.js";
 import { GitHubAccounts } from "./github-accounts.js";
 const $ = selector => document.querySelector(selector);
@@ -29,8 +29,26 @@ export class WorkspaceSettings {
     $("#add-variable").addEventListener("click", () => { this.draft.variables.push({ key: "", value: "", secret: true, enabled: true }); this.renderVariables(); $("#variables-table-body tr:last-child input").focus(); });
     $("#environments-dialog").addEventListener("close", () => { this.draft = null; $("#variables-table-body").replaceChildren(); });
   }
-  async load() {
-    const [github, environments, saved, mcps] = await Promise.all([this.api("/api/github"), this.api("/api/environments"), this.api("/api/preferences"), this.api("/api/mcps")]);
+  load(options) { return this.loading = this.loadSnapshot(options); }
+  async loadCurrent() {
+    let pending = this.load();
+    // Follow replacement requests already in flight, never poll/retry the API.
+    // Repeated account changes fail visibly instead of starting an unbounded loop.
+    for (let changes = 0; changes < 4; changes++) {
+      const loaded = await pending;
+      if (pending === this.loading) {
+        if (!loaded) throw new Error("Settings changed while loading. Reopen this dialog to retry.");
+        return;
+      }
+      pending = this.loading;
+    }
+    throw new Error("Settings changed while loading. Reopen this dialog to retry.");
+  }
+  async loadSnapshot({ validWhile = () => true } = {}) {
+    if (!this.state.config) throw new Error("Relay is still loading. Try again in a moment.");
+    const request = this.loadRequest = (this.loadRequest || 0) + 1;
+    const [github, environments, saved, mcps, accounts] = await Promise.all([this.api("/api/github"), this.api("/api/environments"), this.api("/api/preferences"), this.api("/api/mcps"), this.state.config.features?.agentAccounts ? this.api("/api/agent-accounts") : { accounts: [] }]);
+    if (request !== this.loadRequest || !validWhile()) return false;
     const repositoryScope = JSON.stringify(github.connections || []);
     if (this.repositoryScope !== repositoryScope) {
       this.repositoryScope = repositoryScope; this.repositoryRequest++;
@@ -39,7 +57,7 @@ export class WorkspaceSettings {
     this.mcps = mcps.connections;
     this.github = github; this.environments = environments.environments; this.software = environments.software;
     this.preferences = saved.preferences;
-    this.accounts = this.state.config.features?.agentAccounts ? (await this.api("/api/agent-accounts")).accounts : [];
+    this.accounts = accounts.accounts;
     if (!$("#new-chat-dialog").open) this.selected = structuredClone(saved.preferences.repositories || []);
     $("#github-button").textContent = github.connected ? `GitHub · ${github.login}` : "Connect GitHub";
     $("#github-requirement").hidden = github.connected;
@@ -47,6 +65,7 @@ export class WorkspaceSettings {
     $("#create-chat-button").disabled = !github.connected;
     this.renderEnvironments();
     this.renderRepositories();
+    return true;
   }
   renderEnvironments() {
     const selected = $("#environment-select").value || this.preferences?.environmentId;
@@ -93,7 +112,7 @@ export class WorkspaceSettings {
   }
   async openNew() {
     $("#create-chat-error").textContent = "";
-    await this.load();
+    await this.loadCurrent();
     this.selected = structuredClone(this.preferences.repositories || []);
     if (this.preferences.agent && [...$("#agent-select").options].some(o => o.value === this.preferences.agent)) $("#agent-select").value = this.preferences.agent;
     this.modelPicker.key = null;
@@ -122,12 +141,10 @@ export class WorkspaceSettings {
     const results = $("#repository-results"); results.replaceChildren();
     const status = (text, { error = false, manage = false, retry = false } = {}) => {
       const message = el("p", error ? "form-error" : "muted", text); message.id = "repository-status"; message.setAttribute("role", error ? "alert" : "status"); results.append(message);
-      if (manage) { const action = button("Manage GitHub company access", () => this.openGitHub()); action.id = "repository-manage-github"; results.append(action); }
+      if (manage) { const action = button("Manage GitHub accounts", () => this.openGitHub()); action.id = "repository-manage-github"; results.append(action); }
       if (retry) { const action = button("Retry loading repositories", () => this.loadRepositories(true)); action.id = "repository-retry"; results.append(action); }
     };
     if (this.repositoryLoading) return status("Loading repositories…");
-    if (this.github?.connected && !(this.github.connections || []).some(connection => connection.connected && companyScope(connection).companies.length))
-      return status("GitHub is connected, but no companies are allowed. Configure company access to choose repositories.", { manage: true });
     if (this.repositoryError) return status("Could not load repositories. Check your GitHub connection and retry.", { error: true, manage: true, retry: true });
     for (const repo of this.repositories.filter(repo => repo.fullName.toLowerCase().includes(query))) {
       const label = el("label", "repository-option"); const input = el("input"); input.type = "checkbox"; input.checked = this.selected.some(item => item.fullName === repo.fullName && (!item.githubConnectionId || item.githubConnectionId === repo.githubConnectionId));
@@ -138,7 +155,7 @@ export class WorkspaceSettings {
       });
       label.append(input, el("span", "", repo.fullName), el("small", "", `${repo.private ? "Private" : "Public"}${repo.connectionName ? ` · ${repo.connectionName}` : ""}`)); results.append(label);
     }
-    if (!results.childElementCount) status(this.repositories.length ? "No repositories match your search." : "No repositories are available for the allowed companies. Check GitHub permissions or refresh the list.", { manage: !this.repositories.length, retry: !this.repositories.length });
+    if (!results.childElementCount) status(this.repositories.length ? "No repositories match your search." : "No repositories are available from your connected GitHub accounts. Check GitHub permissions or refresh the list.", { manage: !this.repositories.length, retry: !this.repositories.length });
   }
   renderSelected() {
     this.renderEnvironments();
@@ -191,7 +208,8 @@ export class WorkspaceSettings {
     $("#environment-error").textContent = "";
     $("#environment-tabs").replaceChildren(...this.environments.map(env => button(env.name, () => { if (confirm("Switch environments? Unsaved edits will be discarded.")) this.editEnvironment(env); }, `environment-tab${environment?.id === env.id ? " selected" : ""}`)));
     $("#environment-name").value = this.draft.name;
-    this.environmentCompanies.set(this.draft, knownCompanies(this.state, [...this.environments, ...this.mcps, ...(this.github.connections || [])]));
+    const companyState = { ...this.state, chats: [...(this.state.chats || []), ...this.selected.map(repository => ({ repositories: [repository] }))] };
+    this.environmentCompanies.set(this.draft, knownCompanies(companyState, [...this.environments, ...this.mcps, ...(this.accounts || [])]));
     this.renderEnvironmentMcps();
     $("#environment-setup-script").value = this.draft.setupScript || "";
     $("#environment-archived").checked = Boolean(this.draft.archived);

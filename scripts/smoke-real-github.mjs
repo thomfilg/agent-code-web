@@ -29,7 +29,7 @@ try {
   const options = { config: { apiBase: "https://api.github.com" } };
   github = new GitHubConnection({ ...options, records: userRecords(records, "authorized-smoke-owner") });
   // Internal test-only seeding: public HTTP endpoints reject token imports.
-  const connection = (await github.connect({ token, name: "Authorized read-only smoke", companies: [account] })).connection;
+  const connection = (await github.connect({ token, name: "Authorized read-only smoke" })).connection;
   assert.equal(connection.login, account);
   assert.ok(!JSON.stringify(await github.status()).includes(token));
   const stored = await records.pool.query("SELECT payload FROM relay_records WHERE kind=$1", ["user:authorized-smoke-owner:github_connection"]);
@@ -49,11 +49,11 @@ try {
   github = new GitHubConnection({ ...options, records: userRecords(records, "authorized-smoke-owner") });
   assert.equal((await github.status()).connections[0].id, connection.id);
   assert.equal((await github.request("/user", { connectionId: connection.id })).login, account);
-  await assert.rejects(github.request("/repos/not-authorized/repository", { connectionId: connection.id }), { statusCode: 403 });
+  await assert.rejects(github.request("/repos/not-authorized/repository", { connectionId: connection.id }), error => [403, 404].includes(error.statusCode));
   const another = new GitHubConnection({ ...options, records: userRecords(records, "other-smoke-user") });
   assert.equal((await another.status()).connections.length, 0);
   await assert.rejects(another.get(connection.id), { statusCode: 404 }); await another.close();
-  console.log(JSON.stringify({ credentialSource: "explicitly authorized local test copy; not new OAuth consent", encryptedRestart: true, account, repository, scopedListing: true, selectedClone: true, noPersistedGitCredential: true, pullRequestRead: true, checksRead: true, crossCompanyDenied: true, crossUserDenied: true, remoteWrites: false }));
+  console.log(JSON.stringify({ credentialSource: "explicitly authorized local test copy; not new OAuth consent", encryptedRestart: true, account, repository, providerAuthorizedListing: true, selectedClone: true, noPersistedGitCredential: true, pullRequestRead: true, checksRead: true, providerDeniedRepository: true, crossUserDenied: true, remoteWrites: false }));
 } catch {
   console.error("GitHub real read-only smoke failed. Sensitive subprocess and credential output suppressed."); process.exitCode = 1;
 } finally {

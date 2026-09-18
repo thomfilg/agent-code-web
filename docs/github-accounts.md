@@ -5,14 +5,15 @@
 Open **GitHub connections → Add GitHub connection**. Relay immediately shows
 Connecting, then places the code, authorization link and cancel action inside
 that connection's card. Open GitHub, enter the code and approve the desired
-account. After success, name the connection and explicitly choose its allowed
-companies. Nothing is preselected. Choose repositories and that connection
-when creating a conversation.
+account. After success, all repositories that GitHub permits that identity to
+access are available immediately. Naming is optional. Choose repositories and
+that connection when creating a conversation. Previously saved connections
+also work without a second Relay company form or a new sign-in.
 
-Multiple independent connections are supported. Company edits are revision
-checked. Company and user boundaries are enforced in repository listing,
-branch selection, cloning and PR/check requests, including secondary
-repositories. A missing/revoked/ambiguous connection never borrows another
+Multiple independent connections are supported. Name edits are revision
+checked. Connections belong only to their signed-in Relay user; GitHub controls
+repository and branch permissions, including secondary repositories.
+A missing/revoked/ambiguous connection never borrows another
 account's credentials. Reconnect operates on the saved account, not a repeated
 creation form; approving another GitHub identity is rejected.
 
@@ -28,9 +29,16 @@ Install GitHub CLI (`gh`, or configure `AGENT_GITHUB_CLI`) on the controller;
 outbound HTTPS to GitHub is required. No custom OAuth client ID, token entry,
 or server-login import is needed. The global CLI account is never switched.
 The native temporary-profile and same-OS-user boundary are documented in
-[the ADR](adr/0001-native-github-accounts.md).
+[the native-login ADR](adr/0001-native-github-accounts.md). The
+[provider-permissions decision](adr/2026-09-18-github-provider-permissions.md)
+supersedes the earlier GitHub company allowlist. Agent, environment and MCP
+scopes are unchanged. Workers still receive revocable access only to their
+selected repositories and branches, not every listed repository.
 
-## Validation (2026-09-18)
+## Historical validation (2026-09-18, before provider-permissions refinement)
+
+These receipts describe the earlier implementation. Current validation and
+deployment are tracked in [the feature queue](feature-queue.md).
 
 - The installed gh 2.89.0 issued a real device code in 364 ms using a fresh
   isolated profile. The attempt was cancelled without browser consent; its

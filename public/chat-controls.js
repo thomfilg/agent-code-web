@@ -6,6 +6,19 @@ function link(label, url) { const node = el("a", label); node.href = url; node.t
 const ghUrl = (repo, suffix = "") => /^[\w.-]+\/[\w.-]+$/.test(repo || "") ? `https://github.com/${repo}${suffix}` : null;
 const count = value => Number.isFinite(value) ? new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(value) : "Unavailable";
 
+// Selected checkout defaults are not proof of the worker's current branch.
+// Use observed snapshots only, and do not repeat a branch already shown by a PR.
+export function branchesWithoutPullRequests(chat) {
+  const observed = value => typeof value === "string" && value.trim() ? value.trim().slice(0, 4096) : null;
+  const repositories = chat.repositories?.length ? chat.repositories : [{ fullName: null }];
+  return repositories.flatMap((repository, index) => {
+    const branch = (index === 0 ? observed(chat.workspaceStatus?.branch) : null)
+      || observed(chat.gitBranches?.find(item => item.repository === repository.fullName)?.branch);
+    if (!branch || (chat.pullRequests || []).some(pr => pr.repository?.toLowerCase() === repository.fullName?.toLowerCase() && pr.headRef === branch)) return [];
+    return [{ repository: repository.fullName, branch }];
+  });
+}
+
 export class ChatControls {
   constructor(options) {
     Object.assign(this, options); this.drafts = new Map(); this.hiddenPRs = new Set(); this.uploads = new Map();
@@ -60,7 +73,7 @@ export class ChatControls {
     $("#usage-ring").style.setProperty("--usage", `${percentage}%`);
     $("#archive-current-chat").textContent = chat.archived ? "Unarchive" : "Archive";
     $("#edit-chat-environment").disabled = !chat.environmentId;
-    const signature = JSON.stringify([chat.id, chat.repositories, chat.gitBranches, chat.pullRequests, chat.githubSyncWarning]);
+    const signature = JSON.stringify([chat.id, chat.repositories, chat.gitBranches, chat.workspaceStatus?.branch, chat.pullRequests, chat.githubSyncWarning]);
     if (signature !== this.signature) { this.signature = signature; this.repositories(chat); this.pullRequests(chat); }
     this.renderAttachments();
     const goalStatus = $("#goal-status"); goalStatus.replaceChildren();
@@ -213,6 +226,13 @@ export class ChatControls {
       const fix = el("label", undefined, "checkbox-label"); const fixing = document.createElement("input"); fixing.type = "checkbox"; fixing.disabled = true;
       fix.append(fixing, el("span", "Auto-fix CI & comments · not available")); body.append(fix, el("p", "CI checks refresh every minute. Auto-merge follows GitHub repository rules; no admin bypass.", "muted"));
       ci.append(summary, body); row.append(ci, button("×", () => { this.hiddenPRs.add(`${chat.id}:${pr.repository}:${pr.number}`); this.pullRequests(chat); }, "small-icon")); root.append(row);
+    }
+    for (const ref of branchesWithoutPullRequests(chat)) {
+      const row = el("div", undefined, "pull-request-bar branch-only"); row.setAttribute("role", "group"); row.setAttribute("aria-label", `Git branch for ${ref.repository || "workspace"}`);
+      const icon = el("span", "⑂"); icon.setAttribute("aria-hidden", "true");
+      const branch = el("span", `${ref.repository?.split("/")[1] || "Workspace"} · ${ref.branch}`, "pr-branch");
+      branch.title = `${ref.repository || "Workspace"} · ${ref.branch}`;
+      row.append(icon, branch); root.append(row);
     }
   }
   async showChanges(pr = this.state.active?.pullRequests?.at(-1)) {

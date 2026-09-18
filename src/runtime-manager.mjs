@@ -1733,7 +1733,7 @@ export class RuntimeManager extends EventEmitter {
       this.commands?.invalidate(chatId);
       this.publishChat(await this.store.update(chatId, { usageAccount: null, rateLimits: null })); return;
     }
-    if (event.type === "command_catalog") { await this.#refreshCommandCatalog(chatId, { commandCatalog: event.commands }); return; }
+    if (event.type === "command_catalog") { await this.#refreshCommandCatalog(chatId, { commandCatalog: event.commands, slashCommands: event.commands.map(command => command.name) }); return; }
     if (event.type === "session_capabilities") {
       await this.#refreshCommandCatalog(chatId, { ...(event.connectors !== undefined ? { connectors: event.connectors } : {}), ...(event.slashCommands !== undefined ? { slashCommands: event.slashCommands } : {}) }); return;
     }

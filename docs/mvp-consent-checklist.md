@@ -6,13 +6,22 @@ Record results separately for local Relay and AWS; they do not share accounts
 or conversations. Do not import host logins, copy cookies or disable access
 checks to pass a gate.
 
+Latest user-reported AWS results (2026-09-18): Google login and both Codex/Claude
+connections work. At 14:45 UTC the user also confirmed a Personal Codex/Luna chat
+and supplied its deployed response screenshot under `12-apps/future-pay`.
+Do not ask to repeat those consents just because historical checklist rows below
+remain granular. Account reload/revocation, Claude execution, selected-worker
+GitHub operations, restart/resume, Linear and preview checks are separate gates.
+
 ## 1. Google cloud sign-in
 
 Observed on 2026-09-18 at 09:59 UTC with official Playwright MCP: the deployed
 button reached `accounts.google.com`, which returned **Error 400:
 redirect_uri_mismatch**. No identity, password or consent was supplied. Register
 the exact cloud callback below before trying provider onboarding; restarting
-Relay or re-entering the Google client secret cannot register that URI.
+Relay or re-entering the Google client secret cannot register that URI. This
+initial blocker was subsequently resolved by the user's callback registration
+and reported successful AWS login.
 The reviewed [repeatable probe](deployed-login-probe.md) confirmed the same
 result at 10:10 UTC and can recheck provider initiation after configuration;
 it never completes account consent.
@@ -53,9 +62,10 @@ Repeat separately for each intended personal/company identity:
 - [ ] **Connect GitHub** (or **GitHub · …**) → **＋ Add GitHub connection** →
   **Open GitHub sign-in**. User enters the displayed code and approves the
   intended GitHub identity. Expected: **Signed in as …** on its own card.
-- [ ] **Company access** (also opened after successful consent): set a meaningful
-  **Connection name**, check only the intended companies → **Save company access**.
-  There is no PAT-entry or server-login-import step.
+- [ ] Repositories permitted by the connected GitHub account become available
+  without any Relay company-access step, including existing saved connections.
+  A display-name change is optional. There is no PAT-entry, server-login import
+  or second organization authorization form in Relay.
 - [ ] **New chat** → **Choose repositories**: find the intended repository,
   verify the connection name shown alongside it, select its branch, and confirm
   the first repository determines the intended company. Repository/branch listing

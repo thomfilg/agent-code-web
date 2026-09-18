@@ -6,25 +6,25 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { GitHubWorkerGateway } from "../src/github-worker-gateway.mjs";
 import { handleGitHubWorkerMcp, runGitHubPrTool } from "../src/github-worker-mcp.mjs";
-import { scopeAllows } from "../public/company-scope.js";
 
 const selected = { id: 12, fullName: "example/project", githubConnectionId: "github_alice", branch: "main", defaultBranch: "main" };
 const input = { repositoryId: 12, repository: "example/project", head: "feature/mvp", base: "main", title: "MVP", body: "Description" };
 async function fixture(t, options = {}) {
   const chat = { id: "chat_123", ownerId: "alice", repositories: [{ ...selected }] }, calls = [], serviceOwners = [];
-  const record = { id: "github_alice", revision: 1, token: "PRIVATE-PAT-STAYS-ON-CONTROLLER", companies: ["example"], expiresAt: null };
-  const state = { currentChat: chat, record, hook: null, alive: true, now: 0, upstreamId: 12 };
+  const record = { id: "github_alice", revision: 1, token: "PRIVATE-PAT-STAYS-ON-CONTROLLER", companies: [], expiresAt: null };
+  const state = { currentChat: chat, record, hook: null, alive: true, now: 0, upstreamId: 12, providerAccess: true };
   const github = {
     queue: Promise.resolve(),
-    async requireConnection({ connectionId, repository, chatCompany }) {
+    async requireConnection({ connectionId }) {
       const current = state.record;
-      if (!current || current.id !== connectionId || !current.token || !scopeAllows(current, repository.split("/")[0]) || !scopeAllows(current, chatCompany) ||
+      if (!current || current.id !== connectionId || !current.token ||
           (current.expiresAt && Date.parse(current.expiresAt) <= Date.now())) throw Error("PRIVATE-CONNECTION-DETAIL");
       return { ...current };
     },
     async request(route, options) {
       calls.push({ route, options });
       if (state.hook) await state.hook(route, options);
+      if (!state.providerAccess) throw Object.assign(Error("PRIVATE-PROVIDER-DENIAL"), { statusCode: 403 });
       if (route === "/repos/example/project") return { id: state.upstreamId, full_name: "example/project" };
       if (route.includes("/branches/")) return { name: decodeURIComponent(route.split("/branches/")[1]), commit: { sha: "a".repeat(40) } };
       return { number: 73, state: "open", merged: false, head: { ref: "feature/mvp", repo: { id: 12, full_name: "example/project" } },
@@ -138,9 +138,30 @@ test("real GitHub worker gateway admits MCP only through saved owner/connection 
   assert.equal((await runGitHubPrTool(f.gateway, f.token, "github_create_pull_request", input)).isError, true);
   assert.equal(f.calls.length, before + 1, "mismatched immutable ID denies before branch reads or writes");
 });
-test("real gateway refuses owner/company/selection/revision/token/expiry and runtime changes without provider mutation", async t => {
+test("legacy GitHub company metadata is inert; provider permission and the exact selected repository still govern PR access", async t => {
+  const f = await fixture(t);
+  for (const companies of [[], ["unrelated-company"]]) {
+    f.state.record.companies = companies;
+    const result = await runGitHubPrTool(f.gateway, f.token, "github_create_pull_request", input);
+    assert.equal(result.isError, undefined);
+    assert.equal(f.calls.at(-1).options.connectionId, "github_alice");
+  }
+  f.calls.length = 0;
+  const wrongId = await runGitHubPrTool(f.gateway, f.token, "github_create_pull_request", { ...input, repositoryId: 99 });
+  assert.equal(wrongId.isError, true); assert.equal(f.calls.length, 0);
+  const wrongName = await runGitHubPrTool(f.gateway, f.token, "github_create_pull_request", { ...input, repository: "other/project" });
+  assert.equal(wrongName.isError, true);
+  assert.deepEqual(f.calls.map(call => call.route), ["/repos/example/project"], "a mismatched name cannot direct the grant to another repository");
+  f.calls.length = 0;
+  f.state.providerAccess = false;
+  const denied = await runGitHubPrTool(f.gateway, f.token, "github_create_pull_request", input);
+  assert.equal(denied.isError, true); assert.doesNotMatch(JSON.stringify(denied), /PRIVATE/);
+  assert.deepEqual(f.calls.map(call => call.route), ["/repos/example/project"]);
+  assert.equal(f.calls.some(call => call.options.method === "POST"), false);
+});
+test("real gateway refuses owner/selection/branch/connection/revision/token/expiry and runtime changes without provider mutation", async t => {
   for (const mutate of [f => f.chat.ownerId = "bob", f => f.chat.repositories[0].fullName = "other/project", f => f.chat.repositories[0].id = 99,
-    f => f.chat.repositories[0].githubConnectionId = "github_other", f => f.state.record.companies = ["other"],
+    f => f.chat.repositories[0].githubConnectionId = "github_other", f => f.chat.repositories[0].branch = "changed-branch",
     f => f.state.record.revision++, f => f.state.record.token = "PRIVATE-ROTATED", f => f.state.record.expiresAt = "2000-01-01T00:00:00Z",
     f => f.state.currentChat = null, f => f.state.alive = false, f => f.state.now = 60001, f => f.gateway.revokeChat(f.chat.id)]) {
     const f = await fixture(t); mutate(f);

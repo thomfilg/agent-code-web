@@ -25,7 +25,7 @@
           <button class="icon-button mobile-only" id="close-sidebar" aria-label="Close chats">×</button>
         </div>
 
-        <button class="new-chat-button" id="new-chat-button">
+        <button class="new-chat-button" id="new-chat-button" disabled title="Loading your accounts and repositories…">
           <span aria-hidden="true">＋</span>
           New chat
           <kbd>⌘ K</kbd>
@@ -91,7 +91,7 @@
           <p class="eyebrow">YOUR AGENTS, ON DEMAND</p>
           <h2>Start work here.<br>Let the machine disappear later.</h2>
           <p>Create an isolated chat workspace for Codex or Claude Code. Responses stream here, state survives, and idle workers shut down automatically.</p>
-          <button class="primary-button" id="welcome-new-chat">Create your first chat <span>→</span></button>
+          <button class="primary-button" id="welcome-new-chat" disabled title="Loading your accounts and repositories…">Create your first chat <span>→</span></button>
           <div class="feature-strip">
             <span>Separate workspace</span>
             <span>Live CLI events</span>
@@ -311,15 +311,13 @@
     <dialog id="github-dialog" aria-labelledby="github-dialog-title">
       <div class="dialog-card">
         <div class="dialog-heading"><h2 id="github-dialog-title">GitHub connections</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close GitHub dialog">×</button></div>
-        <p class="muted">Connect your own GitHub account. Then choose which companies can use it.</p>
+        <p class="muted">Connect your own GitHub account to choose from the repositories it can access.</p>
         <div id="github-account-list" class="agent-account-list" aria-live="polite"></div>
         <button type="button" class="secondary-button" id="github-new">＋ Add GitHub connection</button>
-        <form id="github-access-form" hidden>
-          <h3 id="github-access-title">Company access</h3>
+        <form id="github-rename-form" hidden>
+          <h3 id="github-rename-title">Rename connection</h3>
           <label><span>Connection name</span><input id="github-connection-name" maxlength="80" required placeholder="e.g. Personal GitHub"></label>
-          <div id="github-companies"></div>
-          <p class="muted">Only checked companies can use this account. You choose repositories when creating a conversation.</p>
-          <div class="dialog-actions"><button type="button" class="secondary-button" id="github-access-cancel">Cancel</button><button type="submit" class="primary-button" id="github-save-scope">Save company access</button></div>
+          <div class="dialog-actions"><button type="button" class="secondary-button" id="github-rename-cancel">Cancel</button><button type="submit" class="primary-button" id="github-save-name">Save name</button></div>
         </form>
         <p class="form-error" id="github-error" role="alert"></p>
         <details><summary>About GitHub access</summary><p class="muted">Sign-in uses a private GitHub CLI profile. Server logins are never imported. Credentials are encrypted on the controller; local workers share its host filesystem. Use isolated cloud workers for a stronger boundary. Disconnect removes the saved credential from Relay, not GitHub’s own authorization.</p></details>

@@ -400,22 +400,28 @@ invalidated on the next GitHub API request.
 
 ### Company availability and credential separation
 
-GitHub connections, environments and MCP connections each have an **Available
+Agent accounts, environments and MCP connections each have an **Available
 companies** selector. Check several owners (for example `12-apps` and `thomfilg`)
 without granting access to `g2i` or `umg`. Add missing owner names in the form.
 The chat's first repository determines its company; moving its sidebar group or
 adding secondary repositories never changes that authorization scope.
 
+GitHub is different: connecting your account is enough to list every repository
+that GitHub permits that account to access, including organizations. There is no
+second Relay company-selection step, including for existing saved connections.
 Save separate GitHub and MCP connections for different accounts. Repository
-selections retain their GitHub connection ID. A credential must allow both the
-repository's owner and the chat's primary company before Relay can clone it or
-read/update its PRs. Ambiguous GitHub matches require an explicit connection;
-Relay never silently tries another company's token. Clone authentication is
-transient and restricted to the exact repository URL.
+selections retain their GitHub connection ID. Multiple connected GitHub accounts
+require an explicit connection choice; denied access never tries another token.
+Credentials stay private to the signed-in Relay user. Workers receive access
+only to the exact repositories/branches selected for their chat, not the whole
+GitHub account. Clone authentication is transient and restricted to the exact
+repository URL. GitHub revocation, organization SSO and repository permissions
+remain authoritative. See the [GitHub access decision](docs/adr/2026-09-18-github-provider-permissions.md).
 
-An empty company list grants no company access. **Unassigned chats** explicitly
-allows scratch workspaces, not every company. Legacy global credentials remain
-saved and encrypted but require an explicit company selection before reuse;
+For agent accounts, environments and MCPs, an empty company list grants no
+company access. **Unassigned chats** explicitly allows scratch workspaces, not
+every company. Those legacy global credentials remain saved and encrypted but
+require an explicit company selection before reuse;
 old singular MCP organization scopes migrate to the same single company.
 Removing a company or MCP selection revokes existing HTTP MCP grants and streams
 immediately; adding connections and changing worker software/setup/public
@@ -723,7 +729,10 @@ fresh session. The target provider's default model/effort are selected.
   ordinary editing. Registers, undo, macros and search history are cleared on
   chat/account changes or disable. No native config or worker is touched.
 - **Status line:** `/statusline` or **Chat actions → Status line** opens a live
-  preview and field picker for Relay's web footer. Toggle fields and reorder them
+  preview and field picker for Relay's optional web footer, hidden by default.
+  Model/effort stay in their existing controls, context in its indicator, and
+  branches in the repository/PR strip, including before a PR exists. Explicitly
+  saved custom footers remain available. Toggle fields and reorder them
   with arrows or drag handles, then **Save status line**; **Hide status line**
   and **Restore defaults** are staged until saved. Model/reasoning, context,
   5-hour/weekly limits, Git branch, session token totals, native session ID,

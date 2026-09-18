@@ -117,7 +117,7 @@ test("connected company accounts follow the primary repository instead of asking
   const repositories = ["12-apps/future-pay", "other/project", "thomfilg/no-environment"].map((fullName, index) => ({
     id: index + 1, fullName, defaultBranch: "main", githubConnectionId: "github-fixture", connectionName: "Fixture GitHub", private: true,
   }));
-  await page.route("**/api/github", route => route.fulfill({ json: { connected: true, login: "fixture", connections: [{ id: "github-fixture", connected: true, companies: ["12-apps", "other", "thomfilg"] }] } }));
+  await page.route("**/api/github", route => route.fulfill({ json: { connected: true, login: "fixture", repositoryAccess: "github", connections: [{ id: "github-fixture", connected: true, repositoryAccess: "github" }] } }));
   await page.route("**/api/github/repositories*", route => route.fulfill({ json: { repositories } }));
   await page.route("**/api/github/branches?*", route => route.fulfill({ json: { branches: ["main"] } }));
   await page.route("**/api/environments", route => route.fulfill({ json: { environments: [{ id: "environment-fixture", name: "12-apps fixture", companies: ["12-apps"], allowUnassigned: false, archived: false, backend: "local" }], software: [] } }));
@@ -169,12 +169,12 @@ test("connected company accounts follow the primary repository instead of asking
   for (const account of relay.app.agentAccounts.list(owner)) { expect(account.companies).toEqual(["12-apps", "thomfilg"]); expect(account.allowUnassigned).toBe(false); }
 });
 
-test("repository picker explains missing company access, failed loads and search misses without stale refresh results", async ({ page, relay }) => {
+test("repository picker explains GitHub failures and empty results separately from search misses without stale refresh", async ({ page, relay }) => {
   const errors = []; page.on("pageerror", error => errors.push(error.message));
-  let companies = [], mode = "empty", releaseOld, oldStarted = false;
+  let mode = "empty", releaseOld, oldStarted = false;
   const oldRequest = new Promise(resolve => { releaseOld = resolve; });
   const repository = fullName => ({ id: fullName === "12-apps/future-pay" ? 1 : 2, fullName, defaultBranch: "main", githubConnectionId: "github-fixture", private: true });
-  await page.route("**/api/github", route => route.fulfill({ json: { connected: true, login: "fixture", connections: [{ id: "github-fixture", name: "Fixture GitHub", login: "fixture", connected: true, companies, allowUnassigned: false }] } }));
+  await page.route("**/api/github", route => route.fulfill({ json: { connected: true, login: "fixture", repositoryAccess: "github", connections: [{ id: "github-fixture", name: "Fixture GitHub", login: "fixture", connected: true, repositoryAccess: "github" }] } }));
   await page.route("**/api/github/repositories*", async route => {
     if (mode === "error") return route.fulfill({ status: 503, json: { error: "Private upstream fixture error" } });
     if (mode === "hold") { oldStarted = true; await oldRequest; return route.fulfill({ json: { repositories: [repository("12-apps/stale")] } }); }
@@ -182,17 +182,17 @@ test("repository picker explains missing company access, failed loads and search
   });
   try {
     await login(page, relay); await page.locator("#welcome-new-chat").click();
-    await expect(page.locator("#repository-status")).toHaveText("GitHub is connected, but no companies are allowed. Configure company access to choose repositories.");
+    await expect(page.locator("#repository-status")).toHaveText("No repositories are available from your connected GitHub accounts. Check GitHub permissions or refresh the list.");
     await page.locator("#repository-manage-github").click(); await expect(page.locator("#github-dialog")).toBeVisible();
     await page.getByRole("button", { name: "Close GitHub dialog", exact: true }).click();
     await page.locator("#new-chat-dialog").getByRole("button", { name: "Close", exact: true }).click();
-    companies = ["12-apps"]; mode = "error";
+    mode = "error";
     await page.locator("#welcome-new-chat").click();
     await expect(page.locator("#repository-status")).toHaveText("Could not load repositories. Check your GitHub connection and retry.");
     await expect(page.locator("#repository-status")).toHaveAttribute("role", "alert");
     await expect(page.locator("#repository-results")).not.toContainText("Private upstream");
     mode = "empty"; await page.locator("#repository-retry").click();
-    await expect(page.locator("#repository-status")).toContainText("No repositories are available for the allowed companies");
+    await expect(page.locator("#repository-status")).toContainText("No repositories are available from your connected GitHub accounts");
     mode = "ready"; await page.locator("#repository-retry").click();
     await expect(page.locator("#repository-results").getByRole("checkbox", { name: /12-apps\/future-pay/ })).toBeVisible();
     await page.locator("#repo-search").fill("no-match"); await expect(page.locator("#repository-status")).toHaveText("No repositories match your search.");
@@ -203,7 +203,7 @@ test("repository picker explains missing company access, failed loads and search
     const oldResponse = page.waitForResponse(response => response.url().includes("/api/github/repositories")); releaseOld(); await oldResponse;
     await expect(page.locator("#repository-results")).not.toContainText("12-apps/stale");
     await expect(page.locator("#repository-results").getByRole("checkbox", { name: /12-apps\/future-pay/ })).toBeVisible();
-    expect(companies).toEqual(["12-apps"]); expect(relay.app.store.list()).toEqual([]); expect(errors).toEqual([]);
+    expect(relay.app.store.list()).toEqual([]); expect(errors).toEqual([]);
   } finally { releaseOld(); }
 });
 
