@@ -106,6 +106,49 @@ test("legacy blank Linear scopes are not expanded, cancellation retains prior co
   assert.equal((await mcps.list())[0].health.status, "needs_auth");
 });
 
+for (const action of ["cancel", "replace", "delete"]) test(`OAuth ${action} at the persistence boundary cannot commit late credentials`, async t => {
+  const { service, mcps, records, c } = await linearFixture(t);
+  const initial = await mcps.oauth.begin(c.id, "http://localhost:8787/oauth/mcp/callback");
+  await mcps.oauth.finish(await consent(initial, service.origin), cookies(initial));
+  const before = structuredClone(await mcps.get(c.id));
+  const flow = await mcps.oauth.begin(c.id, "http://localhost:8787/oauth/mcp/callback");
+  const put = records.put.bind(records); let gated = false, release;
+  records.put = async (kind, id, value) => {
+    if (!gated && kind === "mcp" && id === c.id && value.oauth?.tokens && value.authGeneration !== before.authGeneration) {
+      gated = true; await new Promise(resolve => { release = resolve; });
+    }
+    return put(kind, id, value);
+  };
+  const finishing = mcps.oauth.finish(await consent(flow, service.origin), cookies(flow));
+  const rejected = assert.rejects(finishing, /cancelled or replaced/);
+  await waitFor(() => gated);
+  let interruptionDone = false;
+  const interrupted = (action === "cancel" ? mcps.oauth.cancel(c.id) : action === "replace" ? mcps.oauth.begin(c.id, "http://localhost:8787/oauth/mcp/callback") : mcps.remove(c.id)).then(value => { interruptionDone = true; return value; });
+  await waitFor(() => mcps.oauth.attempts.get(c.id)?.state !== flow.state);
+  assert.equal(interruptionDone, false, "cancellation/replacement/deletion must wait for guarded persistence to settle");
+  let disclosed = false;
+  const reading = mcps.list().then(value => { disclosed = true; return value; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(disclosed, false, "public reads must not disclose provisional credential state");
+  release(); await rejected; await interrupted; await reading;
+  if (action === "delete") await assert.rejects(mcps.get(c.id), /not found/);
+  else {
+    assert.deepEqual(await mcps.get(c.id), before, "prior authorization and its generation must be restored exactly");
+    if (action === "replace") { assert.equal(mcps.oauth.status(c.id).status, "pending"); await mcps.oauth.cancel(c.id); }
+  }
+});
+
+test("editing an authenticated connection cannot masquerade as a completed new OAuth attempt", async t => {
+  const { service, mcps, c } = await linearFixture(t);
+  const first = await mcps.oauth.begin(c.id, "http://localhost:8787/oauth/mcp/callback");
+  await mcps.oauth.finish(await consent(first, service.origin), cookies(first));
+  const saved = await mcps.get(c.id), pending = await mcps.oauth.begin(c.id, "http://localhost:8787/oauth/mcp/callback");
+  await mcps.save({ ...saved, name: "renamed-linear" }, c.id);
+  const current = (await mcps.list())[0];
+  assert.equal(current.oauthConnected, true); assert.ok(current.revision > saved.revision);
+  assert.equal(current.signIn.status, "cancelled"); assert.equal(current.signIn.id, pending.attemptId);
+  await assert.rejects(mcps.oauth.finish(await consent(pending, service.origin), cookies(pending)), /Invalid or expired/);
+});
+
 test("independent same-name workspace OAuth reaches both selected provider environments with no company or owner fallback", async t => {
   const fixtures = new Map();
   for (const company of ["12-apps", "g2i"]) {

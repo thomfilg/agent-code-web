@@ -89,3 +89,22 @@ test("blocked popup has a usable sign-in link and mobile permissions include an 
   await expect(page.locator("#mcp-connection-status")).toContainText("Authenticated workspace read verified");
   await popup.close();
 });
+
+test("saving another tab's edit during reconnect cannot be presented as completed consent", async ({ page, context }) => {
+  await routeConsent(context); await create(page, "linear-browser-edit-race");
+  const firstPopup = page.waitForEvent("popup"); await page.getByRole("button", { name: "Connect with OAuth", exact: true }).click();
+  const first = await firstPopup; await first.getByRole("link", { name: "Approve access" }).click();
+  await expect(page.locator("#mcp-connection-status")).toContainText("Authenticated workspace read verified"); await first.close();
+  const secondPopup = page.waitForEvent("popup"); await page.getByRole("button", { name: "Connect with OAuth", exact: true }).click();
+  const second = await secondPopup;
+  await expect(page.locator("#mcp-sign-in-status")).toContainText("Waiting for your approval");
+  const { connections } = await (await page.request.get("/api/mcps")).json();
+  const connection = connections.find(c => c.name === "linear-browser-edit-race");
+  const response = await page.request.patch(`/api/mcps/${connection.id}`, { data: { ...connection, name: "linear-browser-edited" } });
+  expect(response.ok()).toBe(true);
+  await expect(page.locator("#mcp-sign-in-status")).toContainText("Connection settings changed");
+  await expect(page.locator("#mcp-connection-status")).not.toContainText("Authenticated workspace read verified");
+  await expect(page.getByRole("button", { name: "Connect with OAuth", exact: true })).toBeEnabled();
+  await second.getByRole("link", { name: "Approve access" }).click();
+  await expect(second.getByRole("heading", { name: "Unable to connect" })).toBeVisible(); await second.close();
+});

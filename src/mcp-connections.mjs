@@ -14,14 +14,21 @@ export class McpConnections {
     this.records = records; this.fetch = fetchImpl; this.broker = new CapabilityBroker({ ttlMs }); this.grants = new Map(); this.queue = Promise.resolve();
     this.oauth = new McpOAuth(this);
   }
-  async list() { return (await this.records.list("mcp")).map(connection => ({ ...publicConnection(connection), signIn: this.oauth.status(connection.id) })); }
+  async list() { await this.queue; return (await this.records.list("mcp")).map(connection => ({ ...publicConnection(connection), signIn: this.oauth.status(connection.id) })); }
   async get(id) { const value = await this.records.get("mcp", id); if (!value) throw Object.assign(new Error("MCP connection not found"), { statusCode: 404 }); return value; }
   save(input, id = null) { const result = this.queue.then(() => this.saveUnlocked(input, id)); this.queue = result.catch(() => {}); return result; }
-  update(id, revision, transform) {
+  update(id, revision, transform, { guard } = {}) {
     const result = this.queue.then(async () => {
       const current = await this.get(id);
       if (current.revision !== revision) throw Object.assign(new Error("Connection changed; reload and try again"), { statusCode: 409 });
-      const value = transform(current); await this.records.put("mcp", id, value);
+      const value = transform(current);
+      const cancelled = () => Object.assign(new Error("Sign-in was cancelled or replaced. No new credentials were saved."), { statusCode: 409 });
+      if (guard && !guard()) throw cancelled();
+      await this.records.put("mcp", id, value);
+      // Cancellation is synchronous but persistence is asynchronous. Keep the
+      // queue locked until the previous record is restored; no pending edit or
+      // new sign-in may observe this value as its committed starting point.
+      if (guard && !guard()) { await this.records.put("mcp", id, current); throw cancelled(); }
       if (value.authGeneration !== current.authGeneration) this.revokeConnection(id);
       return publicConnection(value);
     });
@@ -33,7 +40,7 @@ export class McpConnections {
     const name = String(input.name || "").trim();
     if (!/^[a-zA-Z][\w-]{0,63}$/.test(name)) throw fail("MCP name must start with a letter and use up to 64 letters, numbers, underscores or hyphens");
     const scope = normalizeCompanyScope(input, old || {});
-    if ((await this.list()).some(c => c.id !== id && c.name.toLowerCase() === name.toLowerCase() && scopesOverlap(c, scope))) throw fail("An MCP connection with this name already exists for one of the selected companies. Use a distinct name or non-overlapping companies.");
+    if ((await this.records.list("mcp")).some(c => c.id !== id && c.name.toLowerCase() === name.toLowerCase() && scopesOverlap(c, scope))) throw fail("An MCP connection with this name already exists for one of the selected companies. Use a distinct name or non-overlapping companies.");
     if (!["http", "stdio"].includes(input.type)) throw fail("Choose HTTP or stdio transport");
     let data;
     if (input.type === "http") {
@@ -60,7 +67,9 @@ export class McpConnections {
       data = { command: input.command.trim(), args: input.args };
     }
     const value = { id: id || `mcp_${randomUUID()}`, name, ...scope, organization: scope.companies.length === 1 ? scope.companies[0] : null, type: input.type, ...data, authGeneration: randomUUID(), health: { status: input.type === "stdio" ? "worker_pending" : data.authMode === "oauth" && !data.oauth ? "needs_auth" : "unverified" }, revision: (old?.revision || 0) + 1, updatedAt: new Date().toISOString() };
-    await this.records.put("mcp", value.id, value); if (old) this.revokeConnection(value.id); return publicConnection(value);
+    await this.records.put("mcp", value.id, value);
+    if (old) { this.oauth.invalidate(value.id); this.revokeConnection(value.id); }
+    return publicConnection(value);
   }
   async validateSelection(ids) {
     if (!Array.isArray(ids) || ids.length > 30 || new Set(ids).size !== ids.length || ids.some(id => !/^mcp_[a-f0-9-]{36}$/.test(id))) throw fail("Choose up to 30 saved MCP connections");
@@ -69,9 +78,11 @@ export class McpConnections {
   async remove(id) {
     await this.get(id);
     if ((await this.records.list("environment")).some(env => env.mcpIds?.includes(id))) throw fail("Remove this MCP from its environments before deleting it");
-    await this.records.delete("mcp", id);
     this.oauth.forget(id);
-    this.revokeConnection(id);
+    const result = this.queue.then(async () => {
+      await this.records.delete("mcp", id); this.revokeConnection(id);
+    });
+    this.queue = result.catch(() => {}); return result;
   }
   async test(id) {
     const connection = await this.get(id);

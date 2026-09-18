@@ -358,7 +358,7 @@ export async function createAgentWebServer(options = {}) {
           origin = candidate.origin;
         }
         const flow = await mcps.oauth.begin(id, `${origin}/oauth/mcp/callback`);
-        return json(response, 200, { authorizationUrl: flow.authorizationUrl }, { "set-cookie": `${oauthCookieName(flow.state)}=${flow.cookie}; Path=/oauth/mcp/; HttpOnly; SameSite=Lax; Max-Age=600${origin.startsWith("https:") || config.cookieSecure ? "; Secure" : ""}` });
+        return json(response, 200, { authorizationUrl: flow.authorizationUrl, attemptId: flow.attemptId }, { "set-cookie": `${oauthCookieName(flow.state)}=${flow.cookie}; Path=/oauth/mcp/; HttpOnly; SameSite=Lax; Max-Age=600${origin.startsWith("https:") || config.cookieSecure ? "; Secure" : ""}` });
       }
       if (url.pathname === "/api/models" && request.method === "GET") {
         const agent = url.searchParams.get("agent");

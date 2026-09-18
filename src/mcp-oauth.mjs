@@ -63,20 +63,30 @@ export class McpOAuth {
     for (const [state, flow] of this.flows) if (flow.id === id) this.flows.delete(state);
     this.attempts.delete(id);
   }
+  invalidate(id) {
+    const attempt = this.attempts.get(id);
+    this.forget(id);
+    if (["pending", "connecting"].includes(attempt?.status)) this.attempts.set(id, { id: attempt.id, status: "cancelled", message: "Connection settings changed. Start sign-in again." });
+  }
   async cancel(id) {
     await this.connections.get(id);
+    const attemptId = this.attempts.get(id)?.id;
     this.forget(id);
-    this.attempts.set(id, { status: "cancelled", message: "Sign-in cancelled. Existing authorization was not changed." });
+    this.attempts.set(id, { id: attemptId, status: "cancelled", message: "Sign-in cancelled. Existing authorization was not changed." });
+    await this.connections.queue;
   }
   async begin(id, redirectUrl) {
     for (const [state, flow] of this.flows) if (flow.expiresAt < Date.now()) this.flows.delete(state);
     if (this.flows.size >= 30) throw invalid("Too many pending sign-ins. Wait a few minutes and try again.");
-    const connection = await this.connections.get(id);
+    let connection = await this.connections.get(id);
     if (connection.type !== "http" || connection.authMode !== "oauth") throw invalid("Choose OAuth authentication and save the connection first.");
     safeMcpUrl(redirectUrl);
-    const flow = { state: nonce(), cookie: nonce(), id, revision: connection.revision, expiresAt: Date.now() + 600000 };
+    const flow = { state: nonce(), attemptId: nonce(), cookie: nonce(), id, expiresAt: Date.now() + 600000 };
     this.forget(id);
-    this.attempts.set(id, { state: flow.state, status: "connecting", expiresAt: flow.expiresAt, message: "Preparing secure sign-in…" });
+    this.attempts.set(id, { id: flow.attemptId, state: flow.state, status: "connecting", expiresAt: flow.expiresAt, message: "Preparing secure sign-in…" });
+    await this.connections.queue;
+    if (this.attempts.get(id)?.state !== flow.state) throw invalid("Sign-in was cancelled or replaced. Connect again.");
+    connection = await this.connections.get(id); flow.revision = connection.revision;
     // Reuse registration only for the same callback. Never reuse tokens: Connect
     // means explicit consent, including servers with anonymous initialization.
     const data = { redirectUrl, ...(connection.oauth?.redirectUrl === redirectUrl ? { clientInformation: connection.oauth.clientInformation } : {}) };
@@ -95,11 +105,11 @@ export class McpOAuth {
       if (this.attempts.get(id)?.state !== flow.state) throw invalid("Sign-in was cancelled or replaced. Connect again.");
       if ((await this.connections.get(id)).revision !== flow.revision) throw invalid("Connection changed. Start sign-in again.");
       flow.data = data; this.flows.set(flow.state, flow);
-      this.attempts.set(id, { state: flow.state, status: "pending", expiresAt: flow.expiresAt, message: "Waiting for your approval in the provider window. Choose the workspace for this connection." });
-      return { state: flow.state, cookie: flow.cookie, authorizationUrl: flow.authorizationUrl };
+      this.attempts.set(id, { id: flow.attemptId, state: flow.state, status: "pending", expiresAt: flow.expiresAt, message: "Waiting for your approval in the provider window. Choose the workspace for this connection." });
+      return { state: flow.state, attemptId: flow.attemptId, cookie: flow.cookie, authorizationUrl: flow.authorizationUrl };
     } catch (error) {
       const failure = error.statusCode ? error : invalid("OAuth setup failed. Check the endpoint, server availability, and OAuth client registration settings.");
-      if (this.attempts.get(id)?.state === flow.state) this.attempts.set(id, { status: "failed", message: failure.message });
+      if (this.attempts.get(id)?.state === flow.state) this.attempts.set(id, { id: flow.attemptId, status: "failed", message: failure.message });
       throw failure;
     }
   }
@@ -121,11 +131,11 @@ export class McpOAuth {
       const saved = await this.connections.update(flow.id, flow.revision, current => {
         if (this.attempts.get(flow.id)?.state !== flow.state) throw invalid("Sign-in was cancelled or replaced. No new credentials were saved.");
         return { ...current, oauth: flow.data, authGeneration: nonce(), revision: current.revision + 1, health: { status: "unverified", message: "Signed in. Test connection to verify access and discover tools." } };
-      });
-      if (this.attempts.get(flow.id)?.state === flow.state) this.attempts.set(flow.id, { status: "complete", message: "Signed in. Verify access before selecting the connection in an environment." });
+      }, { guard: () => this.attempts.get(flow.id)?.state === flow.state });
+      if (this.attempts.get(flow.id)?.state === flow.state) this.attempts.set(flow.id, { id: flow.attemptId, status: "complete", message: "Signed in. Verify access before selecting the connection in an environment." });
       return saved;
     } catch (error) {
-      if (this.attempts.get(flow.id)?.state === flow.state) this.attempts.set(flow.id, { status: "failed", message: error.statusCode ? error.message : "OAuth sign-in failed. Start again from MCP connections." });
+      if (this.attempts.get(flow.id)?.state === flow.state) this.attempts.set(flow.id, { id: flow.attemptId, status: "failed", message: error.statusCode ? error.message : "OAuth sign-in failed. Start again from MCP connections." });
       throw error;
     }
   }
@@ -141,6 +151,9 @@ export class McpOAuth {
   }
   async headers(connection) {
     if (connection.authMode !== "oauth") return new Headers(connection.headers || {});
+    // A guarded credential write may be rolling back after cancellation. Never
+    // hand a worker tokens from that provisional database state.
+    await this.connections.queue;
     let current = await this.connections.get(connection.id);
     if (current.authGeneration !== connection.authGeneration || !current.oauth?.tokens) throw loginRequired();
     if (current.oauth.expiresAt !== null && current.oauth.expiresAt <= Date.now() + 30000) {
