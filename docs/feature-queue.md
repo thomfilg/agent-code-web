@@ -10,7 +10,12 @@ selection. Ambiguous legacy MCP/GitHub bindings require an explicit company;
 preserve encrypted credentials without duplicating them or guessing the mapping.
 See [the decision](adr/2026-09-18-company-connections.md) and
 [local acceptance / publication blockers](validation-2026-09-18-company-chat.md).
-The local runtime is committed as `b7b3067`; production is not yet updated.
+The user confirmed `thomfilg + 12-apps` as one Relay company, independent of
+GitHub repository owners. Runtime `8bc0760` passes 144 scoped Node tests and 18
+final browser tests; its immutable AWS image is built, but production is not yet
+updated. The existing chat also contains a g2i repository under another GitHub
+connection; its cross-company-chat policy needs an explicit decision before
+migration. Do not drop that repository or reassign its login silently.
 
 New-chat refinement (2026-09-18): replace the creation modal with an inline
 page, with the message composer at the bottom, a compact environment / repository

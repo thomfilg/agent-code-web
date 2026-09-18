@@ -1,6 +1,7 @@
 # Inline chat, agent choice and company connections — 2026-09-18
 
-Runtime source: `b7b30678219162ad1e5b1b0b24943d6f32cd7d36`.
+Initial runtime source: `b7b30678219162ad1e5b1b0b24943d6f32cd7d36`.
+Final mixed-owner-company runtime: `8bc07607f079714008629450c1ce6f5f7488822d`.
 This is a local acceptance receipt, **not an AWS publication receipt**.
 
 ## Delivered in source
@@ -70,6 +71,11 @@ This is a local acceptance receipt, **not an AWS publication receipt**.
   cards were visually inspected. Screenshots remain under
   `/tmp/relay-company-chat-visual-20260918`; log:
   `/tmp/relay-company-chat-visual-final.log`.
+- After the user confirmed a combined company, the final company/GitHub/new-chat/
+  organization browser run passed **18 tests without retries**, including making
+  a different GitHub owner's repository primary without changing Relay company,
+  persistence across reload and draft retention. Log:
+  `/tmp/relay-company-multi-owner-browser.log`.
 
 Browser boot attempts intermittently failed with `net::ERR_NETWORK_CHANGED` on
 local module requests, confirmed in retained traces. Final runs use at most one
@@ -107,6 +113,27 @@ metadata, mixed-owner grouping, same-name repositories, environment admission,
 preferences and empty-repository chat creation. Log:
 `/tmp/relay-company-binding-final-node.log`.
 
+Read-only SSM `52f6fd46-4b51-4857-a653-bbeeee441efc` confirmed both existing
+GitHub records: `github_754523ec-0856-4434-9673-654ba6859358` (thomfilg, revision 5)
+and `github_e4648eee-be80-40c5-a59d-da6645d2fc4e` (g2i login, revision 2). Linear
+is revision 8. The sole saved environment is `12-apps`; its companies were
+`12-apps` and `thomfilg`. The saved chat has both `12-apps/future-pay` and
+`g2i-ai/clickdown`, using those two different connections.
+
+Read-only SSM `ae8b4448-3395-4af5-ad53-2aa924963d3c` checked the primary GitHub
+credential against exactly those already-selected repositories. GitHub returned
+200 with matching identity for future-pay and 404 for clickdown. No credential
+was printed, imported or reassigned and no provider state was mutated.
+
+**Migration decision pending:** may a single chat explicitly select repositories
+from different companies, each retaining its own company's GitHub connection,
+while MCP scope remains limited to the primary company? The current implementation
+rejects that mixed-connection combination. Applying it to the existing chat would
+block its next GitHub-capable worker start. Do not silently delete a repository,
+rebind it to another login, widen a company's MCP access or claim this case works.
+The user's clarification about one combined thomfilg/12-apps company is settled;
+it is not the unanswered question.
+
 ## Publication status
 
 At approximately 20:27 UTC, bounded AWS identity and public HTTPS checks could not
@@ -122,10 +149,17 @@ returned 200 and STS verified the expected account. Publication work resumed;
 these checks alone do not establish deployment of the new source.
 
 A clean detached release worktree at `/tmp/relay-company-release.gp7GOj` contains
-the exact runtime commit, excluding dirty hibernation foundations and unrelated
-Claude-doctor work. Once connectivity and the GitHub mapping are settled, build
-from the final committed source, then verify its S3 source version, immutable
-image, running container, public assets, readiness and deployed denial probes.
+the final runtime commit, excluding dirty hibernation foundations and unrelated
+Claude-doctor work. CodeBuild
+`ImageBuild-t8BSbSkDsHYX:56f50985-681e-4e37-969a-51a20e39ac4a` succeeded with exact
+source `8bc07607f079714008629450c1ce6f5f7488822d` and immutable S3 source version
+`CGmjKLc9n93_kmBdlw7qHlJYnDYQ5eb2`. Its application image digest is
+`sha256:05d3178a0e32d15f2c0384297c260c9dd9028d79dbbf802f00258952be2f2be5`.
+The pre-rollout worker inventory has one already-stopped worker,
+`i-0a0ed507dd35f0af3`, and no running worker. **The rollout and data migration have
+not started**: first settle the existing mixed-company chat policy, implement and
+rebuild if needed, then verify the running image, assets, readiness and denial
+probes. No user instance, volume, chat, connection or repository was deleted.
 The last independently verified AWS runtime remains `b89269a` (18:40 UTC), as
 recorded in [the runtime-controls receipt](validation-2026-09-18-runtime-controls.md).
 
