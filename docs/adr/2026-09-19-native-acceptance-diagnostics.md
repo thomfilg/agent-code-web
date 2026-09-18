@@ -57,6 +57,6 @@ failures, a tampered remote ownership marker, failed SSM startup cleanup, and an
 actual standalone worker protocol failure that makes no external calls. They do
 not establish live provider authentication or AWS acceptance.
 
-Validation: 23 native acceptance tests and 6 existing SSH launcher tests passed;
+Validation: 24 native acceptance tests and 6 existing SSH launcher tests passed;
 the zero-call default plan and syntax checks also passed. All execution stayed
 on CPU 0,1 and used only disposable local fixtures.
