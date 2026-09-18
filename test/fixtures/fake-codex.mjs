@@ -35,8 +35,16 @@ rl.on("line", (line) => {
   } else if (message.method === "fixture/accountEcho") {
     send({ method: "error", params: { message: `Fixture echo: ${externalAccount.accessToken}` } });
     send({ id: message.id, result: externalAccount });
+  } else if (message.method === "fixture/notifications") {
+    for (const notification of message.params.notifications) send(notification);
+    if (message.params.complete) pendingTurn = null;
+    send({ id: message.id, result: {} });
   } else if (message.method === "thread/start") {
     send({ id: message.id, result: { model: "fixture-gpt", thread: { id: "thr_fixture" } } });
+  } else if (message.method === "thread/fork" && message.params.ephemeral) {
+    send({ id: message.id, result: { model: "fixture-gpt", thread: { id: "thr_side_fixture" } } });
+  } else if (message.method === "thread/unsubscribe") {
+    send({ id: message.id, result: {} });
   } else if (message.method === "thread/list") {
     send({ id: message.id, result: { data: [], nextCursor: null } });
   } else if (message.method === "thread/read") {

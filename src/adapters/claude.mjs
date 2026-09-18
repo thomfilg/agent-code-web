@@ -8,6 +8,7 @@ import { claudeUsage, claudeContext, claudeRateLimits, safeSessionDetails } from
 import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings, inspectNativeClaudeSettings, claudePermissionMode } from "../claude-settings.mjs";
 import { claudeFastRequest, claudeFastState, claudeFastCredential, claudeFastScope, checkClaudeFastAvailability, claudeFastUnavailable } from "../claude-fast.mjs";
 import { ClaudeTextStream } from "../claude-text-stream.mjs";
+import { SecretTextStream } from "../secret-text-stream.mjs";
 import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR, ClaudeControlChannel, runClaudeMcpCommand } from "../claude-mcp.mjs";
 import { ClaudeSession, claudeCallResult, CLAUDE_SCHEDULE_DIAGNOSTICS } from "../claude-session.mjs";
 import { claudePluginReloadRequest, reloadClaudePlugins, CLAUDE_PLUGIN_PRIVATE_ERROR } from "../claude-plugins.mjs";
@@ -35,7 +36,10 @@ export class ClaudeAdapter {
     this.fetchImpl = fetchImpl;
     this.now = now;
     this.accountSecrets = new Set();
-    if (chat.agentAccountId) this.hooks = { ...hooks, ...(hooks.onRequest ? { onRequest: request => hooks.onRequest(this.redactAccount(request)) } : {}), accountCredentials: async options => {
+    if (chat.agentAccountId) this.hooks = { ...hooks,
+      ...(hooks.onEvent ? { onEvent: event => hooks.onEvent(this.redactAccount(event)) } : {}),
+      ...(hooks.onLog ? { onLog: text => hooks.onLog(this.redactAccount(text)) } : {}),
+      ...(hooks.onRequest ? { onRequest: request => hooks.onRequest(this.redactAccount(request)) } : {}), accountCredentials: async options => {
       const credentials = await hooks.accountCredentials(options);
       if (typeof credentials?.accessToken !== "string" || !credentials.accessToken || !credentials.accountId || !credentials.organizationId || credentials.expiresAt <= this.now()) throw Error("Reconnect this Claude account; no other credentials were used.");
       this.accountSecrets.add(credentials.accessToken);
@@ -47,8 +51,11 @@ export class ClaudeAdapter {
 
   redactAccount(value) {
     if (this.nativeAuthMode !== "account") return value;
-    let raw = JSON.stringify(value);
-    for (const secret of this.accountSecrets) raw = raw.replaceAll(secret, "[redacted]");
+    let raw = JSON.stringify(value, (_key, item) => {
+      if (typeof item !== "string") return item;
+      for (const secret of [...this.accountSecrets].sort((a, b) => b.length - a.length)) item = item.replaceAll(secret, "[redacted]");
+      return item;
+    });
     return JSON.parse(raw.replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, "[redacted]"));
   }
 
@@ -363,6 +370,7 @@ export class ClaudeAdapter {
         startedDebugCapture = !managed.debugLog || Boolean(managed.debugLog.error);
         try {
           await managed.enableDebug({ runtimeHome: this.runtimeHome, executor: this.executor, isolation: this.config.processIsolation, signal: controller.signal,
+            sanitize: value => this.redactAccount(value),
             onError: error => { if (!this.stopped && [this.applicationSession, this.turnSession].includes(managed)) this.hooks.onEvent?.({ type: "notice", text: error.message }); } });
           if (version !== this.sendVersion) throw Error("Claude turn interrupted");
           this.assertCapability();
@@ -433,7 +441,9 @@ export class ClaudeAdapter {
       child.stdin.end(interactive || settingsPrompt || debugRequest ? `${JSON.stringify({ type: "user", message: { role: "user", content: input } })}\n` : input);
     }
 
-    const output = new ClaudeTextStream(delta => this.hooks.onEvent?.({ type: "assistant_delta", delta }));
+    const output = new ClaudeTextStream(delta => this.hooks.onEvent?.({ type: "assistant_delta", delta }), this.nativeAuthMode === "account" ? { secrets: this.accountSecrets } : {});
+    this.activeOutput = output;
+    const errorOutput = this.nativeAuthMode === "account" ? new SecretTextStream(this.accountSecrets, { tokenPrefix: "sk-ant-" }) : null;
     let resultMessage = null;
     let nativeFast = null;
     const notifications = new Set();
@@ -453,8 +463,8 @@ export class ClaudeAdapter {
     };
     const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     lines.on("line", (line) => {
-      let event;
-      try { event = this.redactAccount(JSON.parse(line)); } catch { return; }
+      let event, raw;
+      try { raw = JSON.parse(line); event = this.redactAccount(raw); } catch { return; }
       mcpControl?.accept(event);
       reviewControl?.accept(event);
       this.permissionMode(event);
@@ -469,7 +479,9 @@ export class ClaudeAdapter {
         && typeof event.tool_use_id === "string" && backgroundCandidates.has(event.tool_use_id)) {
         this.applicationSession = managed;
       }
-      if (!mcpControl) output.accept(event);
+      // Keep native text unchanged for stream deduplication. The text sink
+      // masks credentials across events before either SSE or saved output.
+      if (!mcpControl) output.accept(raw);
       if (event.type === "system" && event.subtype === "notification" && ["fast-mode-overage-rejected", "fast-mode-org-changed", "fast-mode-cooldown-started", "fast-mode-cooldown-expired", "stop-hook-error"].includes(event.key) && typeof event.text === "string" && !notifications.has(event.key)) {
         notifications.add(event.key);
         this.hooks.onEvent?.({ type: "notice", text: event.key === "stop-hook-error" ? "Claude reported a Stop-hook error. The completion check failed; use /goal to inspect any active goal or check the native hook settings." : redact(event.text).slice(0, 1500) });
@@ -522,12 +534,14 @@ export class ClaudeAdapter {
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => {
-      stderr = `${stderr}${redact(this.redactAccount({ text: String(chunk) }).text)}`.slice(-16_000);
+      stderr = `${stderr}${redact(errorOutput ? errorOutput.push(String(chunk)) : String(chunk))}`.slice(-16_000);
     });
 
     return new Promise((resolve, reject) => {
       let spawnFailed = false;
       child.once("error", (error) => {
+        output.finish(); errorOutput?.finish();
+        if (this.activeOutput === output) this.activeOutput = null;
         spawnFailed = true;
         if (provisionalSession) this.sessionId = null;
         if (reviewControl) this.reviewInterruption = null;
@@ -536,6 +550,8 @@ export class ClaudeAdapter {
         reject(error);
       });
       child.once("close", (code, signal) => { void (async () => {
+        output.finish(); stderr += errorOutput?.finish() || "";
+        if (this.activeOutput === output) this.activeOutput = null;
         finishObservation();
         // Query the actual merge before a one-shot SDK owner is closed. A
         // retained application owner stays alive; inspecting settings cannot
@@ -605,7 +621,7 @@ export class ClaudeAdapter {
             await this.disableFast(version);
             throw Object.assign(new Error(claudeFastUnavailable(nativeFast?.disabledReason)), { nativeFast: nativeFast || { state: "off" }, fastPreference: false, fastCooldown: null });
           }
-          resolve({ text: mcpOutcome?.text ?? output.text, status: "completed", compacted, ...(nativeSettings ? { nativeSettings } : {}), ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) });
+          resolve(this.redactAccount({ text: mcpOutcome?.text ?? output.text, status: "completed", compacted, ...(nativeSettings ? { nativeSettings } : {}), ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) }));
         } else {
           reject(Object.assign(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`), { nativeSettings, ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) }));
         }
@@ -664,6 +680,7 @@ export class ClaudeAdapter {
   }
 
   backgroundEvent(event) {
+    const raw = event;
     event = this.redactAccount(event);
     this.permissionMode(event);
     if (!this.stopped && event.type === "workspace_trust_notice") {
@@ -672,10 +689,11 @@ export class ClaudeAdapter {
     }
     if (!this.stopped && event.type === "background_turn") { this.hooks.onEvent?.(event); return; }
     if (this.stopped || !["assistant", "stream_event", "result"].includes(event.type)) return;
-    this.backgroundOutput ||= new ClaudeTextStream(() => {});
-    this.backgroundOutput.accept(event);
+    this.backgroundOutput ||= new ClaudeTextStream(() => {}, this.nativeAuthMode === "account" ? { secrets: this.accountSecrets } : {});
+    this.backgroundOutput.accept(raw);
     if (event.type === "assistant" && !event.parent_tool_use_id && event.message?.usage) this.backgroundRequest = event.message;
     if (event.type === "result") {
+      this.backgroundOutput.finish();
       this.hooks.onEvent?.({ type: "usage", usage: claudeUsage(event, this.backgroundRequest, randomUUID()) });
       const interrupted = event.relayWorkflowInterrupted === true;
       const failed = !interrupted && (event.is_error === true || Boolean(event.subtype && event.subtype !== "success"));
@@ -687,6 +705,8 @@ export class ClaudeAdapter {
   }
 
   async interrupt() {
+    this.activeOutput?.finish(); this.backgroundOutput?.finish();
+    this.backgroundOutput = null; this.backgroundRequest = null;
     this.sendVersion += 1;
     this.modeObserver = null;
     (this.turnSession?.requests || this.applicationSession?.requests)?.cancel();
@@ -712,6 +732,8 @@ export class ClaudeAdapter {
   }
 
   async stop() {
+    this.activeOutput?.finish(); this.backgroundOutput?.finish();
+    this.backgroundOutput = null; this.backgroundRequest = null;
     this.sendVersion += 1;
     this.modeObserver = null;
     this.settingsInspection?.abort();

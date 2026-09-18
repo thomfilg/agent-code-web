@@ -17,15 +17,15 @@ test("named Claude worker uses only its account, redacts token echoes and retain
   const broker = new CapabilityBroker({ ttlMs: 10000 });
   const config = testConfig(root, { CLAUDE_BIN: path.resolve("test/fixtures/fake-claude.mjs"), CLAUDE_AUTH_MODE: "host", ANTHROPIC_API_KEY: "" });
   const adapter = new ClaudeAdapter({ chat, store, config, broker, hooks: { onEvent: event => events.push(event), onSessionId: id => store.update(chat.id, { agentSessionId: id }),
-    accountCredentials: async options => { calls.push(options); return { accessToken: "fixture-secret-claude-value", accountId: "person", organizationId: "company", expiresAt: Date.now() + 3600000 }; } } });
+    accountCredentials: async options => { calls.push(options); return { accessToken: "sk-ant-oat01-private-fixture-value", accountId: "person", organizationId: "company", expiresAt: Date.now() + 3600000 }; } } });
   t.after(() => adapter.stop()); await adapter.start(); assert.equal(adapter.nativeAuthMode, "account"); assert.equal(broker.size, 0);
   const env = { ANTHROPIC_API_KEY: "bad", ANTHROPIC_BASE_URL: "https://bad.example", CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "bad", CLAUDE_CODE_USE_BEDROCK: "1", CLAUDE_CODE_USER_EMAIL: "other@example.test" };
-  adapter.applyAccountEnvironment(env, { accessToken: "fixture-secret-claude-value", accountId: "person", organizationId: "company" });
+  adapter.applyAccountEnvironment(env, { accessToken: "sk-ant-oat01-private-fixture-value", accountId: "person", organizationId: "company" });
   assert.equal(env.ANTHROPIC_API_KEY, undefined); assert.equal(env.ANTHROPIC_BASE_URL, undefined); assert.equal(env.CLAUDE_CODE_OAUTH_REFRESH_TOKEN, undefined); assert.equal(env.CLAUDE_CODE_USE_BEDROCK, undefined);
-  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "fixture-secret-claude-value"); assert.equal(env.CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH, "1");
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "sk-ant-oat01-private-fixture-value"); assert.equal(env.CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH, "1");
   assert.equal(env.CLAUDE_CODE_USER_EMAIL, undefined);
-  const result = await adapter.send("fixture-secret-claude-value", { model: "default", resetEffort: true });
-  assert.match(result.text, /\[redacted\]/); assert.doesNotMatch(JSON.stringify([result, events]), /fixture-secret-claude-value/);
+  const result = await adapter.send("sk-ant-oat01-private-fixture-value", { model: "default", resetEffort: true });
+  assert.match(result.text, /\[redacted\]/); assert.doesNotMatch(JSON.stringify([result, events]), /sk-ant-oat01-private-fixture-value/);
   await assert.rejects(access(path.join(store.runtimeHome(chat.id), "claude", ".credentials.json")), { code: "ENOENT" });
   assert.ok(store.get(chat.id).agentSessionId); const sessionId = store.get(chat.id).agentSessionId;
   await adapter.stop(); await adapter.start(); const resumed = await adapter.send("resume fixture", { model: "default" });

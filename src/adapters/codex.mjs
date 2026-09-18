@@ -5,6 +5,7 @@ import { JsonRpcProcess } from "../json-rpc-process.mjs";
 import { buildWorkerEnvironment } from "../worker-process.mjs";
 import { inspectDesktopSession } from "../desktop-handoff.mjs";
 import { errorMessage, redact } from "../utils.mjs";
+import { SecretTextStream } from "../secret-text-stream.mjs";
 import { codexUsage, safeRateLimits, cliVersionFromUserAgent, safeSessionDetails } from "../session-info.mjs";
 import { codexMcpArgs } from "../mcp-connections.mjs";
 import { captureSessionBundle, workerSessionIO } from "../codex-session-bundle.mjs";
@@ -170,8 +171,9 @@ export class CodexAdapter {
       isolation: this.executor ? "none" : this.config.processIsolation,
       spawnFn: this.executor ? this.executor.spawn.bind(this.executor) : null,
       spawnOptions: { cwd: this.workspace, env },
+      deferAgentDeltaRedaction: authMode === "account",
       redactSecrets: value => {
-        for (const secret of this.credentialSecrets) value = value.replaceAll(secret, "[redacted]");
+        for (const secret of [...this.credentialSecrets].sort((a, b) => b.length - a.length)) value = value.replaceAll(secret, "[redacted]");
         return value;
       },
     });
@@ -186,6 +188,7 @@ export class CodexAdapter {
     const imports = this.importControls;
     this.importStop = null;
     this.agents = new CodexAgentThreads({ rpc, root: () => this.threadId, workspace: this.workspace, model: this.config.codex.model, saved: this.savedAgentThreads,
+      secrets: authMode === "account" ? this.credentialSecrets : null,
       publish: snapshot => this.hooks.onAgentThreads?.(snapshot), log: text => this.hooks.onLog?.(text) });
     rpc.on("notification", (message) => this.#notification(message));
     rpc.on("request", (message) => this.#serverRequest(message));
@@ -287,6 +290,8 @@ export class CodexAdapter {
     if (!result.thread?.id) throw new Error("Codex did not return a side thread ID");
     const child = new CodexAdapter({ chat: this.chat, store: this.store, config: this.config, broker: this.broker, gatewayOrigin: this.gatewayOrigin, executor: this.executor, hooks });
     child.rpc = rpc; child.threadId = result.thread.id; child.sharedParent = this;
+    child.nativeAuthMode = this.nativeAuthMode;
+    child.credentialSecrets = this.credentialSecrets;
     child.settings = { model: result.model, serviceTier: result.serviceTier ?? null };
     child.sharedListeners = {
       notification: message => { if (message.params?.threadId === child.threadId) child.#notification(message); },
@@ -667,7 +672,8 @@ export class CodexAdapter {
     this.createdForks.clear();
     this.rpc = null;
     if (rpc) await rpc.stop();
-    this.credentialSecrets.clear();
+    // Retain known tokens for delayed notifications and restored native
+    // history throughout this adapter's lifetime, including after refresh.
     await this.importStop;
     this.broker.revokeChat(this.chat.id);
   }
@@ -690,7 +696,7 @@ export class CodexAdapter {
       const current = this.current;
       if (current.goalRun && current.awaitingContinuation) {
         clearTimeout(current.continuationTimer); current.awaitingContinuation = false;
-        current.text = ""; current.finalText = "";
+        current.text = ""; current.finalText = ""; current.outputRedactor = null;
         this.hooks.onEvent?.({ type: "goal_turn_started" });
       }
       current.turnId = params.turn?.id || current.turnId;
@@ -710,8 +716,11 @@ export class CodexAdapter {
       return;
     }
     if (method === "item/agentMessage/delta" && this.current) {
-      this.current.text += params.delta || "";
-      this.hooks.onEvent?.({ type: "assistant_delta", delta: params.delta || "" });
+      const current = this.current;
+      if (this.nativeAuthMode === "account") current.outputRedactor ||= new SecretTextStream(this.credentialSecrets);
+      const delta = current.outputRedactor ? current.outputRedactor.push(params.delta || "") : params.delta || "";
+      current.text += delta;
+      if (delta) this.hooks.onEvent?.({ type: "assistant_delta", delta });
       return;
     }
     if ((method === "item/started" || method === "item/completed") && params.item) {
@@ -733,6 +742,7 @@ export class CodexAdapter {
         if (!current.review || params.turn.id !== current.reviewTurnId) return;
       }
       const status = params.turn?.status || "completed";
+      this.#finishOutput(current);
       if (status === "completed" && current.goalRun) {
         this.hooks.onEvent?.({ type: "goal_turn_completed", text: current.text || current.finalText });
         current.awaitingContinuation = true;
@@ -758,6 +768,7 @@ export class CodexAdapter {
   #finishGoalRun() {
     const current = this.current;
     if (!current) return;
+    this.#finishOutput(current);
     this.current = null; clearTimeout(current.timer); clearTimeout(current.continuationTimer);
     current.resolveTurn({ text: "", status: "completed", turnsHandled: true });
   }
@@ -790,10 +801,18 @@ export class CodexAdapter {
   #rejectCurrent(error) {
     if (!this.current) return;
     const current = this.current;
+    this.#finishOutput(current);
     this.current = null;
     current.resolveStarted?.(null);
     clearTimeout(current.timer);
     clearTimeout(current.continuationTimer);
     current.rejectTurn(error);
+  }
+
+  #finishOutput(current) {
+    const tail = current.outputRedactor?.finish();
+    if (!tail) return;
+    current.text += tail;
+    this.hooks.onEvent?.({ type: "assistant_delta", delta: tail });
   }
 }
