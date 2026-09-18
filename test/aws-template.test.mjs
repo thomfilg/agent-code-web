@@ -23,6 +23,12 @@ test("AWS template keeps state, controller and untrusted workers separated", () 
   const stop = statements.find(s => s.Action.includes("ec2:StopInstances"));
   assert.equal(stop.Condition.StringEquals["ec2:ResourceTag/AgentRelayDeployment"].Ref, "AWS::StackName");
   assert.equal(stop.Condition.StringEquals["ec2:ResourceTag/ManagedBy"], "agent-relay");
+  const images = statements.find(s => s.Action === "ec2:RunInstances" && JSON.stringify(s.Resource).includes("image/*"));
+  assert.equal(images.Condition.StringEquals["ec2:ResourceTag/AgentRelayAcceptance"], "verified-v1");
+  for (const statement of statements.filter(s => JSON.stringify(s.Action).includes("CreateTags"))) {
+    assert.doesNotMatch(JSON.stringify(statement.Resource), /image\//);
+    assert.equal(statement.Condition.StringEquals["ec2:CreateAction"], "RunInstances");
+  }
   const source = JSON.stringify(t);
   assert.doesNotMatch(source, /PRIVATE KEY|GOOGLE_CLIENT_SECRET|DOPPLER_TOKEN|auth\.json/);
   assert.equal(t.Parameters.BaseImageId.Type, "AWS::EC2::Image::Id");

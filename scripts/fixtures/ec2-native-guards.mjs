@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { assertWorkerImage } from "../../src/worker-image.mjs";
 
 export const nativeTarget = Object.freeze({ profile: "code-web", region: "us-east-2", account: "456808212788", deployment: "agent-relay-mvp", controller: "i-08c991c22089589a5" });
 const tagsOf = value => Object.fromEntries((value?.Tags || []).map(({ Key, Value }) => [Key, Value]));
@@ -43,6 +44,7 @@ export async function guardNativeTarget(options, json) {
       ingress[0].UserIdGroupPairs[0].GroupId !== controllerGroup || ingress[0].IpRanges?.length || ingress[0].Ipv6Ranges?.length || ingress[0].PrefixListIds?.length) fail("Native acceptance worker network is not private/controller-only");
   const images = await json("ec2", "describe-images", "--image-ids", options.imageId, "--owners", t.account, "--query", "Images");
   const image = images?.[0];
+  assertWorkerImage(image, { imageId: options.imageId, account: t.account, deployment: t.deployment, keyName: outputs.WorkerKeyName });
   const mappings = image?.BlockDeviceMappings || [];
   const roots = mappings.filter(mapping => mapping.DeviceName === image?.RootDeviceName && mapping.Ebs);
   // Canonical includes inert instance-store hints. The explicitly guarded

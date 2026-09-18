@@ -13,10 +13,10 @@ function ec2Config(overrides = {}) {
     AGENT_EC2_AMI_ID: "ami-aaaaaaaaaaaaaaaaa", AGENT_EC2_SUBNET_ID: "subnet-aaaaaaaaaaaaaaaaa", AGENT_EC2_SECURITY_GROUP_ID: "sg-aaaaaaaaaaaaaaaaa", AGENT_EC2_KEY_NAME: "fixture-worker", AGENT_EC2_SSH_PRIVATE_KEY: "/tmp/fixture-key", AGENT_EC2_SSH_KNOWN_HOSTS: "/tmp/relay-known-hosts-fixture", SSH_BIN: "ssh", AWS_REGION: "us-east-1", ...overrides });
 }
 function instance(overrides = {}) {
-  return { InstanceId: "i-aaaaaaaaaaaaaaaaa", State: { Name: "stopped" }, PrivateIpAddress: "10.0.0.42", SubnetId: "subnet-aaaaaaaaaaaaaaaaa", KeyName: "fixture-worker", SecurityGroups: [{ GroupId: "sg-aaaaaaaaaaaaaaaaa" }], MetadataOptions: { HttpEndpoint: "disabled" }, Tags: [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: "relay-fixture" }, { Key: "AgentWebChat", Value: chat.id }], ...overrides };
+  return { InstanceId: "i-aaaaaaaaaaaaaaaaa", ImageId: "ami-aaaaaaaaaaaaaaaaa", State: { Name: "stopped" }, PrivateIpAddress: "10.0.0.42", SubnetId: "subnet-aaaaaaaaaaaaaaaaa", KeyName: "fixture-worker", SecurityGroups: [{ GroupId: "sg-aaaaaaaaaaaaaaaaa" }], MetadataOptions: { HttpEndpoint: "disabled" }, Tags: [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: "relay-fixture" }, { Key: "AgentWebChat", Value: chat.id }], ...overrides };
 }
 function image(overrides = {}) {
-  return { ImageId: "ami-aaaaaaaaaaaaaaaaa", State: "available", Architecture: "x86_64", Tags: [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: "relay-fixture" }, { Key: "AgentRelayWorkerKey", Value: "fixture-worker" }, { Key: "CodexVersion", Value: "0.154.0" }, { Key: "ClaudeVersion", Value: "2.1.222" }], ...overrides };
+  return { ImageId: "ami-aaaaaaaaaaaaaaaaa", OwnerId: "123456789012", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true } }], State: "available", Architecture: "x86_64", Tags: [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: "relay-fixture" }, { Key: "AgentRelayWorkerKey", Value: "fixture-worker" }, { Key: "CodexVersion", Value: "0.154.0" }, { Key: "ClaudeVersion", Value: "2.1.222" }, { Key: "AgentRelayAcceptance", Value: "verified-v1" }, { Key: "AgentRelayAcceptanceId", Value: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }], ...overrides };
 }
 function fixture({ initial = instance(), config = ec2Config(), ami = image(), lookup, afterLaunch } = {}) {
   const calls = [];
@@ -24,7 +24,7 @@ function fixture({ initial = instance(), config = ec2Config(), ami = image(), lo
   const backend = new Ec2Backend({ store: {}, config, commandRunner: async (command, args) => {
     calls.push({ command, args });
     if (command === "ssh") return args.at(-1).includes(".workspace-seeded") ? "ready" : "";
-    if (args.includes("describe-images")) return JSON.stringify(ami);
+    if (args.includes("describe-images")) return JSON.stringify([typeof ami === "function" ? ami(args) : ami]);
     if (args.includes("describe-instances")) return JSON.stringify(args.includes("--instance-ids") ? worker : (lookup || (worker ? [worker] : [])));
     if (args.includes("run-instances")) { worker = afterLaunch || instance({ State: { Name: "pending" } }); return JSON.stringify(worker); }
     if (args.includes("start-instances")) worker.State.Name = "running";
@@ -105,6 +105,46 @@ test("EC2 requires deployment, private IP, safe origin and SSH target", () => {
   for (const origin of ["https://user:password@relay.test", "https://relay.test/path", "https://relay.test?key=secret"]) assert.throws(() => ec2Config({ AGENT_EC2_GATEWAY_ORIGIN: origin }), /without credentials/);
   const { backend } = fixture();
   for (const host of ["-oProxyCommand=bad", "example.com", "169.254.169.254", "127.0.0.1", "8.8.8.8"]) assert.throws(() => backend.sshArgs(host), /private IPv4/);
+});
+
+test("missing, revoked and malformed acceptance deny new and existing worker admission, not cleanup", async () => {
+  const invalid = [
+    image({ Tags: image().Tags.filter(tag => !tag.Key.startsWith("AgentRelayAcceptance")) }),
+    image({ Tags: image().Tags.map(tag => tag.Key === "AgentRelayAcceptance" ? { ...tag, Value: "revoked" } : tag) }),
+    image({ Tags: image().Tags.map(tag => tag.Key === "AgentRelayAcceptanceId" ? { ...tag, Value: "invalid" } : tag) }),
+    image({ Public: true }), image({ BlockDeviceMappings: [] }),
+  ];
+  for (const ami of invalid) for (const initial of [null, instance(), instance({ State: { Name: "running" } })]) {
+    const f = fixture({ ami, initial });
+    await assert.rejects(f.backend.acquire(chat), /acceptance|verified image/);
+    assert.ok(f.calls.every(call => call.command !== "ssh" && !call.args.some(arg => ["start-instances", "run-instances"].includes(arg))));
+    if (initial) {
+      await f.backend.sleep(chat); await f.backend.destroy(chat);
+      assert.ok(f.calls.some(call => call.args.includes("terminate-instances")));
+    }
+  }
+});
+
+test("existing worker admission validates its actual AMI, and refreshes acceptance before returning executor", async () => {
+  const actual = "ami-bbbbbbbbbbbbbbbbb", queries = [];
+  const f = fixture({ initial: instance({ ImageId: actual }), ami: args => {
+    queries.push(args);
+    return image({ ImageId: actual });
+  } });
+  await f.backend.acquire(chat);
+  assert.equal(queries.length, 3);
+  for (const args of queries) { assert.ok(args.includes(actual)); assert.ok(args.includes("--owners")); assert.ok(args.includes("self")); }
+  let reads = 0;
+  const revoked = fixture({ ami: () => ++reads === 1 ? image() : image({ Tags: [] }) });
+  await assert.rejects(revoked.backend.acquire(chat), /verified image/);
+  assert.ok(revoked.calls.some(call => call.args.includes("start-instances")));
+  assert.ok(!revoked.calls.some(call => call.command === "ssh"));
+  reads = 0;
+  const delayed = fixture({ ami: () => ++reads < 3 ? image() : image({ Tags: [] }) });
+  await assert.rejects(delayed.backend.acquire(chat), /verified image/);
+  assert.ok(delayed.calls.some(call => call.command === "ssh"));
+  const wrongLaunch = fixture({ initial: null, afterLaunch: instance({ ImageId: actual }) });
+  await assert.rejects(wrongLaunch.backend.acquire(chat), /requested accepted AMI/);
 });
 
 test("EC2 sends private environment and native arguments over stdin, never controller SSH argv", async () => {

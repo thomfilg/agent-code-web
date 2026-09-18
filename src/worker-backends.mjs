@@ -4,6 +4,7 @@ import path from "node:path";
 import { isIP } from "node:net";
 import { spawnWorker } from "./worker-process.mjs";
 import { SSH_WORKER_LAUNCHER, sshWorkerRequest } from "./ssh-worker-launcher.mjs";
+import { assertWorkerImage } from "./worker-image.mjs";
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
@@ -226,6 +227,10 @@ export class Ec2Backend {
   async acquire(chat) {
     let instance = await this.#find(chat.id);
     if (!instance) instance = await this.#create(chat.id);
+    // Existing/stopped workers retain their actual AMI, not necessarily the
+    // currently configured one. A revoked marker denies new admission only;
+    // sleep/destroy deliberately remain available for exact-owned cleanup.
+    await this.#acceptedImage(instance.ImageId);
     if (instance.State?.Name === "stopping") {
       await this.#aws("ec2", "wait", "instance-stopped", "--instance-ids", instance.InstanceId);
       instance.State.Name = "stopped";
@@ -235,12 +240,16 @@ export class Ec2Backend {
     }
     await this.#aws("ec2", "wait", "instance-running", "--instance-ids", instance.InstanceId);
     instance = await this.#describe(instance.InstanceId, chat.id);
+    await this.#acceptedImage(instance.ImageId);
     const host = this.config.ec2.usePublicIp ? instance.PublicIpAddress : instance.PrivateIpAddress;
     if (!host) throw new Error(`EC2 instance ${instance.InstanceId} has no ${this.config.ec2.usePublicIp ? "public" : "private"} IP`);
     await mkdir(path.dirname(this.config.ec2.sshKnownHosts), { recursive: true, mode: 0o700 });
     await this.#waitForSsh(host, instance.InstanceId);
     const executor = new Ec2Executor({ backend: this, chat, instance, host });
     await executor.prepare();
+    // SSH readiness/workspace upload can take time; do not hand an executor
+    // to provider credential delivery if acceptance was revoked meanwhile.
+    await this.#acceptedImage(instance.ImageId);
     return executor;
   }
 
@@ -301,15 +310,18 @@ export class Ec2Backend {
     return this.#assertWorker(instance, chatId);
   }
 
+  async #acceptedImage(imageId) {
+    const ec2 = this.config.ec2;
+    if (!/^ami-[a-f0-9]{8,17}$/.test(imageId || "")) throw new Error("Worker instance has no verifiable AMI identity");
+    // AWS enforces self ownership; no reliance on an arbitrary tag as owner.
+    const images = JSON.parse(await this.#aws("ec2", "describe-images", "--image-ids", imageId, "--owners", "self", "--query", "Images", "--output", "json"));
+    if (!Array.isArray(images) || images.length !== 1) throw new Error("Worker AMI is not uniquely owned by this AWS account");
+    return assertWorkerImage(images[0], { imageId, deployment: ec2.deployment, keyName: ec2.keyName });
+  }
+
   async #create(chatId) {
     const ec2 = this.config.ec2;
-    const image = JSON.parse(await this.#aws("ec2", "describe-images", "--image-ids", ec2.amiId, "--query", "Images[0]", "--output", "json"));
-    const imageTags = Object.fromEntries((image?.Tags || []).map(({ Key, Value }) => [Key, Value]));
-    if (image?.ImageId !== ec2.amiId || image.State !== "available" || image.Architecture !== "x86_64" ||
-        imageTags.ManagedBy !== "agent-relay" || imageTags.AgentRelayDeployment !== ec2.deployment ||
-        imageTags.AgentRelayWorkerKey !== ec2.keyName || imageTags.CodexVersion !== "0.154.0" || imageTags.ClaudeVersion !== "2.1.222") {
-      throw new Error("Worker AMI must be a verified image baked for this deployment, SSH key, and pinned CLI versions");
-    }
+    await this.#acceptedImage(ec2.amiId);
     const Tags = [
       { Key: "Name", Value: `agent-relay-${chatId.slice(-12)}` }, { Key: "AgentWebChat", Value: chatId },
       { Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: ec2.deployment },
@@ -332,7 +344,9 @@ export class Ec2Backend {
     );
     const instance = JSON.parse(output);
     if (!/^i-[a-f0-9]{8,17}$/.test(instance?.InstanceId || "")) throw new Error("EC2 launch did not return a valid worker ID");
-    return this.#describe(instance.InstanceId, chatId);
+    const described = await this.#describe(instance.InstanceId, chatId);
+    if (described.ImageId !== ec2.amiId) throw new Error("New worker does not use the requested accepted AMI");
+    return described;
   }
 
   async #waitForSsh(host, instanceId) {
