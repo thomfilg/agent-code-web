@@ -8,8 +8,12 @@ Runtime source `79d66cc` is committed/pushed to draft PR #4. Final local accepta
 passed 1,202 Node cases (zero failures, three explicit opt-in skips) and 8/8 actual
 UI cases. The final synthetic comparison reduced command acknowledgement median
 from 170.9 to 6.6 ms and increased output from 4.6 to 29.9 frames/s; those numbers
-exclude network/model latency. Publication remains pending: the AWS `code-web`
-session is expired, and no instances or deployed files were changed. See
+exclude network/model latency. After the user renewed AWS credentials, build
+source `28654d6` was published at 17:41 UTC: SSM Success/0, independently matched
+running image, readiness 200 and all three changed public assets matched the
+exact commit. All 13 deployed denial probes passed. The one running worker was
+stopped by this authorized manual rollout; no data or instance was deleted.
+Authenticated end-to-end AWS browser latency remains unmeasured. See
 [the measurements and limitations](validation-2026-09-18-browser-interaction.md).
 The separate perceived agent-chat lag is under diagnosis: messages traverse the
 controller and return over SSE, not a direct browser-to-worker connection. No

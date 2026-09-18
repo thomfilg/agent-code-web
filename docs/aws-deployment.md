@@ -7,6 +7,16 @@ manual-only and off by default. Today's manually operated update may interrupt
 workers under the user's explicit setup authorization; that is not permission
 for future disruptive automation. See [the required continuity gate](adr/2026-09-18-automatic-rollouts-preserve-workers.md).
 
+Latest application publication (2026-09-18 17:41 UTC): build source `28654d6`
+(runtime `79d66cc`) adds Shared Chrome streaming/input improvements, remote
+reload shortcuts and explicit plain-text clipboard. Rollout SSM
+`609c230c-af33-4e41-bcce-6426341f59ae` completed Success/0. At 17:43 UTC,
+independent checks confirmed the actual running immutable image, public
+readiness, all three changed public assets and 13 fixed GitHub denial probes.
+The authorized manual restart stopped the one running worker; no data, worker
+instance or volume was deleted. This does not satisfy the future automatic
+continuity gate. See [the image, source and verification receipt](validation-2026-09-18-browser-interaction.md#aws-publication--independently-verified-at-1743-utc).
+
 Current product clarification (2026-09-18): the GitHub company-selection step
 described in historical receipts below is superseded by
 [provider-authorized repository access](adr/2026-09-18-github-provider-permissions.md).
@@ -249,7 +259,7 @@ transport acceptance item, not something a local `.localhost` alias provides.
 
 ## Durability and acceptance status
 
-Current application (2026-09-18 14:11 UTC): revision
+Historical application (2026-09-18 14:11 UTC): revision
 `f271d7ec2c0b871dcba7f39e63cfd7f29a4a645c`, immutable digest
 `sha256:aa59e99face500213d3f04b554b0567d4c2c7f7670376fcc47b10ef28ecfcfc8`.
 CodeBuild `ImageBuild-t8BSbSkDsHYX:b59d2266-3ae9-4587-a7e2-e162be7c91e3`

@@ -97,11 +97,49 @@ fixed and the final complete runs above passed without relaxing the behavior
 assertions. All browser state was disposable fixture data, with no real model
 prompts or real account consent.
 
-AWS credential verification currently reports an expired `code-web` login.
-No deployment or running worker was changed. The published runtime remains
-`e7689a7` until there is a separate successful rollout receipt. Publication must
-respect the [worker continuity constraint](adr/2026-09-18-automatic-rollouts-preserve-workers.md);
-today's manual exception is not authority to enable disruptive automatic deploys.
+## AWS publication — independently verified at 17:43 UTC
+
+The initial publication attempt was blocked by an expired `code-web` login;
+no deployment occurred during that attempt. After the user renewed it, account
+`456808212788` / `us-east-2` and the clean pinned rollout engine were verified.
+The subsequent authorized manual rollout succeeded:
+
+- Build source: `28654d65db5afa65005086e7aa08de84a41826af`, the receipt-only
+  commit following runtime `79d66cc`. Runtime inputs are unchanged between
+  these commits. The allowlisted committed archive excludes the unrelated
+  uncommitted Claude-doctor changes and local private state.
+- Build: `ImageBuild-t8BSbSkDsHYX:648f38bf-66cf-448d-a1a7-3c7f00949936`,
+  **SUCCEEDED**, immutable S3 version `pUnRBDTZv0bZa_W8SYkJzXhVkClVutXv`.
+- Image: `456808212788.dkr.ecr.us-east-2.amazonaws.com/agent-relay-mvp-applicationrepository-sujdgarjwejp@sha256:e2b03cfabb64bb571d47bbdc35a5c669dbbba41c817a9580c9984ddc73de998b`.
+- Rollout: SSM `609c230c-af33-4e41-bcce-6426341f59ae`, **Success**, exit **0**,
+  elapsed **26.454 seconds**, ended **17:41:24 UTC**, controller
+  `i-08c991c22089589a5`. No infrastructure provisioning was performed.
+- Independent read-only running-container identity check: SSM
+  `2799ed92-81e2-4216-b3ab-819c09c9d9d0`, **Success/0**; the actual running
+  controller image matches the exact digest above. No environment or
+  credential contents were printed.
+- At **17:42:19 UTC**, public `/readyz` returned **200 / ok:true** and anonymous
+  `/api/chats` returned **401**. All three changed public assets (`index.html`,
+  `shared-browser.js`, `browser-input.js`) returned **200**, no Set-Cookie, and
+  SHA-256 matched the exact build source through CloudFront.
+- All **13 fixed deployed GitHub denial probes passed** at **17:42:22 UTC**.
+  This is negative-route behavior, not positive authenticated GitHub evidence;
+  it is paired with the independent immutable-image receipt above. No real
+  model prompts, provider mutations or account imports were requested.
+
+The scoped worker inventory changed from **one running** before rollout to
+**one stopped** at **17:42:55 UTC**. The manual restart therefore interrupted
+the worker; it is not evidence of task continuity. No chat, credential, worker
+instance or data volume was deleted. The user can resume the worker through
+the chat. Today's explicit interruption exception does not authorize disruptive
+automatic deployments; those remain disabled under the
+[worker continuity constraint](adr/2026-09-18-automatic-rollouts-preserve-workers.md).
+
+Reload Relay to load the new UI assets. For the separate personal/signed-in
+Chrome mode, update/reload the installed extension to use its new streaming
+implementation; publishing the controller does not update an already installed
+extension. Local interaction acceptance and deployed health/identity checks do
+not establish the user's authenticated end-to-end AWS browser latency.
 
 ## Separate agent-chat latency question
 
