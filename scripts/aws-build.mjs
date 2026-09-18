@@ -26,11 +26,12 @@ export function buildTarget(stack, resources) {
   return { ...outputs, repository };
 }
 
-export function buildSummary(build, selected) {
+export function buildSummary(build, selected, expectedVersion = null) {
   if (build?.projectName !== selected.ImageBuildProject) throw new Error("Build does not belong to this deployment");
   const tag = build.environment?.environmentVariables?.find(item => item.name === "IMAGE_TAG")?.value;
   if (!/^[a-f0-9]{40}$/.test(tag || "") || build.source?.location !== `${selected.ArtifactBucket}/source/${tag}.zip`) throw new Error("Build does not identify an exact committed source archive");
-  return { id: build.id, status: build.buildStatus, phase: build.currentPhase, revision: tag, logGroup: build.logs?.groupName, logStream: build.logs?.streamName };
+  if (!build.sourceVersion || build.sourceVersion === "null" || expectedVersion && build.sourceVersion !== expectedVersion) throw new Error("Build must use the exact uploaded S3 object version");
+  return { id: build.id, status: build.buildStatus, phase: build.currentPhase, revision: tag, sourceVersion: build.sourceVersion, logGroup: build.logs?.groupName, logStream: build.logs?.streamName };
 }
 
 export async function main(args) {
@@ -61,9 +62,10 @@ export async function main(args) {
   const filename = path.join(directory, "source.zip"), key = `source/${revision}.zip`;
   try {
     await execute("git", ["archive", "--format=zip", `--output=${filename}`, revision, ".dockerignore", "deploy/aws", "package.json", "package-lock.json", "scripts/build-auth.mjs", "src", "public", "chrome-extension"], { cwd: root });
-    await aws(["s3api", "put-object"], ["--bucket", selected.ArtifactBucket, "--key", key, "--body", filename, "--server-side-encryption", "AES256"]);
-    const result = await aws(["codebuild", "start-build"], ["--project-name", selected.ImageBuildProject, "--source-type-override", "S3", "--source-location-override", `${selected.ArtifactBucket}/${key}`, "--environment-variables-override", JSON.stringify([{ name: "IMAGE_TAG", value: revision, type: "PLAINTEXT" }])]);
-    console.log(JSON.stringify({ started: true, ...buildSummary(result.build, selected) }));
+    const uploaded = await aws(["s3api", "put-object"], ["--bucket", selected.ArtifactBucket, "--key", key, "--body", filename, "--server-side-encryption", "AES256"]);
+    if (!uploaded.VersionId || uploaded.VersionId === "null") throw new Error("Source bucket must retain immutable object versions");
+    const result = await aws(["codebuild", "start-build"], ["--project-name", selected.ImageBuildProject, "--source-type-override", "S3", "--source-location-override", `${selected.ArtifactBucket}/${key}`, "--source-version", uploaded.VersionId, "--environment-variables-override", JSON.stringify([{ name: "IMAGE_TAG", value: revision, type: "PLAINTEXT" }])]);
+    console.log(JSON.stringify({ started: true, ...buildSummary(result.build, selected, uploaded.VersionId) }));
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 

@@ -6,7 +6,7 @@ const outputs = { ArtifactBucket: "relay-artifacts", ImageBuildProject: "relay-b
 const stack = { StackStatus: "CREATE_COMPLETE", Tags: [{ Key: "ManagedBy", Value: "12-apps-ci" }], Outputs: Object.entries(outputs).map(([OutputKey, OutputValue]) => ({ OutputKey, OutputValue })) };
 const resources = [{ ResourceType: "AWS::S3::Bucket", PhysicalResourceId: outputs.ArtifactBucket }, { ResourceType: "AWS::CodeBuild::Project", PhysicalResourceId: outputs.ImageBuildProject }, { ResourceType: "AWS::ECR::Repository", PhysicalResourceId: "relay-images" }];
 const revision = "a".repeat(40);
-const build = { id: "relay-build:00000000-0000-0000-0000-000000000000", projectName: "relay-build", buildStatus: "SUCCEEDED", currentPhase: "COMPLETED", environment: { environmentVariables: [{ name: "IMAGE_TAG", value: revision }, { name: "PRIVATE_TEST_VALUE", value: "must-not-print" }] }, source: { location: `relay-artifacts/source/${revision}.zip` } };
+const build = { id: "relay-build:00000000-0000-0000-0000-000000000000", projectName: "relay-build", buildStatus: "SUCCEEDED", currentPhase: "COMPLETED", sourceVersion: "immutable-s3-version", environment: { environmentVariables: [{ name: "IMAGE_TAG", value: revision }, { name: "PRIVATE_TEST_VALUE", value: "must-not-print" }] }, source: { location: `relay-artifacts/source/${revision}.zip` } };
 
 test("image building requires completed stack and exact owned resources", () => {
   assert.equal(buildTarget(stack, resources).repository, "relay-images");
@@ -24,4 +24,8 @@ test("build status is project and exact committed source bound and redacted", ()
   assert.throws(() => buildSummary({ ...build, projectName: "unrelated" }, selected));
   assert.throws(() => buildSummary({ ...build, source: { location: "relay-artifacts/source/other.zip" } }, selected));
   assert.throws(() => buildSummary({ ...build, environment: { environmentVariables: [{ name: "IMAGE_TAG", value: "latest" }] } }, selected));
+  assert.throws(() => buildSummary({ ...build, sourceVersion: undefined }, selected));
+  assert.throws(() => buildSummary({ ...build, sourceVersion: "null" }, selected));
+  assert.throws(() => buildSummary(build, selected, "different-upload"));
+  assert.equal(buildSummary(build, selected, "immutable-s3-version").sourceVersion, "immutable-s3-version");
 });
