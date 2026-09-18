@@ -104,12 +104,20 @@ This replaces the legacy previous slot, so record the new baseline explicitly.
 A legacy image without the Host dispatcher could serve Relay UI/routes on a
 preview hostname. Host-only Relay cookies still prevent automatic login there,
 but that violates the origin contract. **Revoking grants or changing the enable
-flag alone is insufficient.** Before rollback to legacy code, or an intentional
-global disable, revoke assignments and confirm every relevant distribution is
+flag alone is insufficient for a legacy rollback.** Before rollback to legacy
+code, revoke assignments and confirm every relevant distribution is
 disabled and `Deployed` (or complete exact deletion) before removing routing.
 Do not modify unrelated distributions or bypass a busy deploy drain. Normal
 preview-aware updates preserve host records but invalidate browser grants;
 users reopen from Relay after restart.
+
+The independent Host guard added in `62bd880` remains active for Google/HTTPS/EC2
+controllers even when preview provisioning is disabled. On that reviewed binary,
+old preview hosts return 421 instead of falling through to Relay; an intentional
+global disable does **not** require prior CloudFront disablement for origin
+isolation. It does not delete distributions, however, and pauses reconciliation.
+Prefer completing scoped revocation/cleanup before disabling to avoid retained
+resources and costs. Do not assume a pre-guard rollback image has this behavior.
 
 ## Evidence to record
 
