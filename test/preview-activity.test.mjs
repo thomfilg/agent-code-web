@@ -92,3 +92,46 @@ test("runtime preview holds prevent idle sleep, never start a model, and Stop re
   assert.equal(manager.previewGeneration(chat.id), 1);
   assert.deepEqual(store.get(chat.id).messages.map(message => message.text), ["fixture", "reply"]);
 });
+
+test("verified runtime restart restores preview admission after fatal error without reviving an old lease", async t => {
+  const root = await temporaryDirectory(t), config = testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "60000" }), store = new ChatStore(root); await store.initialize();
+  const adapters = [];
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10000 }),
+    workerBackend: { acquire: async () => ({}), sleep: async () => {}, destroy: async () => {} },
+    adapterFactory: ({ hooks }) => { const adapter = { hooks, start: async () => {}, send: async () => ({ text: "fixture reply" }), stop: async () => {} }; adapters.push(adapter); return adapter; } });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "mock" }); await manager.send(chat.id, "first fixture");
+  const old = await manager.previewActivity.hold(chat.id, manager.previewGeneration(chat.id), new AbortController().signal);
+  await adapters[0].hooks.onFatal(Error("fixture failure"));
+  assert.equal(old.signal.aborted, true); assert.equal(manager.previewGeneration(chat.id), null);
+  await manager.send(chat.id, "restart fixture");
+  assert.equal(adapters.length, 2); assert.equal(manager.previewGeneration(chat.id), 1);
+  const fresh = await manager.previewActivity.hold(chat.id, 1, new AbortController().signal);
+  assert.equal(fresh.signal.aborted, false); assert.equal(old.signal.aborted, true); fresh.release();
+});
+
+test("Stop during final startup persistence cannot announce or restore a cancelled preview runtime", async t => {
+  const root = await temporaryDirectory(t), config = testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "60000" }), store = new ChatStore(root); await store.initialize();
+  const adapters = [], events = [], ready = Promise.withResolvers(), finishReady = Promise.withResolvers(), stopStarted = Promise.withResolvers(), finishStop = Promise.withResolvers();
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10000 }),
+    workerBackend: { acquire: async () => ({}), sleep: async () => {}, destroy: async () => {} },
+    adapterFactory: ({ hooks }) => {
+      const index = adapters.length, adapter = { hooks, start: async () => {}, send: async () => ({ text: "fixture reply" }),
+        stop: async () => { if (index === 1) { stopStarted.resolve(); await finishStop.promise; } } }; adapters.push(adapter); return adapter;
+    } });
+  t.after(async () => { finishReady.resolve(); finishStop.resolve(); await manager.shutdown(); });
+  manager.on("event", event => events.push(event));
+  const chat = await manager.createChat({ agent: "mock" }); await manager.send(chat.id, "first fixture");
+  await adapters[0].hooks.onFatal(Error("fixture failure")); assert.equal(manager.previewGeneration(chat.id), null);
+  const update = store.update.bind(store); let gate = true;
+  store.update = async (...args) => { const value = await update(...args); if (gate && value?.statusDetail === "Runtime ready") { gate = false; ready.resolve(); await finishReady.promise; } return value; };
+  const restarting = manager.send(chat.id, "cancelled restart fixture"); await ready.promise;
+  const stopping = manager.stop(chat.id); await stopStarted.promise;
+  assert.equal(manager.previewGeneration(chat.id), null); finishReady.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(manager.previewGeneration(chat.id), null);
+  assert.equal(events.filter(event => event.type === "runtime_started").length, 1);
+  finishStop.resolve(); await Promise.all([stopping, restarting]); store.update = update;
+  assert.equal(events.filter(event => event.type === "runtime_started").length, 1);
+  assert.equal(manager.previewGeneration(chat.id), 2, "a completed Stop still permits an explicit later open");
+});
