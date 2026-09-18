@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, mkdir, writeFile, readFile, rm, lstat, symlink, chmod } from "node:fs/promises";
 import { EventEmitter } from "node:events";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { parseNativeOptions, smokeEc2Native, readNativeAccess, validateProbeReceipt } from "../scripts/smoke-ec2-native.mjs";
@@ -340,4 +341,11 @@ test("tunnel startup failure retains safe primary stage and unconfirmed session 
     assert.deepEqual(error.diagnostic, { stage: "ssm-tunnel", category: "failed", sessionCloseAttempted: true, sessionClosed: false });
     assert.doesNotMatch(JSON.stringify(nativeFailureReceipt(error)), /PRIVATE/); return true;
   });
+});
+
+test("outer CLI fails with only a fixed diagnostic receipt before any AWS call", () => {
+  const result = spawnSync(process.execPath, [new URL("../scripts/smoke-ec2-native.mjs", import.meta.url).pathname, "--PRIVATE-UNKNOWN-ARGUMENT"], { encoding: "utf8", env: { PATH: "", LANG: "C.UTF-8" } });
+  assert.equal(result.status, 1); assert.equal(result.stdout, ""); assert.doesNotMatch(result.stderr, /PRIVATE|\.mjs:| at /);
+  const receipt = JSON.parse(result.stderr.split("\n")[0]);
+  assert.equal(receipt.accepted, false); assert.deepEqual(receipt.diagnostic, { stage: "arguments", category: "failed" });
 });
