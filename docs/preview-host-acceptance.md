@@ -27,6 +27,8 @@ Required container settings:
 - `--network host`, solely to use the exact controller instance role via IMDS.
   The helper creates no listener or application HTTP traffic.
 - `--user 1000:1000 --read-only --cap-drop ALL --security-opt no-new-privileges`.
+- `--cpus 1 --memory 512m --pids-limit 128`; the launcher verifies these bounds
+  against Docker's actual container configuration before starting.
 - A private tmpfs `/tmp`; only a new dedicated UID1000 mode0700 operator
   directory is writable, mounted at `/acceptance`. Never mount `/srv/relay/data`,
   `/var/lib/relay`, the Docker socket, a credential directory or the product DB.
@@ -86,3 +88,30 @@ failed readiness cleanup, denied deletion, cancellation, durable fsync journal,
 concurrent lock rejection and bad scope/symlink rejection. It is not actual AWS
 permission or provisioning evidence. A real receipt must be paired with the
 operator container's observed exact image/role and final resource inventory.
+
+## Reviewed host launcher
+
+`deploy/aws/preview-host-launch.py` defaults to a no-Docker/no-AWS plan. An
+explicit root `--run` reads one bounded public payload from stdin with exactly
+`input` (the helper JSON above), `stackArn` (the exact owned stack ARN), and
+`helperSource` (base64 of the reviewed helper). The launcher pins both the image
+digest above and the helper SHA256, so arbitrary code or image substitution is
+not accepted. It validates the existing `relay` and `relay-previous` image,
+ownership and enabled preview metadata before starting. It holds the deployment
+engine's `/run/12-apps-controller-rollout.lock` for the whole operation.
+
+The launcher creates only `/srv/relay-preview-acceptance/<runId>` and a uniquely
+named container. It inspects actual image ID, labels, entrypoint, user, resource
+limits, capabilities, network, env, bind mounts and tmpfs before `docker start`.
+`HOME=/tmp/preview-home` is inside that private tmpfs. The Docker attach command
+is bounded to1660seconds; the enclosing SSM document must set execution timeout
+to at least1800seconds (30minutes). Do not begin another rollout while it holds
+the host lock. On timeout, only the exact inspected operator ID is stopped; a
+stopped state is observed before removal and exact inventory absence is checked
+after removal. Cloud cleanup still requires the helper's separate successful
+delete/absence receipt; container removal cannot turn an ambiguous result into
+success. The journal and public helper source remain for audit/recovery.
+If Docker creates a stopped container but its creation response is lost before
+the ID is captured, the launcher fails without guessing an ID. Recover only the
+exact unique name after checking its acceptance label, run UUID and pinned image;
+do not infer that a failed launcher means no container exists.
