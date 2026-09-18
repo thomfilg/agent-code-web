@@ -16,7 +16,7 @@ function selection(chat) {
   const seen = new Set();
   const repositories = chat.repositories.map(repo => {
     if (!Number.isSafeInteger(repo.id) || repo.id <= 0 || seen.has(repo.id) ||
-      typeof repo.fullName !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo.fullName) ||
+      typeof repo.fullName !== "string" || repo.fullName.length > 201 || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo.fullName) ||
       repo.fullName.split("/").some(part => part === "." || part === "..") || typeof repo.githubConnectionId !== "string") throw fail();
     seen.add(repo.id);
     return { id: repo.id, fullName: repo.fullName, githubConnectionId: repo.githubConnectionId, branch: repo.branch, defaultBranch: repo.defaultBranch };
@@ -169,6 +169,7 @@ export class GitHubWorkerGateway {
       const gitProtocol = request.headers["git-protocol"];
       if (gitProtocol && !/^version=[12]$/.test(gitProtocol)) throw fail(400);
       await this.withRepository(token, Number(id), async ({ github, repository, connectionId, chatCompany, signal: grantSignal, assertCurrent }) => {
+        if (response.destroyed || request.aborted) throw fail();
         const disconnected = new AbortController(), signal = AbortSignal.any([grantSignal, disconnected.signal]);
         const onClose = () => { if (!response.writableFinished) disconnected.abort(); };
         response.once("close", onClose);

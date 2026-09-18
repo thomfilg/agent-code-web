@@ -163,6 +163,40 @@ test("revocation aborts an ongoing smart HTTP response stream", async t => {
   await assert.rejects(reader.read()); assert.equal(upstreamAborted, true);
 });
 
+test("gzip bombs are denied before forwarding and concurrent operations are capped per grant and globally", async t => {
+  let forwarded = false;
+  const f = await fixture(t, { fetchImpl: async () => { forwarded = true; throw Error(); } }), origin = await serve(t, f.gateway), grant = await f.gateway.runtime(f.chat.id, origin);
+  const response = await fetch(origin + "/gateway/github/git/1.git/git-receive-pack", { method: "POST", body: gzipSync(Buffer.alloc(32 * 1024 * 1024 + 1)), headers: {
+    ...headers(grant.token), "content-type": "application/x-git-receive-pack-request", "content-encoding": "gzip",
+  } });
+  assert.equal(response.status, 413); assert.equal(forwarded, false);
+  const grants = [grant];
+  for (const id of ["chat_two", "chat_three"]) { f.chats.set(id, { ...f.chat, id }); grants.push(await f.gateway.runtime(id, origin)); }
+  const releases = [], operations = [];
+  const hold = async token => {
+    const promise = f.gateway.withRepository(token, 1, () => new Promise(resolve => releases.push(resolve)));
+    operations.push(promise); while (releases.length !== operations.length) await tick();
+  };
+  await hold(grants[0].token); await hold(grants[0].token);
+  await assert.rejects(f.gateway.withRepository(grants[0].token, 1, () => {}), { statusCode: 429 });
+  await hold(grants[1].token); await hold(grants[1].token);
+  await assert.rejects(f.gateway.withRepository(grants[2].token, 1, () => {}), { statusCode: 429 });
+  for (const release of releases) release(); await Promise.all(operations);
+  assert.equal(f.gateway.active, 0);
+});
+
+test("client disconnect cancels provider work and never persists provider error output", async t => {
+  let upstreamAborted = false, entered = false;
+  const f = await fixture(t, { fetchImpl: async (_url, { signal }) => {
+    entered = true; return new Promise((_, reject) => signal.addEventListener("abort", () => { upstreamAborted = true; reject(Error("PRIVATE")); }, { once: true }));
+  } });
+  const origin = await serve(t, f.gateway), grant = await f.gateway.runtime(f.chat.id, origin), cancellation = new AbortController();
+  const result = fetch(origin + discovery, { headers: headers(grant.token), signal: cancellation.signal }); const rejected = assert.rejects(result);
+  while (!entered) await tick(); cancellation.abort(); await rejected;
+  for (let i = 0; i < 100 && !upstreamAborted; i++) await tick();
+  assert.equal(upstreamAborted, true);
+});
+
 test("native Git clones, fetches and pushes through actual git-http-backend without credential persistence", async t => {
   const directory = await mkdtemp(path.join(tmpdir(), "relay-git-gateway-")); t.after(() => rm(directory, { recursive: true, force: true }));
   const env = { PATH: process.env.PATH, HOME: directory, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", LANG: "C.UTF-8" };
