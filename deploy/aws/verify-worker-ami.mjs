@@ -18,7 +18,9 @@ function safeProbeFailure(output) {
   try {
     const diagnostic = JSON.parse(output).diagnostic;
     if (diagnostic?.stage !== "worker-probe" || !probeFailureCategories.has(diagnostic.category)) return "";
-    return `; ${diagnostic.category}${Number.isInteger(diagnostic.exitCode) && diagnostic.exitCode >= -255 && diagnostic.exitCode <= 255 ? ` (exit ${diagnostic.exitCode})` : ""}`;
+    const checks = ["finalized", "cloudInitDisabled", "ssmDisabled", "credentialsAbsent", "transportKeyMatches", "metadataReachable", "freshIdentity", "heartbeatEnabled", "watchdogActive"];
+    const audit = diagnostic.category === "image-audit" ? checks.filter(key => typeof diagnostic.auditChecks?.[key] === "boolean").map(key => `${key}=${diagnostic.auditChecks[key]}`) : [];
+    return `; ${diagnostic.category}${Number.isInteger(diagnostic.exitCode) && diagnostic.exitCode >= -255 && diagnostic.exitCode <= 255 ? ` (exit ${diagnostic.exitCode})` : ""}${audit.length ? `; audit checks: ${audit.join(", ")}` : ""}`;
   } catch { return ""; }
 }
 
