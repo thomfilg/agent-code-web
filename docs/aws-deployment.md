@@ -131,15 +131,41 @@ user's account. Codex/GitHub provide device URLs/codes; Claude provides its
 native authorization URL and asks for the complete returned code. Linear uses
 browser OAuth and a read-only workspace verification before claiming success.
 
-Latest OAuth checkpoint (2026-09-18 13:19 UTC): the user confirmed adding both
+Latest user acceptance (2026-09-18 13:54 UTC): the user confirmed that cloud
+Google login and connecting both Claude and Codex work. This is **user-reported
+product acceptance**, not an agent-observed authenticated browser run. The
+subsequent account screenshot shows both providers connected and scoped to
+`12-apps` and `thomfilg`. No model turn or chat resume was reported.
+
+The user then reported a blocked new-chat flow: with no primary repository
+selected, the account dropdown is empty and misleadingly suggests reconnecting.
+The first repository determines company scope; company-bound accounts correctly
+cannot be offered to an unassigned chat. The correction is repository-first
+guidance and a compact account-settings control, not broader credential access.
+GitHub company setup/repository access, Linear consent, successful deployed chat
+creation, selected-account execution/
+resume and authenticated deployed preview/transport acceptance remain open.
+
+At 14:01 UTC a scoped deployed read-only diagnostic confirmed the repository
+list's immediate blocker: exactly one saved GitHub connection is connected but
+has `companies: []`; none has an allowed company. The query verified the legacy
+owner against the configured Google owner before reading only that owner's
+GitHub records, in a PostgreSQL read-only transaction. SSM
+`389227f0-9c54-4b1f-b6fd-2c898d4ff542` completed Success / exit 0. No token,
+session or email was printed; no provider request, consent or record mutation
+was performed. This is saved-connection evidence, not fresh GitHub authorization
+or repository-access verification. Company access requires the user's explicit
+selection; the frontend must make that unfinished setup visible.
+
+Earlier OAuth checkpoint (2026-09-18 13:19 UTC): the user confirmed adding both
 cloud values above while retaining localhost. The official-MCP public probe
 then reached `accounts.google.com` without detecting `redirect_uri_mismatch`
 or Error 400. It did not observe a visible email field at its sampling point,
 and **did not establish a completed login or successful callback**. All three
 entry widths passed again, anonymous chats returned 401, and browser/client/
 transport closure plus private transient cleanup were confirmed. No credentials
-or consent were entered. The next gate is the user's legitimate cloud sign-in,
-followed by the separate provider consents and authenticated acceptance.
+or consent were entered. This probe did not establish the successful login
+subsequently reported by the user above.
 
 Historical public-browser check (2026-09-18 09:59 UTC): **Continue with Google**
 reached `accounts.google.com`, which rejected the cloud callback with
@@ -201,7 +227,39 @@ transport acceptance item, not something a local `.localhost` alias provides.
 
 ## Durability and acceptance status
 
-Current application (2026-09-18 13:06 UTC): revision
+Current application (2026-09-18 14:11 UTC): revision
+`f271d7ec2c0b871dcba7f39e63cfd7f29a4a645c`, immutable digest
+`sha256:aa59e99face500213d3f04b554b0567d4c2c7f7670376fcc47b10ef28ecfcfc8`.
+CodeBuild `ImageBuild-t8BSbSkDsHYX:b59d2266-3ae9-4587-a7e2-e162be7c91e3`
+used exact S3 source version `TB0dvT3INsfkz3TXFyyC67SNvWUfpwbD` and succeeded.
+The single safe-drain rollout `5a621149-308f-4f38-b00e-50751c6c7822` was
+independently confirmed Success / exit 0. At 14:11:31 UTC public `/readyz`
+returned 200 / `{ok:true}`; `/`, `/workspace-settings.js` and
+`/github-accounts.js` each returned 200 without Set-Cookie and matched the exact
+committed source bytes. No second rollout, forced drain, provider consent or
+company-scope change was performed. The previous compatible preview-aware
+image remains the earlier `b8b04ecc…` release below.
+
+This frontend correction moves repository selection before the company-bound
+account picker, replaces the large connection button with Agent's settings
+icon, and makes missing GitHub company access actionable. It distinguishes
+repository-loading failure from empty lists/searches and prevents stale refresh
+responses replacing newer results. One incomplete GitHub setup can reopen with
+known-company suggestions, but neither companies nor an ambiguous account are
+automatically selected. Backend access rules are unchanged.
+
+The patch passed 35/35 targeted backend tests, 18/18 account browser tests and
+3/3 GitHub browser tests with one browser worker and CPU 0–1 affinity. The
+official-MCP disposable fixture used actual local app APIs and UI to save
+GitHub company access, retrieve repositories, select both providers, explicitly
+configure the environment's company and create an empty Codex chat; no model
+prompt or real provider consent was sent. Widths 320/390/1600 fit, with visual
+inspection at 390. The 1122-test full regression below belongs to the preceding
+release, not a new full-suite run on this frontend patch. User-reported Google/
+Claude/Codex onboarding is recorded above; actual deployed chat execution,
+GitHub repository access, Linear and authenticated preview remain open gates.
+
+Previous application (2026-09-18 13:06 UTC): revision
 `6bf952434ad2c9310ab032bc1fb2cc14c5a83aa8`, immutable digest
 `sha256:b8b04eccd0a1a5841656868871e7666e553ebef12b760caef8aa74175d261d78`.
 CodeBuild `ImageBuild-t8BSbSkDsHYX:56dda959-1ef2-4049-b2fb-db38158ead84`
@@ -251,9 +309,10 @@ at 1600/390/320 pixels without horizontal overflow. Google initiation still
 returned **redirect_uri_mismatch / Error 400**; no credentials or consent were
 entered. Browser/client/transport closure and private transient cleanup were
 confirmed. At 13:19 UTC, after the user confirmed registering the cloud callback,
-the repeat probe no longer detected either Google error. Completed Google login,
-all real provider consents and authenticated deployed app/transport/
-selected-account execution remain open; see the latest OAuth checkpoint above.
+the repeat probe no longer detected either Google error. The user subsequently
+confirmed Google login and Claude/Codex connection; GitHub/Linear consent,
+successful chat creation and authenticated deployed app/transport/
+selected-account execution remain open; see the latest user acceptance above.
 
 Local runtime `f0e57ca` has the same application sources. Its controlled restart
 used cold private checkpoint `checkpoint-eDMBUp`; the credential file remained
@@ -302,7 +361,8 @@ journal was retained. Independent complete distribution inventory confirmed the
 temporary ID absent and the Relay distribution present. This is provider-state
 reinitialization, not a controller reboot or authenticated application traffic.
 See the [scoped receipt](preview-host-acceptance.md#actual-isolated-controller-role-receipt--2026-09-18).
-Google callback registration and real provider consent remain open.
+At this historical checkpoint Google callback registration and real provider
+consent remained open; the latest user acceptance above supersedes that status.
 
 The post-test deployment-tagged EC2/volume inventory contained only the intended
 running controller and its unchanged encrypted data volume; no tagged temporary
@@ -400,7 +460,8 @@ The earlier fixture's five-second initial UI wait was replaced by an explicit
 Fixture/SSM and VM/encrypted-volume cleanup passed, with no provider credentials,
 model turns or transcript messages. This is a real AWS guest controlled through
 an isolated local Relay, not deployed authenticated CloudFront acceptance.
-Cloud Google/provider consent, selected-product-account execution,
-protected deployed SSE/live-browser acceptance and remote
-application forwarding remain open. See the [feature queue](feature-queue.md)
+The user has since confirmed cloud Google login and Claude/Codex connection;
+GitHub/Linear consent, selected-product-account execution, protected deployed
+SSE/live-browser acceptance and remote application forwarding remain open.
+See the [feature queue](feature-queue.md)
 for the latest evidence and explicit release gates.

@@ -85,7 +85,15 @@ is the current prerequisite; item 20's unfinished doctor work stays paused.
 
 ## MVP release gate — 2026-09-17
 
-Current checkpoint (2026-09-18 13:06 UTC): AWS serves immutable revision
+Latest publication (2026-09-18 14:11 UTC): the repository/account onboarding fix
+`f271d7e` is live on AWS at immutable digest
+`aa59e99face500213d3f04b554b0567d4c2c7f7670376fcc47b10ef28ecfcfc8`.
+The single safe-drain rollout completed Success / exit 0; independent public
+readiness and exact source-byte checks of all three changed frontend assets
+passed. Account/company permissions were not changed. The UI-fix tests and
+remaining product-acceptance gates are detailed below.
+
+Previous checkpoint (2026-09-18 13:06 UTC): AWS served immutable revision
 `6bf9524` / digest `b8b04eccd0a1a5841656868871e7666e553ebef12b760caef8aa74175d261d78`.
 The rollout and a second same-digest compatible rollback baseline completed
 healthy, both independently Success / exit 0. The final exact host audit
@@ -114,10 +122,49 @@ origin/callback while retaining localhost; a fresh official-MCP check at
 13:19 UTC reached Google without detecting that error or Error 400. It did not
 observe a visible email field at its sampling point and did not complete login;
 all browser/client/transport and private transient cleanup was confirmed.
-Legitimate Google sign-in and real provider consents remain open, followed by
-selected-account execution/resume and authenticated deployed transport/app
-acceptance. The MVP is **not complete**. Test totals do not close
+At 13:54 UTC the user confirmed cloud Google login and connecting both Claude
+and Codex. Record these as **user-reported product acceptance**, not automated
+authenticated browser or model-turn evidence. A subsequent screenshot confirms
+both connected accounts are scoped to `12-apps` and `thomfilg`.
+
+The user then reported a blocked new-chat account picker with no repository
+selected. Root cause: company-scoped accounts are filtered against the currently
+unassigned chat, while the UI incorrectly suggests reconnecting and puts
+repository selection after its dependent fields. A repository-first flow with
+accurate guidance and the requested settings icon beside Agent is implemented
+below; company access is not widened. GitHub company setup/repository access,
+Linear consent, successful deployed chat creation, selected-account execution/resume and authenticated deployed
+transport/app acceptance remain open. The MVP is **not complete**. Test totals do not close
 the historical priority re-audits or change the number of recorded requests.
+
+The additional empty-repository report was confirmed against the deployed
+owner's saved metadata at 14:01 UTC: one connected GitHub connection, zero
+allowed companies. An owner-bound PostgreSQL read-only diagnostic made no
+provider requests or record changes. The existing backend intentionally returns
+no repositories before explicit company permission; the correction below adds
+a clear company-access setup action in place of the misleading generic
+search-empty message. No company is selected or authorized automatically.
+
+The UI correction is committed and pushed as `f271d7e`: repository selection
+precedes the company-dependent account picker; the requested settings icon
+beside Agent opens account management without the large connection button.
+The repository picker distinguishes missing GitHub company access, loading
+failure, no available repositories and search misses, with explicit setup/retry
+actions and stale-response protection. Reopening one incomplete GitHub setup
+shows known company suggestions from agent accounts but checks none for the
+user; several incomplete accounts require an explicit choice. Create remains
+disabled until repository, eligible agent account and environment are selected.
+
+Verification of this patch: **35/35 targeted backend tests**, **18/18 account
+browser tests** and **3/3 GitHub browser tests**, sequential on CPUs 0–1 at nice
+10. The official-MCP disposable fixture exercised the real local APIs and UI
+through explicit GitHub company permission, repository retrieval, both provider
+account selectors, explicit environment company access and one empty Codex chat.
+It sent zero model prompts and used zero real provider consents. Widths 320,
+390 and 1600 fit; root visually inspected the 390-pixel screenshot. Independent
+source review passed. The prior 1122-test full regression is the earlier release
+baseline, not a newly executed full suite on this frontend patch. Publication
+receipts belong in the [deployment status](aws-deployment.md).
 See [current deployment receipts](aws-deployment.md) and
 [preview operation limits](app-preview-operations.md).
 
