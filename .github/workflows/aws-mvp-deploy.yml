@@ -1,0 +1,53 @@
+name: AWS MVP application rollout (manual)
+
+# No push/PR trigger and no infrastructure changes. The prebuilt ECR artifact
+# comes from the separate, explicitly operated CodeBuild publication pipeline.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Observe status, deploy one immutable image, or restore the retained previous container
+        type: choice
+        options: [status, deploy, rollback]
+        default: status
+        required: true
+      image:
+        description: Required for deploy only; complete ECR repository@sha256 digest
+        type: string
+        default: ''
+      confirm_rollout:
+        description: Confirm the deployment/rollback maintenance gap (not needed for status)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  rollout:
+    if: >-
+      github.repository == 'thomfilg/agent-code-web' &&
+      github.ref == 'refs/heads/main' &&
+      vars.ENABLE_DEPLOY_AWS == 'true' &&
+      (inputs.action == 'status' || inputs.confirm_rollout)
+    permissions:
+      contents: read
+      id-token: write
+      actions: write # Required ceiling for the shared workflow's optional post-CD job.
+    uses: 12-apps/ci/.github/workflows/deploy-aws.yml@848182b33461640e9ac0feb7315f747a67877c88
+    with:
+      engine_ref: 848182b33461640e9ac0feb7315f747a67877c88
+      action: ${{ inputs.action }}
+      image: ${{ inputs.image }}
+      region: us-east-2
+      expected_account: '456808212788'
+      role_arn: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      stack: agent-relay-mvp
+      environment: aws-mvp
+      container: relay
+      mount: /srv/relay/data
+      destination: /var/lib/relay
+      ready_file: /var/lib/relay-controller-ready
+      port: '8787'
+      health: /readyz
+      timeout: '180'
