@@ -201,8 +201,10 @@ update completed without replacing any resource. Markers require successful
 fresh/resumed audits and confirmed test-resource cleanup, not merely a successful
 AMI bake. Runtime admission changes passed 64 focused tests and await rollout.
 
-The latest full backend regression at `3a3adb3` passed 833 tests without skips,
-including native/SSH/operator fixtures. A fresh browser run passed 28 isolated fixtures: 16
+The latest integrated regression at `e22fd45` passed 859 tests without skips,
+including native/SSH/operator fixtures and the opt-in official-MCP guest UI
+test in the same sequential run. Ten finalizer Python checks also passed.
+A fresh onboarding browser run passed 28 isolated fixtures: 16
 Codex/Claude, 4 Google, 4 GitHub/company scopes and 4 Linear. These are not real
 provider consent. Fresh-worker acceptance, native AWS account execution/resume,
 cloud Google/provider consent, protected SSE/live-browser acceptance and remote

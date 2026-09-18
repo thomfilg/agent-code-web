@@ -160,6 +160,11 @@ AWS checkpoint (2026-09-18 07:50 UTC):
 - The subsequent full backend regression at `3a3adb3` passed **833/833**, with
   no skips or failures, one test process at a time on CPUs 0–1/nice 10. It
   includes local integration/operator fixtures, not real AWS or model calls.
+- The latest integrated run at `e22fd45` passed **859/859**, no skips or failures,
+  with the opt-in official-MCP guest UI test enabled in that same sequential
+  run (175.9 seconds, CPUs 0–1/nice 10). Separate finalizer Python checks passed
+  10/10, including real shell fixtures. The new AMI bake uses that revision;
+  these passing local checks do not replace its pending AWS boot acceptance.
 
 Parallel implementation checkpoint (2026-09-18):
 
