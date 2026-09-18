@@ -15,6 +15,7 @@ import { legacyClaudeContext } from "./legacy-usage.mjs";
 import { renderingSample } from "./rendering-sample.mjs";
 import { messageCommand } from "./message-command.mjs";
 import { ChatPresence } from "./chat-presence.mjs";
+import { PreviewActivity } from "./preview-activity.mjs";
 import { publicRequest, responseFor } from "./agent-requests.mjs";
 import { SideChats } from "./side-chats.mjs";
 import { NativeAgentSnapshots } from "./native-agent-snapshots.mjs";
@@ -184,6 +185,17 @@ export class RuntimeManager extends EventEmitter {
     this.store = store;
     this.config = config;
     this.presence = new ChatPresence({ onChange: chatId => this.refreshActivity(chatId) });
+    this.previewActivity = new PreviewActivity({ generation: chatId => this.previewGeneration(chatId), acquire: chatId => this.browserExecutor(chatId),
+      onChange: async chatId => {
+        const version = this.previewGeneration(chatId);
+        clearTimeout(this.#workspaceIdleTimers.get(chatId)); this.#workspaceIdleTimers.delete(chatId);
+        await this.refreshActivity(chatId);
+        if (version !== this.previewGeneration(chatId) || this.previewActivity.closed) return;
+        if (!this.previewActivity.has(chatId) && !this.workspacePresence.has(chatId)) {
+          const timer = setTimeout(() => { this.#workspaceIdleTimers.delete(chatId); if (this.#executors.has(chatId)) void this.browserIdle(chatId).catch(() => {}); }, this.config.idleTimeoutMs);
+          timer.unref?.(); this.#workspaceIdleTimers.set(chatId, timer);
+        }
+      } });
     this.workspacePresence = new ChatPresence({ onChange: async chatId => {
       const version = this.#lifecycleVersions.get(chatId) || 0;
       clearTimeout(this.#workspaceIdleTimers.get(chatId)); this.#workspaceIdleTimers.delete(chatId);
@@ -611,10 +623,12 @@ export class RuntimeManager extends EventEmitter {
     try { return await pending; } catch (error) { if (this.#executors.get(chatId) === pending) this.#executors.delete(chatId); throw error; }
   }
 
+  previewGeneration(chatId) { return this.store.get(chatId) && !this.store.get(chatId).archived ? this.#lifecycleVersions.get(chatId) || 0 : null; }
+
   async browserIdle(chatId) {
     // A browser-only wake must release its EC2 lease too. Otherwise the cloud
     // watchdog can stop the VM behind a cached executor, breaking the next open.
-    if (!this.#runtimes.has(chatId) && !this.isBusy(chatId) && !this.workspacePresence.has(chatId) && !this.browsers?.entries.has(chatId) && this.store.get(chatId)) await this.stop(chatId, "idle-timeout");
+    if (!this.#runtimes.has(chatId) && !this.isBusy(chatId) && !this.workspacePresence.has(chatId) && !this.previewActivity.has(chatId) && !this.browsers?.entries.has(chatId) && this.store.get(chatId)) await this.stop(chatId, "idle-timeout");
   }
 
   async workspaceFiles(chatId, action, input = {}) {
@@ -1358,6 +1372,8 @@ export class RuntimeManager extends EventEmitter {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("chat not found"), { statusCode: 404 });
     this.#lifecycleVersions.set(chatId, (this.#lifecycleVersions.get(chatId) || 0) + 1);
+    this.previewActivity.revokeChat(chatId);
+    this.emit("preview-revoke", { chatId, reason });
     this.workspacePresence.remove(chatId);
     clearTimeout(this.#workspaceIdleTimers.get(chatId)); this.#workspaceIdleTimers.delete(chatId);
     this.#forking.get(chatId)?.controller.abort(Object.assign(new Error("Fork cancelled because the source chat stopped"), { name: "AbortError", statusCode: 409 }));
@@ -1456,6 +1472,7 @@ export class RuntimeManager extends EventEmitter {
 
   async shutdown() {
     this.githubWorkers?.shutdown();
+    this.previewActivity.close();
     this.presence.clear();
     this.workspacePresence.clear();
     for (const timer of this.#workspaceIdleTimers.values()) clearTimeout(timer);
@@ -1621,11 +1638,11 @@ export class RuntimeManager extends EventEmitter {
   async #scheduleIdleStop(chatId, runtime) {
     clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
     if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.trustReviewing || runtime.adapter.isBackgroundBusy?.()) return;
-    const reason = this.#importPending(chatId) ? "import" : this.#forking.has(chatId) ? "fork" : runtime.adapter.hasScheduledWork?.() ? "schedule" : runtime.adapter.agents?.busy() ? "agents" : this.sideChats.busy(chatId) ? "side" : this.browsers?.hasViewers(chatId) ? "browser" : this.workspacePresence.has(chatId) ? "workspace" : this.presence.has(chatId) ? "tab" : null;
+    const reason = this.#importPending(chatId) ? "import" : this.#forking.has(chatId) ? "fork" : runtime.adapter.hasScheduledWork?.() ? "schedule" : runtime.adapter.agents?.busy() ? "agents" : this.sideChats.busy(chatId) ? "side" : this.browsers?.hasViewers(chatId) ? "browser" : this.previewActivity.has(chatId) ? "preview" : this.workspacePresence.has(chatId) ? "workspace" : this.presence.has(chatId) ? "tab" : null;
     const chat = this.store.get(chatId);
     if (reason) {
       if (chat?.idleKeepAwakeReason !== reason || chat?.idleDeadlineAt || chat?.status !== "idle") {
-        const updated = await this.store.update(chatId, current => ({ ...runtimeWorkflowPatch(current, "idle"), status: "idle", statusDetail: reason === "import" ? "Sleep paused until the import is reconciled" : reason === "fork" ? "Creating an independent fork" : reason === "schedule" ? "Sleep paused while native scheduled tasks are active" : reason === "agents" ? "Sleep paused while child agents are working" : reason === "side" ? "Sleep paused while the side chat is working" : reason === "browser" ? "Sleep paused while you're using Chrome" : reason === "workspace" ? "Sleep paused while the workspace viewer is open" : "Sleep paused while this chat tab is visible", idleDeadlineAt: null, idleKeepAwakeReason: reason }));
+        const updated = await this.store.update(chatId, current => ({ ...runtimeWorkflowPatch(current, "idle"), status: "idle", statusDetail: reason === "import" ? "Sleep paused until the import is reconciled" : reason === "fork" ? "Creating an independent fork" : reason === "schedule" ? "Sleep paused while native scheduled tasks are active" : reason === "agents" ? "Sleep paused while child agents are working" : reason === "side" ? "Sleep paused while the side chat is working" : reason === "browser" ? "Sleep paused while you're using Chrome" : reason === "preview" ? "Sleep paused while an app preview is active" : reason === "workspace" ? "Sleep paused while the workspace viewer is open" : "Sleep paused while this chat tab is visible", idleDeadlineAt: null, idleKeepAwakeReason: reason }));
         if (updated) this.publishChat(updated);
       }
       return;
@@ -1633,7 +1650,7 @@ export class RuntimeManager extends EventEmitter {
     const deadline = new Date(Date.now() + this.config.idleTimeoutMs).toISOString();
     await this.#setStatus(chatId, "idle", "Waiting for another message", deadline);
     runtime.idleTimer = setTimeout(() => {
-      if (this.#importPending(chatId) || this.#forking.has(chatId) || runtime.adapter.hasScheduledWork?.() || runtime.adapter.agents?.busy() || this.sideChats.busy(chatId) || this.browsers?.hasViewers(chatId) || this.workspacePresence.has(chatId) || this.presence.has(chatId)) { void this.#scheduleIdleStop(chatId, runtime); return; }
+      if (this.#importPending(chatId) || this.#forking.has(chatId) || runtime.adapter.hasScheduledWork?.() || runtime.adapter.agents?.busy() || this.sideChats.busy(chatId) || this.browsers?.hasViewers(chatId) || this.previewActivity.has(chatId) || this.workspacePresence.has(chatId) || this.presence.has(chatId)) { void this.#scheduleIdleStop(chatId, runtime); return; }
       if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.trustReviewing || runtime.adapter.isBackgroundBusy?.()) return;
       this.stop(chatId, "idle-timeout").catch((error) => this.#fatal(chatId, error));
     }, this.config.idleTimeoutMs);
@@ -1746,6 +1763,8 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async #fatal(chatId, error) {
+    this.previewActivity.revokeChat(chatId);
+    this.emit("preview-revoke", { chatId, reason: "error" });
     this.githubWorkers?.revokeChat(chatId);
     this.#forking.get(chatId)?.controller.abort(error);
     this.workspacePresence.remove(chatId);
