@@ -12,6 +12,7 @@ import { SlashComposer } from "./slash-composer.js";
 import { McpSettings } from "./mcp-settings.js";
 import { MessageHistory } from "./message-history.js";
 import { MessageNavigator } from "./message-navigator.js";
+import { MessageFollow } from "./message-follow.js";
 import { DocumentPreview } from "./document-preview.js";
 import { SharedBrowserPanel } from "./shared-browser.js";
 import { AppPreviewDialog } from "./app-preview.js";
@@ -162,17 +163,13 @@ function renderMessage(message, streaming = false) {
 }
 
 const messageWindow = new MessageWindow();
-let adjustingMessageWindow = false;
-let messageRenderVersion = 0;
-function renderMessages({ pinBottom = false } = {}) {
+function renderMessages() {
   if (!state.active) return;
-  const version = ++messageRenderVersion;
   const changedChat = messageWindow.chatId !== state.active.id;
-  const wasNearBottom = elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight < 110;
+  const render = messageFollow.begin({ reset: changedChat });
   const oldTop = elements.messages.getBoundingClientRect().top;
   const anchor = [...elements.messages.querySelectorAll(".message")].find(n => n.getBoundingClientRect().bottom > oldTop + 10);
   const anchorId = anchor?.dataset.messageId, anchorOffset = anchor ? anchor.getBoundingClientRect().top - oldTop : 0;
-  adjustingMessageWindow = true;
   elements.messages.replaceChildren();
   const persisted = (state.active.messages || []).filter(message => !message.meta?.renderingSample);
   if (!persisted.length && !state.stream && !state.liveTools.size) {
@@ -188,16 +185,14 @@ function renderMessages({ pinBottom = false } = {}) {
     for (const message of visible) elements.messages.append(message.kind === "tool_group" ? toolActivity.button(message.key) : renderMessage(message));
     if (messageWindow.end < rows.length) {
       elements.messages.append(pager(`Load newer messages · ${rows.length - messageWindow.end} below`, () => { messageWindow.move(1); renderMessages(); }));
-      elements.messages.append(pager("Jump to latest", () => { messageWindow.latest(); messageNavigator.readingHistory = false; renderMessages({ pinBottom: true }); }));
     } else if (state.stream) elements.messages.append(renderMessage({ id: state.stream.id, role: "assistant", text: state.stream.text }, true));
   }
   messageNavigator.update();
-  if (messageWindow.tail && !messageNavigator.readingHistory && (changedChat || pinBottom || wasNearBottom)) elements.messages.scrollTop = elements.messages.scrollHeight;
-  else if (anchorId) {
+  if (!render.follow && anchorId) {
     const retained = [...elements.messages.querySelectorAll(".message")].find(n => n.dataset.messageId === anchorId);
     if (retained) elements.messages.scrollTop += retained.getBoundingClientRect().top - elements.messages.getBoundingClientRect().top - anchorOffset;
   }
-  requestAnimationFrame(() => requestAnimationFrame(() => { if (version === messageRenderVersion) adjustingMessageWindow = false; }));
+  messageFollow.end(render);
 }
 
 function renderApproval() {
@@ -229,6 +224,7 @@ function renderActive() {
   if (!chat) {
     closeSidePanel("diff"); toolActivity.update(null, new Map());
     elements.messages.replaceChildren();
+    messageFollow.observe(); $("#message-jump-latest").hidden = true;
     elements.title.textContent = "Agent Relay";
     elements.meta.textContent = "Independent workspaces. Disposable runtimes.";
     return;
@@ -363,24 +359,24 @@ function connectEvents(chatId) {
       const index = state.active.messages.findIndex((message) => message.id === event.message.id);
       if (index >= 0) state.active.messages[index] = event.message;
       else state.active.messages.push(event.message);
-      renderMessages({ pinBottom: true });
+      renderMessages();
     } else if (event.type === "turn_started") {
       state.liveTools.clear();
       state.stream = { id: event.messageId, text: "" };
-      renderMessages({ pinBottom: true });
+      renderMessages();
     } else if (event.type === "assistant_delta") {
       if (!state.stream) state.stream = { id: "stream", text: "" };
       state.stream.text += event.delta || "";
-      renderMessages({ pinBottom: true });
+      renderMessages();
     } else if (event.type === "tool") {
       if (event.state === "running") state.liveTools.set(event.itemId, event);
       else state.liveTools.delete(event.itemId);
-      renderMessages({ pinBottom: true });
+      renderMessages();
     } else if (event.type === "turn_completed") {
       state.liveTools.clear();
       state.stream = null;
       if (!state.active.messages.some((message) => message.id === event.message.id)) state.active.messages.push(event.message);
-      renderMessages({ pinBottom: true });
+      renderMessages();
     } else if (event.type === "turn_interrupted" || event.type === "runtime_stopped") {
       state.liveTools.clear(); state.stream = null;
       renderMessages();
@@ -388,7 +384,7 @@ function connectEvents(chatId) {
       state.liveTools.clear();
       state.stream = null;
       if (!state.active.messages.some((message) => message.id === event.message.id)) state.active.messages.push(event.message);
-      renderMessages({ pinBottom: true });
+      renderMessages();
     } else if (event.type === "request") {
       state.active.pendingRequest = event.request;
       renderApproval();
@@ -910,14 +906,18 @@ const nativeImports = new NativeImportsControls({ state, api, controls: chatCont
   else toast(`Imported chat ready: ${chat.title}`, { outsideDialog: true });
 } });
 const messageHistory = new MessageHistory({ input: elements.input, state, onChange: resizeInput });
-const messageNavigator = new MessageNavigator({ state, scroller: elements.messages, root: $("#message-navigator"), ensureVisible: id => { if (messageWindow.show(id)) renderMessages(); }, atLatest: () => messageWindow.tail });
-elements.messages.addEventListener("scroll", () => {
-  if (adjustingMessageWindow || !messageWindow.rows?.length) return;
-  const nearBottom = elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight < 100;
-  messageNavigator.readingHistory = !nearBottom || !messageWindow.tail;
-  if (elements.messages.scrollTop < 80 && messageWindow.start > 0) { messageWindow.move(-1); renderMessages(); }
-  else if (nearBottom && messageWindow.end < messageWindow.rows.length) { messageWindow.move(1); renderMessages(); }
-}, { passive: true });
+const messageNavigator = new MessageNavigator({ state, scroller: elements.messages, root: $("#message-navigator"), ensureVisible: id => { if (messageWindow.show(id)) renderMessages(); } });
+const messageFollow = new MessageFollow({ scroller: elements.messages,
+  atLatest: () => messageWindow.tail, reading: () => messageNavigator.readingHistory,
+  setReading: value => { messageNavigator.readingHistory = value; },
+  onChange: () => { $("#message-jump-latest").hidden = !state.active || messageFollow.following(); },
+  onScroll: ({ nearBottom }) => {
+    if (!messageWindow.rows?.length) return;
+    if (elements.messages.scrollTop < 80 && messageWindow.start > 0) { messageNavigator.readingHistory = true; messageWindow.move(-1); renderMessages(); }
+    else if (nearBottom && messageWindow.end < messageWindow.rows.length) { messageWindow.move(1); renderMessages(); }
+  },
+});
+$("#message-jump-latest").onclick = () => { messageWindow.latest(); messageFollow.resume(); renderMessages(); };
 const activeModelPicker = new ModelPicker({ root: $("#composer-model-controls"), api,
   onCatalogReady: context => { if (claudeCatalogMatchesChat(context, state.active)) slashComposer.refresh(context.chatId); },
   onChange: async settings => {

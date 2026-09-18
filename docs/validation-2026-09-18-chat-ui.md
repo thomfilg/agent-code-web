@@ -45,7 +45,28 @@ The fix must keep following through layout changes, preserve intentional
 scrollback and provide a stable explicit return to the latest message. The
 first attempts at the two other reproduction cases failed at fixture startup,
 not at scroll assertions, and are not evidence of additional scroll defects.
-Implementation and browser acceptance are in progress.
+The fix now keeps follow/scrollback intent independently of layout changes,
+observes the scroller and bounded message window's border boxes, and keeps
+one Jump to latest button outside transcript replacement. Wheel, touch,
+keyboard and scrollbar gestures can detach; explicit latest or scrolling back
+to the tail resumes. Pinch zoom does not count as scrolling into history.
+
+Final focused evidence: **14/14 unit/window cases** and **5/5 browser cases**
+(18.4 seconds), including the three new follow cases and two existing
+long-history/message-navigator regressions. Tests cover viewport/composer and
+late content growth, real upward wheel gestures during every-frame deltas,
+stable button identity, reading-position retention, explicit resume, long
+scrollbar gestures, chat reset, and native animation callback binding.
+No page errors or submitted prompts occurred. The mounted transcript remains
+bounded to 60 persisted rows plus one streamed reply. Desktop and 320-pixel
+screenshots were visually inspected at
+`test-results/message-follow-desktop.png` and
+`test-results/message-follow-mobile.png`.
+
+Earlier fix iterations failed on native animation callback binding and a
+content-box-only observer; both were corrected and the original browser
+assertions rerun without relaxation. These were local failures, not deployed
+changes.
 
 ## Not established by these tests
 
@@ -67,3 +88,11 @@ Implementation and browser acceptance are in progress.
 Pending. The previously deployed revision remains `f271d7e` until an immutable
 image rollout, SSM result, health and exact public asset checks establish a
 new receipt. No existing chat, credential or running job is disposable test data.
+
+Read-only AWS preflight at 15:46 UTC verified the expected account/stack,
+healthy controller, encrypted attached data volume, SSM and readiness. At
+15:50 UTC, an exact-deployment tag-filtered query counted one running worker.
+The current controller shutdown also stops EC2 workers; its drain check does
+not prove retained native Bash tasks are idle. The user was asked whether the
+background task has finished. No drain, stop or rollout was performed for this
+checkpoint.

@@ -625,6 +625,7 @@ dialog { max-height: calc(100dvh - 28px); }
 .goal-summary { max-width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--text); font: inherit; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #goal-status:not(:empty) { display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
 .message-page-button { display: block; margin: 12px auto; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--muted); font: inherit; cursor: pointer; }
+.message-latest-button { flex: none; margin: 0 auto 8px; padding: 6px 12px; font-size: 12px; }
 .queue-send { padding: 4px 7px; font-size: 11px; }
 .composer { position: relative; }
 #slash-menu { position: absolute; bottom: calc(100% + 10px); left: 0; width: min(560px, 100%); max-height: min(440px, 55dvh); display: flex; flex-direction: column; border: 1px solid #454d3e; border-radius: 14px; background: #22261f; box-shadow: 0 16px 48px #0007; z-index: 40; overflow: hidden; }
