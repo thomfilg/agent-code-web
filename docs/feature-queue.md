@@ -85,6 +85,21 @@ is the current prerequisite; item 20's unfinished doctor work stays paused.
 
 ## MVP release gate — 2026-09-17
 
+Verification checkpoint (2026-09-18 12:40 UTC): the full integrated suite on
+`62bd880` passed **1097/1097**, with zero failures, cancellations or skips in
+255.4 seconds. Native GitHub and official-MCP guest UI were enabled; execution
+was sequential on CPUs 0–1 at nice 10. The subsequent bootstrap-cleanup and
+pinned host-launcher checks passed **8 Node tests** and **8 Python tests**
+separately; 414 committed JavaScript modules passed syntax checks. These are
+test counts, not a count of delivered feature requests.
+
+The local controller was restarted from `da848d4` after an idle-work check and
+cold private checkpoint `checkpoint-a8XZOv`. Its credential file matches that
+checkpoint byte-for-byte and all 12 encrypted records remain readable. No
+record was written by the verification, no production user/chat was fabricated,
+and no provider consent or model prompt occurred. AWS still runs the immutable
+revision in the activation receipt below until a later rollout is recorded.
+
 Continuation checkpoint (2026-09-18 12:25 UTC): the user renewed autonomous
 work for two hours, ending at 13:39:52 UTC (10:39:52 São Paulo). The isolated
 remote-app preview now has committed controller routing, persistent
@@ -120,7 +135,7 @@ the credential file byte-for-byte against its cold private checkpoint
 restart. No account was authorized or message sent; this is not a claim that
 every encrypted row was byte-compared against the archive.
 
-Latest local activation (2026-09-18 09:50 UTC): the integrated Codex/Claude,
+Historical local activation (2026-09-18 09:50 UTC): the integrated Codex/Claude,
 GitHub/Linear, scoped worker Git/PR gateway and account-deletion version is active
 on `http://localhost:8787` (revision `1f79d26`, same runtime as AWS `3a0b7b3`
 plus three integration tests). A cold private checkpoint preceded
