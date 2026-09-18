@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
-import { bakeWorkerImage, parseOptions, safeBootstrapReceipt } from "../deploy/aws/bake-worker-ami.mjs";
+import { readFile, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
+import { bakeWorkerImage, parseOptions, safeBootstrapReceipt, gzipWorkerUserData, EC2_USER_DATA_MAX_BYTES } from "../deploy/aws/bake-worker-ami.mjs";
 
 const required = ["--expected-account", "123456789012", "--deployment", "relay-fixture", "--subnet-id", "subnet-aaaaaaaaaaaaaaaaa", "--security-group-id", "sg-aaaaaaaaaaaaaaaaa", "--key-name", "relay-fixture-worker", "--builder-instance-profile", "relay-fixture-builder", "--base-image-id", "ami-aaaaaaaaaaaaaaaaa"];
 const builderId = "i-aaaaaaaaaaaaaaaaa";
@@ -28,7 +30,13 @@ function fixture({ commandFailed = false, neverStops = false, foreignBuilder = f
     if (args.includes("describe-key-pairs")) return JSON.stringify([{ KeyName: "relay-fixture-worker", Tags: infrastructureTags, PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestFixturePublicKeyOnly fixture", ...keyOverride }]);
     if (args.includes("run-instances")) {
       tags = JSON.parse(args[args.indexOf("--tag-specifications") + 1])[0].Tags;
-      userData = await readFile(args[args.indexOf("--user-data") + 1].slice(7), "utf8");
+      const source = args[args.indexOf("--user-data") + 1];
+      assert.ok(source.startsWith("fileb://"));
+      const filename = source.slice(8);
+      assert.equal((await stat(filename)).mode & 0o777, 0o600);
+      const compressed = await readFile(filename);
+      assert.ok(compressed.length <= EC2_USER_DATA_MAX_BYTES);
+      userData = gunzipSync(compressed).toString("utf8");
       return JSON.stringify(builderId);
     }
     if (args.includes("describe-instances")) return JSON.stringify([{ InstanceId: builderId, State: { Name: sent >= 2 && !neverStops ? "stopped" : "running" }, Tags: foreignBuilder ? [] : tags, SubnetId: "subnet-aaaaaaaaaaaaaaaaa", SecurityGroups: [{ GroupId: "sg-aaaaaaaaaaaaaaaaa" }], KeyName: "relay-fixture-worker", IamInstanceProfile: { Arn: "arn:aws:iam::123456789012:instance-profile/relay-fixture-builder" } }]);
@@ -49,6 +57,29 @@ test("AMI dry-run validates required network/deployment inputs and invokes no AW
   assert.equal(result.finalWorkerRole, null);
   assert.equal(result.finalWorkerMetadata, "disabled");
   for (const args of [[], [...required, "--subnet-id", "subnet-*"], [...required, "--deployment", "*,other"], [...required, "--instance-type", "t4g.medium"], [...required, "--volume-gb", "2"], [...required, "--ssh-private-key", "secret"]]) assert.throws(() => parseOptions(args));
+});
+
+test("real worker recipe uses deterministic gzip and fits EC2 after binary decoding", async () => {
+  const recipe = await readFile(new URL("../deploy/aws/worker-cloud-init.yaml", import.meta.url), "utf8");
+  assert.ok(Buffer.byteLength(recipe) > EC2_USER_DATA_MAX_BYTES, "exercise the actual oversized YAML regression");
+  const compressed = gzipWorkerUserData(recipe);
+  assert.deepEqual(compressed.subarray(0, 3), Buffer.from([0x1f, 0x8b, 0x08]));
+  assert.ok(compressed.length <= EC2_USER_DATA_MAX_BYTES);
+  assert.equal(gunzipSync(compressed).toString("utf8"), recipe);
+  assert.deepEqual(gzipWorkerUserData(recipe), compressed);
+});
+
+test("oversized compressed user-data fails before any AWS calls and never prints payload", async () => {
+  const recipe = `#cloud-config\n# @openai/codex@0.154.0 @anthropic-ai/claude-code@2.1.222\n# PRIVATE-FIXTURE-NOT-TO-PRINT\n${Array.from({ length: 2000 }, (_, i) => `# ${createHash("sha256").update(String(i)).digest("hex")}`).join("\n")}\n`;
+  assert.throws(() => gzipWorkerUserData(recipe), /exceeds the EC2 16 KiB limit/);
+  for (const dryRun of [false, true]) await assert.rejects(bakeWorkerImage({ ...parseOptions(required), dryRun }, { recipe, run: () => { throw Error("AWS must not run"); } }), error => /exceeds the EC2 16 KiB limit/.test(error.message) && !error.message.includes("PRIVATE-FIXTURE"));
+});
+
+test("rendered public key is included in the compressed limit before launching", async () => {
+  const key = `ssh-rsa ${Array.from({ length: 1500 }, (_, i) => createHash("sha256").update(String(i)).digest("base64")).join("")}`;
+  const f = fixture({ keyOverride: { PublicKey: key } });
+  await assert.rejects(bakeWorkerImage(parseOptions(required), { run: f.run }), /exceeds the EC2 16 KiB limit/);
+  assert.equal(f.calls.some(c => c.includes("run-instances") || c.includes("terminate-instances")), false);
 });
 
 test("AMI baker uses private SSM-only builder, tags image/snapshot, finalizes before imaging and cleans exact builder", async () => {

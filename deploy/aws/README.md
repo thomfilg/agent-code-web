@@ -49,6 +49,14 @@ network/key/profile, private subnet, controller-only SSH ingress, HTTP(S) egress
 and a builder role limited to `AmazonSSMManagedInstanceCore` before launching.
 Base images must be official Canonical Ubuntu 24.04 amd64 images.
 
+The baker gzip-compresses cloud-init user-data and checks the compressed bytes
+against EC2's 16 KiB limit locally, including in `--dry-run`. It checks again
+after inserting the deployment public key, before launching any VM. The private
+temporary binary file is passed with `--user-data fileb://...`; AWS CLI performs
+the single required base64 encoding and cloud-init decompresses on boot. Raw
+user-data and credential material are never printed. See the
+[transport decision and offline CLI proof](../../docs/adr/2026-09-19-worker-user-data-gzip.md).
+
 The builder has no public IP. Installation/validation use SSM Run Command, not
 SSH, and never receive an operator private key, Doppler/provider secrets or user
 credentials. SSM needs private NAT egress (or appropriate VPC endpoints); the
