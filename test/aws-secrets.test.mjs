@@ -15,6 +15,8 @@ test("AWS environment copies only Google/encryption settings and uses IAM plus i
   assert.equal(env.AGENT_ENABLE_MOCK, "0");
   assert.equal(env.AGENT_ALLOWED_EMAILS, "");
   assert.equal(Buffer.from(env.AGENT_WORKER_SSH_KEY_BASE64, "base64").toString(), key);
+  assert.equal(environmentFor({ ...secrets, AGENT_ALLOWED_EMAILS: " Work@Example.Test,second@example.test " }, outputs, image, key).AGENT_ALLOWED_EMAILS, "work@example.test,second@example.test");
+  assert.throws(() => environmentFor({ ...secrets, AGENT_ALLOWED_EMAILS: "not-an-email" }, outputs, image, key));
 });
 
 test("secret publication rejects missing keys, plaintext origins and wrong worker identity/version", () => {

@@ -72,7 +72,7 @@ this activation did not delete those messages. No worker or real model turn
 was started. The subsequent authorized Codex activation below now serves the
 named-account onboarding UI. The user has since connected the named Personal
 Codex account; a consented real turn and chat/account resume still need checking.
-Claude is still unimplemented. Neither Google sign-in nor a saved
+Claude was still unimplemented at that historical checkpoint. Neither Google sign-in nor a saved
 GitHub/MCP connection establishes successful provider onboarding.
 Do not silently adopt host credentials or count native integration gates as
 passed. Tests run one suite at a time with inherited two-CPU affinity and
@@ -87,9 +87,36 @@ active on `http://localhost:8787`, preserving all 12 current encrypted records
 and the local credential file byte-for-byte. Personal and umg are disconnected;
 fresh consent and the authorized real-turn/resume gate are still open. The
 older connected-Personal checkpoint above is historical. Claude, GitHub and
-Linear work proceeds in parallel isolated worktrees under ADR 0001.
+Linear implementations are now integrated from reviewed isolated worktrees
+under ADR 0001; this running local process has not yet been restarted to them.
 AWS provisioning is now explicitly authorized for profile `code-web`, account
-`456808212788`, region `us-east-2`; no AWS resources have yet been created.
+`456808212788`, region `us-east-2`. Stack `agent-relay-mvp` is being created:
+the private controller and encrypted data attachment exist; CloudFront is still
+provisioning. This is not a deployed/readiness pass.
+
+Parallel implementation checkpoint (2026-09-18):
+
+- Claude: native manual-code ceremony, per-user named accounts, account-bound
+  models/runtime and access-only worker renewal implemented. Independent review
+  found and fixed cancellation-during-save and refresh-rotation durability races.
+  Agent suite: 649 backend, 14 browser; final focused 41 regressions. Two expressly
+  authorized isolated real Haiku turns returned OK, with native session resume;
+  host credentials remained unchanged. Product browser consent remains open.
+- GitHub: private native `gh auth login`, URL/code, explicit company scope and
+  selected connection for repository/clone/PR/check operations implemented;
+  PAT/host-import onboarding removed. Agent checks: 42 backend, 13 browser.
+  Authorized isolated host-account read/clone/PR tests passed; a fresh user
+  consent through the product remains open. Reconnect/stale-401 race fixed.
+- Linear: OAuth/DCR/PKCE, attempt-bound UI success, cancellation rollback and
+  read-only workspace verification implemented (37 backend, 4 browser).
+  Live provider metadata was inspected, but real OAuth and selected-environment
+  authenticated reads still require user consent. Fixture reads are not that gate.
+- AWS: controller template/image/readiness/drain, private deployment-scoped
+  worker baker, separate Doppler `code-web/stg_aws_mvp` secrets and immutable
+  build/deploy scripts implemented. Actual image boot, application rollout,
+  rollback/durability and deployed authentication checks remain open.
+- All integrated auth changes are saved in PR #4; feature PRs #5/#6/#7 retain
+  their separate review/evidence. Existing unfinished doctor edits are untouched.
 
 The user explicitly requires working **Codex, Claude, GitHub and Linear
 authentication**, plus **a script to deploy Relay on AWS**, before the MVP is
@@ -102,10 +129,10 @@ mock or unauthenticated MCP handshake does not satisfy this gate.
 | Required integration | End-to-end acceptance | Queue items / current gap |
 | --- | --- | --- |
 | Codex | Detect missing authentication; show a working Connect action and the supported native browser authorization URL/code. Complete sign-in from the user's browser, select a named account for the chat, run a consented real turn and resume that account after restart. Surface expired/revoked access and reconnect without falling back to the host CLI | 43/44: named-account implementation, account-scoped login UX and automated checks pass on `feat/codex-account-login`; real Personal account consent confirmed, real turn and live chat/account resume acceptance still open |
-| Claude | The same complete onboarding and reconnect path, using Claude's supported native authentication flow. The selected named personal/company account must actually be used for a consented real turn and restored after restart | 43/44: provider-login UI, account-bound flow and real acceptance unfinished |
-| GitHub | A simple Relay sign-in action runs `gh auth login` in a private account profile and gives the user the authorization URL/code. Remove token-entry and “Use this server's gh login” options; never import the global CLI identity. After authentication, identify the account and explicitly allowed companies/repositories; list, select and clone an authorized repository and read its PR/check status. Handle denied/revoked access without borrowing another connection | 21: latest UX clarification queued within this existing MVP gate, after the current Codex feature; current native onboarding, scope and runtime acceptance remain open |
+| Claude | The same complete onboarding and reconnect path, using Claude's supported native authentication flow. The selected named personal/company account must actually be used for a consented real turn and restored after restart | 43/44: implementation, reviewed regressions and authorized isolated real turn/resume pass; activation and fresh product browser consent remain open |
+| GitHub | A simple Relay sign-in action runs `gh auth login` in a private account profile and gives the user the authorization URL/code. Remove token-entry and “Use this server's gh login” options; never import the global CLI identity. After authentication, identify the account and explicitly allowed companies/repositories; list, select and clone an authorized repository and read its PR/check status. Handle denied/revoked access without borrowing another connection | 21: implementation, scope tests and authorized isolated real repository/clone/PR checks pass; activation and fresh product browser consent remain open |
 | Linear | Complete real browser OAuth, discover tools and perform a non-mutating authenticated workspace read through the selected agent/environment. Support independent g2i and 12-apps connections, including the same MCP name, with no cross-company credential fallback | 02/03/04/10/21: configuration/discovery evidence is not completed OAuth or runtime acceptance |
-| AWS deployment | A documented, repeatable script deploys the complete application at a stable HTTPS URL, validates readiness, preserves data across updates and supports rollback; verify all four integrations on the deployed application | 45: reference review and requirements only; no complete controller deployment or live AWS acceptance |
+| AWS deployment | A documented, repeatable script deploys the complete application at a stable HTTPS URL, validates readiness, preserves data across updates and supports rollback; verify all four integrations on the deployed application | 45: deployment implementation and actual authorized infrastructure creation in progress; live rollout and acceptance not yet passed |
 
 Common authentication acceptance:
 

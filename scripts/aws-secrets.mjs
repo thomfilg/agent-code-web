@@ -33,6 +33,8 @@ async function withSecretFile(value, action) {
 export function environmentFor(secrets, outputs, image, privateKey) {
   for (const name of required) if (typeof secrets[name] !== "string" || !secrets[name].trim()) throw new Error(`Set ${name} in Doppler ${project}/${config}`);
   if (Buffer.from(secrets.AGENT_ENCRYPTION_KEY, "base64").length !== 32 || secrets.AUTH_SECRET.length < 32) throw new Error("Invalid deployment encryption/session keys");
+  const allowedEmails = (secrets.AGENT_ALLOWED_EMAILS || "").split(",").map(value => value.trim().toLowerCase()).filter(Boolean);
+  if (allowedEmails.some(email => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) throw new Error("Invalid deployment Google email allowlist");
   const url = new URL(outputs.PublicUrl);
   if (url.protocol !== "https:" || url.pathname !== "/" || url.search || url.hash || url.username || url.password) throw new Error("Expected canonical HTTPS origin");
   if (image.State !== "available" || image.Architecture !== "x86_64") throw new Error("Worker image is not available x86_64");
@@ -41,7 +43,7 @@ export function environmentFor(secrets, outputs, image, privateKey) {
   if (!privateKey.startsWith("-----BEGIN OPENSSH PRIVATE KEY-----\n")) throw new Error("Invalid worker transport key");
   for (const key of ["WorkerSubnetId", "WorkerSecurityGroupId", "WorkerKeyName"]) if (!outputs[key]) throw new Error("Missing worker stack output");
   return { ...Object.fromEntries(required.map(key => [key, secrets[key]])),
-    AGENT_WEB_PUBLIC_URL: url.origin, AGENT_GOOGLE_AUTH: "1", AGENT_COOKIE_SECURE: "1", AGENT_ALLOWED_EMAILS: "",
+    AGENT_WEB_PUBLIC_URL: url.origin, AGENT_GOOGLE_AUTH: "1", AGENT_COOKIE_SECURE: "1", AGENT_ALLOWED_EMAILS: allowedEmails.join(","),
     AGENT_WEB_HOST: "0.0.0.0", AGENT_WEB_PORT: "8787", AGENT_DATABASE_MODE: "embedded",
     AGENT_CONTROL_DIR: "/var/lib/relay/control", AGENT_DATA_DIR: "/var/lib/relay/state", AGENT_ENABLE_MOCK: "0",
     AGENT_PROCESS_ISOLATION: "none", AGENT_WORKER_BACKEND: "ec2", CODEX_AUTH_MODE: "gateway", CLAUDE_AUTH_MODE: "gateway",
@@ -62,7 +64,7 @@ export async function main(args) {
     const configs = Array.isArray(list) ? list : list.configs;
     if (!configs.some(item => item.name === config)) await doppler(["configs", "create", config, "--environment", "stg"]);
     const existing = await values(config);
-    if (Object.keys(existing).some(key => !key.startsWith("DOPPLER_") && !required.includes(key))) throw new Error("Deployment config contains unrelated settings; refusing to overwrite them");
+    if (Object.keys(existing).some(key => !key.startsWith("DOPPLER_") && !required.includes(key) && key !== "AGENT_ALLOWED_EMAILS")) throw new Error("Deployment config contains unrelated settings; refusing to overwrite them");
     const source = await values("dev");
     for (const key of required.slice(0, 3)) if (!source[key]?.trim()) throw new Error(`Missing ${key} in the explicitly selected source`);
     // A new Doppler branch can inherit its environment's Google settings.
@@ -71,6 +73,7 @@ export async function main(args) {
     const selected = Object.fromEntries(required.slice(0, 3).map(key => [key, existing[key] || source[key]]));
     selected.AUTH_SECRET = existing.AUTH_SECRET || randomBytes(48).toString("base64url");
     selected.AGENT_ENCRYPTION_KEY = existing.AGENT_ENCRYPTION_KEY || randomBytes(32).toString("base64");
+    selected.AGENT_ALLOWED_EMAILS = existing.AGENT_ALLOWED_EMAILS || "";
     await withSecretFile(selected, filename => doppler(["secrets", "upload", filename, "--config", config, "--silent"]));
     console.log(JSON.stringify({ project, config, initialized: true, copied: required.slice(0, 3), generated: required.slice(3), localDevChanged: false }));
     return;
