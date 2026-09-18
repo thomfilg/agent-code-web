@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import { isIP } from "node:net";
 import { spawnWorker } from "./worker-process.mjs";
 
 function shellQuote(value) {
@@ -83,13 +84,13 @@ class Ec2Executor {
   async prepare() {
     const chatRoot = path.posix.dirname(this.workspace);
     const marker = `${chatRoot}/.workspace-seeded`;
-    await this.backend.sshCapture(this.host, `install -d -m 700 ${shellQuote(this.workspace)} ${shellQuote(this.runtimeHome)} && touch ${shellQuote(this.heartbeat)}`);
-    const seeded = await this.backend.sshCapture(this.host, `test -f ${shellQuote(marker)} && printf ready || true`);
+    await this.backend.sshCapture(this.host, `install -d -m 700 ${shellQuote(this.workspace)} ${shellQuote(this.runtimeHome)} && touch ${shellQuote(this.heartbeat)}`, this.instance.InstanceId);
+    const seeded = await this.backend.sshCapture(this.host, `test -f ${shellQuote(marker)} && printf ready || true`, this.instance.InstanceId);
     if (seeded === "ready") {
       for (const repo of this.chat.repositories || []) {
         if (!/^[A-Za-z0-9_.-]+--[A-Za-z0-9_.-]+$/.test(repo.directory)) throw new Error("Invalid repository directory");
         const target = `${this.workspace}/${repo.directory}`;
-        const exists = await this.backend.sshCapture(this.host, `test -e ${shellQuote(target)} && printf ready || true`);
+        const exists = await this.backend.sshCapture(this.host, `test -e ${shellQuote(target)} && printf ready || true`, this.instance.InstanceId);
         if (exists !== "ready") await this.#uploadWorkspace(marker, repo.directory);
       }
       return;
@@ -110,21 +111,21 @@ class Ec2Executor {
       `env -i ${assignments} ${shellQuote(command)} ${args.map(shellQuote).join(" ")}`,
     ].join("\n");
     const remote = `exec /bin/sh -c ${shellQuote(inner)}`;
-    return spawn(this.backend.config.ec2.sshBin, [...this.backend.sshArgs(this.host), remote], {
+    return spawn(this.backend.config.ec2.sshBin, [...this.backend.sshArgs(this.host, this.instance.InstanceId), remote], {
       stdio: options.stdio || ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
   }
 
   mkdir(directory) {
-    return this.backend.sshCapture(this.host, `install -d -m 700 ${shellQuote(directory)} && touch ${shellQuote(this.heartbeat)}`).then(() => undefined);
+    return this.backend.sshCapture(this.host, `install -d -m 700 ${shellQuote(directory)} && touch ${shellQuote(this.heartbeat)}`, this.instance.InstanceId).then(() => undefined);
   }
 
   #uploadWorkspace(marker, directory = ".") {
     return new Promise((resolve, reject) => {
       const tar = spawn("tar", ["-C", this.chat.workspace, "-cf", "-", "--", directory], { stdio: ["ignore", "pipe", "pipe"] });
       const remote = `tar -xf - -C ${shellQuote(this.workspace)} && touch ${shellQuote(marker)} ${shellQuote(this.heartbeat)}`;
-      const ssh = spawn(this.backend.config.ec2.sshBin, [...this.backend.sshArgs(this.host), remote], { stdio: ["pipe", "ignore", "pipe"] });
+      const ssh = spawn(this.backend.config.ec2.sshBin, [...this.backend.sshArgs(this.host, this.instance.InstanceId), remote], { stdio: ["pipe", "ignore", "pipe"] });
       tar.stdout.pipe(ssh.stdin);
       let errors = "";
       tar.stderr.on("data", (chunk) => { errors += chunk; });
@@ -151,6 +152,7 @@ export class Ec2Backend {
     this.commandRunner = commandRunner;
     const required = {
       AGENT_EC2_AMI_ID: config.ec2.amiId,
+      AGENT_EC2_DEPLOYMENT: config.ec2.deployment,
       AGENT_EC2_SUBNET_ID: config.ec2.subnetId,
       AGENT_EC2_SECURITY_GROUP_ID: config.ec2.securityGroupId,
       AGENT_EC2_KEY_NAME: config.ec2.keyName,
@@ -158,18 +160,30 @@ export class Ec2Backend {
     };
     const missing = Object.entries(required).filter(([, value]) => !value).map(([name]) => name);
     if (missing.length) throw new Error(`EC2 backend is missing: ${missing.join(", ")}`);
+    if (!/^[A-Za-z][A-Za-z0-9-]{0,127}$/.test(config.ec2.deployment)) throw new Error("Invalid AGENT_EC2_DEPLOYMENT");
+    if (!/^[a-z_][a-z0-9_-]*$/.test(config.ec2.sshUser)) throw new Error("Invalid EC2 SSH user");
+    if (!/^\/[A-Za-z0-9_/-]+$/.test(config.ec2.remoteRoot) || config.ec2.remoteRoot.includes("..") || config.ec2.remoteRoot === "/") throw new Error("Invalid EC2 remote root");
+    if (config.ec2.usePublicIp) throw new Error("EC2 workers must use private addresses; public worker IPs are not supported");
   }
 
   awsArgs(...args) {
-    return ["--profile", this.config.ec2.profile, "--region", this.config.ec2.region, ...args];
+    return [...(this.config.ec2.profile ? ["--profile", this.config.ec2.profile] : []), "--region", this.config.ec2.region, "--no-cli-pager", ...args];
   }
 
-  sshArgs(host) {
+  sshArgs(host, instanceId) {
+    if (isIP(host) !== 4 || !/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) throw new Error("EC2 worker SSH target must be a private IPv4 address");
+    if (!/^i-[a-f0-9]{8,17}$/.test(instanceId || "")) throw new Error("SSH requires the verified worker instance ID");
     return [
+      "-F", "/dev/null",
       "-T",
       "-i", this.config.ec2.sshPrivateKey,
       "-o", "BatchMode=yes",
       "-o", "StrictHostKeyChecking=accept-new",
+      "-o", `UserKnownHostsFile=${this.config.ec2.sshKnownHosts}`,
+      "-o", `HostKeyAlias=${this.config.ec2.deployment}-${instanceId}`,
+      "-o", "IdentitiesOnly=yes",
+      "-o", "ForwardAgent=no",
+      "-o", "ClearAllForwardings=yes",
       "-o", "ConnectTimeout=10",
       "-o", "ServerAliveInterval=15",
       "-o", "ServerAliveCountMax=3",
@@ -177,8 +191,8 @@ export class Ec2Backend {
     ];
   }
 
-  sshCapture(host, remoteCommand) {
-    return this.commandRunner(this.config.ec2.sshBin, [...this.sshArgs(host), remoteCommand], { timeoutMs: 60_000 });
+  sshCapture(host, remoteCommand, instanceId) {
+    return this.commandRunner(this.config.ec2.sshBin, [...this.sshArgs(host, instanceId), remoteCommand], { timeoutMs: 60_000 });
   }
 
   async acquire(chat) {
@@ -192,10 +206,11 @@ export class Ec2Backend {
       await this.#aws("ec2", "start-instances", "--instance-ids", instance.InstanceId);
     }
     await this.#aws("ec2", "wait", "instance-running", "--instance-ids", instance.InstanceId);
-    instance = await this.#describe(instance.InstanceId);
+    instance = await this.#describe(instance.InstanceId, chat.id);
     const host = this.config.ec2.usePublicIp ? instance.PublicIpAddress : instance.PrivateIpAddress;
     if (!host) throw new Error(`EC2 instance ${instance.InstanceId} has no ${this.config.ec2.usePublicIp ? "public" : "private"} IP`);
-    await this.#waitForSsh(host);
+    await mkdir(path.dirname(this.config.ec2.sshKnownHosts), { recursive: true, mode: 0o700 });
+    await this.#waitForSsh(host, instance.InstanceId);
     const executor = new Ec2Executor({ backend: this, chat, instance, host });
     await executor.prepare();
     return executor;
@@ -218,30 +233,59 @@ export class Ec2Backend {
   }
 
   async #find(chatId) {
+    if (!/^chat_[a-f0-9]{32}$/.test(chatId)) throw new Error("Invalid EC2 chat identifier");
     const output = await this.#aws(
       "ec2", "describe-instances",
       "--filters",
       `Name=tag:AgentWebChat,Values=${chatId}`,
+      `Name=tag:AgentRelayDeployment,Values=${this.config.ec2.deployment}`,
+      "Name=tag:ManagedBy,Values=agent-relay",
       "Name=instance-state-name,Values=pending,running,stopping,stopped",
-      "--query", "Reservations[0].Instances[0]",
+      "--query", "Reservations[].Instances[]",
       "--output", "json",
     );
-    return output && output !== "null" ? JSON.parse(output) : null;
+    const instances = JSON.parse(output || "[]");
+    if (!Array.isArray(instances) || instances.length > 1) throw new Error("EC2 worker lookup is ambiguous; refusing to mutate instances");
+    return instances.length ? this.#assertWorker(instances[0], chatId) : null;
   }
 
-  async #describe(instanceId) {
+  #assertWorker(instance, chatId) {
+    const tags = Object.fromEntries((instance.Tags || []).map(({ Key, Value }) => [Key, Value]));
+    const ec2 = this.config.ec2;
+    if (!/^i-[a-f0-9]{8,17}$/.test(instance.InstanceId || "") || tags.ManagedBy !== "agent-relay" ||
+        tags.AgentRelayDeployment !== ec2.deployment || tags.AgentWebChat !== chatId ||
+        instance.SubnetId !== ec2.subnetId || instance.KeyName !== ec2.keyName ||
+        instance.SecurityGroups?.length !== 1 || instance.SecurityGroups[0].GroupId !== ec2.securityGroupId ||
+        instance.IamInstanceProfile || instance.PublicIpAddress || instance.MetadataOptions?.HttpEndpoint !== "disabled") {
+      throw new Error("EC2 worker ownership or isolation does not match this deployment; refusing access or mutation");
+    }
+    return instance;
+  }
+
+  async #describe(instanceId, chatId) {
     const output = await this.#aws(
       "ec2", "describe-instances", "--instance-ids", instanceId,
       "--query", "Reservations[0].Instances[0]", "--output", "json",
     );
     const instance = output && output !== "null" ? JSON.parse(output) : null;
     if (!instance) throw new Error(`EC2 instance disappeared: ${instanceId}`);
-    return instance;
+    if (instance.InstanceId !== instanceId) throw new Error("EC2 worker lookup returned an unexpected instance");
+    return this.#assertWorker(instance, chatId);
   }
 
   async #create(chatId) {
-    const tags = `ResourceType=instance,Tags=[{Key=Name,Value=agent-web-${chatId.slice(-12)}},{Key=AgentWebChat,Value=${chatId}},{Key=ManagedBy,Value=agent-web-poc}]`;
-    const volumeTags = `ResourceType=volume,Tags=[{Key=AgentWebChat,Value=${chatId}},{Key=ManagedBy,Value=agent-web-poc}]`;
+    const ec2 = this.config.ec2;
+    const image = JSON.parse(await this.#aws("ec2", "describe-images", "--image-ids", ec2.amiId, "--query", "Images[0]", "--output", "json"));
+    const imageTags = Object.fromEntries((image?.Tags || []).map(({ Key, Value }) => [Key, Value]));
+    if (image?.ImageId !== ec2.amiId || image.State !== "available" || image.Architecture !== "x86_64" ||
+        imageTags.ManagedBy !== "agent-relay" || imageTags.AgentRelayDeployment !== ec2.deployment ||
+        imageTags.AgentRelayWorkerKey !== ec2.keyName || imageTags.CodexVersion !== "0.154.0" || imageTags.ClaudeVersion !== "2.1.222") {
+      throw new Error("Worker AMI must be a verified image baked for this deployment, SSH key, and pinned CLI versions");
+    }
+    const Tags = [
+      { Key: "Name", Value: `agent-relay-${chatId.slice(-12)}` }, { Key: "AgentWebChat", Value: chatId },
+      { Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: ec2.deployment },
+    ];
     const blockDevice = JSON.stringify([{
       DeviceName: this.config.ec2.rootDevice,
       Ebs: { VolumeSize: this.config.ec2.volumeGb, VolumeType: "gp3", Encrypted: true, DeleteOnTermination: true },
@@ -250,24 +294,25 @@ export class Ec2Backend {
       "ec2", "run-instances",
       "--image-id", this.config.ec2.amiId,
       "--instance-type", this.config.ec2.instanceType,
-      "--subnet-id", this.config.ec2.subnetId,
-      "--security-group-ids", this.config.ec2.securityGroupId,
+      "--network-interfaces", JSON.stringify([{ DeviceIndex: 0, SubnetId: ec2.subnetId, Groups: [ec2.securityGroupId], AssociatePublicIpAddress: false, DeleteOnTermination: true }]),
       "--key-name", this.config.ec2.keyName,
       "--block-device-mappings", blockDevice,
-      "--metadata-options", "HttpTokens=required,HttpEndpoint=enabled",
+      "--metadata-options", "HttpTokens=required,HttpEndpoint=disabled",
       "--instance-initiated-shutdown-behavior", "stop",
-      "--tag-specifications", tags, volumeTags,
+      "--tag-specifications", JSON.stringify(["instance", "volume"].map(ResourceType => ({ ResourceType, Tags }))),
       "--query", "Instances[0]", "--output", "json",
     );
-    return JSON.parse(output);
+    const instance = JSON.parse(output);
+    if (!/^i-[a-f0-9]{8,17}$/.test(instance?.InstanceId || "")) throw new Error("EC2 launch did not return a valid worker ID");
+    return this.#describe(instance.InstanceId, chatId);
   }
 
-  async #waitForSsh(host) {
+  async #waitForSsh(host, instanceId) {
     const deadline = Date.now() + this.config.ec2.sshReadyTimeoutMs;
     let lastError;
     while (Date.now() < deadline) {
       try {
-        await this.sshCapture(host, "command -v codex >/dev/null && command -v claude >/dev/null");
+        await this.sshCapture(host, "test -f /opt/agent-web/READY && test -f /opt/agent-web/IMAGE_FINALIZED && test \"$(codex --version)\" = 'codex-cli 0.154.0' && test \"$(claude --version)\" = '2.1.222 (Claude Code)'", instanceId);
         return;
       } catch (error) {
         lastError = error;
