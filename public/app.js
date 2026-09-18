@@ -42,6 +42,7 @@ import { SyntaxThemeControls } from "./syntax-theme-controls.js";
 import { PetControls } from "./pet-controls.js";
 import { DesktopHandoff } from "./desktop-handoff.js";
 import { ClaudeWorkspaceTrustControls } from "./claude-workspace-trust.js";
+import { RuntimeWake } from "./runtime-wake.js";
 
 const state = {
   config: null,
@@ -51,6 +52,7 @@ const state = {
   liveTools: new Map(),
   queueActions: new Map(),
   eventSource: null,
+  deletingChats: new Set(),
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -175,7 +177,7 @@ function renderMessages() {
   if (!persisted.length && !state.stream && !state.liveTools.size) {
     messageWindow.update(state.active.id, []);
     toolActivity.update(state.active.id, new Map());
-    elements.messages.append(node("div", "messages-empty", "This workspace is ready.\nSend a message to wake the agent."));
+    elements.messages.append(node("div", "messages-empty", "Wake the environment to use its browser or files.\nSend a message when you want the agent to work."));
   } else {
     const { rows, groups } = groupTools(persisted, [...state.liveTools.values()]);
     toolActivity.update(state.active.id, groups);
@@ -221,6 +223,7 @@ function renderActive() {
   elements.welcome.hidden = Boolean(chat);
   elements.conversation.hidden = !chat;
   elements.actions.hidden = !chat;
+  runtimeWake.render(chat);
   if (!chat) {
     closeSidePanel("diff"); toolActivity.update(null, new Map());
     elements.messages.replaceChildren();
@@ -235,18 +238,21 @@ function renderActive() {
   const account = workspaceSettings.accounts?.find(item => item.id === chat.agentAccountId);
   elements.meta.textContent = `${agentLabel(chat.agent)}${account ? ` · ${account.name}` : ""}${runtimeLabel} · ${chat.workspace}`;
   elements.status.textContent = chat.status === "idle" && chat.idleKeepAwakeReason ? "Ready" : chat.status;
-  elements.detail.textContent = chat.statusDetail || "";
+  const deleting = state.deletingChats.has(chat.id);
+  elements.detail.textContent = deleting ? "Deleting chat · waiting for its worker to stop…" : chat.statusDetail || "";
   elements.statusDot.className = `status-dot ${chat.status}`;
-  $("#stop-button").disabled = chat.status === "stopped";
+  $("#stop-button").disabled = deleting || chat.status === "stopped";
+  $("#delete-button").disabled = deleting;
+  $("#delete-button").setAttribute("aria-busy", String(deleting));
   const switching = state.switchingChat === chat.id;
   const busy = ["running", "starting"].includes(chat.status);
-  const unavailable = switching || chat.status === "stopping" || chat.workflowState === "archived";
-  elements.send.disabled = unavailable;
+  const unavailable = deleting || switching || chat.status === "stopping" || chat.workflowState === "archived";
+  elements.send.disabled = unavailable || runtimeWake.isWaiting(chat.id);
   elements.input.disabled = unavailable;
   elements.send.type = busy ? "button" : "submit";
   elements.send.setAttribute("aria-label", busy ? "Stop agent" : "Send message");
   elements.send.querySelector("path").setAttribute("d", busy ? "M7 7h10v10H7z" : "m5 12 7-7 7 7M12 5v14");
-  $("#queue-message").hidden = !busy; $("#queue-message").disabled = unavailable;
+  $("#queue-message").hidden = !busy || runtimeWake.isWaiting(chat.id); $("#queue-message").disabled = unavailable;
   renderKeyboardHints();
   elements.input.placeholder = chat.workflowState === "archived" ? "Archived · unarchive this chat to continue" : "Ask your agent to build, inspect, or fix something…";
   if (!elements.agentPicker.options.length) for (const agent of state.config.agents.filter(item => item.enabled)) {
@@ -491,6 +497,7 @@ async function forkFromComposer(chatId, text) {
 async function sendMessage(event) {
   event.preventDefault();
   if (!state.active || state.waitingForUploads) return;
+  if (runtimeWake.isWaiting(state.active.id)) { toast("The environment is waking up. Your draft is kept; send it when ready."); return; }
   const waitingChat = state.active.id;
   if (chatControls.uploads.has(waitingChat)) {
     state.waitingForUploads = true;
@@ -769,12 +776,18 @@ $("#stop-button").addEventListener("click", async () => {
   catch (error) { toast(error.message); }
 });
 async function deleteChat(chat) {
+  if (chat && state.deletingChats.has(chat.id)) return false;
   if (!chat || !confirm(`Permanently delete “${chat.title}”, its messages, and its workspace files? Any running agent will be stopped. This cannot be undone.`)) return false;
   const id = chat.id;
-  await api(`/api/chats/${id}`, { method: "DELETE" });
-  await forgetChat(id);
-  toast("Chat and workspace permanently deleted.");
-  return true;
+  state.deletingChats.add(id); renderChats(); renderActive();
+  try {
+    await api(`/api/chats/${id}`, { method: "DELETE" });
+    await forgetChat(id);
+    toast("Chat and workspace permanently deleted.");
+    return true;
+  } finally {
+    state.deletingChats.delete(id); renderChats(); renderActive();
+  }
 }
 async function forgetChat(id) {
   vimComposer.forget(id);
@@ -829,6 +842,16 @@ const agentThreads = new AgentThreadsPanel({ api, getChat: () => state.active, t
 const appPreview = new AppPreviewDialog({ api, getChat: () => state.active, getBackend: () => state.active?.runtimeMetadata?.backend || state.config?.workerBackend });
 $("#open-app-preview").onclick = () => appPreview.open();
 const sharedBrowser = new SharedBrowserPanel({ api, getBackend: () => state.active?.runtimeMetadata?.backend || state.config?.workerBackend, openApp: options => appPreview.open(options) });
+const runtimeWake = new RuntimeWake({ button: $("#wake-worker"), api, getChat: () => state.active,
+  changed: () => renderActive(),
+  unavailable: id => state.deletingChats.has(id) || state.switchingChat === id,
+  updated: chat => {
+    if (!chat || state.active?.id !== chat.id || (chat.revision || 0) < (state.active.revision || 0)) return;
+    updateChatSummary(chat); state.active = { ...state.active, ...chat }; renderActive();
+  },
+  ready: id => { if (sharedBrowser.chatId === id && !sharedBrowser.panel.hidden && !sharedBrowser.socket) sharedBrowser.connect(); },
+  notify: message => toast(message, { outsideDialog: true }),
+});
 const browserConnectionSettings = new BrowserConnectionSettings({ api, state, toast, browser: sharedBrowser,
   accountChanged: async () => {
     appPreview.resetIdentity();

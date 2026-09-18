@@ -215,6 +215,13 @@ expire after a disconnect and never wake a stopped worker, invoke an agent, or
 send browsing activity into the conversation. Hidden browser panels stop their
 live stream until the tab becomes visible again.
 
+Use **Wake environment** in the chat's runtime banner to start a stopped worker
+without sending a message to the agent. Startup progress and errors stay visible;
+duplicate clicks share the same startup. An already-open browser panel reconnects
+when ready. Drafts, saved sessions and queued input are retained, and no goal or
+queued message is automatically resumed. This starts the machine, not previously
+terminated application commands such as `npm run dev`; it is not hibernation.
+
 Paste clipboard images/files in the composer to attach them. Click an image
 attachment to preview it in the document column (an overlay on narrow screens),
 with fit/actual-size controls and a separate remove action. Saved attachments
@@ -323,6 +330,8 @@ Chats use a single compact row: status icon, title, pin, and organize menu.
 Status details and timestamps remain available on hover and in Organize chat.
 Choose **Organize chat → Delete chat** to permanently remove that chat, messages,
 attachments, and workspace after confirmation. A running worker is stopped first.
+**Deleting…** appears immediately while that shutdown completes; the chat is
+removed only after confirmation from the server. Failed deletion can be retried.
 Archive remains available when you want to keep the chat instead. Deleting a
 different chat does not disturb the active conversation or its draft.
 

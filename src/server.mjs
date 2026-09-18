@@ -695,6 +695,12 @@ export async function createAgentWebServer(options = {}) {
           await manager.stop(chatId, "manual");
           return json(response, 200, { stopped: true });
         }
+        if (tail === "wake" && request.method === "POST") {
+          await bodyJson(request, 1000); request.guardChat();
+          const result = await manager.wake(chatId, request.guardChat);
+          request.guardChat();
+          return json(response, result.accepted ? 202 : 200, { chat: result.chat, accepted: result.accepted });
+        }
         const requestMatch = /^requests\/([^/]+)\/respond$/.exec(tail);
         if (requestMatch && request.method === "POST") {
           await manager.respond(chatId, requestMatch[1], await bodyJson(request, config.maxBodyBytes));

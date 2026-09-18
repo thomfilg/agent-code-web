@@ -105,10 +105,13 @@
               <span class="status-dot" id="status-dot"></span>
               <div>
                 <strong id="runtime-status">Stopped</strong>
-                <span id="runtime-detail">The worker starts with your next message.</span>
+                <span id="runtime-detail">Wake the environment without sending an agent message.</span>
               </div>
             </div>
-            <div class="countdown" id="countdown"></div>
+            <div class="runtime-actions">
+              <div class="countdown" id="countdown"></div>
+              <button type="button" id="wake-worker" class="secondary-button">Wake environment</button>
+            </div>
             <div class="chat-pet" id="chat-pet" role="group" aria-label="Current chat pet" hidden></div>
           </div>
           <div class="messages" id="messages" aria-live="polite"></div>

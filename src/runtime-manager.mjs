@@ -59,6 +59,9 @@ export class RuntimeManager extends EventEmitter {
   #executors = new Map();
   #forking = new Map();
   #workspaceIdleTimers = new Map();
+  #workerWakes = new Map();
+  #awakeWorkers = new Set();
+  #workerIdleTimers = new Map();
 
   async enqueue(chatId, rawText, attachmentIds = []) {
     const text = clampText(rawText, 100_000, "message");
@@ -599,25 +602,106 @@ export class RuntimeManager extends EventEmitter {
     ];
   }
 
-  isBusy(chatId) { const runtime = this.#runtimes.get(chatId); return this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.busy || runtime?.adapter.isBackgroundBusy?.()) || this.#importPending(chatId); }
+  isBusy(chatId) { const runtime = this.#runtimes.get(chatId); return this.#workerWakes.has(chatId) || this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.busy || runtime?.adapter.isBackgroundBusy?.()) || this.#importPending(chatId); }
   publishChat(chat) { if (chat) this.#emit(chat.id, { type: "chat_updated", chat }); }
+
+  // Admit quickly: a cold EC2 start can outlast the public HTTP timeout. This
+  // operation acquires infrastructure only, never an adapter, turn or queue.
+  async wake(chatId, guard = () => {}) {
+    guard();
+    const chat = this.store.get(chatId);
+    if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    if (chat.archived || chat.workflowState === "archived") throw Object.assign(new Error("Unarchive this chat before waking its environment"), { statusCode: 409 });
+    const version = this.#lifecycleVersions.get(chatId) || 0;
+    if (this.#previewStops.has(chatId) || chat.status === "stopping") throw Object.assign(new Error("Wait for this environment to finish stopping"), { statusCode: 409 });
+    const previous = this.#workerWakes.get(chatId);
+    if (previous) {
+      if (previous.version !== version) throw Object.assign(new Error("The previous wake is being cancelled; try again when stopping finishes"), { statusCode: 409 });
+      return previous.admission;
+    }
+    if (this.#runtimes.has(chatId) || this.#awakeWorkers.has(chatId)) return { chat, completion: Promise.resolve(), accepted: false };
+    if (this.isBusy(chatId)) throw Object.assign(new Error("Wait for the current chat operation to finish"), { statusCode: 409 });
+    const operation = { version };
+    const check = () => {
+      guard();
+      const current = this.store.get(chatId);
+      if (!current || current.archived || (this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Environment wake cancelled"), { name: "AbortError", statusCode: 409 });
+    };
+    this.#workerWakes.set(chatId, operation);
+    operation.admission = (async () => {
+      const starting = await this.store.update(chatId, current => {
+        check();
+        return { ...runtimeWorkflowPatch(current, "starting"), status: "starting", statusDetail: "Waking environment · no message is sent to the agent", idleDeadlineAt: null, idleKeepAwakeReason: null };
+      });
+      this.publishChat(starting);
+      operation.completion = (async () => {
+        try {
+          check(); await this.browserExecutor(chatId); check();
+          this.#awakeWorkers.add(chatId);
+        } catch (error) {
+          if (error.name !== "AbortError" && (this.#lifecycleVersions.get(chatId) || 0) === version && this.store.get(chatId)) {
+            // A failed acquisition may have started a VM. Release that exact
+            // chat's lease before allowing a retry, without changing its queue.
+            this.#executors.delete(chatId);
+            try { if (chat.agent !== "mock") await this.workerBackend.sleep(chat); } catch { /* Surface the original failure; Stop remains available. */ }
+            if ((this.#lifecycleVersions.get(chatId) || 0) === version) await this.#setStatus(chatId, "error", `Could not wake environment: ${errorMessage(error)}`, null);
+          }
+          throw error;
+        } finally {
+          if (this.#workerWakes.get(chatId) === operation) this.#workerWakes.delete(chatId);
+        }
+        check(); await this.#scheduleWorkerIdle(chatId);
+      })();
+      operation.completion.catch(() => {}); // Failure is visible in chat status.
+      return { chat: starting, completion: operation.completion, accepted: true };
+    })().catch(error => { if (this.#workerWakes.get(chatId) === operation) this.#workerWakes.delete(chatId); throw error; });
+    return operation.admission;
+  }
+
+  async #scheduleWorkerIdle(chatId) {
+    clearTimeout(this.#workerIdleTimers.get(chatId)); this.#workerIdleTimers.delete(chatId);
+    if (!this.#awakeWorkers.has(chatId) || this.#runtimes.has(chatId) || this.isBusy(chatId)) return;
+    const version = this.#lifecycleVersions.get(chatId) || 0;
+    const reason = this.browsers?.hasViewers(chatId) ? "browser" : this.previewActivity.has(chatId) ? "preview" : this.workspacePresence.has(chatId) ? "workspace" : this.presence.has(chatId) ? "tab" : null;
+    const deadline = reason ? null : new Date(Date.now() + this.config.idleTimeoutMs).toISOString();
+    const updated = await this.store.update(chatId, current => {
+      if (!this.#awakeWorkers.has(chatId) || this.#runtimes.has(chatId) || this.isBusy(chatId) || (this.#lifecycleVersions.get(chatId) || 0) !== version) return {};
+      return { ...runtimeWorkflowPatch(current, "idle"), status: "idle", statusDetail: "Environment ready · no message sent to the agent", idleDeadlineAt: deadline, idleKeepAwakeReason: reason };
+    });
+    if (!this.#awakeWorkers.has(chatId) || this.#runtimes.has(chatId) || (this.#lifecycleVersions.get(chatId) || 0) !== version) return;
+    this.publishChat(updated);
+    if (!reason) {
+      const timer = setTimeout(() => {
+        this.#workerIdleTimers.delete(chatId);
+        if (!this.#awakeWorkers.has(chatId) || this.#runtimes.has(chatId) || this.isBusy(chatId)) return;
+        if (this.browsers?.hasViewers(chatId) || this.previewActivity.has(chatId) || this.workspacePresence.has(chatId) || this.presence.has(chatId)) { void this.#scheduleWorkerIdle(chatId).catch(() => {}); return; }
+        void this.stop(chatId, "idle-timeout").catch(() => {});
+      }, this.config.idleTimeoutMs);
+      timer.unref?.(); this.#workerIdleTimers.set(chatId, timer);
+    }
+  }
 
   // A viewer may wake the worker without starting an LLM turn. Share this lease
   // with agent startup so opening Chrome cannot create a second EC2 instance.
   async browserExecutor(chatId) {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    if (chat.archived || this.#previewStops.has(chatId)) throw Object.assign(new Error("This environment is archived or stopping"), { statusCode: 409 });
     if (this.#executors.has(chatId)) return this.#executors.get(chatId);
     const version = this.#lifecycleVersions.get(chatId) || 0;
+    const check = () => { if (!this.store.get(chatId) || this.store.get(chatId).archived || (this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" }); };
     const pending = (async () => {
       if (chat.environmentId) await (await this.servicesFor(chat)).environments.runtime(chat.environmentId, chat);
+      check();
       if (chat.repositories?.length && !chat.workspaceReady) {
         await prepareRepositories({ destination: chat.workspace, repositories: chat.repositories, getToken: async repository => (await this.servicesFor(chat)).github.tokenForRepository(repository, chat),
-          onProgress: detail => this.#setStatus(chatId, "starting", detail, null) });
+          onProgress: detail => { check(); return this.#setStatus(chatId, "starting", detail, null); } });
+        check();
         await this.store.update(chatId, { workspaceReady: true });
       }
+      check();
       const executor = await this.workerBackend.acquire(this.store.get(chatId));
-      if ((this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" });
+      check();
       if (executor?.metadata) await this.store.update(chatId, { runtimeMetadata: executor.metadata });
       return executor;
     })();
@@ -628,6 +712,7 @@ export class RuntimeManager extends EventEmitter {
   previewGeneration(chatId) { return this.store.get(chatId) && !this.store.get(chatId).archived && !this.#previewStops.has(chatId) && !this.#previewBlocked.has(chatId) ? this.#lifecycleVersions.get(chatId) || 0 : null; }
 
   async browserIdle(chatId) {
+    if (this.#awakeWorkers.has(chatId)) return this.#scheduleWorkerIdle(chatId);
     // A browser-only wake must release its EC2 lease too. Otherwise the cloud
     // watchdog can stop the VM behind a cached executor, breaking the next open.
     if (!this.#runtimes.has(chatId) && !this.isBusy(chatId) && !this.workspacePresence.has(chatId) && !this.previewActivity.has(chatId) && !this.browsers?.entries.has(chatId) && this.store.get(chatId)) await this.stop(chatId, "idle-timeout");
@@ -673,12 +758,17 @@ export class RuntimeManager extends EventEmitter {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     await this.presence.set(chatId, clientId, chat.archived ? false : active);
+    if (active && this.#awakeWorkers.has(chatId)) {
+      const executor = await this.#executors.get(chatId);
+      if (executor?.metadata?.backend === "ec2") await readWorkspaceFiles(chat, executor, { action: "ping" });
+    }
     return { active: this.presence.has(chatId), expiresInMs: this.presence.ttlMs };
   }
 
   async refreshActivity(chatId) {
     const runtime = this.#runtimes.get(chatId);
     if (runtime && !runtime.busy && this.store.get(chatId)?.status === "idle") await this.#scheduleIdleStop(chatId, runtime);
+    if (!runtime && this.#awakeWorkers.has(chatId)) await this.#scheduleWorkerIdle(chatId);
     this.browsers?.touch(chatId);
   }
 
@@ -1141,6 +1231,7 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async #submit(chatId, rawText, attachmentIds = [], queueAction = null, approval = null) {
+    if (this.#workerWakes.has(chatId)) throw Object.assign(new Error("The environment is waking up. Wait until it is ready before sending a message."), { statusCode: 409 });
     const text = clampText(rawText, 100_000, "message");
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("chat not found"), { statusCode: 404 });
@@ -1377,6 +1468,8 @@ export class RuntimeManager extends EventEmitter {
     let stopped = false;
     try {
     this.#lifecycleVersions.set(chatId, (this.#lifecycleVersions.get(chatId) || 0) + 1);
+    this.#awakeWorkers.delete(chatId);
+    clearTimeout(this.#workerIdleTimers.get(chatId)); this.#workerIdleTimers.delete(chatId);
     this.previewActivity.revokeChat(chatId);
     this.emit("preview-revoke", { chatId, reason });
     this.workspacePresence.remove(chatId);
@@ -1489,7 +1582,8 @@ export class RuntimeManager extends EventEmitter {
     for (const timer of this.#workspaceIdleTimers.values()) clearTimeout(timer);
     this.#workspaceIdleTimers.clear();
     await this.pullRequests.stop();
-    await Promise.allSettled([...new Set([...this.#runtimes.keys(), ...this.#executors.keys()])].map((chatId) => this.stop(chatId, "shutdown")));
+    await Promise.allSettled([...new Set([...this.#runtimes.keys(), ...this.#executors.keys(), ...this.#workerWakes.keys()])].map((chatId) => this.stop(chatId, "shutdown")));
+    await Promise.allSettled([...this.#workerWakes.values()].map(operation => operation.completion || operation.admission));
     await this.browsers?.shutdown();
   }
 
@@ -1500,6 +1594,8 @@ export class RuntimeManager extends EventEmitter {
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const checkCancelled = () => { if ((this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" }); };
     await this.#setStatus(chatId, "starting", "Starting isolated agent runtime", null);
+    this.#awakeWorkers.delete(chatId);
+    clearTimeout(this.#workerIdleTimers.get(chatId)); this.#workerIdleTimers.delete(chatId);
     let runtime;
     let executor;
     let forkRecord;

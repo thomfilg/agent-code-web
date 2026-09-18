@@ -49,10 +49,11 @@ export class ChatSidebar {
     $("#organize-form").addEventListener("submit", event => this.saveChat(event));
     $("#archive-chat-button").addEventListener("click", () => this.toggleArchive());
     $("#organize-delete-chat").addEventListener("click", async event => {
-      event.currentTarget.disabled = true;
+      const control = event.currentTarget;
+      control.disabled = true; control.textContent = "Deleting…"; control.setAttribute("aria-busy", "true");
       try { if (await this.remove(this.editingChat)) $("#organize-dialog").close(); }
       catch (error) { $("#organize-error").textContent = error.message; }
-      finally { $("#organize-delete-chat").disabled = false; }
+      finally { control.disabled = false; control.textContent = "Delete chat"; control.setAttribute("aria-busy", "false"); }
     });
     $("#remove-group-button").addEventListener("click", () => this.removeGroup());
     document.addEventListener("dragend", () => { this.dragging = false; document.querySelectorAll(".drop-over").forEach(item => item.classList.remove("drop-over")); this.scheduleRefresh(); });
@@ -133,8 +134,9 @@ export class ChatSidebar {
     return details;
   }
   row(chat, showOrigin = false) {
-    const row = el("div", `chat-row${this.state.active?.id === chat.id ? " active" : ""}`);
-    row.draggable = true; row.dataset.chatId = chat.id;
+    const deleting = this.state.deletingChats?.has(chat.id);
+    const row = el("div", `chat-row${this.state.active?.id === chat.id ? " active" : ""}${deleting ? " deleting" : ""}`);
+    row.draggable = !deleting; row.dataset.chatId = chat.id; row.setAttribute("aria-busy", String(Boolean(deleting)));
     row.addEventListener("dragstart", event => {
       this.dragging = true; event.dataTransfer.effectAllowed = "move";
       event.dataTransfer.setData("application/x-agent-relay-chat", chat.id);
@@ -144,7 +146,7 @@ export class ChatSidebar {
     select.dataset.focusKey = `select-${chat.id}`;
     select.setAttribute("aria-current", String(this.state.active?.id === chat.id));
     const top = el("div", "chat-item-top");
-    top.append(statusIcon(chat), el("span", "chat-item-title", chat.title));
+    top.append(statusIcon(chat), el("span", "chat-item-title", deleting ? `Deleting… ${chat.title}` : chat.title));
     select.append(top);
     const origin = repositoryGroup(chat);
     select.title = `${chat.title}\n${origin.company} / ${origin.repository}\n${this.agentLabel(chat.agent)} · ${stateLabel(chat.workflowState)}\nUpdated: ${new Date(chat.updatedAt).toLocaleString()}${showOrigin && chat.customGroupId ? `\nGroup: ${this.groups.find(g => g.id === chat.customGroupId)?.name || ""}` : ""}`;
@@ -152,12 +154,13 @@ export class ChatSidebar {
     const pin = button(chat.pinned ? "★" : "☆", `${chat.pinned ? "Unpin" : "Pin"} ${chat.title}`, () => this.patch(chat.id, { pinned: !chat.pinned }).catch(error => this.toast(error.message)));
     pin.setAttribute("aria-pressed", String(Boolean(chat.pinned))); pin.dataset.focusKey = `pin-${chat.id}`;
     const menu = button("⋯", `Organize ${chat.title}`, () => this.editChat(chat)); menu.dataset.focusKey = `organize-${chat.id}`;
+    pin.disabled = Boolean(deleting); menu.disabled = Boolean(deleting);
     controls.append(pin, menu); row.append(select, controls);
     return row;
   }
   render() {
     const list = $("#chat-list");
-    const signature = JSON.stringify({ chats: this.state.chats, groups: this.groups, preferences: this.preferences, active: this.state.active?.id });
+    const signature = JSON.stringify({ chats: this.state.chats, groups: this.groups, preferences: this.preferences, active: this.state.active?.id, deleting: [...(this.state.deletingChats || [])] });
     if (signature === this.renderedSignature || this.dragging) return;
     this.renderedSignature = signature;
     const focused = list.contains(document.activeElement) ? document.activeElement?.dataset.focusKey : null;

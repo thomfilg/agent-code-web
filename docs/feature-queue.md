@@ -1,5 +1,16 @@
 # Feature queue — original request order
 
+Worker lifecycle follow-up (2026-09-18): the user requests explicit environment
+wake without an agent message and reports slow, silent chat deletion. A wake
+button with prompt-free asynchronous acquisition and immediate deletion feedback
+passes 1,209 Node cases (zero failures, three opt-in skips) and 15 final browser
+cases; publication is not yet claimed. See [scope and acceptance](validation-2026-09-18-runtime-controls.md).
+Their subsequent request for two-minute hibernation and fifteen-minute full stop
+is separate and not activated. AWS stop and completed hibernation both avoid
+compute charges while retaining billable disk; the clarified policy choice and
+compatible-image/process-resume acceptance remain open. Production timer values
+are unchanged at this checkpoint.
+
 Shared Chrome follow-up (2026-09-18): user authorized proceeding on interaction
 lag, reload shortcuts and plain-text clipboard. The implementation now uses
 native compressed frames while interacting, idle high-DPI refinement, bounded
