@@ -180,9 +180,21 @@ consistent backup/restore and failed-release rollback must each be exercised
 and documented before delivery is complete. Do not format, replace or restore
 over the live data volume to test those cases; use a separate disposable restore.
 
-Current evidence (2026-09-18): stack created, controller private SSM bootstrap
-passed (Docker, Python, separate ext4 mount and UID 1000/mode 700). Application
-build, worker bake and live rollout acceptance are in progress. The integrated
-code passed 712 backend tests plus 15 account/Google, 4 Linear and 4
-GitHub/company browser checks. Those fixture checks do not close real consent,
-deployed runtime, backup/restore or rollback gates.
+Current evidence (2026-09-18): authorized infrastructure, immutable build and
+HTTPS rollout of `f0692eb` passed; `/readyz` is 200 and anonymous `/api/chats` is
+401. Cold backup/restore passed on encrypted EBS (retained snapshot
+`snap-08d0e108e9596b5df`); the distinct restored copy was verified and removed,
+and the original controller recovered. Controlled failed-rollout recovery also
+passed: candidate exit 1/readiness failure restored the exact original
+container, configuration and mounts, with no secret or application-data change.
+Evidence: acceptance `91246861-681f-485c-b85f-4b9051b071a4`, SSM
+`88faada5-24b1-493e-bb78-22cd1df09fde`. The normal single previous-container slot
+was consumed by this test; the healthy current image remains unchanged.
+
+The core regression checkpoint passed 783 backend tests plus 21 native/SSH
+checks. A fresh integrated browser run passed 28 isolated fixtures: 16
+Codex/Claude, 4 Google, 4 GitHub/company scopes and 4 Linear. These are not real
+provider consent. Fresh-worker acceptance, native AWS account execution/resume,
+cloud Google/provider consent, protected SSE/live-browser acceptance and remote
+application forwarding remain open. See the [feature queue](feature-queue.md)
+for the latest evidence and explicit release gates.

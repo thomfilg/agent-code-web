@@ -48,11 +48,14 @@ work and preserve its unfinished test changes. Then return to the remaining
 original queue; new requests still append at the end. The old count conflated
 implementation tests with usable delivery: item 09 is a technical answer, and
 the other **17 were reopened for delivery acceptance**, not newly discovered
-defects. After the saved-data acceptance of item 01 below, the current total is
+defects. After the saved-data acceptance of item 01 below, the historical total was
 **45 items: 1 delivered, 1 answered and 43 not fully delivered** (16 priority
 re-audits, the previous 24 open items, two authentication requests and the AWS
 deployment request below). The new MVP gate is a release requirement, not a
-claim that these open items have been completed.
+claim that these open items have been completed. There are now **46 recorded
+requests** including account deletion; current delivery acceptance is tracked
+per row. The latest activation/evidence below supersedes historical status
+claims without turning fixture coverage into real-account acceptance.
 
 For each reopened item, verify its full acceptance condition on current code,
 then verify the applicable deployed UI/backend/native integration. Preserve real
@@ -103,7 +106,7 @@ Official Playwright MCP verified the Google entry screen at 1600, 390 and 320
 pixels without horizontal overflow. Google cloud consent remains pending the
 new callback registration; no production account or chat was fabricated.
 
-AWS checkpoint (2026-09-18 06:44 UTC):
+AWS checkpoint (2026-09-18 07:15 UTC):
 
 - Cold backup/restore passed on the actual encrypted EBS volume. Snapshot
   `snap-08d0e108e9596b5df` is retained; a distinct restored volume matched both
@@ -112,16 +115,25 @@ AWS checkpoint (2026-09-18 06:44 UTC):
   claim of large-volume recovery testing. Run `775be65e-3184-4822-b9f1-7e919d96d076`.
 - The reviewed application update through revision `f0692eb` is healthy in AWS
   (immutable digest `sha256:d00cf873d34af1676f52b954fc06218f265326c9c172003f51f957a16feb9bb1`). Integration
-  tests passed 783/783, plus 21 isolated-native/SSH tests. A passing build is
-  not counted as a completed rollback gate.
+  tests passed 783/783, plus 21 isolated-native/SSH tests.
+- Controlled failed-rollout recovery passed on the actual controller. The
+  candidate inherited the exact current filesystem, deliberately exited 1 and
+  failed readiness. The shared engine restored the exact original container,
+  configuration and mounts, verified the persistent EBS volume, and removed
+  the failed candidate. No secret or application data changed. Run
+  `91246861-681f-485c-b85f-4b9051b071a4`, SSM
+  `88faada5-24b1-493e-bb78-22cd1df09fde`; independent public checks again returned
+  readiness 200 and anonymous chats 401. The older previous-container slot was
+  consumed under the normal single-slot rollout policy.
 - Worker AMI `ami-0511b35c0d21d5ee0` was built and finalized, but fresh boot
-  acceptance failed an internal image-audit flag after SSH connected. Both
-  disposable verification workers were confirmed terminated. Safe boolean
-  diagnostics are now implemented; the image is **not accepted for real chats**.
+  acceptance failed credential/metadata audit flags after SSH connected. All
+  three disposable verification workers were confirmed terminated. Typed safe
+  diagnostics, builder SSM purge and metadata-denial handling are implemented;
+  a new bake is pending. The old image is **not accepted for real chats**.
 - The cloud Google callback to register is
   `https://d20atclccf8cku.cloudfront.net/api/auth/callback/google`.
   Fresh product consent for Codex/Claude/GitHub/Linear, worker/native acceptance,
-  deployed authenticated transports, and rollback remain explicit open gates.
+  and deployed authenticated transports remain explicit open gates.
 - Deployed WSS transport passed a real 101 upgrade and bidirectional frames,
   followed by the expected unauthenticated rejection/close 1008 on the existing
   extension endpoint. No pairing, database user, Chrome or model was started.
@@ -131,6 +143,9 @@ AWS checkpoint (2026-09-18 06:44 UTC):
   agent onboarding, separately scoped Personal/Company login links, deleting
   pending Company consent, and completing Claude's returned-code flow. Screen
   widths 320/390/1600 fit. This is UX evidence, not real provider authorization.
+- The fresh integrated browser regression passed **28/28** isolated fixtures:
+  Codex/Claude accounts 16, Google 4, GitHub/company scopes 4 and Linear 4.
+  Suites ran sequentially with one browser worker, CPUs 0–1 and nice 10.
 
 Parallel implementation checkpoint (2026-09-18):
 
@@ -152,7 +167,7 @@ Parallel implementation checkpoint (2026-09-18):
 - AWS: controller template/image/readiness/drain, private deployment-scoped
   worker baker, separate Doppler `code-web/stg_aws_mvp` secrets and immutable
   build/deploy scripts implemented. Actual HTTPS rollout and cold backup/restore
-  pass as recorded above; worker image acceptance, failed-rollout recovery and deployed
+  and controlled failed-rollout recovery pass as recorded above; worker image acceptance and deployed
   authenticated integration checks remain open.
 - Account deletion: reviewed backend/UI implementation removes a selected
   account without deleting its conversations. Integrated focused checks: 18
@@ -176,11 +191,11 @@ mock or unauthenticated MCP handshake does not satisfy this gate.
 
 | Required integration | End-to-end acceptance | Queue items / current gap |
 | --- | --- | --- |
-| Codex | Detect missing authentication; show a working Connect action and the supported native browser authorization URL/code. Complete sign-in from the user's browser, select a named account for the chat, run a consented real turn and resume that account after restart. Surface expired/revoked access and reconnect without falling back to the host CLI | 43/44: named-account implementation, account-scoped login UX and automated checks pass on `feat/codex-account-login`; real Personal account consent confirmed, real turn and live chat/account resume acceptance still open |
-| Claude | The same complete onboarding and reconnect path, using Claude's supported native authentication flow. The selected named personal/company account must actually be used for a consented real turn and restored after restart | 43/44: implementation, reviewed regressions and authorized isolated real turn/resume pass; activation and fresh product browser consent remain open |
-| GitHub | A simple Relay sign-in action runs `gh auth login` in a private account profile and gives the user the authorization URL/code. Remove token-entry and “Use this server's gh login” options; never import the global CLI identity. After authentication, identify the account and explicitly allowed companies/repositories; list, select and clone an authorized repository and read its PR/check status. Handle denied/revoked access without borrowing another connection | 21: implementation, scope tests and authorized isolated real repository/clone/PR checks pass; activation and fresh product browser consent remain open |
-| Linear | Complete real browser OAuth, discover tools and perform a non-mutating authenticated workspace read through the selected agent/environment. Support independent g2i and 12-apps connections, including the same MCP name, with no cross-company credential fallback | 02/03/04/10/21: configuration/discovery evidence is not completed OAuth or runtime acceptance |
-| AWS deployment | A documented, repeatable script deploys the complete application at a stable HTTPS URL, validates readiness, preserves data across updates and supports rollback; verify all four integrations on the deployed application | 45: deployment implementation and actual authorized infrastructure creation in progress; live rollout and acceptance not yet passed |
+| Codex | Detect missing authentication; show a working Connect action and the supported native browser authorization URL/code. Complete sign-in from the user's browser, select a named account for the chat, run a consented real turn and resume that account after restart. Surface expired/revoked access and reconnect without falling back to the host CLI | 43/44: implementation and local/AWS activation passed; 16 account-browser fixtures pass jointly with Claude. Personal/umg are disconnected; fresh product consent and selected-account real turn/resume remain open |
+| Claude | The same complete onboarding and reconnect path, using Claude's supported native authentication flow. The selected named personal/company account must actually be used for a consented real turn and restored after restart | 43/44: implementation, local/AWS activation, reviewed regressions and authorized isolated real turn/resume passed. Fresh product browser consent and native AWS account execution/resume remain open |
+| GitHub | A simple Relay sign-in action runs `gh auth login` in a private account profile and gives the user the authorization URL/code. Remove token-entry and “Use this server's gh login” options; never import the global CLI identity. After authentication, identify the account and explicitly allowed companies/repositories; list, select and clone an authorized repository and read its PR/check status. Handle denied/revoked access without borrowing another connection | 21: implementation and local/AWS activation passed; scope fixtures and authorized isolated repository/clone/PR checks passed. Fresh product consent and deployed selected-connection repository/PR acceptance remain open |
+| Linear | Complete real browser OAuth, discover tools and perform a non-mutating authenticated workspace read through the selected agent/environment. Support independent g2i and 12-apps connections, including the same MCP name, with no cross-company credential fallback | 02/03/04/10/21: OAuth/DCR/PKCE, scoped environment integration and fixture workspace-read checks implemented and activated. Four browser fixtures pass; real browser consent and selected-environment authenticated workspace read remain open |
+| AWS deployment | A documented, repeatable script deploys the complete application at a stable HTTPS URL, validates readiness, preserves data across updates and supports rollback; verify all four integrations on the deployed application | 45: authorized infrastructure, HTTPS rollout, cold backup/restore and controlled failed-rollout recovery passed. Fresh-worker/native acceptance, real integration consent, protected SSE and remote app forwarding remain open |
 
 Common authentication acceptance:
 
@@ -323,10 +338,10 @@ References inspected for this request:
 | 40 | Search across messages the user wrote and the AI's final answers, with conversation/result navigation. Do not store or index reasoning/chain-of-thought for this feature; exclude tool activity and intermediate responses from results | New feature appended after saved prompts; search-screen reference received; not started |
 | 41 | Deleting a worker/container must preserve the chat and its messages outside disposable storage; only explicit chat deletion removes the conversation. Reproduce actual container deletion independently of stop/restart, using disposable fixtures | New data-loss report appended; item 05 stop/restart verification does not establish container-deletion safety; not started |
 | 42 | Explore and implement a third-column panel showing the main agent's active secondary agents, with native status and supported conversation details. Selecting a secondary agent opens a popup/composer for prompts addressed to that agent, including while it is working; retain accessible keyboard navigation and keep the main agent/conversation independent. Investigate actual Claude Code/Claude web and Codex capabilities, reusing item 20's Codex descendant-navigation work where applicable. Do not invent child sessions or claim unsupported native messaging/steering | Codex feasibility confirmed read-only: descendant listing, status and direct input/steering are available, with experimental API caveats. Claude capability investigation and the requested both-provider panel/popup remain queued, not implemented |
-| 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | Codex account-bound device-code UI and automated checks pass; real Personal account consent confirmed, real turn/resume acceptance remains open. Claude native login is next, not implemented. No global profile is imported |
-| 44 | Authenticate Relay users with Google using `@12-apps/auth`; persist data privately per user and support multiple named Claude/Codex accounts (personal/company), explicitly selected per chat with no credential fallback | Google login is live. Codex named accounts, encrypted persistence, explicit chat binding and access-only worker renewal pass automated checks. Real Codex account acceptance and Claude multi-account support remain open |
-| 45 | Provide a repeatable AWS deployment script for the complete Relay application, following future-pay's deployment guidance; add reusable AWS support to `12-apps/ci` and keep Relay a thin application-specific consumer | MVP blocker: references reviewed and acceptance criteria recorded above. Shared registry currently has only DigitalOcean/Cloudflare; existing Relay EC2 worker scaffolding is not a complete controller deployment. No AWS provisioning or deployment performed |
-| 46 | Delete a saved agent account, separately from disconnecting it; confirm the specific account, remove its stored credentials, prevent other-user deletion, and retain conversations without silently selecting another account | New request (2026-09-17), appended outside the MVP under the standing queue rule; not implemented |
+| 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | Both providers' native onboarding is implemented and active, with account-scoped progress/link/code/retry UX. Integrated fixtures pass. Personal/umg need fresh consent; selected-account real turn/resume remains open. No global profile is imported |
+| 44 | Authenticate Relay users with Google using `@12-apps/auth`; persist data privately per user and support multiple named Claude/Codex accounts (personal/company), explicitly selected per chat with no credential fallback | Google identity and both providers' named accounts are implemented and active locally/AWS. Persistence, isolation, explicit binding and access-only renewal pass automated checks. Fresh product consent, selected-account real turns and deployed restart/resume remain open |
+| 45 | Provide a repeatable AWS deployment script for the complete Relay application, following future-pay's deployment guidance; add reusable AWS support to `12-apps/ci` and keep Relay a thin application-specific consumer | Shared engine and Relay operators implemented. Authorized HTTPS deployment, readiness, anonymous denial, cold backup/restore and controlled failed-rollout recovery passed. Fresh-worker/native acceptance, real integration consent, protected transports and remote app forwarding remain open; MVP is not complete |
+| 46 | Delete a saved agent account, separately from disconnecting it; confirm the specific account, remove its stored credentials, prevent other-user deletion, and retain conversations without silently selecting another account | Implemented as the requested account-lifecycle refinement and active locally/AWS. Exact-account deletion, cancellation, cross-user denial and conversation retention pass backend/browser fixtures. No real user account was deleted for acceptance |
 
 ## Verification ledger
 
