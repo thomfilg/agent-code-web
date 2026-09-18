@@ -106,7 +106,7 @@ Official Playwright MCP verified the Google entry screen at 1600, 390 and 320
 pixels without horizontal overflow. Google cloud consent remains pending the
 new callback registration; no production account or chat was fabricated.
 
-AWS checkpoint (2026-09-18 08:18 UTC):
+AWS checkpoint (2026-09-18 08:28 UTC):
 
 - Cold backup/restore passed on the actual encrypted EBS volume. Snapshot
   `snap-08d0e108e9596b5df` is retained; a distinct restored volume matched both
@@ -154,9 +154,19 @@ AWS checkpoint (2026-09-18 08:18 UTC):
   The image-only configuration publication preserved every credential/other
   setting; a rollout of the prior healthy app established the accepted-image
   rollback baseline before the new runtime rollout.
+- Actual isolated native Claude acceptance passed on the accepted AWS image:
+  two Haiku turns returned OK and retained the first turn's context, with the
+  same account identity. Run `bc21e4dc-52aa-4234-b2f8-87c1f2ab61fd`, worker
+  `i-0676589cf2c450529`. Only the explicitly authorized host access token was
+  copied into the disposable test profile (no refresh token or product account
+  import). Source credentials were unchanged; the remote profile and SSM session
+  were cleaned up, and the exact VM plus its encrypted volume were confirmed
+  removed. Reported cost upper bound: USD 0.014650. This proves the native AWS
+  turn/resume path, not fresh product browser consent or selected-product-account
+  onboarding. Guest Chrome and public workspace transfer remain separate gates.
 - The cloud Google callback to register is
   `https://d20atclccf8cku.cloudfront.net/api/auth/callback/google`.
-  Fresh product consent for Codex/Claude/GitHub/Linear, worker/native acceptance,
+  Fresh product consent for Codex/Claude/GitHub/Linear, selected-account execution,
   and deployed authenticated transports remain explicit open gates.
 - Deployed WSS transport passed a real 101 upgrade and bidirectional frames,
   followed by the expected unauthenticated rejection/close 1008 on the existing
@@ -177,7 +187,7 @@ AWS checkpoint (2026-09-18 08:18 UTC):
   with the opt-in official-MCP guest UI test enabled in that same sequential
   run (175.9 seconds, CPUs 0–1/nice 10). Separate finalizer Python checks passed
   10/10, including real shell fixtures. The new AMI bake uses that revision;
-  these passing local checks do not replace its pending AWS boot acceptance.
+  these passing local checks are separate from the AWS boot acceptance above.
 
 Parallel implementation checkpoint (2026-09-18):
 
@@ -224,10 +234,10 @@ mock or unauthenticated MCP handshake does not satisfy this gate.
 | Required integration | End-to-end acceptance | Queue items / current gap |
 | --- | --- | --- |
 | Codex | Detect missing authentication; show a working Connect action and the supported native browser authorization URL/code. Complete sign-in from the user's browser, select a named account for the chat, run a consented real turn and resume that account after restart. Surface expired/revoked access and reconnect without falling back to the host CLI | 43/44: implementation and local/AWS activation passed; 16 account-browser fixtures pass jointly with Claude. Personal/umg are disconnected; fresh product consent and selected-account real turn/resume remain open |
-| Claude | The same complete onboarding and reconnect path, using Claude's supported native authentication flow. The selected named personal/company account must actually be used for a consented real turn and restored after restart | 43/44: implementation, local/AWS activation, reviewed regressions and authorized isolated real turn/resume passed. Fresh product browser consent and native AWS account execution/resume remain open |
+| Claude | The same complete onboarding and reconnect path, using Claude's supported native authentication flow. The selected named personal/company account must actually be used for a consented real turn and restored after restart | 43/44: implementation, local/AWS activation, reviewed regressions and authorized isolated real turn/resume passed locally and on a fresh accepted AWS worker. Fresh product browser consent and selected-product-account execution remain open |
 | GitHub | A simple Relay sign-in action runs `gh auth login` in a private account profile and gives the user the authorization URL/code. Remove token-entry and “Use this server's gh login” options; never import the global CLI identity. After authentication, identify the account and explicitly allowed companies/repositories; list, select and clone an authorized repository and read its PR/check status. Handle denied/revoked access without borrowing another connection | 21: implementation and local/AWS activation passed; scope fixtures and authorized isolated repository/clone/PR checks passed. Fresh product consent and deployed selected-connection repository/PR acceptance remain open |
 | Linear | Complete real browser OAuth, discover tools and perform a non-mutating authenticated workspace read through the selected agent/environment. Support independent g2i and 12-apps connections, including the same MCP name, with no cross-company credential fallback | 02/03/04/10/21: OAuth/DCR/PKCE, scoped environment integration and fixture workspace-read checks implemented and activated. Four browser fixtures pass; real browser consent and selected-environment authenticated workspace read remain open |
-| AWS deployment | A documented, repeatable script deploys the complete application at a stable HTTPS URL, validates readiness, preserves data across updates and supports rollback; verify all four integrations on the deployed application | 45: authorized infrastructure, HTTPS rollout, cold backup/restore and controlled failed-rollout recovery passed. Fresh-worker/native acceptance, real integration consent, protected SSE and remote app forwarding remain open |
+| AWS deployment | A documented, repeatable script deploys the complete application at a stable HTTPS URL, validates readiness, preserves data across updates and supports rollback; verify all four integrations on the deployed application | 45: authorized infrastructure, HTTPS rollout, cold backup/restore, controlled failed-rollout recovery, fresh/resumed worker and isolated native Claude acceptance passed. Real integration consent, selected-account execution, guest Chrome/workspace transfer, protected SSE and remote app forwarding remain open |
 
 Common authentication acceptance:
 
@@ -372,7 +382,7 @@ References inspected for this request:
 | 42 | Explore and implement a third-column panel showing the main agent's active secondary agents, with native status and supported conversation details. Selecting a secondary agent opens a popup/composer for prompts addressed to that agent, including while it is working; retain accessible keyboard navigation and keep the main agent/conversation independent. Investigate actual Claude Code/Claude web and Codex capabilities, reusing item 20's Codex descendant-navigation work where applicable. Do not invent child sessions or claim unsupported native messaging/steering | Codex feasibility confirmed read-only: descendant listing, status and direct input/steering are available, with experimental API caveats. Claude capability investigation and the requested both-provider panel/popup remain queued, not implemented |
 | 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | Both providers' native onboarding is implemented and active, with account-scoped progress/link/code/retry UX. Integrated fixtures pass. Personal/umg need fresh consent; selected-account real turn/resume remains open. No global profile is imported |
 | 44 | Authenticate Relay users with Google using `@12-apps/auth`; persist data privately per user and support multiple named Claude/Codex accounts (personal/company), explicitly selected per chat with no credential fallback | Google identity and both providers' named accounts are implemented and active locally/AWS. Persistence, isolation, explicit binding and access-only renewal pass automated checks. Fresh product consent, selected-account real turns and deployed restart/resume remain open |
-| 45 | Provide a repeatable AWS deployment script for the complete Relay application, following future-pay's deployment guidance; add reusable AWS support to `12-apps/ci` and keep Relay a thin application-specific consumer | Shared engine and Relay operators implemented. Authorized HTTPS deployment, readiness, anonymous denial, cold backup/restore and controlled failed-rollout recovery passed. Fresh-worker/native acceptance, real integration consent, protected transports and remote app forwarding remain open; MVP is not complete |
+| 45 | Provide a repeatable AWS deployment script for the complete Relay application, following future-pay's deployment guidance; add reusable AWS support to `12-apps/ci` and keep Relay a thin application-specific consumer | Shared engine and Relay operators implemented. Authorized HTTPS deployment, readiness, anonymous denial, cold backup/restore, failed-rollout recovery, fresh/resumed worker and isolated native Claude acceptance passed. Real integration consent, selected-account execution, guest Chrome/workspace transfer, protected transports and remote app forwarding remain open; MVP is not complete |
 | 46 | Delete a saved agent account, separately from disconnecting it; confirm the specific account, remove its stored credentials, prevent other-user deletion, and retain conversations without silently selecting another account | Implemented as the requested account-lifecycle refinement and active locally/AWS. Exact-account deletion, cancellation, cross-user denial and conversation retention pass backend/browser fixtures. No real user account was deleted for acceptance |
 
 ## Verification ledger

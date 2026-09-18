@@ -210,7 +210,13 @@ including native/SSH/operator fixtures and the opt-in official-MCP guest UI
 test in the same sequential run. Ten finalizer Python checks also passed.
 A fresh onboarding browser run passed 28 isolated fixtures: 16
 Codex/Claude, 4 Google, 4 GitHub/company scopes and 4 Linear. These are not real
-provider consent. Native AWS account execution/resume,
-cloud Google/provider consent, protected SSE/live-browser acceptance and remote
+provider consent. Actual isolated Claude execution/resume also passed on the
+accepted AWS worker image: run `bc21e4dc-52aa-4234-b2f8-87c1f2ab61fd`, worker
+`i-0676589cf2c450529`. Two authorized Haiku turns retained context/account identity;
+the host source stayed unchanged, no refresh token was copied, the private test
+profile/session were cleaned, and the VM and encrypted volume were removed.
+Reported cost upper bound was USD 0.014650. This is not product-account onboarding.
+Cloud Google/provider consent, selected-product-account execution, guest Chrome
+and public workspace transfer, protected SSE/live-browser acceptance and remote
 application forwarding remain open. See the [feature queue](feature-queue.md)
 for the latest evidence and explicit release gates.
