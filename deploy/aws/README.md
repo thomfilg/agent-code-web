@@ -145,7 +145,8 @@ operator output, source archive, worker image or worker filesystem.
 
 The image contains a root-owned, fixed-path audit helper. Its narrowly scoped
 sudo rule permits the chat agent to run only that no-argument, read-only audit.
-It emits public identity hashes and booleans, never credential contents. The
+It emits public identity hashes, booleans and bounded fixed-category failure
+counts, never credential names, paths or contents. The
 operator verifies the finalization marker, credential scrub, inactive/disabled
 SSM, inaccessible metadata, new machine/SSH host identity, exact CLI versions,
 boot heartbeat and watchdog. It writes a disposable sentinel, stops/starts the

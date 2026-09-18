@@ -20,10 +20,15 @@ import time
 AUDIT_CHECKS = ('finalized', 'cloudInitDisabled', 'ssmDisabled', 'credentialsAbsent',
                 'transportKeyMatches', 'metadataReachable', 'freshIdentity',
                 'heartbeatEnabled', 'watchdogActive')
+CREDENTIAL_COUNTS = ('providerAuthFiles', 'sshPrivateKeyFiles', 'pemFiles', 'ssmLibraryFiles',
+                     'ssmSnapFiles', 'ssmSnapshotFiles', 'ssmPackageFiles',
+                     'unexpectedAuthorizedKeys', 'scanErrors')
+METADATA_RESULTS = ('token-endpoint-accessible', 'http-403-denied', 'http-401-unauthorized',
+                    'unexpected-http-response', 'network-unavailable', 'unexpected-network-error')
 
 
 class ProbeFailure(RuntimeError):
-    def __init__(self, category, exit_code=None, audit_checks=None):
+    def __init__(self, category, exit_code=None, audit_checks=None, credential_counts=None, metadata_probe=None):
         super().__init__('Private worker SSH/audit failed; no key or private output emitted')
         self.diagnostic = {'stage': 'worker-probe', 'category': category}
         if isinstance(exit_code, int) and -255 <= exit_code <= 255:
@@ -33,6 +38,13 @@ class ProbeFailure(RuntimeError):
                            if type(audit_checks.get(key)) is bool}
             if safe_checks:
                 self.diagnostic['auditChecks'] = safe_checks
+        if category == 'image-audit' and isinstance(credential_counts, dict):
+            safe_counts = {key: credential_counts[key] for key in CREDENTIAL_COUNTS
+                           if type(credential_counts.get(key)) is int and 0 <= credential_counts[key] <= 1000000}
+            if safe_counts:
+                self.diagnostic['credentialFailureCounts'] = safe_counts
+        if category == 'image-audit' and metadata_probe in METADATA_RESULTS:
+            self.diagnostic['metadataProbe'] = metadata_probe
 
 
 def probe_failure(result):
@@ -46,7 +58,7 @@ def probe_failure(result):
                     'image scrub audit failed': 'image-audit', 'boot heartbeat is stale': 'heartbeat',
                     'worker sentinel mismatch': 'sentinel', 'invalid-worker-receipt': 'invalid-receipt'}
     if reason in known_checks:
-        return ProbeFailure(known_checks[reason], result.returncode, worker_failure.get('auditChecks'))
+        return ProbeFailure(known_checks[reason], result.returncode, worker_failure.get('auditChecks'), worker_failure.get('credentialFailureCounts'), worker_failure.get('metadataProbe'))
     stderr = (result.stderr or '').lower()
     if 'host key verification failed' in stderr or 'remote host identification has changed' in stderr:
         category = 'ssh-host-key'
@@ -76,6 +88,8 @@ def failure_receipt(error):
 WORKER_PROBE = r'''
 import json, os, pathlib, subprocess, sys, time
 audit_checks = {}
+credential_counts = {}
+metadata_probe = None
 try:
     request = json.loads(sys.argv[1])
     if subprocess.check_output(['/usr/bin/id', '-un'], text=True).strip() != 'agent':
@@ -89,6 +103,11 @@ try:
     audit = subprocess.run(['/usr/bin/sudo', '-n', '/usr/local/sbin/agent-web-audit-image'], capture_output=True, text=True, timeout=30)
     receipt = json.loads(audit.stdout)
     audit_checks = {key: receipt[key] for key in ('finalized', 'cloudInitDisabled', 'ssmDisabled', 'credentialsAbsent', 'transportKeyMatches', 'metadataReachable', 'freshIdentity', 'heartbeatEnabled', 'watchdogActive') if type(receipt.get(key)) is bool}
+    counts = receipt.get('credentialFailureCounts', {})
+    if isinstance(counts, dict):
+        credential_counts = {key: counts[key] for key in ('providerAuthFiles', 'sshPrivateKeyFiles', 'pemFiles', 'ssmLibraryFiles', 'ssmSnapFiles', 'ssmSnapshotFiles', 'ssmPackageFiles', 'unexpectedAuthorizedKeys', 'scanErrors') if type(counts.get(key)) is int and 0 <= counts[key] <= 1000000}
+    if receipt.get('metadataProbe') in ('token-endpoint-accessible', 'http-403-denied', 'http-401-unauthorized', 'unexpected-http-response', 'network-unavailable', 'unexpected-network-error'):
+        metadata_probe = receipt['metadataProbe']
     if audit.returncode or receipt.get('valid') is not True:
         raise RuntimeError('image scrub audit failed')
     heartbeat = pathlib.Path('/opt/agent-web/.heartbeat')
@@ -109,6 +128,8 @@ except Exception as error:
     failure = {'error': 'Worker acceptance checks failed; no private diagnostics emitted', 'reason': str(error) if isinstance(error, RuntimeError) and str(error) in reasons else 'invalid-worker-receipt'}
     if failure['reason'] == 'image scrub audit failed':
         failure['auditChecks'] = audit_checks
+        failure['credentialFailureCounts'] = credential_counts
+        failure['metadataProbe'] = metadata_probe
     print(json.dumps(failure))
     sys.exit(1)
 '''
