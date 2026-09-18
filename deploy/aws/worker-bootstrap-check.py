@@ -1,6 +1,7 @@
 #!/usr/bin/python3 -I
 """Emit only bounded stage/boolean diagnostics, never cloud-init log contents."""
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -47,13 +48,15 @@ checks = {
     'docker': version_ok('docker'),
     'chrome': version_ok('google-chrome'),
     'readyMarker': pathlib.Path('/opt/agent-web/READY').is_file(),
-    'finalizer': pathlib.Path('/usr/local/sbin/agent-web-finalize-image').is_file(),
-    'auditHelper': pathlib.Path('/usr/local/sbin/agent-web-audit-image').is_file(),
+    'finalizer': pathlib.Path('/usr/local/sbin/agent-web-finalize-image').is_file() and os.access('/usr/local/sbin/agent-web-finalize-image', os.X_OK),
+    'auditHelper': pathlib.Path('/usr/local/sbin/agent-web-audit-image').is_file() and os.access('/usr/local/sbin/agent-web-audit-image', os.X_OK),
+    'systemdVerified': False,
 }
 ordering_cycle = False
 try:
     verified = subprocess.run(['systemd-analyze', 'verify', '/etc/systemd/system/agent-web-hostkeys.service', 'ssh.socket', 'ssh.service'], capture_output=True, text=True, timeout=30)
     ordering_cycle = 'ordering cycle' in verified.stderr.lower()
+    checks['systemdVerified'] = verified.returncode == 0
 except (OSError, subprocess.TimeoutExpired):
     pass
 

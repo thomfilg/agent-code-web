@@ -15,7 +15,7 @@ export function safeBootstrapReceipt(output) {
   try {
     const value = JSON.parse(output);
     const stages = ["init-local", "init-network", "modules-config", "modules-final", "package-update-upgrade-install", "scripts-user", "ssh"];
-    const checkNames = ["node", "codex", "claude", "docker", "chrome", "readyMarker", "finalizer", "auditHelper"];
+    const checkNames = ["node", "codex", "claude", "docker", "chrome", "readyMarker", "finalizer", "auditHelper", "systemdVerified"];
     if (value.kind !== "relay-worker-bootstrap" || value.schema !== 1 || !["done", "running", "error", "disabled", "not run", "unknown"].includes(value.status) || !Array.isArray(value.failedModules) || value.failedModules.some(stage => !stages.includes(stage)) || typeof value.sshOrderingCycle !== "boolean" || checkNames.some(key => typeof value.checks?.[key] !== "boolean")) return null;
     return { status: value.status, failedModules: [...new Set(value.failedModules)], checks: Object.fromEntries(checkNames.map(key => [key, value.checks[key]])), sshOrderingCycle: value.sshOrderingCycle };
   } catch { return null; }
