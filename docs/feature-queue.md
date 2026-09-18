@@ -128,6 +128,10 @@ AWS checkpoint (2026-09-18 09:51 UTC):
   no skips/failures (223.0 seconds). Both opt-ins were enabled: native GitHub
   environment/configuration probes and official-MCP guest UI. Single test
   process at a time, CPUs 0–1 and nice 10.
+- The subsequent full run including the three grant-to-proxy integration
+  fixtures and two canonical OAuth-origin fixtures passed **1021/1021**,
+  no failures/skips (229.8 seconds), with the same opt-ins and CPU limits.
+  Those five additions change tests only, not the deployed application.
 - The generic HTTP lifecycle fix now covers early responses outside the Git
   gateway too. A completed response closes only its own unfinished input after
   flushing; complete keepalive, gated authenticated saves and live SSE remain
