@@ -14,7 +14,7 @@ function receipt(payload) {
     audit: { schema: 1, valid: true, finalized: true, cloudInitDisabled: true, ssmDisabled: true, credentialsAbsent: true, transportKeyMatches: true, freshIdentity: true, heartbeatEnabled: true, watchdogActive: true, metadataReachable: false, machine: "a".repeat(64), hostKeys: { "ssh_host_ed25519_key.pub": "b".repeat(64) } } };
 }
 
-function fixture({ account = "123456789012", stackOutputs = outputs, controllerOverride = {}, imageOverride = {}, networkOverride = {}, workerOverride = {}, mutateReceipt = r => r, commandFailed = false, driftAfterLaunch = false, noCleanup = false } = {}) {
+function fixture({ account = "123456789012", stackOutputs = outputs, controllerOverride = {}, imageOverride = {}, networkOverride = {}, workerOverride = {}, mutateReceipt = r => r, commandFailed = false, driftAfterLaunch = false, noCleanup = false, detachedShutdown = false, shutdownBeforeCleanup = false, driftDuringCleanup = false } = {}) {
   const calls = [], requests = [];
   let workerTags, state = "running", result;
   const run = async args => {
@@ -29,8 +29,8 @@ function fixture({ account = "123456789012", stackOutputs = outputs, controllerO
     if (args.includes("describe-key-pairs")) return reply([{ KeyName: outputs.WorkerKeyName, Tags: infrastructureTags, PublicKey: "ssh-ed25519 AAAAFixturePublicKey comment\n" }]);
     if (args.includes("describe-instances")) {
       if (args.includes(controllerId)) return reply([{ InstanceId: controllerId, State: { Name: "running" }, Tags: infrastructureTags, SubnetId: "subnet-ccccccccccccccccc", SecurityGroups: [{ GroupId: "sg-ccccccccccccccccc" }], IamInstanceProfile: { Arn: "arn:aws:iam::123456789012:instance-profile/fixture-controller" }, ...controllerOverride }]);
-      const base = { InstanceId: workerId, ImageId: options.imageId, State: { Name: state }, Tags: driftAfterLaunch ? [] : workerTags, ...workerOverride };
-      if (state === "terminated") return reply([base]);
+      const base = { InstanceId: workerId, ImageId: options.imageId, State: { Name: state }, Tags: driftAfterLaunch || driftDuringCleanup && state === "shutting-down" ? [] : workerTags, ...workerOverride };
+      if (["shutting-down", "terminated"].includes(state)) { if (state === "shutting-down") state = "terminated"; return reply([base]); }
       return reply([{ ...base, SubnetId: outputs.WorkerSubnetId, SecurityGroups: [{ GroupId: outputs.WorkerSecurityGroupId }], KeyName: outputs.WorkerKeyName, MetadataOptions: { HttpEndpoint: "disabled" }, PrivateIpAddress: "10.84.2.22", ...workerOverride }]);
     }
     if (args.includes("run-instances")) { workerTags = JSON.parse(args[args.indexOf("--tag-specifications") + 1])[0].Tags; return reply(workerId); }
@@ -42,10 +42,10 @@ function fixture({ account = "123456789012", stackOutputs = outputs, controllerO
       result = mutateReceipt(receipt(payload));
       return reply({ Command: { CommandId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" } });
     }
-    if (args.includes("get-command-invocation")) return reply({ Status: commandFailed ? "Failed" : "Success", ResponseCode: commandFailed ? 1 : 0, StandardOutputContent: JSON.stringify(result), StandardErrorContent: "DO NOT PRINT PRIVATE OUTPUT" });
+    if (args.includes("get-command-invocation")) { if (shutdownBeforeCleanup) state = "shutting-down"; return reply({ Status: commandFailed ? "Failed" : "Success", ResponseCode: commandFailed ? 1 : 0, StandardOutputContent: JSON.stringify(result), StandardErrorContent: "DO NOT PRINT PRIVATE OUTPUT" }); }
     if (args.includes("stop-instances")) { state = "stopped"; return ""; }
     if (args.includes("start-instances")) { state = "running"; return ""; }
-    if (args.includes("terminate-instances")) { if (!noCleanup) state = "terminated"; return ""; }
+    if (args.includes("terminate-instances")) { if (!noCleanup) state = detachedShutdown ? "shutting-down" : "terminated"; return ""; }
     throw new Error("Unexpected fixture AWS call");
   };
   return { calls, requests, run };
@@ -63,6 +63,8 @@ test("AMI acceptance recognizes inert Canonical instance-store hints but rejects
   const hint = { DeviceName: "/dev/sdb", VirtualName: "ephemeral0" };
   const valid = fixture({ imageOverride: { BlockDeviceMappings: [root, hint] } });
   assert.equal((await verifyWorkerImage(options, { run: valid.run, sleep: async () => {} })).accepted, true);
+  const reversed = fixture({ imageOverride: { BlockDeviceMappings: [hint, root] } });
+  assert.equal((await verifyWorkerImage(options, { run: reversed.run, sleep: async () => {} })).accepted, true);
   for (const mapping of [[hint], [{ ...root, Ebs: { Encrypted: false } }, hint], [root, { DeviceName: "/dev/sdc" }], [root, { ...hint, VirtualName: "unknown" }], [root, { ...hint, NoDevice: "" }]]) {
     const f = fixture({ imageOverride: { BlockDeviceMappings: mapping } });
     await assert.rejects(verifyWorkerImage(options, { run: f.run, sleep: async () => {} }), /private encrypted/);
@@ -119,6 +121,34 @@ test("changed ownership blocks mutation; cleanup timeout cannot produce a succes
   assert.equal(foreign.calls.some(c => c.includes("terminate-instances") || c.includes("send-command")), false);
   const stuck = fixture({ noCleanup: true });
   await assert.rejects(verifyWorkerImage(options, { run: stuck.run, sleep: async () => {}, pollLimit: 2 }), /test worker termination/);
+});
+
+test("termination observation tolerates detached interfaces only for an exactly owned shutting-down worker", async () => {
+  const success = fixture({ detachedShutdown: true });
+  assert.equal((await verifyWorkerImage(options, { run: success.run, sleep: async () => {} })).cleanedUp, true);
+  assert.equal(success.calls.filter(call => call.includes("terminate-instances")).length, 1);
+  for (const shutdownBeforeCleanup of [false, true]) {
+    const failed = fixture({ commandFailed: true, detachedShutdown: true, shutdownBeforeCleanup });
+    await assert.rejects(verifyWorkerImage(options, { run: failed.run, sleep: async () => {} }), /Worker acceptance audit failed \(fresh\).*private output suppressed$/);
+    assert.equal(failed.calls.filter(call => call.includes("terminate-instances")).length, shutdownBeforeCleanup ? 0 : 1);
+  }
+  const foreign = fixture({ detachedShutdown: true, driftDuringCleanup: true });
+  await assert.rejects(verifyWorkerImage(options, { run: foreign.run, sleep: async () => {} }), /ownership changed/);
+  assert.equal(foreign.calls.filter(call => call.includes("terminate-instances")).length, 1);
+});
+
+test("failed cleanup retains the original probe reason and never prints arbitrary diagnostics", async () => {
+  const failed = fixture({ commandFailed: true, noCleanup: true, mutateReceipt: () => ({ diagnostic: { stage: "worker-probe", category: "ssh-permission-denied", exitCode: 255 }, reason: "PRIVATE SECRET", error: "PRIVATE SECRET" }) });
+  await assert.rejects(verifyWorkerImage(options, { run: failed.run, sleep: async () => {}, pollLimit: 2 }), error => {
+    assert.match(error.message, /Worker acceptance audit failed \(fresh\); ssh-permission-denied \(exit 255\)/);
+    assert.match(error.message, /cleanup unconfirmed for acceptance worker i-aaaaaaaaaaaaaaaaa/);
+    assert.doesNotMatch(error.message, /PRIVATE SECRET|DO NOT PRINT/);
+    return true;
+  });
+  for (const diagnostic of [{ stage: "worker-probe", category: "PRIVATE SECRET", exitCode: 255 }, { stage: "PRIVATE SECRET", category: "ssh-host-key", exitCode: 255 }, { stage: "worker-probe", category: "ssh-host-key", exitCode: "PRIVATE SECRET" }]) {
+    const f = fixture({ commandFailed: true, mutateReceipt: () => ({ diagnostic }) });
+    await assert.rejects(verifyWorkerImage(options, { run: f.run, sleep: async () => {} }), error => !error.message.includes("PRIVATE SECRET"));
+  }
 });
 
 test("receipt validation compares identity values independently of object key ordering", () => {

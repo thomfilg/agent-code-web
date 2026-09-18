@@ -12,6 +12,15 @@ const privateIp = value => isIP(value) === 4 && /^(10\.|192\.168\.|172\.(1[6-9]|
 const tagsOf = resource => Object.fromEntries((resource?.Tags || []).map(({ Key, Value }) => [Key, Value]));
 const quote = value => `'${String(value).replaceAll("'", `'"'"'`)}'`;
 const imageTags = { ManagedBy: "agent-relay", CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" };
+const probeFailureCategories = new Set(["worker-user", "native-version", "image-audit", "heartbeat", "sentinel", "invalid-receipt", "ssh-host-key", "ssh-permission-denied", "ssh-connection-refused", "ssh-network-unreachable", "remote-command-missing", "ssh-transport", "remote-command-failed", "ssh-probe-timeout", "ssh-executable-unavailable"]);
+
+function safeProbeFailure(output) {
+  try {
+    const diagnostic = JSON.parse(output).diagnostic;
+    if (diagnostic?.stage !== "worker-probe" || !probeFailureCategories.has(diagnostic.category)) return "";
+    return `; ${diagnostic.category}${Number.isInteger(diagnostic.exitCode) && diagnostic.exitCode >= -255 && diagnostic.exitCode <= 255 ? ` (exit ${diagnostic.exitCode})` : ""}`;
+  } catch { return ""; }
+}
 
 export function parseVerificationOptions(args) {
   const options = { profile: "", dryRun: false };
@@ -96,13 +105,14 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
   let workerId;
   let workerHost;
   let cleaned = false;
-  async function worker(allowTerminated = false) {
+  async function worker(terminationObservation = false) {
     const matches = await json("ec2", "describe-instances", "--instance-ids", workerId, "--query", "Reservations[].Instances[]");
     const current = matches?.[0], currentTags = tagsOf(current);
     if (matches?.length !== 1 || current.InstanceId !== workerId || currentTags.ManagedBy !== "agent-relay" || currentTags.AgentRelayDeployment !== o.deployment || currentTags.AgentRelayVerification !== verificationId || currentTags.AgentWebChat !== chatId || current.ImageId !== o.imageId) throw new Error("Test worker ownership changed; refusing mutation");
-    // EC2 can omit released network interfaces on a terminated instance. No
-    // mutation follows this reduced terminal-state check.
-    if (!(allowTerminated && current.State?.Name === "terminated") && (current.SubnetId !== outputs.WorkerSubnetId || current.SecurityGroups?.length !== 1 || current.SecurityGroups[0].GroupId !== outputs.WorkerSecurityGroupId || current.KeyName !== outputs.WorkerKeyName || current.IamInstanceProfile || current.PublicIpAddress || current.MetadataOptions?.HttpEndpoint !== "disabled")) throw new Error("Test worker isolation changed; refusing mutation");
+    // EC2 releases interfaces during shutting-down, not only after terminated.
+    // This reduced check is read-only: no mutation can follow it without a new
+    // strict check, and immutable identity plus every ownership tag still match.
+    if (!(terminationObservation && ["shutting-down", "terminated"].includes(current.State?.Name)) && (current.SubnetId !== outputs.WorkerSubnetId || current.SecurityGroups?.length !== 1 || current.SecurityGroups[0].GroupId !== outputs.WorkerSecurityGroupId || current.KeyName !== outputs.WorkerKeyName || current.IamInstanceProfile || current.PublicIpAddress || current.MetadataOptions?.HttpEndpoint !== "disabled")) throw new Error("Test worker isolation changed; refusing mutation");
     return current;
   }
   async function poll(description, check) {
@@ -130,19 +140,20 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
       try { invocation = await json("ssm", "get-command-invocation", "--instance-id", outputs.ControllerInstanceId, "--command-id", commandId); }
       catch (error) { if (error.message === "InvocationDoesNotExist") return false; throw error; }
       if (["Pending", "InProgress", "Delayed"].includes(invocation.Status)) return false;
-      if (invocation.Status !== "Success" || invocation.ResponseCode !== 0) throw new Error(`Worker acceptance audit failed (${phase}); inspect scoped SSM command ${commandId}; private output suppressed`);
+      if (invocation.Status !== "Success" || invocation.ResponseCode !== 0) throw new Error(`Worker acceptance audit failed (${phase})${safeProbeFailure(invocation.StandardOutputContent)}; inspect scoped SSM command ${commandId}; private output suppressed`);
       try { return verifyReceipt(JSON.parse(invocation.StandardOutputContent), { verificationId, workerId, phase, previous }); }
       catch { throw new Error(`Worker acceptance receipt failed validation (${phase}); no private output emitted`); }
     });
     return { ...result, commandId };
   }
   let receipt;
+  let primaryFailure;
   try {
     const Tags = [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: o.deployment }, { Key: "AgentRelayVerification", Value: verificationId }, { Key: "AgentWebChat", Value: chatId }, { Key: "Name", Value: `${o.deployment}-image-verification` }];
     const launched = await json("ec2", "run-instances", "--image-id", o.imageId, "--instance-type", "t3.medium", "--client-token", verificationId,
       "--network-interfaces", JSON.stringify([{ DeviceIndex: 0, SubnetId: outputs.WorkerSubnetId, Groups: [outputs.WorkerSecurityGroupId], AssociatePublicIpAddress: false, DeleteOnTermination: true }]),
       "--key-name", outputs.WorkerKeyName, "--metadata-options", "HttpTokens=required,HttpEndpoint=disabled", "--instance-initiated-shutdown-behavior", "stop", "--credit-specification", "CpuCredits=standard",
-      "--block-device-mappings", JSON.stringify([{ DeviceName: image.RootDeviceName || "/dev/sda1", Ebs: { VolumeType: "gp3", VolumeSize: Math.max(20, image.BlockDeviceMappings[0].Ebs.VolumeSize || 20), Encrypted: true, DeleteOnTermination: true } }]),
+      "--block-device-mappings", JSON.stringify([{ DeviceName: image.RootDeviceName, Ebs: { VolumeType: "gp3", VolumeSize: Math.max(20, rootDisks[0].Ebs.VolumeSize || 20), Encrypted: true, DeleteOnTermination: true } }]),
       "--tag-specifications", JSON.stringify(["instance", "volume"].map(ResourceType => ({ ResourceType, Tags }))), "--query", "Instances[0].InstanceId");
     if (!/^i-[a-f0-9]{8,17}$/.test(launched || "")) throw new Error("Invalid acceptance worker ID");
     workerId = launched;
@@ -159,13 +170,24 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
     receipt = { accepted: true, schema: 1, account: o.account, region: o.region, deployment: o.deployment, imageId: o.imageId, verificationId, workerId, controllerId: outputs.ControllerInstanceId,
       checks: { freshBoot: true, disabledMetadata: true, noInstanceRole: true, privateNetwork: true, credentialScrub: true, pinnedNativeVersions: true, freshMachineAndHostIdentity: true, identitySurvivedStopStart: true, sentinelSurvivedStopStart: true, heartbeatFreshAfterBoot: true, controllerSecretStayedLocal: true },
       evidence: { freshCommandId: fresh.commandId, resumedCommandId: resumed.commandId, machineHash: resumed.audit.machine, hostKeyHashes: resumed.audit.hostKeys }, promptsSent: false, accountImports: false };
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
   } finally {
     if (workerId) {
-      await worker();
-      await aws("ec2", "terminate-instances", "--instance-ids", workerId);
-      await poll("test worker termination", async () => (await worker(true)).State?.Name === "terminated");
-      cleaned = true;
-      log(`Terminated only acceptance worker ${workerId} and its disposable encrypted root volume.`);
+      try {
+        const observed = await worker(true);
+        if (!["shutting-down", "terminated"].includes(observed.State?.Name)) {
+          await worker();
+          await aws("ec2", "terminate-instances", "--instance-ids", workerId);
+        }
+        await poll("test worker termination", async () => (await worker(true)).State?.Name === "terminated");
+        cleaned = true;
+        log(`Confirmed termination of only acceptance worker ${workerId} and its disposable encrypted root volume.`);
+      } catch (error) {
+        if (primaryFailure) throw new Error(`${primaryFailure.message}; cleanup unconfirmed for acceptance worker ${workerId}; inspect exact deployment-owned instance before any further mutation`, { cause: primaryFailure });
+        throw error;
+      }
     }
   }
   return { ...receipt, cleanedUp: cleaned };

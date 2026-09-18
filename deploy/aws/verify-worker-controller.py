@@ -17,6 +17,51 @@ import tempfile
 import time
 
 
+class ProbeFailure(RuntimeError):
+    def __init__(self, category, exit_code=None):
+        super().__init__('Private worker SSH/audit failed; no key or private output emitted')
+        self.diagnostic = {'stage': 'worker-probe', 'category': category}
+        if isinstance(exit_code, int) and -255 <= exit_code <= 255:
+            self.diagnostic['exitCode'] = exit_code
+
+
+def probe_failure(result):
+    """Classify private subprocess output locally; never return its contents."""
+    try:
+        reason = json.loads(result.stdout).get('reason')
+    except Exception:
+        reason = None
+    known_checks = {'wrong worker user': 'worker-user', 'native version mismatch': 'native-version',
+                    'image scrub audit failed': 'image-audit', 'boot heartbeat is stale': 'heartbeat',
+                    'worker sentinel mismatch': 'sentinel', 'invalid-worker-receipt': 'invalid-receipt'}
+    if reason in known_checks:
+        return ProbeFailure(known_checks[reason], result.returncode)
+    stderr = (result.stderr or '').lower()
+    if 'host key verification failed' in stderr or 'remote host identification has changed' in stderr:
+        category = 'ssh-host-key'
+    elif 'permission denied' in stderr or 'authentication failed' in stderr:
+        category = 'ssh-permission-denied'
+    elif 'connection refused' in stderr:
+        category = 'ssh-connection-refused'
+    elif 'timed out' in stderr or 'no route to host' in stderr or 'network is unreachable' in stderr:
+        category = 'ssh-network-unreachable'
+    elif result.returncode == 127:
+        category = 'remote-command-missing'
+    else:
+        category = 'ssh-transport' if result.returncode == 255 else 'remote-command-failed'
+    return ProbeFailure(category, result.returncode)
+
+
+def failure_receipt(error):
+    # RuntimeError descriptions originate in this fixed script. Other exception
+    # strings can contain subprocess output, secret JSON or paths: omit them.
+    result = {'error': 'Controller worker acceptance failed; private diagnostics suppressed',
+              'reason': str(error) if isinstance(error, RuntimeError) else 'unexpected-probe-failure'}
+    if isinstance(error, ProbeFailure):
+        result['diagnostic'] = error.diagnostic
+    return result
+
+
 WORKER_PROBE = r'''
 import json, os, pathlib, subprocess, sys, time
 try:
@@ -115,19 +160,24 @@ def main():
         command = 'python3 -I -c ' + shlex.quote(WORKER_PROBE) + ' ' + shlex.quote(json.dumps(worker_request))
         deadline = time.monotonic() + 240
         while True:
-            probed = subprocess.run(ssh + [command], capture_output=True, text=True, timeout=100)
-            if probed.returncode != 255 or time.monotonic() >= deadline:
+            try:
+                probed = subprocess.run(ssh + [command], capture_output=True, text=True, timeout=100)
+            except subprocess.TimeoutExpired:
+                raise ProbeFailure('ssh-probe-timeout') from None
+            except OSError:
+                raise ProbeFailure('ssh-executable-unavailable') from None
+            failure = probe_failure(probed) if probed.returncode else None
+            if not failure or probed.returncode != 255 or failure.diagnostic['category'] not in ('ssh-connection-refused', 'ssh-network-unreachable', 'ssh-transport') or time.monotonic() >= deadline:
                 break
             time.sleep(5)
-        if probed.returncode:
-            try:
-                reason = json.loads(probed.stdout).get('reason')
-            except Exception:
-                reason = None
-            if reason in ('wrong worker user', 'native version mismatch', 'image scrub audit failed', 'boot heartbeat is stale', 'worker sentinel mismatch'):
-                raise RuntimeError('Private worker check failed: ' + reason)
-            raise RuntimeError('Private worker SSH/audit failed; no key or private output emitted')
-        result = json.loads(probed.stdout)
+        if failure:
+            raise failure
+        try:
+            result = json.loads(probed.stdout)
+            if not isinstance(result, dict) or not isinstance(result.get('audit'), dict):
+                raise ValueError('invalid receipt')
+        except (ValueError, TypeError):
+            raise ProbeFailure('invalid-receipt', probed.returncode) from None
         result.update({'schema': 1, 'verificationId': request['verificationId'], 'workerId': request['workerId'],
                        'phase': request['phase'], 'knownHosts': known_file.read_text()})
         print(json.dumps(result))
@@ -137,8 +187,5 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as error:
-        # All RuntimeError messages above are fixed stage descriptions. Never
-        # include subprocess stderr, JSON bodies or arbitrary exception strings.
-        reason = str(error) if isinstance(error, RuntimeError) else 'unexpected-probe-failure'
-        print(json.dumps({'error': 'Controller worker acceptance failed; private diagnostics suppressed', 'reason': reason}))
+        print(json.dumps(failure_receipt(error)))
         sys.exit(1)

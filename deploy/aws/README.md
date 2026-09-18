@@ -168,6 +168,15 @@ manually rather than weakening scope checks. Failed SSM output contains only
 fixed stage descriptions; no private diagnostics are printed. The original
 controller, AMI, stack secret and product data are not deleted or modified.
 
+Probe failures include an allowlisted category and numeric exit code, when
+available (SSH host-key/authentication/network, missing remote command, worker
+audit, or invalid receipt). Raw stdout/stderr never becomes a diagnostic. A
+failed cleanup retains the original probe error and marks cleanup unconfirmed.
+EC2 may detach network interfaces while an instance is `shutting-down`; only
+read-only termination observation tolerates that, with the exact instance,
+image and all deployment/verification ownership tags still required. No stop,
+start or terminate action uses that reduced terminal-state check.
+
 Additional local fixture checks:
 
 ```bash
