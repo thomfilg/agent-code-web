@@ -103,6 +103,11 @@ test("real WebSocket preview round trip closes immediately on Relay logout", asy
   const logout = f.app.googleAuth.revoke(user);
   await waitFor(() => client.readyState === WebSocket.CLOSED);
   assert.equal((await f.preview.call("/")).status, 403); assert.deepEqual(f.app.store.get(f.chatId).messages, []);
+  assert.equal(await f.app.googleAuth.session({ headers: { cookie: f.browser.header() }, url: "/" }), null);
+  const hosts = await f.app.previews.hosts.list({ ownerId: user.id, chatId: f.chatId });
+  assert.equal((await f.browser.call(f.api, { method: "POST", body: { port: 3001 } })).status, 401);
+  assert.deepEqual(await f.app.previews.hosts.list({ ownerId: user.id, chatId: f.chatId }), hosts);
+  await assert.rejects(f.app.previews.ensure(user, f.chatId, 3001), { statusCode: 401 });
   f.app.records.delete = remove; release(); await logout;
 });
 
