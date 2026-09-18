@@ -94,3 +94,26 @@ test("Claude credential reader rejects symlinks, oversize and missing inference 
     await writeFile(target, content); await assert.rejects(() => readClaudeAuth(target));
   }
 });
+
+test("Claude cancellation aborts a pending provider verification without leaking diagnostics", async t => {
+  const entered = Promise.withResolvers();
+  const client = new ClaudeAccountClient({ claude: { bin: "unused" } }, { fetchImpl: async (_url, { signal }) => {
+    entered.resolve(); return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(Error("private-provider-diagnostic")), { once: true }));
+  } });
+  await client.start(claudeAuthFixture()); t.after(() => client.close());
+  const snapshot = assert.rejects(() => client.snapshot(), { code: "temporary" }); await entered.promise;
+  await client.cancel(); await snapshot;
+});
+
+test("Claude distinguishes temporary throttling/transport failures from revoked access and invalid profile data", async t => {
+  for (const failure of ["throttled", "network", "body", "revoked", "invalid"]) {
+    const client = new ClaudeAccountClient({ claude: { bin: "unused" } }, { fetchImpl: async () => {
+      if (failure === "network") throw TypeError("private-provider-diagnostic");
+      if (failure === "body") return new Response(new ReadableStream({ start(controller) { controller.error(TypeError("private-provider-diagnostic")); } }));
+      return new Response("private-provider-diagnostic", { status: failure === "throttled" ? 429 : failure === "revoked" ? 401 : 200 });
+    } });
+    await client.start(claudeAuthFixture()); t.after(() => client.close());
+    await assert.rejects(() => client.snapshot(), { code: ["throttled", "network", "body"].includes(failure) ? "temporary" : "authentication" });
+    await client.close();
+  }
+});

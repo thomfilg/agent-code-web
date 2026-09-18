@@ -37,9 +37,12 @@ renew expired tokens.
 5. Renew centrally with the installed CLI's refresh grant at the fixed
    `https://platform.claude.com/v1/oauth/token` endpoint. Reject redirects,
    malformed/oversized responses and missing inference scope. Serialize
-   renewals per account, validate the returned access token's identity, and
-   persist rotated credentials before delivering access to a worker. A failure
-   requires reconnect; it never falls back to another provider/profile.
+   renewals per account and checkpoint rotated credentials encrypted under the
+   existing immutable identity before fetching the new token's profile. No
+   access is delivered until that identity is independently verified. A
+   temporary network/5xx/429 outage preserves the checkpoint for retry without
+   another consent ceremony; revoked access or identity mismatch requires
+   reconnect. There is never another provider/profile fallback.
 6. Workers receive only the selected account's short-lived access token and
    identity metadata. They get a private chat profile, not a refresh token or
    an imported `.credentials.json`. Native SDK `oauth_token_refresh` requests
@@ -56,6 +59,10 @@ renew expired tokens.
 - A controller restart cancels unfinished consent; completed encrypted account
   records survive. Disconnect invalidates admission before stopping bound
   workers. Reconnect preserves the named account identity and existing chats.
+- Cancel invalidates the owner's pending flow before waiting for native
+  verification/storage. Guarded commits roll back provisional credential writes
+  if cancelled while awaiting persistence; admission/status never use those
+  provisional credentials. Another user's request cannot invalidate the flow.
 - The native refresh/control contract is version-sensitive. The offline native
   smoke must run when upgrading Claude Code; it exercises a real executable,
   a 401, private renewal, inference and journal resume without external network.

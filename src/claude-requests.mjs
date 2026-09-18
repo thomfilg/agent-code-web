@@ -34,7 +34,7 @@ export class ClaudeRequests {
       void Promise.resolve().then(() => this.hooks.accountCredentials({ refresh: true })).then(credentials => {
         if (this.closed) return;
         return this.write({ type: "control_response", response: { subtype: "success", request_id: id, response: { accessToken: credentials.accessToken } } });
-      }, () => this.closed ? null : this.write({ type: "control_response", response: { subtype: "error", request_id: id, error: "Reconnect this Claude account; no other credentials were used." } })).catch(() => {}).finally(() => { this.refreshing = false; });
+      }, error => this.closed ? null : this.write({ type: "control_response", response: { subtype: "error", request_id: id, error: error?.statusCode === 503 ? "Claude is temporarily unavailable. Retry this action; your saved account was not disconnected." : "Reconnect this Claude account; no other credentials were used." } })).catch(() => {}).finally(() => { this.refreshing = false; });
       return true;
     }
     if (native?.subtype !== "can_use_tool" || typeof native.tool_name !== "string" || !object(native.input)) {
