@@ -147,7 +147,8 @@ test("real named-service mutation hooks abort only that owner's work before dura
   const chats = {}, grants = {}, services = {};
   for (const ownerId of ["legacy", "alice", "bob"]) {
     const service = services[ownerId] = await resources.forOwner(ownerId);
-    await (service.records || records).put("connection", "github", { id: "github", token: `synthetic-${ownerId}-private-token`, revision: 1, name: "Selected", companies: [] });
+    await service.companies?.save({ id: "company", name: "Company" });
+    await (service.records || records).put("connection", "github", { id: "github", token: `synthetic-${ownerId}-private-token`, revision: 1, name: "Selected", companyId: "company" });
     service.github.fetch = async () => Response.json({ id: repo.id, full_name: repo.fullName });
     const chat = chats[ownerId] = await store.create({ agent: "codex", ownerId, repositories: [{ ...repo, githubConnectionId: "github" }] });
     grants[ownerId] = await gateway.runtime(chat.id, "https://relay.example");
@@ -179,7 +180,8 @@ test("server → local executor → both native adapters persist only sanitized 
     const adapter = new Adapter({ ...options, config, store: app.store, broker: app.broker }); instances.push(adapter); return adapter;
   } });
   t.after(() => app.stop()); await app.start();
-  await app.records.put("connection", "github", { id: "github", token: "controller-private-fixture-not-for-worker", revision: 1, companies: [] });
+  await (await app.resources.forOwner(null)).companies.save({ id: "company", name: "Company" });
+  await app.records.put("connection", "github", { id: "github", token: "controller-private-fixture-not-for-worker", revision: 1, companyId: "company" });
   for (const provider of ["codex", "claude"]) {
     const chat = await app.store.create({ agent: provider, title: "Real adapters fixture", repositories: [{ ...repo, githubConnectionId: "github" }] });
     await app.store.update(chat.id, { workspaceReady: true }); await mkdir(chat.workspace, { recursive: true });

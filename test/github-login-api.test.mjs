@@ -22,7 +22,8 @@ test("GitHub native login HTTP routes are private to each Google user and reject
     assert.equal((await post(client, "/api/github", input)).status, 400);
     assert.equal((await post(client, "/api/github/device", input)).status, 400);
   }
-  const login = await (await post(owner, "/api/github/device", {})).json();
+  await post(owner, "/api/companies", { id: "acme", name: "Acme" });
+  const login = await (await post(owner, "/api/github/device", { companyId: "acme" })).json();
   assert.equal(login.connection.signIn.userCode, "TEST-CODE");
   assert.deepEqual((await (await member.request("/api/github")).json()).connections, []);
   assert.equal((await post(member, "/api/github/device/poll", { id: login.id })).status, 404);

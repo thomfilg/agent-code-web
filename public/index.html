@@ -38,7 +38,7 @@
 
         <div class="sidebar-footer">
           <button type="button" class="secondary-button relay-account-button" id="relay-account-button" aria-label="Your Relay account" hidden></button>
-          <div class="settings-buttons"><button class="secondary-button" id="agent-accounts-button" hidden>Agent accounts</button><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button><button class="secondary-button" id="mcps-button">MCP connections</button><button class="secondary-button" id="browser-connections-button">Browser connections</button></div>
+          <div class="settings-buttons"><button class="secondary-button" id="companies-button">Companies</button><button class="secondary-button" id="agent-accounts-button" hidden>Agent accounts</button><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button><button class="secondary-button" id="mcps-button">MCP connections</button><button class="secondary-button" id="browser-connections-button">Browser connections</button></div>
           <div class="system-state">
             <span class="live-dot"></span>
             <div>
@@ -86,17 +86,51 @@
           </div>
         </header>
 
-        <section class="empty-state" id="welcome">
-          <div class="empty-orbit" aria-hidden="true"><span></span></div>
-          <p class="eyebrow">YOUR AGENTS, ON DEMAND</p>
-          <h2>Start work here.<br>Let the machine disappear later.</h2>
-          <p>Create an isolated chat workspace for Codex or Claude Code. Responses stream here, state survives, and idle workers shut down automatically.</p>
-          <button class="primary-button" id="welcome-new-chat" disabled title="Loading your accounts and repositories…">Create your first chat <span>→</span></button>
-          <div class="feature-strip">
-            <span>Separate workspace</span>
-            <span>Live CLI events</span>
-            <span>5-minute autosleep</span>
+        <section id="companies-page" class="settings-page" aria-label="Companies" hidden>
+          <div class="settings-page-heading"><div><h2>Your companies</h2><p class="muted">Keep each company's connections together. Agent accounts can be used across companies.</p></div><button type="button" class="primary-button" id="company-new">＋ Add company</button></div>
+          <p id="company-error" class="form-error" role="alert"></p>
+          <p id="company-empty" class="muted" hidden>No companies yet. Add one to connect GitHub and development tools.</p>
+          <div id="company-list"></div>
+          <form id="company-form" class="company-edit" hidden>
+            <h3 id="company-form-title">Add a company</h3>
+            <label><span>Company name</span><input id="company-name" required maxlength="80" autocomplete="organization" placeholder="e.g. 12 Apps"></label>
+            <label><span>GitHub organization or username</span><input id="company-id" required maxlength="39" pattern="[A-Za-z0-9][A-Za-z0-9-]*" placeholder="e.g. 12-apps" autocomplete="off"></label>
+            <p class="muted">This identifier matches the owner of the chat's primary repository. It cannot be renamed; the display name can.</p>
+            <p id="company-form-error" class="form-error" role="alert"></p>
+            <div class="dialog-actions"><button type="button" class="secondary-button" id="company-cancel">Cancel</button><button type="submit" class="primary-button">Save company</button></div>
+          </form>
+        </section>
+        <section class="new-chat-page" id="new-chat-page" aria-label="New chat" hidden>
+          <div class="new-chat-overview" id="new-chat-overview">
+            <h2>What would you like to work on?</h2>
+            <div id="recent-chats" aria-label="Recent conversations"></div>
           </div>
+          <div id="new-chat-progress" class="new-chat-progress" hidden><div class="new-chat-prompt"></div><p role="status">Preparing your chat…</p></div>
+          <form class="composer-wrap new-chat-composer" id="new-chat-form">
+            <fieldset id="new-chat-fields" disabled>
+              <div class="workspace-strip">
+                <div class="environment-chip"><span aria-hidden="true">☁</span><select id="environment-select" aria-label="Environment" required></select><button type="button" class="small-icon" id="environment-settings" aria-label="Manage selected environment" title="Manage environments">⚙</button></div>
+                <div id="repository-picker" class="repository-strip" hidden>
+                  <div id="selected-repositories" class="selected-repositories"></div>
+                  <details class="control-menu upward repository-picker-dropdown"><summary role="button" aria-label="Add repositories" aria-expanded="false" aria-controls="new-repository-popover" title="Add repositories">+</summary><div class="control-popover repository-popover" id="new-repository-popover"><div class="repository-search"><input id="repo-search" type="search" placeholder="Search repositories…" aria-label="Search repositories"><button type="button" class="icon-button" id="refresh-repositories" aria-label="Refresh repositories">↻</button></div><div id="repository-results"></div></div></details>
+                </div>
+              </div>
+              <p class="sr-only" id="repository-group-hint"></p>
+              <div id="github-requirement" class="onboarding-hint" hidden><span>Connect GitHub to add repositories.</span><button type="button" class="secondary-button" id="connect-github-button">Connect GitHub</button></div>
+              <div class="composer draft-composer">
+                <label class="sr-only" for="initial-prompt">New chat message</label><textarea id="initial-prompt" rows="1" maxlength="100000" required placeholder="Describe a task or ask a question…"></textarea>
+                <div class="composer-footer">
+                  <div class="draft-agent-picker" id="new-agent-account-field"><select id="agent-select" aria-label="Agent" required></select><select id="new-agent-account" aria-label="Agent" hidden><option value="">Select an agent account</option></select><button type="button" class="small-icon" id="connect-codex-button" aria-label="Manage agent accounts" title="Manage agent accounts" hidden>⚙</button></div>
+                  <div class="model-controls compact-model-controls" id="new-model-controls"><select class="model-select" aria-label="New chat model" title="Model"></select><select class="effort-select" aria-label="New chat effort" title="Effort"></select><p class="model-note" role="status"></p></div>
+                  <button class="send-button" id="create-chat-button" type="submit" aria-label="Send first message" title="Send message" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg></button>
+                </div>
+              </div>
+              <div id="agent-account-requirement" class="onboarding-hint" hidden><p id="agent-account-hint" class="muted" role="status"></p></div>
+            </fieldset>
+            <p id="create-chat-error" class="form-error" role="alert"></p>
+            <div class="composer-help"><span id="new-chat-status" role="status">Loading accounts and repositories…</span><span>Enter to send · Shift + Enter for a new line</span></div>
+            <details class="new-chat-security"><summary>Account privacy</summary><p id="dialog-security"></p></details>
+          </form>
         </section>
 
         <section class="conversation" id="conversation" hidden>
@@ -122,6 +156,7 @@
             <div id="goal-status"></div>
             <div id="message-queue" aria-live="polite"></div>
             <div id="pull-request-bars" class="pull-request-bars"></div>
+            <div id="chat-workspace-strip" class="workspace-strip" aria-label="Chat environment and repositories"></div>
             <form class="composer" id="composer">
               <div id="slash-menu" hidden>
                 <div class="slash-heading"><span class="slash-symbol" aria-hidden="true">/</span><div><strong>Commands &amp; skills</strong><span id="slash-caption"></span></div><span id="slash-count"></span></div>
@@ -258,40 +293,6 @@
     </div></dialog>
     <dialog id="browser-share-dialog"><form class="dialog-card" id="browser-share-form"><div class="dialog-heading"><h2>Share signed-in Chrome?</h2><button type="button" class="icon-button" id="browser-share-close" aria-label="Cancel Chrome sharing">×</button></div><p>The agent will be able to read and act on websites using this Chrome profile’s saved logins. Only enable this for work you trust.</p><label><span>Your connection</span><select id="browser-share-connection" required></select></label><p id="browser-share-privacy" class="muted"></p><p class="muted">Sharing opens a separate automation tab. Turning the switch off revokes access and closes that tab without signing you out. Actions already taken cannot be undone. Localhost in personal Chrome means your computer, not a remote worker.</p><label class="checkbox-row"><input type="checkbox" id="browser-share-confirm" required><span>I authorize signed-in browser access for this chat.</span></label><p id="browser-share-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary-button" id="browser-share-manage">Manage connections</button><button type="submit" class="primary-button" id="browser-share-enable">Enable for this chat</button></div></form></dialog>
     <dialog id="usage-dialog"><div class="dialog-card usage-card"><div class="dialog-heading"><h2>Usage</h2><button type="button" class="icon-button" id="usage-close" aria-label="Close usage">×</button></div><div class="usage-actions"><button type="button" id="usage-refresh">Refresh</button><button type="button" id="usage-copy">Copy</button></div><div id="usage-details"></div></div></dialog>
-    <dialog id="new-chat-dialog">
-      <!-- Conversation creation -->
-      <form method="dialog" class="dialog-card" id="new-chat-form">
-        <div class="dialog-heading">
-          <div>
-            <p class="eyebrow">NEW RUNTIME</p>
-            <h2>Create a conversation</h2>
-          </div>
-          <button class="icon-button" value="cancel" formnovalidate aria-label="Close">×</button>
-        </div>
-        <div class="environment-choice"><label>
-          <span>Agent</span>
-          <select id="agent-select" required></select>
-        </label><button type="button" class="icon-button" id="connect-codex-button" aria-label="Manage agent accounts" title="Manage agent accounts" hidden>⚙</button></div>
-        <div id="github-requirement" class="dialog-security"><p>Connect GitHub to choose your repositories.</p><button type="button" class="secondary-button" id="connect-github-button">Connect GitHub</button></div>
-        <div id="repository-picker" hidden>
-          <div id="selected-repositories" class="selected-repositories"></div>
-          <p class="muted" id="repository-group-hint"></p>
-          <details class="repository-picker-dropdown"><summary>Choose repositories</summary><div class="repository-search"><input id="repo-search" type="search" placeholder="Search repositories…" aria-label="Search repositories"><button type="button" class="icon-button" id="refresh-repositories" aria-label="Refresh repositories">↻</button></div><div id="repository-results"></div></details>
-        </div>
-        <div id="agent-account-requirement" hidden><p id="agent-account-hint" class="muted" role="status">Connect an agent account before creating a conversation.</p></div>
-        <label id="new-agent-account-field" hidden><span>Agent account</span><select id="new-agent-account" aria-label="Agent account"><option value="">Select an account</option></select></label>
-        <div class="model-controls" id="new-model-controls"><label><span>Model</span><select class="model-select" aria-label="New chat model"></select></label><label><span>Effort</span><select class="effort-select" aria-label="New chat effort"></select></label><p class="model-note" role="status"></p></div>
-        <label><span>What would you like to work on?</span><textarea id="initial-prompt" rows="3" maxlength="100000" placeholder="Describe the task. Your agent will name this conversation."></textarea></label>
-        <div class="environment-choice"><label><span>Environment</span><select id="environment-select" required></select></label><button type="button" class="icon-button" id="environment-settings" aria-label="Manage selected environment">⚙</button></div>
-        <div class="dialog-security" id="dialog-security"></div>
-        <p id="create-chat-error" class="form-error" role="alert"></p>
-        <div class="dialog-actions">
-          <button class="secondary-button" value="cancel" formnovalidate>Cancel</button>
-          <button class="primary-button" id="create-chat-button" value="default">Create chat</button>
-        </div>
-      </form>
-    </dialog>
-
     <dialog id="agent-accounts-dialog" aria-labelledby="agent-accounts-title">
       <section class="dialog-card">
         <div class="dialog-heading"><h2 id="agent-accounts-title">Your agent accounts</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close agent accounts">×</button></div>
@@ -303,26 +304,27 @@
           <fieldset id="agent-account-fields">
             <label><span>Agent</span><select id="agent-account-provider"><option value="codex">Codex</option><option value="claude">Claude Code</option></select></label>
             <label><span>Account name</span><input id="agent-account-name" required maxlength="80" placeholder="Personal or company" autocomplete="off"></label>
-            <div id="agent-account-companies"></div>
             <div class="dialog-actions"><button type="button" class="secondary-button" id="agent-account-cancel">Cancel</button><button type="submit" class="primary-button" id="agent-account-submit">Sign in to Codex</button></div>
           </fieldset>
           <p id="agent-account-progress" class="agent-account-progress" role="status" hidden></p>
           <p id="agent-account-error" class="form-error" role="alert"></p>
         </form>
-        <details class="agent-account-help"><summary>About accounts and access</summary><p class="muted">Google sign-in does not sign you in to Codex or Claude. Server logins are never imported. Only the companies you select can use an account; the first repository determines a chat’s company.</p><p class="muted">Credentials are encrypted on the controller. Local workers share the host filesystem; use isolated cloud workers for untrusted multi-user workloads. Claude uses your Pro, Max, Team or Enterprise subscription; authorize in your browser, then paste the returned code into that account’s card.</p></details>
+        <details class="agent-account-help"><summary>About accounts and access</summary><p class="muted">Google sign-in does not sign you in to Codex or Claude. Server logins are never imported. Choose one of your accounts per chat. Your last choice is remembered for each primary repository; other users cannot use your accounts.</p><p class="muted">Credentials are encrypted on the controller. Local workers share the host filesystem; use isolated cloud workers for untrusted multi-user workloads. Claude uses your Pro, Max, Team or Enterprise subscription; authorize in your browser, then paste the returned code into that account’s card.</p></details>
       </section>
     </dialog>
 
     <dialog id="github-dialog" aria-labelledby="github-dialog-title">
       <div class="dialog-card">
         <div class="dialog-heading"><h2 id="github-dialog-title">GitHub connections</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close GitHub dialog">×</button></div>
+        <div class="company-filter"><label><span>Company</span><select id="github-company-filter"></select></label><button type="button" class="secondary-button" id="github-manage-companies">Manage companies</button></div>
         <p class="muted">Connect your own GitHub account to choose from the repositories it can access.</p>
         <div id="github-account-list" class="agent-account-list" aria-live="polite"></div>
         <button type="button" class="secondary-button" id="github-new">＋ Add GitHub connection</button>
         <form id="github-rename-form" hidden>
           <h3 id="github-rename-title">Rename connection</h3>
+          <label><span>Company</span><select id="github-connection-company" required></select></label>
           <label><span>Connection name</span><input id="github-connection-name" maxlength="80" required placeholder="e.g. Personal GitHub"></label>
-          <div class="dialog-actions"><button type="button" class="secondary-button" id="github-rename-cancel">Cancel</button><button type="submit" class="primary-button" id="github-save-name">Save name</button></div>
+          <div class="dialog-actions"><button type="button" class="secondary-button" id="github-rename-cancel">Cancel</button><button type="submit" class="primary-button" id="github-save-name">Save connection</button></div>
         </form>
         <p class="form-error" id="github-error" role="alert"></p>
         <details><summary>About GitHub access</summary><p class="muted">Sign-in uses a private GitHub CLI profile. Server logins are never imported. Credentials are encrypted on the controller; local workers share its host filesystem. Use isolated cloud workers for a stronger boundary. Disconnect removes the saved credential from Relay, not GitHub’s own authorization.</p></details>
@@ -335,7 +337,7 @@
         <form id="environment-form">
           <label><span>Environment name</span><input id="environment-name" required maxlength="80" placeholder="e.g. Acme staging"></label>
           <div id="environment-companies"></div>
-          <section class="environment-mcps"><h3>MCP connections</h3><div id="environment-mcp-options"></div><p class="muted">Only selected connections allowed for this chat’s company reach the worker. The environment and the connection must both allow that company. Changes apply on the next worker start.</p></section>
+          <section class="environment-mcps"><h3>Company tools</h3><div id="environment-mcp-options"></div><p class="muted">Chats load the connections assigned to their primary repository's company. No additional MCP selection is needed here.</p></section>
           <p class="muted" id="environment-backend"></p>
           <label><span>Network access</span><select disabled aria-label="Network access"><option>Worker infrastructure default</option></select></label>
           <p class="muted">Custom egress restrictions are not enforced by this backend. Configure the worker network externally; agent sandbox permissions remain separate.</p>
@@ -355,30 +357,40 @@
 
     <dialog id="mcp-dialog" aria-labelledby="mcp-title"><div class="dialog-card mcp-card">
       <div class="dialog-heading"><h2 id="mcp-title">MCP connections</h2><button type="button" class="icon-button" id="mcp-close" aria-label="Close MCP connections">×</button></div>
-      <p class="muted">Connect tools once, then select them in each environment. Only enable servers you trust: their tools can access and change data.</p>
-      <h3>Your connections</h3><div id="mcp-list"></div><button type="button" class="secondary-button" id="mcp-new">＋ Custom MCP</button>
-      <details id="mcp-catalog" open><summary>Add a development tool</summary><div id="mcp-presets" class="mcp-presets"></div></details>
-      <form id="mcp-form">
+      <section id="mcp-overview">
+        <div class="company-filter"><label><span>Company</span><select id="mcp-company-filter"></select></label><button type="button" class="secondary-button" id="mcp-manage-companies">Manage companies</button></div>
+        <p id="mcp-overview-note" class="muted"></p>
+        <div id="mcp-presets" class="mcp-presets"></div>
+        <div id="mcp-list" class="mcp-presets"></div><button type="button" class="secondary-button" id="mcp-new">＋ Custom MCP</button>
+      </section>
+      <section id="mcp-detail" hidden>
+        <div class="mcp-detail-navigation"><button type="button" class="secondary-button" id="mcp-back">← All tools</button><span id="mcp-detail-company" class="muted"></span></div>
+        <div id="mcp-connection-switcher" hidden><label><span>Saved connection</span><select id="mcp-connection-select"></select></label><button type="button" class="secondary-button" id="mcp-add-another">＋ Add another connection</button></div>
+        <form id="mcp-form">
         <label><span>Connection name</span><input id="mcp-name" required maxlength="64" placeholder="e.g. company-tools"></label>
-        <div id="mcp-companies"></div>
-        <p class="muted">Save separate connections and sign in separately for different company accounts. A blank company list never shares credentials across companies.</p>
+        <label><span>Company</span><select id="mcp-company" required></select></label>
+        <p id="mcp-company-review" class="form-error" hidden>Choose one company for this connection. Its credentials have been kept, but agents cannot use it until you assign it.</p>
+        <div id="mcp-linear-fields" hidden><label><span>Linear permissions</span><select id="mcp-linear-access"><option value="read">Read only</option><option value="read write">Read and write</option></select></label></div>
+        <section id="mcp-sign-in-status" aria-live="polite"></section>
+        <section id="mcp-connection-status" aria-live="polite"></section>
+        <p id="mcp-availability" class="muted"></p>
+        <div class="mcp-connect-actions"><button type="button" class="primary-button" id="mcp-connect" hidden>Connect with OAuth</button><button type="button" class="secondary-button" id="mcp-test" hidden>Test connection</button><button type="button" class="secondary-button" id="mcp-disconnect" hidden>Disconnect</button></div>
+        <details id="mcp-advanced"><summary>Advanced settings</summary>
         <label><span>Transport</span><select id="mcp-type"><option value="http">Streamable HTTP · protected credentials</option><option value="stdio">Stdio · process on the worker</option></select></label>
         <div id="mcp-http">
           <label><span>MCP endpoint URL</span><input id="mcp-url" type="url" placeholder="https://paladira.com/api/mcp"></label>
           <label><span>Authentication</span><select id="mcp-auth"><option value="oauth">OAuth · sign in with your browser</option><option value="headers">Authentication headers / API token</option><option value="none">No authentication</option></select></label>
-          <div id="mcp-linear-fields" hidden><label><span>Linear permissions</span><select id="mcp-linear-access"><option value="read">Read only</option><option value="read write">Read and write</option></select></label><p class="muted">Sign in separately for each workspace (for example g2i and 12-apps). Choose its matching company above. Linear registers this app automatically; no client ID is normally needed. Verification only reads a team and never changes your workspace.</p></div>
           <div id="mcp-header-fields" hidden><label><span>Authentication headers · JSON, encrypted</span><textarea id="mcp-headers" rows="3" spellcheck="false" autocomplete="off"></textarea></label><p class="muted">Blank keeps saved headers for the same URL; {} clears them. Changing the endpoint clears existing credentials.</p></div>
           <details id="mcp-oauth-fields"><summary>Advanced OAuth settings</summary><p class="muted">Normally discovered automatically. Only fill these if the provider requires a pre-registered client or specific scopes.</p><label><span>OAuth client ID</span><input id="mcp-client-id" autocomplete="off"></label><label><span>OAuth client secret · optional, encrypted</span><input id="mcp-client-secret" type="password" autocomplete="new-password"></label><label><span>OAuth scopes · space separated</span><input id="mcp-scopes" placeholder="Leave blank to use server-advertised scopes"></label><p class="muted">Callback: <code id="mcp-callback-url"></code></p></details>
           <p class="muted">Authentication stays encrypted on the controller. The agent gets revocable access, not the service’s credentials. Only approve permissions you want the agent to use.</p>
         </div>
         <div id="mcp-stdio" hidden><label><span>Executable</span><input id="mcp-command" placeholder="npx"></label><label><span>Arguments · JSON array</span><textarea id="mcp-args" rows="3" spellcheck="false">[]</textarea></label><p class="muted">Runs on each selected worker with that worker’s permissions. Install its runtime in the environment. Commands and arguments are agent-readable: do not include secrets. Use HTTP for protected authentication.</p></div>
-        <p class="muted">Local workers share the host filesystem; isolated cloud workers provide a stronger secret boundary.</p>
+        <p class="muted">Local workers share the host filesystem; use isolated cloud workers for untrusted workloads. Only connect tools you trust to access or change company data.</p>
+        </details>
         <p id="mcp-error" class="form-error" role="alert"></p><p id="mcp-save-status" class="muted" role="status"></p>
-        <section id="mcp-sign-in-status" aria-live="polite"></section>
-        <section id="mcp-connection-status" aria-live="polite"></section>
-        <div class="mcp-connect-actions"><button type="button" class="secondary-button" id="mcp-connect" hidden>Connect with OAuth</button><button type="button" class="secondary-button" id="mcp-test" hidden>Test connection</button><button type="button" class="secondary-button" id="mcp-disconnect" hidden>Disconnect OAuth</button></div>
-        <div class="dialog-actions"><button type="button" class="secondary-button" id="mcp-delete" hidden>Delete connection</button><button class="primary-button">Save connection</button></div>
+        <div class="dialog-actions"><button type="button" class="secondary-button" id="mcp-delete" hidden>Delete connection</button><button class="primary-button" id="mcp-save">Save connection</button></div>
       </form>
+      </section>
     </div></dialog>
 
     <dialog id="group-dialog" aria-labelledby="group-dialog-title">

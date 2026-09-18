@@ -1,5 +1,34 @@
 # Feature queue — original request order
 
+Company/MCP refinement (2026-09-18): create a separate Companies page. Each
+company owns many MCP connections and at most one GitHub connection; a connection
+belongs to one company only. Agent accounts alone remain selectable across
+companies. MCPs open to company-filtered provider cards with status, then a detail
+view containing only that connection's settings. Hide transport/registration
+details under Advanced. Company assignment replaces the extra environment-MCP
+selection. Ambiguous legacy MCP/GitHub bindings require an explicit company;
+preserve encrypted credentials without duplicating them or guessing the mapping.
+See [the decision](adr/2026-09-18-company-connections.md). Implementation is under
+local acceptance; production is not yet updated.
+
+New-chat refinement (2026-09-18): replace the creation modal with an inline
+page, with the message composer at the bottom, a compact environment / repository
+/ branch / `+` strip above it, and model/effort controls beside the combined
+agent-account selector. The first submission transitions to the conversation
+and shows preparation progress immediately. Keep the draft on failure. Existing
+conversations also expose repository addition in the compact strip, without
+creating another chat. Repository addition currently restarts the idle workspace;
+show that warning before committing and keep the primary repository unchanged.
+
+Account-selection refinement (2026-09-18): remove project/company assignment
+from Codex/Claude accounts. Every connected account owned by the signed-in user
+is available across their projects. Use one selector (`provider · account name ·
+email`) and remember its last explicit choice per user and primary repository,
+independently of branch and secondary repositories. This supersedes historical
+agent-account company restrictions below; ownership, provider identity,
+disconnection, environment and MCP controls remain enforced. These changes are
+under local acceptance, not yet published to AWS.
+
 Worker lifecycle follow-up (2026-09-18): the user requests explicit environment
 wake without an agent message and reports slow, silent chat deletion. A wake
 button with prompt-free asynchronous acquisition and immediate deletion feedback

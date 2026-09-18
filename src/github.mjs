@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { GitHubLogin, GitHubLoginError } from "./github-login.mjs";
+import { companyForChat } from "../public/company-scope.js";
 const fail = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const listingChanged = () => fail("GitHub connection changed while loading repositories. Refresh the list.", 409);
 const rejectLegacyScope = input => {
@@ -15,7 +16,8 @@ function repository(repo) {
 }
 
 export class GitHubConnection {
-  constructor({ records, config, fetchImpl = fetch, loginFactory = () => new GitHubLogin({ executable: config.cliPath || "gh" }), onChange = () => {} }) {
+  constructor({ records, config, companies = null, fetchImpl = fetch, loginFactory = () => new GitHubLogin({ executable: config.cliPath || "gh" }), onChange = () => {} }) {
+    this.companies = companies;
     this.records = records; this.config = config; this.fetch = fetchImpl;
     this.loginFactory = loginFactory;
     this.onChange = onChange;
@@ -35,7 +37,7 @@ export class GitHubConnection {
   public(connection) {
     const { token, companies, organization, allowUnassigned, scopeNeedsReview, ...value } = connection;
     const flow = [...this.pending.values()].find(flow => flow.connectionId === connection.id);
-    return { ...value, name: value.name || value.login || "GitHub", revision: value.revision || 0, repositoryAccess: "github", connected: Boolean(token && (!value.expiresAt || Date.parse(value.expiresAt) > Date.now())), ...(flow ? { signIn: { id: flow.id, state: flow.code ? "pending" : "starting", ...flow.code } } : {}) };
+    return { ...value, name: value.name || value.login || "GitHub", revision: value.revision || 0, repositoryAccess: "github", ...(this.companies ? { companyId: value.companyId || null, scopeNeedsReview: !value.companyId } : {}), connected: Boolean(token && (!value.expiresAt || Date.parse(value.expiresAt) > Date.now())), ...(flow ? { signIn: { id: flow.id, state: flow.code ? "pending" : "starting", ...flow.code } } : {}) };
   }
   async get(id) {
     await this.ready;
@@ -54,15 +56,25 @@ export class GitHubConnection {
     const connections = (await this.connections()).map(connection => this.public(connection)), active = connections.filter(connection => connection.connected);
     return { connections, connected: Boolean(active.length), login: active.length === 1 ? active[0].login : active.length ? `${active.length} connections` : null, expiresAt: active.length === 1 ? active[0].expiresAt : null, expired: Boolean(connections.length && !active.length), localAvailable: false, oauthAvailable: true, repositoryAccess: "github" };
   }
-  async requireConnection({ connectionId, repository: name } = {}) {
+  async requireConnection({ connectionId, repository: name, chatCompany } = {}) {
     if (name) repoName(name);
     const candidates = connectionId ? [await this.get(connectionId)] : await this.connections();
-    const active = candidates.filter(connection => this.public(connection).connected);
+    const company = chatCompany === undefined ? name?.split("/")[0]?.toLowerCase() : chatCompany?.toLowerCase();
+    const active = candidates.filter(connection => this.public(connection).connected && (!this.companies || (connection.companyId && (!company || connection.companyId === company))));
+    if (this.companies && !active.length && candidates.some(connection => this.public(connection).connected)) throw fail("Choose the GitHub connection assigned to this company. Assign unlinked accounts on the GitHub connections page.", 403);
     if (!active.length) throw fail("Connect GitHub to continue. Your saved connection is missing or expired.", 401);
-    // GitHub is the authority for repository/organization access. Legacy Relay
-    // company fields never restrict or select a credential; ambiguity needs an ID.
+    // Company selection chooses the credential; GitHub still decides which
+    // repositories that credential can access. Never borrow another company's.
     if (active.length !== 1) throw fail("Multiple GitHub connections match. Select the intended connection for this repository.", 409);
+    if (this.companies) await this.companies.get(active[0].companyId);
     return active[0];
+  }
+  async companyForConnection(input, old) {
+    if (!this.companies) return undefined;
+    const companyId = input.companyId ?? old?.companyId;
+    await this.companies.get(companyId);
+    if ((await this.connections()).some(connection => connection.id !== old?.id && connection.companyId === companyId)) throw fail("This company already has a GitHub connection. Reconnect or remove that connection first.", 409);
+    return companyId;
   }
   connect(input) {
     const result = this.queue.then(() => this.connectUnlocked(input)); this.queue = result.catch(() => {}); return result;
@@ -71,11 +83,12 @@ export class GitHubConnection {
     let { method, token, expiresAt } = input;
     const old = input.id ? await this.get(input.id) : null;
     if (old && input.revision !== (old.revision || 0)) throw fail("GitHub connection changed. Reload before saving.", 409);
+    const companyId = await this.companyForConnection(input, old);
     const name = String(input.name ?? old?.name ?? "GitHub").trim();
     if (!name || name.length > 80) throw fail("Connection name must contain 1–80 characters");
     if (method) throw fail("Use Sign in to GitHub. Server credentials are never imported.", 400);
     if (token === undefined && old) {
-      await this.put({ ...old, name, revision: (old.revision || 0) + 1 });
+      await this.put({ ...old, name, ...(companyId ? { companyId } : {}), revision: (old.revision || 0) + 1 });
       return { ...await this.status(), connection: this.public(await this.get(old.id)) };
     }
     if (typeof token !== "string" || token.length < 10 || token.length > 1000 || /\s/.test(token)) throw fail("Enter a valid GitHub access token");
@@ -87,7 +100,7 @@ export class GitHubConnection {
     const dates = [detectedExpiry, expiresAt].filter(Boolean).map(date => Date.parse(date));
     if (dates.some(date => !Number.isFinite(date) || date <= Date.now())) throw fail("The token expiry must be in the future");
     const connection = {
-      id: old?.id || `github_${randomUUID()}`, name, revision: (old?.revision || 0) + 1,
+      id: old?.id || `github_${randomUUID()}`, name, ...(companyId ? { companyId } : {}), revision: (old?.revision || 0) + 1,
       login: account.login, accountId: account.id, token, loginState: "connected", error: null,
       expiresAt: dates.length ? new Date(Math.min(...dates)).toISOString() : null, connectedAt: new Date().toISOString(),
     };
@@ -142,7 +155,7 @@ export class GitHubConnection {
   }
   async repositories(query = "", refresh = false) {
     await this.queue;
-    const connections = (await this.connections()).filter(connection => this.public(connection).connected), result = [], validations = [];
+    const connections = (await this.connections()).filter(connection => this.public(connection).connected && (!this.companies || connection.companyId)), result = [], validations = [];
     const generation = this.connectionGeneration;
     for (const account of connections) {
       const tokenHash = createHash("sha256").update(account.token).digest("hex");
@@ -168,18 +181,19 @@ export class GitHubConnection {
         cached = { revision: account.revision, tokenHash, repos, until: Date.now() + 300000 }; this.cache.set(account.id, cached);
       }
       const current = await assertCurrent();
-      result.push(...cached.repos.map(repo => ({ ...repo, githubConnectionId: account.id, connectionName: current.name || current.login })));
+      result.push(...cached.repos.map(repo => ({ ...repo, githubConnectionId: account.id, connectionName: current.name || current.login, ...(current.companyId ? { companyId: current.companyId } : {}) })));
     }
     for (const validate of validations) await validate();
     if (this.connectionGeneration !== generation) throw listingChanged();
     const q = query.trim().toLowerCase();
     return result.filter(repo => repo.fullName.toLowerCase().includes(q));
   }
-  async branches(name, connectionId) {
+  async branches(name, connectionId, chatCompany) {
     repoName(name);
+    if (this.companies && chatCompany) await this.companies.get(chatCompany);
     const branches = [];
     for (let page = 1; ; page++) {
-      const chunk = await this.request(`/repos/${name}/branches?per_page=100&page=${page}`, { connectionId });
+      const chunk = await this.request(`/repos/${name}/branches?per_page=100&page=${page}`, { connectionId, chatCompany });
       branches.push(...chunk.map(branch => branch.name));
       if (chunk.length < 100) break;
     }
@@ -207,7 +221,7 @@ export class GitHubConnection {
     }
     return resolved;
   }
-  async tokenForRepository(repo) { return (await this.requireConnection({ connectionId: repo.githubConnectionId, repository: repo.fullName })).token; }
+  async tokenForRepository(repo, chat) { return (await this.requireConnection({ connectionId: repo.githubConnectionId, repository: repo.fullName, ...(chat ? { chatCompany: companyForChat(chat) } : {}) })).token; }
   async beginDevice(input = {}) {
     rejectLegacyScope(input);
     const result = this.queue.then(async () => {
@@ -218,7 +232,8 @@ export class GitHubConnection {
       if (existing) return { id: existing.id, connection: this.public(old) };
       if (this.pending.size >= 3) throw fail("Finish or cancel an existing GitHub sign-in first.", 429);
       if (old && input.revision !== (old.revision || 0)) throw fail("GitHub connection changed. Reload before signing in.", 409);
-      const connection = { ...old, id: old?.id || `github_${randomUUID()}`, name: old?.name || "New GitHub account", token: null, loginState: "starting", error: null, revision: (old?.revision || 0) + 1 };
+      const companyId = await this.companyForConnection(input, old);
+      const connection = { ...old, id: old?.id || `github_${randomUUID()}`, ...(companyId ? { companyId } : {}), name: old?.name || "New GitHub account", token: null, loginState: "starting", error: null, revision: (old?.revision || 0) + 1 };
       await this.put(connection);
       const flow = { id: randomUUID(), connectionId: connection.id, client: this.loginFactory(), code: null };
       this.pending.set(flow.id, flow);

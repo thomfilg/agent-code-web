@@ -102,7 +102,8 @@ test("HTTP OAuth routes require authenticated same-origin initiation and a brows
   const root = await temporaryDirectory(t), app = await createAgentWebServer({ config: testConfig(root, { AGENT_WEB_AUTH_TOKEN: "browser-secret" }) });
   await app.start(); t.after(() => app.stop());
   const origin = `http://127.0.0.1:${app.server.address().port}`, authorization = { Authorization: "Bearer browser-secret", "content-type": "application/json" };
-  const c = (await (await fetch(`${origin}/api/mcps`, { method: "POST", headers: authorization, body: JSON.stringify({ name: "routes", type: "http", url: `${service.origin}/mcp`, authMode: "oauth" }) })).json()).connection;
+  await (await app.resources.forOwner(null)).companies.save({ id: "acme", name: "Acme" });
+  const c = (await (await fetch(`${origin}/api/mcps`, { method: "POST", headers: authorization, body: JSON.stringify({ name: "routes", companyId: "acme", type: "http", url: `${service.origin}/mcp`, authMode: "oauth" }) })).json()).connection;
   const start = `${origin}/api/mcps/${c.id}/oauth`;
   assert.equal((await fetch(start, { method: "POST" })).status, 401);
   assert.equal((await fetch(start, { method: "POST", headers: { ...authorization, Origin: "https://attacker.example" } })).status, 403);
@@ -120,26 +121,31 @@ test("HTTP OAuth routes require authenticated same-origin initiation and a brows
   assert.equal((await (await fetch(`${origin}/api/mcps`, { headers: authorization })).json()).connections[0].oauthConnected, true, "cancel is not disconnect");
 });
 
-test("environment selections reach both adapters; grants revoke on stop and fresh starts pick up edits", async t => {
+test("company connections reach both adapters without environment selection; stop revokes and resume rotates grants", async t => {
   const root = await temporaryDirectory(t), seen = [];
   const app = await createAgentWebServer({ config: testConfig(root), models: { creationSettings: async () => ({}), turnSettings: async () => ({}) },
     adapterFactory: ({ chat, executor }) => ({ start: async () => { seen.push({ agent: chat.agent, servers: executor.mcpServers }); }, send: async () => ({ text: "ready" }), stop: async () => {} }) });
   await app.start(); t.after(() => app.stop());
   const mcps = app.manager.mcps;
-  const included = await mcps.save({ name: "selected", allowUnassigned: true, type: "http", url: "https://included.example/mcp", headers: { Authorization: "Bearer upstream-secret" } });
-  await mcps.save({ name: "not-selected", type: "http", url: "https://excluded.example/mcp" });
-  const environment = await app.manager.environments.save({ name: "Selected MCPs", backend: "local", allowUnassigned: true, mcpIds: [included.id] });
+  for (const id of ["acme", "other"]) await (await app.resources.forOwner(null)).companies.save({ id, name: id });
+  await app.records.put("connection", "github", { id: "github", companyId: "acme", token: "fixture-mcp-github-token", revision: 1 });
+  app.manager.github.fetch = async () => { throw new Error("No real GitHub requests in this fixture"); };
+  const included = await mcps.save({ name: "selected", companyId: "acme", type: "http", url: "https://included.example/mcp", headers: { Authorization: "Bearer upstream-secret" } });
+  await mcps.save({ name: "not-selected", companyId: "other", type: "http", url: "https://excluded.example/mcp" });
+  const environment = await app.manager.environments.save({ name: "Company MCPs", backend: "local", companies: ["acme"], allowUnassigned: true, mcpIds: [] });
+  const selectedName = `relay_selected_${included.id.slice(4).replaceAll("-", "")}`;
   for (const agent of ["codex", "claude"]) {
     const chat = await app.manager.createChat({ agent, title: "MCP worker", environmentId: environment.id });
+    await app.store.update(chat.id, { repositories: [{ id: 31, fullName: "acme/fixture", githubConnectionId: "github" }] });
     await app.manager.send(chat.id, "load tools"); const runtime = seen.at(-1);
-    assert.equal(runtime.agent, agent); assert.deepEqual(Object.keys(runtime.servers), ["relay_selected", "relay_browser"]);
+    assert.equal(runtime.agent, agent); assert.deepEqual(Object.keys(runtime.servers), [selectedName, "relay_browser", "relay_github"]);
     const browserToken = runtime.servers.relay_browser.headers.Authorization.slice(7);
     assert.equal(app.manager.browsers.grants.validate(browserToken, "browser").chatId, chat.id);
     assert.ok(!JSON.stringify(runtime).includes("upstream-secret"));
-    const token = runtime.servers.relay_selected.headers.Authorization.slice(7); assert.ok(mcps.broker.validate(token, "mcp"));
+    const token = runtime.servers[selectedName].headers.Authorization.slice(7); assert.ok(mcps.broker.validate(token, "mcp"));
     await app.manager.stop(chat.id); assert.equal(mcps.broker.validate(token, "mcp"), null);
     assert.equal(app.manager.browsers.grants.validate(browserToken, "browser"), null);
-    await app.manager.send(chat.id, "restart tools"); assert.notEqual(seen.at(-1).servers.relay_selected.headers.Authorization, runtime.servers.relay_selected.headers.Authorization);
+    await app.manager.send(chat.id, "restart tools"); assert.notEqual(seen.at(-1).servers[selectedName].headers.Authorization, runtime.servers[selectedName].headers.Authorization);
     await app.manager.stop(chat.id);
   }
 });

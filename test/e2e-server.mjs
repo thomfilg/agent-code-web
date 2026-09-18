@@ -37,6 +37,7 @@ models.codex = async () => ({ models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol"
 models.claude = async () => ({ models: [{ id: "opus", label: "Opus", efforts: ["auto", "low", "medium", "high", "xhigh", "max"] }, { id: "sonnet", label: "Sonnet", efforts: ["auto", "low", "medium", "high", "xhigh", "max"], defaultEffort: "high" }, { id: "haiku", label: "Haiku", efforts: ["auto"] }, { id: "default", label: "Claude account default", efforts: ["auto", "high"] }], source: "fixture" });
 const commands = { list: async chat => ({ commands: [{ name: "usage", kind: "Web control" }, { name: "goal", kind: "CLI command" }, { name: "work", description: "Installed work skill", kind: "Skill" }, { name: "workflow", description: "Workflow plugin", kind: "Skill" }, ...(chat.agent === "claude" ? [{ name: "claude-only", kind: "Skill" }] : [])] }) };
 const app = await createAgentWebServer({ config, records, github, models, commands }); await app.start();
+for (const id of ["acme", "other", "12-apps", "g2i"]) await (await app.resources.forOwner(null)).companies.save({ id, name: id });
 const defaultEnvironment = (await app.manager.environments.list())[0];
 await app.manager.environments.save({ ...defaultEnvironment, companies: ["acme", "other", "12-apps", "g2i"], allowUnassigned: true }, defaultEnvironment.id);
 for (const title of ["Existing alpha", "Existing beta"]) await app.manager.createChat({ agent: "mock", title });

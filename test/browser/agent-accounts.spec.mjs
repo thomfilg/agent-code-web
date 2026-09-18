@@ -29,24 +29,22 @@ async function login(page, relay) {
   await expect(page.locator("#relay-account-button")).toHaveText("owner@example.com");
   await expect(page.locator("#isolation-label")).toHaveText("Process isolation disabled");
   await expect(page.locator("#agent-accounts-button")).toBeAttached();
-  await expect(page.locator("#welcome-new-chat")).toBeVisible();
+  await expect(page.locator("#new-chat-page")).toBeVisible();
 }
 const card = (page, name) => page.getByRole("region", { name: `${name} · Codex`, exact: true });
 async function addAccount(page, name) {
   await page.locator("#agent-account-new").click();
   await expect(page.locator("#agent-account-form")).toBeVisible();
   await page.getByLabel("Account name", { exact: true }).fill(name);
-  await page.locator("#agent-account-companies").getByLabel("Unassigned chats (no company)", { exact: true }).check();
   await page.getByRole("button", { name: "Sign in to Codex", exact: true }).click();
 }
 
 test("Claude account card owns its link and returned code, enables account models and reconnects without a megazord", async ({ page, relay }) => {
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   await page.setViewportSize({ width: 390, height: 844 }); await login(page, relay);
-  await page.locator("#welcome-new-chat").click(); await page.locator("#connect-codex-button").click();
+  await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", false); await page.locator("#connect-codex-button").click();
   await page.locator("#agent-account-new").click(); await page.locator("#agent-account-provider").selectOption("claude");
   await page.getByLabel("Account name", { exact: true }).fill("Claude Personal");
-  await page.locator("#agent-account-companies").getByLabel("Unassigned chats (no company)", { exact: true }).check();
   await page.getByRole("button", { name: "Sign in to Claude", exact: true }).click();
   const accountCard = page.getByRole("region", { name: "Claude Personal · Claude", exact: true });
   await expect(accountCard.getByRole("link", { name: "Open Claude sign-in for Claude Personal", exact: true })).toHaveAttribute("href", /^https:\/\/claude\.com\//);
@@ -61,9 +59,8 @@ test("Claude account card owns its link and returned code, enables account model
   await page.screenshot({ path: test.info().outputPath("claude-account-connected-mobile.png") });
   await page.getByRole("button", { name: "Close agent accounts" }).click();
   await expect(page.locator("#agent-select")).toHaveValue("claude");
-  await expect(page.getByLabel("Claude account", { exact: true })).toHaveValue("");
   const account = relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId)[0];
-  await page.getByLabel("Claude account", { exact: true }).selectOption(account.id);
+  await expect(page.getByLabel("Agent", { exact: true })).toHaveValue(account.id);
   await expect(page.locator("#new-model-controls")).toHaveAttribute("data-status", "ready");
   await page.locator("#connect-codex-button").click(); page.once("dialog", dialog => dialog.accept());
   await accountCard.getByRole("button", { name: "Disconnect", exact: true }).click();
@@ -81,9 +78,9 @@ test("Claude account card owns its link and returned code, enables account model
 test("missing agent offers account onboarding instead of Invalid agent; device login persists and is explicitly selected", async ({ page, relay }) => {
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   await login(page, relay);
-  await page.locator("#welcome-new-chat").click();
-  await expect(page.locator("#new-chat-dialog")).toBeVisible();
-  await expect(page.locator("#agent-account-hint")).toContainText("No agent is connected");
+  await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", false);
+  await expect(page.locator("#new-chat-page")).toBeVisible();
+  await expect(page.locator("#agent-account-hint")).toContainText("Connect Codex or Claude");
   await expect(page.locator("#create-chat-error")).toHaveText("");
   await expect(page.locator("#new-model-controls")).toBeHidden();
   await expect(page.locator("#create-chat-button")).toBeDisabled();
@@ -92,7 +89,6 @@ test("missing agent offers account onboarding instead of Invalid agent; device l
   await page.locator("#connect-codex-button").click();
   await page.locator("#agent-account-new").click();
   await page.getByLabel("Account name", { exact: true }).fill("Personal Codex");
-  await page.getByLabel("Unassigned chats (no company)", { exact: true }).check();
   await page.getByRole("button", { name: "Sign in to Codex", exact: true }).click();
   await expect(card(page, "Personal Codex").getByLabel("Codex sign-in code for Personal Codex")).toHaveText("TEST-1234");
   await expect(card(page, "Personal Codex").getByRole("link", { name: "Open Codex sign-in for Personal Codex" })).toHaveAttribute("href", "https://auth.openai.com/codex/device");
@@ -101,8 +97,7 @@ test("missing agent offers account onboarding instead of Invalid agent; device l
   await expect(card(page, "Personal Codex")).toContainText("codex@example.test · Connected");
   await page.getByRole("button", { name: "Close agent accounts" }).click();
   await expect(page.locator("#new-agent-account-field")).toBeVisible();
-  await expect(page.locator("#new-agent-account")).toHaveValue("");
-  await page.locator("#new-agent-account").selectOption({ label: "Personal Codex · codex@example.test" });
+  await expect(page.locator("#new-agent-account option:checked")).toHaveText("Codex · Personal Codex · codex@example.test");
   await expect(page.locator("#new-model-controls")).toHaveAttribute("data-status", "ready");
   expect(relay.app.store.list()).toEqual([]);
   await page.reload();
@@ -112,7 +107,7 @@ test("missing agent offers account onboarding instead of Invalid agent; device l
   expect(errors).toEqual([]);
 });
 
-test("connected company accounts follow the primary repository instead of asking for another login", async ({ page, relay }) => {
+test("single Agent selector offers every own account and remembers the choice by primary repository", async ({ page, relay }) => {
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   const repositories = ["12-apps/future-pay", "other/project", "thomfilg/no-environment"].map((fullName, index) => ({
     id: index + 1, fullName, defaultBranch: "main", githubConnectionId: "github-fixture", connectionName: "Fixture GitHub", private: true,
@@ -120,7 +115,7 @@ test("connected company accounts follow the primary repository instead of asking
   await page.route("**/api/github", route => route.fulfill({ json: { connected: true, login: "fixture", repositoryAccess: "github", connections: [{ id: "github-fixture", connected: true, repositoryAccess: "github" }] } }));
   await page.route("**/api/github/repositories*", route => route.fulfill({ json: { repositories } }));
   await page.route("**/api/github/branches?*", route => route.fulfill({ json: { branches: ["main"] } }));
-  await page.route("**/api/environments", route => route.fulfill({ json: { environments: [{ id: "environment-fixture", name: "12-apps fixture", companies: ["12-apps"], allowUnassigned: false, archived: false, backend: "local" }], software: [] } }));
+  await page.route("**/api/environments", route => route.fulfill({ json: { environments: [{ id: "environment-fixture", name: "Fixture", companies: ["12-apps", "other"], allowUnassigned: true, archived: false, backend: "local" }], software: [] } }));
   await page.route("**/api/preferences", route => route.fulfill({ json: { preferences: route.request().method() === "PATCH" ? route.request().postDataJSON() : { repositories: [] } } }));
   await login(page, relay);
   const owner = relay.app.googleAuth.legacyOwnerId;
@@ -129,44 +124,56 @@ test("connected company accounts follow the primary repository instead of asking
     relay[provider].clients.at(-1).approve();
     await expect.poll(() => relay.app.agentAccounts.list(owner).find(account => account.provider === provider)?.status).toBe("connected");
   }
-  await page.reload(); await page.locator("#welcome-new-chat").click();
+  await page.reload(); await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", false);
   const chooser = page.locator("#repository-picker .repository-picker-dropdown"), accounts = page.locator("#new-agent-account");
-  await expect(chooser).toHaveAttribute("open", "");
-  await expect(accounts).toBeDisabled(); await expect(accounts.locator("option")).toHaveCount(1);
-  await expect(page.locator("#agent-account-hint")).toContainText("Choose a primary repository first");
-  await expect(page.locator("#agent-account-hint")).not.toContainText("Connect one");
+  await expect(chooser).not.toHaveAttribute("open", "");
+  await expect(accounts).toBeEnabled(); await expect(accounts.locator("option")).toHaveCount(3);
+  await expect(page.locator("#agent-select")).toBeHidden();
+  await expect(page.locator("#agent-account-requirement")).toBeHidden();
+  await expect(page.locator("dialog#new-chat-page")).toHaveCount(0);
   await expect(page.locator("#create-chat-button")).toBeDisabled();
   expect(await page.locator("#repository-picker").evaluate(element => Boolean(element.compareDocumentPosition(document.querySelector("#new-agent-account-field")) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
   await page.getByRole("button", { name: "Manage agent accounts", exact: true }).click();
   await expect(page.locator("#agent-accounts-dialog")).toBeVisible();
   await expect(page.locator("#agent-account-new")).toBeVisible();
   await page.getByRole("button", { name: "Close agent accounts", exact: true }).click();
+  await chooser.locator("summary").click();
   await page.locator("#repository-results").getByRole("checkbox", { name: /12-apps\/future-pay/ }).check();
+  await chooser.locator("summary").click();
   for (const provider of ["codex", "claude"]) {
-    await page.locator("#agent-select").selectOption(provider);
     const account = relay.app.agentAccounts.list(owner).find(item => item.provider === provider);
-    await expect(accounts).toBeEnabled(); await expect(accounts.locator("option")).toHaveCount(2);
+    await expect(accounts).toBeEnabled(); await expect(accounts.locator("option")).toHaveCount(3);
     await expect(accounts.locator(`option[value="${account.id}"]`)).toHaveCount(1);
     await accounts.selectOption(account.id);
     await expect(page.locator("#create-chat-button")).toBeEnabled();
+    await expect(page.locator("#new-model-controls")).toHaveAttribute("data-status", "ready");
   }
+  await chooser.locator("summary").click();
   await page.locator("#repository-results").getByRole("checkbox", { name: /other\/project/ }).check();
-  await expect(accounts.locator("option")).toHaveCount(2); // A secondary repo never changes account scope.
+  await chooser.locator("summary").click();
+  await expect(accounts.locator("option")).toHaveCount(3);
+  const claude = relay.app.agentAccounts.list(owner).find(item => item.provider === "claude").id;
+  const codex = relay.app.agentAccounts.list(owner).find(item => item.provider === "codex").id;
+  await expect(accounts).toHaveValue(claude); // Secondary repositories do not change the remembered project.
   await page.getByRole("button", { name: "Make other/project primary", exact: true }).click();
-  await expect(accounts).toBeDisabled(); await expect(accounts).toHaveValue(""); await expect(accounts.locator("option")).toHaveCount(1);
-  await expect(page.locator("#agent-account-hint")).toContainText("No connected Claude account is allowed for other");
-  await expect(page.locator("#new-model-controls")).toBeHidden(); await expect(page.locator("#create-chat-button")).toBeDisabled();
+  await expect(accounts).toBeEnabled(); await expect(accounts.locator("option")).toHaveCount(3);
+  await accounts.selectOption(codex);
+  await expect(page.locator("#new-model-controls")).toHaveAttribute("data-status", "ready");
   await page.getByRole("button", { name: "Make 12-apps/future-pay primary", exact: true }).click();
-  await expect(accounts).toBeEnabled(); await expect(accounts.locator("option")).toHaveCount(2);
+  await expect(accounts).toHaveValue(claude);
+  await page.getByRole("button", { name: "Make other/project primary", exact: true }).click();
+  await expect(accounts).toHaveValue(codex);
+  await chooser.locator("summary").click();
   await page.locator("#repository-results").getByRole("checkbox", { name: /thomfilg\/no-environment/ }).check();
+  await chooser.locator("summary").click();
   await page.getByRole("button", { name: "Make thomfilg/no-environment primary", exact: true }).click();
   await expect(accounts).toBeEnabled();
   await accounts.selectOption(relay.app.agentAccounts.list(owner).find(item => item.provider === "claude").id);
   await expect(page.locator("#environment-select")).toHaveValue(""); await expect(page.locator("#create-chat-button")).toBeDisabled();
   await page.setViewportSize({ width: 390, height: 844 });
-  expect(await page.locator("#new-chat-dialog").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await page.locator("#new-chat-page").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   expect(relay.app.store.list()).toEqual([]); expect(errors).toEqual([]);
-  for (const account of relay.app.agentAccounts.list(owner)) { expect(account.companies).toEqual(["12-apps", "thomfilg"]); expect(account.allowUnassigned).toBe(false); }
+  for (const account of relay.app.agentAccounts.list(owner)) { expect(account.companies).toBeUndefined(); expect(account.allowUnassigned).toBeUndefined(); }
 });
 
 test("repository picker explains GitHub failures and empty results separately from search misses without stale refresh", async ({ page, relay }) => {
@@ -181,13 +188,14 @@ test("repository picker explains GitHub failures and empty results separately fr
     return route.fulfill({ json: { repositories: mode === "ready" ? [repository("12-apps/future-pay")] : [] } });
   });
   try {
-    await login(page, relay); await page.locator("#welcome-new-chat").click();
+    await login(page, relay); await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", false);
+    await page.getByRole("button", { name: "Add repositories", exact: true }).click();
     await expect(page.locator("#repository-status")).toHaveText("No repositories are available from your connected GitHub accounts. Check GitHub permissions or refresh the list.");
     await page.locator("#repository-manage-github").click(); await expect(page.locator("#github-dialog")).toBeVisible();
     await page.getByRole("button", { name: "Close GitHub dialog", exact: true }).click();
-    await page.locator("#new-chat-dialog").getByRole("button", { name: "Close", exact: true }).click();
     mode = "error";
-    await page.locator("#welcome-new-chat").click();
+    await page.getByRole("button", { name: "Add repositories", exact: true }).click();
+    await page.locator("#refresh-repositories").click();
     await expect(page.locator("#repository-status")).toHaveText("Could not load repositories. Check your GitHub connection and retry.");
     await expect(page.locator("#repository-status")).toHaveAttribute("role", "alert");
     await expect(page.locator("#repository-results")).not.toContainText("Private upstream");
@@ -207,15 +215,13 @@ test("repository picker explains GitHub failures and empty results separately fr
   } finally { releaseOld(); }
 });
 
-test("mobile onboarding permits cancelling a pending login and never widens company scope", async ({ page, relay }) => {
+test("mobile onboarding permits cancelling a pending login without project assignment controls", async ({ page, relay }) => {
   await page.setViewportSize({ width: 390, height: 844 }); await login(page, relay);
   // Sidebar is collapsed on mobile; open onboarding via the new-chat action.
-  await page.locator("#welcome-new-chat").click(); await page.locator("#connect-codex-button").click();
+  await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", false); await page.locator("#connect-codex-button").click();
   await page.locator("#agent-account-new").click();
   await page.getByLabel("Account name", { exact: true }).fill("Company Codex");
-  const companies = page.locator("#agent-account-companies");
-  await companies.getByLabel("Add companies", { exact: true }).fill("12-apps");
-  await companies.getByRole("button", { name: "Add companies", exact: true }).click();
+  await expect(page.locator("#agent-account-companies")).toHaveCount(0);
   await page.getByRole("button", { name: "Sign in to Codex", exact: true }).click();
   await expect(card(page, "Company Codex").getByLabel("Codex sign-in code for Company Codex")).toBeVisible();
   expect(await page.locator("#agent-accounts-dialog").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
@@ -223,7 +229,7 @@ test("mobile onboarding permits cancelling a pending login and never widens comp
   await page.getByRole("button", { name: "Cancel sign-in", exact: true }).click();
   await expect(card(page, "Company Codex")).toContainText("cancelled");
   const account = relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId)[0];
-  expect(account.status).toBe("disconnected"); expect(account.companies).toEqual(["12-apps"]); expect(account.allowUnassigned).toBe(false);
+  expect(account.status).toBe("disconnected"); expect(account.companies).toBeUndefined(); expect(account.allowUnassigned).toBeUndefined();
   expect(relay.codex.clients[0].closed).toBe(true);
 });
 
@@ -241,38 +247,39 @@ test("a chat explicitly selects among personal and company accounts and shows di
   const response = await page.request.post(`${relay.url}/api/chats`, { headers: { origin: relay.url }, data: { agent: "codex", agentAccountId: personal.id, title: "Account picker" } });
   expect(response.status()).toBe(201); const { chat } = await response.json();
   await page.goto(`${relay.url}/#chat=${chat.id}`); await page.reload();
-  await expect(page.locator("#chat-agent-account")).toHaveText("Personal");
+  await expect(page.locator("#chat-agent-select option:checked")).toHaveText("Codex · Personal · codex@example.test");
   await page.locator("#chat-agent-account").click(); await connect("Company");
   const company = relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId).find(account => account.name === "Company");
   page.once("dialog", dialog => dialog.accept());
   await page.locator(".agent-account-card").filter({ hasText: "Company · Codex" }).getByRole("button", { name: "Use in this chat", exact: true }).click();
-  await expect(page.locator("#chat-agent-account")).toHaveText("Company");
+  await expect(page.locator("#chat-agent-select option:checked")).toHaveText("Codex · Company · codex@example.test");
   expect(relay.app.store.get(chat.id).agentAccountId).toBe(company.id);
   expect(relay.app.store.get(chat.id).workspace).toBe(chat.workspace);
   await page.locator("#chat-agent-account").click(); page.once("dialog", dialog => dialog.accept());
   await page.locator(".agent-account-card").filter({ hasText: "Company · Codex" }).getByRole("button", { name: "Disconnect", exact: true }).click();
   await page.getByRole("button", { name: "Close agent accounts" }).click();
-  await expect(page.locator("#chat-agent-account")).toHaveText("Company · reconnect");
+  await expect(page.locator("#chat-agent-select option:checked")).toHaveText("Codex · Company · codex@example.test · reconnect");
   await page.locator("#chat-agent-account").click(); page.once("dialog", dialog => dialog.accept());
   await page.locator(".agent-account-card").filter({ hasText: "Personal · Codex" }).getByRole("button", { name: "Disconnect", exact: true }).click();
+  await expect(card(page, "Personal")).toContainText("Not connected");
+  await expect.poll(() => relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId).some(account => account.status === "connected")).toBe(false);
   await page.getByRole("button", { name: "Close agent accounts" }).click();
-  await expect(page.locator("#chat-agent-select")).toHaveValue("codex");
+  await expect(page.locator("#chat-agent-select")).toHaveValue(company.id);
   await expect(page.locator("#chat-agent-select")).toBeDisabled();
   expect(relay.app.store.get(chat.id).messages).toEqual([]);
 });
 
 test("Add account visibly toggles a focused form and preserves its unsent draft", async ({ page, relay }) => {
   await page.setViewportSize({ width: 320, height: 800 }); await login(page, relay);
-  await page.locator("#welcome-new-chat").click(); await page.locator("#connect-codex-button").click();
+  await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", false); await page.locator("#connect-codex-button").click();
   const toggle = page.locator("#agent-account-new"), form = page.locator("#agent-account-form");
   await expect(form).toBeHidden(); await expect(toggle).toHaveAttribute("aria-expanded", "false");
   await toggle.click(); await expect(form).toBeVisible(); await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(page.getByLabel("Account name", { exact: true })).toBeFocused();
   await page.getByLabel("Account name", { exact: true }).fill("Unsent personal account");
-  await form.getByLabel("Unassigned chats (no company)", { exact: true }).check();
   await toggle.click(); await expect(form).toBeHidden();
   await toggle.click(); await expect(page.getByLabel("Account name", { exact: true })).toHaveValue("Unsent personal account");
-  await expect(form.getByLabel("Unassigned chats (no company)", { exact: true })).toBeChecked();
+  await expect(form.getByLabel("Unassigned chats (no company)", { exact: true })).toHaveCount(0);
   expect(await page.locator("#agent-accounts-dialog").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.locator("#agent-account-cancel").click(); await expect(form).toBeHidden();
   expect(relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId)).toEqual([]);
@@ -347,7 +354,7 @@ test("failed sign-in restores the form and preserves name and company choices fo
   await expect(page.locator("#agent-account-error")).toContainText("temporarily unavailable");
   await expect(page.locator("#agent-account-submit")).toBeEnabled(); await expect(page.locator("#agent-account-submit")).toHaveText("Sign in to Codex");
   await expect(page.getByLabel("Account name", { exact: true })).toHaveValue("Retry personal");
-  await expect(page.locator("#agent-account-form").getByLabel("Unassigned chats (no company)", { exact: true })).toBeChecked();
+  await expect(page.locator("#agent-account-companies")).toHaveCount(0);
   await page.locator("#agent-account-submit").click(); await expect(card(page, "Retry personal").locator("code")).toBeVisible();
   expect(attempts).toBe(2); expect(relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId)).toHaveLength(1);
 });
@@ -372,13 +379,10 @@ test("a delayed pending-status response cannot restore a cancelled account's cod
   } finally { release(); }
 });
 
-test("Reconnect is one click inside the saved account, preserves scope and exposes a retryable startup error only once", async ({ page, relay }) => {
+test("Reconnect is one click inside the saved account, preserves identity and exposes a retryable startup error only once", async ({ page, relay }) => {
   await login(page, relay); await page.locator("#agent-accounts-button").click();
   await page.locator("#agent-account-new").click();
   await page.getByLabel("Account name", { exact: true }).fill("Personal");
-  const companies = page.locator("#agent-account-companies");
-  await companies.getByLabel("Add companies", { exact: true }).fill("12-apps");
-  await companies.getByRole("button", { name: "Add companies", exact: true }).click();
   await page.getByRole("button", { name: "Sign in to Codex", exact: true }).click();
   await expect(card(page, "Personal").locator("code")).toBeVisible();
   relay.codex.clients.at(-1).approve(); await expect(card(page, "Personal")).toContainText("Connected");
@@ -407,9 +411,9 @@ test("Reconnect is one click inside the saved account, preserves scope and expos
     await expect(page.locator("#agent-account-form")).toBeHidden();
     const saved = relay.app.agentAccounts.list(relay.app.googleAuth.legacyOwnerId);
     expect(saved).toHaveLength(1); expect(saved[0].id).toBe(original.id);
-    expect(saved[0].companies).toEqual(["12-apps"]); expect(saved[0].allowUnassigned).toBe(false);
+    expect(saved[0].name).toBe(original.name); expect(saved[0].companies).toBeUndefined();
     await page.locator("#agent-account-new").click();
-    await expect(companies.locator("details")).not.toHaveAttribute("open", "");
+    await expect(page.locator("#agent-account-companies")).toHaveCount(0);
     await expect(page.locator(".agent-account-help")).not.toHaveAttribute("open", "");
   } finally { gate.resolve(); }
 });
@@ -445,7 +449,6 @@ for (const provider of ["codex", "claude"]) test(`${provider} Delete account is 
   relay.codex.clients.at(-1).approve(); await expect(card(page, "Keep me")).toContainText("Connected");
   await page.locator("#agent-account-new").click(); await page.locator("#agent-account-provider").selectOption(provider);
   await page.getByLabel("Account name", { exact: true }).fill("Delete me");
-  await page.locator("#agent-account-companies").getByLabel("Unassigned chats (no company)", { exact: true }).check();
   await page.locator("#agent-account-submit").click();
   const row = page.getByRole("region", { name: `Delete me · ${provider === "claude" ? "Claude" : "Codex"}`, exact: true });
   await expect(row.getByRole("link")).toBeVisible();

@@ -32,7 +32,8 @@ test("Claude consent, user/company boundaries, encrypted persistence and access-
   assert.equal((await accounts.status(alice, id)).login, undefined); assert.equal(codex.clients.length, 0);
   for (const action of [() => accounts.credentials(bob, id, chat), () => accounts.models(bob, id), () => accounts.disconnect(bob, id)]) await assert.rejects(action, { statusCode: 404 });
   await assert.rejects(() => accounts.select(alice, id, { ...chat, agent: "codex" }), /selected agent/);
-  await assert.rejects(() => accounts.select(alice, id, { ...chat, repositories: [{ fullName: "12-apps/private" }] }), { statusCode: 403 });
+  assert.equal((await accounts.select(alice, id, { ...chat, repositories: [{ fullName: "12-apps/private" }] })).id, id);
+  assert.equal((await accounts.select(alice, id, { ...chat, repositories: [] })).id, id);
   await assert.rejects(() => accounts.models(alice, id, "codex"), /selected agent/);
   const credentials = await accounts.credentials(alice, id, chat, { refresh: true });
   assert.deepEqual(Object.keys(credentials).sort(), ["accessToken", "accountId", "email", "expiresAt", "organizationId"]);

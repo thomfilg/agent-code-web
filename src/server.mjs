@@ -20,6 +20,7 @@ import { createWorkerBackend } from "./worker-backends.mjs";
 import { openDatabase } from "./database.mjs";
 import { ChatOrganization } from "./chat-organization.mjs";
 import { GitHubConnection } from "./github.mjs";
+import { Companies } from "./companies.mjs";
 import { GitHubWorkerGateway } from "./github-worker-gateway.mjs";
 import { handleGitHubWorkerMcp } from "./github-worker-mcp.mjs";
 import { Environments, SOFTWARE_CATALOG } from "./environments.mjs";
@@ -132,14 +133,16 @@ export async function createAgentWebServer(options = {}) {
     } });
   await agentAccounts.initialize();
   const organization = new ChatOrganization({ records, store, changed: sidebarChanged });
-  const github = options.github || new GitHubConnection({ records, config: config.github });
-  const mcps = new McpConnections(records, { ttlMs: config.sessionCapabilityTtlMs });
+  const companies = new Companies(records);
+  const github = options.github || new GitHubConnection({ records, config: config.github, companies });
+  github.companies = companies;
+  const mcps = new McpConnections(records, { ttlMs: config.sessionCapabilityTtlMs, companies });
   const publicOrigin = config.publicOrigin ? safeMcpUrl(config.publicOrigin).origin : null;
   const environments = new Environments(records, config.workerBackend, mcps);
   const models = options.models || new ModelCatalog(config, agentAccounts);
   const attachments = new Attachments(records, store);
   const commands = options.commands || new CommandCatalog(config, models);
-  const resources = new UserServices({ records, config, identity: googleAuth, store, legacy: { records, github, mcps, environments, organization }, changed: sidebarChanged,
+  const resources = new UserServices({ records, config, identity: googleAuth, store, legacy: { records, github, mcps, environments, organization, companies }, changed: sidebarChanged,
     githubChanged: (ownerId, id) => githubWorkers.revokeConnection(ownerId, id) });
   const githubWorkers = new GitHubWorkerGateway({ store, servicesFor: chat => resources.forOwner(chat.ownerId), ttlMs: config.sessionCapabilityTtlMs,
     ...(options.githubWorkerFetch ? { fetchImpl: options.githubWorkerFetch } : {}) });
@@ -282,7 +285,7 @@ export async function createAgentWebServer(options = {}) {
       const user = url.pathname.startsWith("/api/") ? await browserUsers.session(request) : null;
       if (googleAuth.enabled && url.pathname.startsWith("/api/") && !user) return json(response, 401, { error: "Sign in with Google to use Relay" });
       if (url.pathname.startsWith("/api/")) {
-      const { github, mcps, environments, organization, records } = await resources.forOwner(user?.id);
+      const { github, mcps, environments, organization, records, companies } = await resources.forOwner(user?.id);
       // Authentication/resource lookup can outlive shutdown's stream cleanup.
       // Do not let an already accepted request open a new SSE stream afterward.
       if (stopping || draining) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
@@ -362,7 +365,7 @@ export async function createAgentWebServer(options = {}) {
           agents: manager.availableAgents(user?.id),
           workspaceSource: resources.isLegacy(user?.id) ? config.workspaceSource : "",
           database: records.kind,
-          features: { companyScopes: true, googleLogin: googleAuth.enabled, agentAccounts: googleAuth.enabled },
+          features: { companyScopes: true, companyRegistry: true, companyMcpConnections: true, googleLogin: googleAuth.enabled, agentAccounts: googleAuth.enabled },
           ...(googleAuth.enabled ? { user: googleAuth.public(user) } : {}),
         });
       }
@@ -377,6 +380,10 @@ export async function createAgentWebServer(options = {}) {
         if (accountRoute && request.method === "POST" && accountRoute[2]) return json(response, 200, await agentAccounts[accountRoute[2]](user.id, accountRoute[1]));
         return json(response, 404, { error: "Agent account action not found" });
       }
+      if (url.pathname === "/api/companies" && request.method === "GET") return json(response, 200, { companies: await companies.list() });
+      if (url.pathname === "/api/companies" && request.method === "POST") return json(response, 201, { company: await companies.save(await bodyJson(request, 4000)) });
+      const companyRoute = /^\/api\/companies\/([a-z0-9-]{1,39})$/.exec(url.pathname);
+      if (companyRoute && request.method === "PATCH") return json(response, 200, { company: await companies.save(await bodyJson(request, 4000), companyRoute[1]) });
       if (url.pathname === "/api/github" && request.method === "GET") return json(response, 200, await github.status());
       if (url.pathname === "/api/mcps" && request.method === "GET") return json(response, 200, { connections: await mcps.list() });
       if (url.pathname === "/api/mcps/presets" && request.method === "GET") return json(response, 200, { presets: MCP_PRESETS });
@@ -415,7 +422,7 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/github/device/poll" && request.method === "POST") return json(response, 200, await github.pollDevice((await bodyJson(request, config.maxBodyBytes)).id));
       if (url.pathname === "/api/github/device/cancel" && request.method === "POST") return json(response, 200, await github.cancelDevice((await bodyJson(request, config.maxBodyBytes)).id));
       if (url.pathname === "/api/github/repositories" && request.method === "GET") return json(response, 200, { repositories: await github.repositories(url.searchParams.get("q") || "", url.searchParams.get("refresh") === "1") });
-      if (url.pathname === "/api/github/branches" && request.method === "GET") return json(response, 200, { branches: await github.branches(url.searchParams.get("repository"), url.searchParams.get("connection") || undefined) });
+      if (url.pathname === "/api/github/branches" && request.method === "GET") return json(response, 200, { branches: await github.branches(url.searchParams.get("repository"), url.searchParams.get("connection") || undefined, url.searchParams.get("company") || undefined) });
       if (url.pathname === "/api/environments" && request.method === "GET") return json(response, 200, { environments: await environments.list(), software: SOFTWARE_CATALOG });
       if (url.pathname === "/api/environments" && request.method === "POST") return json(response, 201, { environment: await environments.save(await bodyJson(request, config.maxBodyBytes)) });
       const environmentRoute = /^\/api\/environments\/(env_[a-f0-9-]{36})(?:\/(reveal))?$/.exec(url.pathname);
@@ -429,7 +436,7 @@ export async function createAgentWebServer(options = {}) {
         if (!environmentRoute[2] && request.method === "PATCH") return json(response, 200, { environment: await environments.save(await bodyJson(request, config.maxBodyBytes), id) });
         if (!environmentRoute[2] && request.method === "DELETE") { await environments.remove(id, store.list()); return json(response, 200, { removed: true }); }
       }
-      if (url.pathname === "/api/preferences" && request.method === "GET") return json(response, 200, { preferences: await records.get("preferences", "new-chat") || {} });
+      if (url.pathname === "/api/preferences" && request.method === "GET") return json(response, 200, { preferences: await records.get("preferences", "new-chat") || {}, projectAgents: googleAuth.enabled ? await agentAccounts.projectPreferences(user.id) : {} });
       if (url.pathname === "/api/preferences" && request.method === "PATCH") {
         const body = await bodyJson(request, config.maxBodyBytes);
         if (googleAuth.enabled && ["codex", "claude"].includes(body.agent)) await agentAccounts.select(user.id, body.agentAccountId, body);
@@ -442,6 +449,7 @@ export async function createAgentWebServer(options = {}) {
           ...(["codex", "claude"].includes(body.agent) && body.agentAccountId ? { agentAccountId: body.agentAccountId } : {}),
           ...modelSettings, repositories: body.repositories.map(({ fullName, branch, githubConnectionId }) => ({ fullName, branch, ...(githubConnectionId ? { githubConnectionId } : {}) })) };
         await records.put("preferences", "new-chat", preferences);
+        if (googleAuth.enabled) await agentAccounts.rememberProject(user.id, preferences);
         return json(response, 200, { preferences });
       }
       if (url.pathname === "/api/chats" && request.method === "GET") {

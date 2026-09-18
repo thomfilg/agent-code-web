@@ -1,6 +1,3 @@
-import { CompanyPicker, knownCompanies } from "./company-picker.js";
-import { scopeLabel, scopeAllows, companyForChat } from "./company-scope.js";
-
 const $ = selector => document.querySelector(selector);
 const providerLabel = provider => provider === "claude" ? "Claude" : "Codex";
 const node = (tag, text, className) => { const element = document.createElement(tag); if (text) element.textContent = text; if (className) element.className = className; return element; };
@@ -10,7 +7,6 @@ export class AgentAccountSettings {
   constructor({ api, state, changed, chatUpdated, toast }) {
     Object.assign(this, { api, state, changed, chatUpdated, toast });
     this.accounts = []; this.logins = new Map(); this.errors = new Map(); this.actions = new Map(); this.accountVersions = new Map(); this.deleted = new Set(); this.generation = 0; this.listRequest = 0;
-    this.companies = new CompanyPicker($("#agent-account-companies"), () => {}, { compact: true });
     $("#agent-accounts-button").onclick = () => this.open();
     $("#connect-codex-button").onclick = () => this.open();
     $("#chat-agent-account").onclick = () => this.open();
@@ -44,7 +40,7 @@ export class AgentAccountSettings {
   }
   renderList() {
     const chat = this.state.active;
-    const key = JSON.stringify([this.accounts, [...this.logins], [...this.errors], [...this.actions], chat?.id, chat?.agentAccountId, chat?.status, chat?.archived, chat && companyForChat(chat)]);
+    const key = JSON.stringify([this.accounts, [...this.logins], [...this.errors], [...this.actions], chat?.id, chat?.agentAccountId, chat?.status, chat?.archived]);
     if (this.rendered === key) return;
     this.rendered = key;
     const list = $("#agent-account-list"); list.replaceChildren();
@@ -55,13 +51,12 @@ export class AgentAccountSettings {
       row.append(heading);
       if (!this.actions.has(account.id)) row.append(node("p", account.email ? `${account.email} · ${status}` : status, "muted"));
       else if (account.email) row.append(node("p", account.email, "muted"));
-      row.append(node("p", scopeLabel(account), "muted"));
       if (account.error && !this.actions.has(account.id) && !this.errors.has(account.id)) row.append(node("p", account.error, "form-error"));
       if (this.errors.has(account.id)) { const error = node("p", this.errors.get(account.id), "form-error"); error.setAttribute("role", "alert"); row.append(error); }
       if (this.actions.has(account.id)) {
         const progress = node("p", this.actions.get(account.id), "agent-account-progress"); progress.setAttribute("role", "status"); row.append(progress);
       } else {
-        if (chat && account.status === "connected" && chat.agentAccountId !== account.id && !chat.archived && !["running", "starting", "stopping"].includes(chat.status) && scopeAllows(account, companyForChat(chat))) {
+        if (chat && account.status === "connected" && chat.agentAccountId !== account.id && !chat.archived && !["running", "starting", "stopping"].includes(chat.status)) {
           row.append(button("Use in this chat", async () => {
             if (chat.agentAccountId && !confirm(`Use “${account.name}” for this chat? The conversation and files stay, but the agent session restarts with this account.`)) return;
             const generation = this.generation;
@@ -141,12 +136,10 @@ export class AgentAccountSettings {
     finally { this.actions.delete(account.id); this.renderList(); this.schedulePoll(); }
   }
   async reconnect(account) {
-    // Reconnection is not account creation: keep the saved name and exact
-    // access scope, and show progress on this card without reopening a form.
+    // Keep the saved account identity and show reconnect progress on its card.
     await this.act(account, `Connecting to ${providerLabel(account.provider)} for “${account.name}”…`, async () => {
       this.accept(await this.api("/api/agent-accounts", { method: "POST", body: JSON.stringify({
         id: account.id, provider: account.provider, name: account.name,
-        companies: account.companies, allowUnassigned: account.allowUnassigned,
       }) }));
     });
   }
@@ -160,7 +153,6 @@ export class AgentAccountSettings {
     if (!this.formInitialized) {
       this.formInitialized = true;
       $("#agent-account-name").value = "";
-      this.companies.set({}, knownCompanies(this.state, this.accounts));
       $("#agent-account-error").textContent = "";
     }
     this.showForm(true);
@@ -201,8 +193,7 @@ export class AgentAccountSettings {
   }
   async connect() {
     if (this.connecting) return;
-    const input = { provider: $("#agent-account-provider").value, name: $("#agent-account-name").value,
-      ...this.companies.value() };
+    const input = { provider: $("#agent-account-provider").value, name: $("#agent-account-name").value };
     const generation = this.generation;
     this.setConnecting(input.name); $("#agent-account-error").textContent = "";
     try {

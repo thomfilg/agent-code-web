@@ -42,17 +42,19 @@ test("keymap remaps actual send/newline shortcuts, persists on reload and retain
 });
 
 test("global shortcut removal/restoration works and editing/IME/repeated keys cannot trigger accidental actions", async ({ page }) => {
-  const f = await setup(page); await page.locator("#message-input").fill("Menu keeps my draft"); await open(page, true); await page.getByLabel("New chat", { exact: true }).fill("alt-k"); await save(page); await close(page);
+  const f = await setup(page); await page.locator("#message-input").fill("Menu keeps my draft"); await open(page, true); await page.getByRole("textbox", { name: "New chat", exact: true }).fill("alt-k"); await save(page); await close(page);
   await expect(page.locator("#message-input")).toHaveValue("Menu keeps my draft");
-  const input = page.locator("#message-input"); await input.fill("Retain draft"); await input.press("Control+k"); await expect(page.locator("#new-chat-dialog")).not.toBeVisible();
-  await input.press("Alt+k"); await expect(page.locator("#new-chat-dialog")).toBeVisible(); await page.locator("#new-chat-dialog").evaluate(dialog => dialog.close());
-  await open(page); await page.getByLabel("New chat", { exact: true }).fill(""); await save(page); await close(page);
-  await input.press("Alt+k"); await expect(page.locator("#new-chat-dialog")).not.toBeVisible();
+  const input = page.locator("#message-input"); await input.fill("Retain draft"); await input.press("Control+k"); await expect(page.locator("#new-chat-page")).not.toBeVisible();
+  await input.press("Alt+k"); await expect(page.locator("#new-chat-page")).toBeVisible();
+  await page.getByRole("button", { name: `Open ${f.chat.title}`, exact: true }).click();
+  await expect(input).toHaveValue("Retain draft");
+  await open(page); await page.getByRole("textbox", { name: "New chat", exact: true }).fill(""); await save(page); await close(page);
+  await input.press("Alt+k"); await expect(page.locator("#new-chat-page")).not.toBeVisible();
   await input.fill("Unsent"); for (const extra of [{ isComposing: true }, { keyCode: 229 }, { repeat: true }]) await input.dispatchEvent("keydown", { key: "Enter", bubbles: true, ...extra });
   expect(f.calls.messages).toHaveLength(0);
-  await open(page); await page.getByLabel("New chat", { exact: true }).fill("ctrl-l"); await expect(page.locator("#controls-content [role=status]")).toContainText("reserved"); await expect(page.getByRole("button", { name: "Save shortcuts", exact: true })).toBeDisabled();
+  await open(page); await page.getByRole("textbox", { name: "New chat", exact: true }).fill("ctrl-l"); await expect(page.locator("#controls-content [role=status]")).toContainText("reserved"); await expect(page.getByRole("button", { name: "Save shortcuts", exact: true })).toBeDisabled();
   await page.getByRole("button", { name: "Restore all defaults", exact: true }).click(); await save(page); await close(page);
-  await input.press("Control+k"); await expect(page.locator("#new-chat-dialog")).toBeVisible(); expect(f.calls.worker).toEqual([]);
+  await input.press("Control+k"); await expect(page.locator("#new-chat-page")).toBeVisible(); expect(f.calls.worker).toEqual([]);
 });
 
 test("mobile keymap shows conflicts, keeps a stale-save draft and requires explicit reload", async ({ page }) => {

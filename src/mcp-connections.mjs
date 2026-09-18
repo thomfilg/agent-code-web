@@ -5,16 +5,18 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpOAuth } from "./mcp-oauth.mjs";
 import { isLinearMcp } from "../public/mcp-provider.js";
+import { connectionCompany } from "./companies.mjs";
 import { companyForChat, companyScope, normalizeCompanyScope, scopeAllows, scopesOverlap } from "../public/company-scope.js";
 const fail = message => Object.assign(new Error(message), { statusCode: 400 });
 const publicConnection = ({ headers, oauth, oauthClientSecret, authGeneration, ...connection }) => ({ ...connection, ...companyScope(connection), scopeNeedsReview: !Array.isArray(connection.companies) && !connection.organization, authMode: connection.authMode || (Object.keys(headers || {}).length ? "headers" : "none"), headerNames: Object.keys(headers || {}), hasCredentials: Boolean(Object.keys(headers || {}).length), oauthConnected: Boolean(oauth?.tokens), hasClientSecret: Boolean(oauthClientSecret), health: connection.health || { status: "unverified" } });
 
 export class McpConnections {
-  constructor(records, { ttlMs = 86400000, fetchImpl = fetch } = {}) {
+  constructor(records, { ttlMs = 86400000, fetchImpl = fetch, companies = null } = {}) {
+    this.companies = companies;
     this.records = records; this.fetch = fetchImpl; this.broker = new CapabilityBroker({ ttlMs }); this.grants = new Map(); this.queue = Promise.resolve();
     this.oauth = new McpOAuth(this);
   }
-  async list() { await this.queue; return (await this.records.list("mcp")).map(connection => ({ ...publicConnection(connection), signIn: this.oauth.status(connection.id) })); }
+  async list() { await this.queue; return (await this.records.list("mcp")).map(connection => ({ ...publicConnection(connection), ...(this.companies ? { companyId: connectionCompany(connection), scopeNeedsReview: !connectionCompany(connection) } : {}), signIn: this.oauth.status(connection.id) })); }
   async get(id) { const value = await this.records.get("mcp", id); if (!value) throw Object.assign(new Error("MCP connection not found"), { statusCode: 404 }); return value; }
   save(input, id = null) { const result = this.queue.then(() => this.saveUnlocked(input, id)); this.queue = result.catch(() => {}); return result; }
   update(id, revision, transform, { guard } = {}) {
@@ -39,7 +41,7 @@ export class McpConnections {
     if (old && input.revision !== old.revision) throw Object.assign(new Error("Connection changed; reload before saving"), { statusCode: 409 });
     const name = String(input.name || "").trim();
     if (!/^[a-zA-Z][\w-]{0,63}$/.test(name)) throw fail("MCP name must start with a letter and use up to 64 letters, numbers, underscores or hyphens");
-    const scope = normalizeCompanyScope(input, old || {});
+    const scope = this.companies ? await this.companies.connectionScope(input, old || {}) : normalizeCompanyScope(input, old || {});
     if ((await this.records.list("mcp")).some(c => c.id !== id && c.name.toLowerCase() === name.toLowerCase() && scopesOverlap(c, scope))) throw fail("An MCP connection with this name already exists for one of the selected companies. Use a distinct name or non-overlapping companies.");
     if (!["http", "stdio"].includes(input.type)) throw fail("Choose HTTP or stdio transport");
     let data;
@@ -75,9 +77,16 @@ export class McpConnections {
     if (!Array.isArray(ids) || ids.length > 30 || new Set(ids).size !== ids.length || ids.some(id => !/^mcp_[a-f0-9-]{36}$/.test(id))) throw fail("Choose up to 30 saved MCP connections");
     for (const id of ids) await this.get(id); return ids;
   }
+  async forCompany(company) {
+    if (!this.companies || !company) return [];
+    await this.companies.get(company);
+    await this.queue;
+    return (await this.records.list("mcp")).filter(connection => connectionCompany(connection) === company &&
+      (connection.type === "stdio" || connection.authMode === "none" || connection.oauth?.tokens || Object.keys(connection.headers || {}).length)).map(connection => connection.id);
+  }
   async remove(id) {
     await this.get(id);
-    if ((await this.records.list("environment")).some(env => env.mcpIds?.includes(id))) throw fail("Remove this MCP from its environments before deleting it");
+    if (!this.companies && (await this.records.list("environment")).some(env => env.mcpIds?.includes(id))) throw fail("Remove this MCP from its environments before deleting it");
     this.oauth.forget(id);
     const result = this.queue.then(async () => {
       await this.records.delete("mcp", id); this.revokeConnection(id);
@@ -117,7 +126,7 @@ export class McpConnections {
         // Do not persist workspace data, issues, identities or tool response text.
         workspaceRead = { tool: "list_teams", checkedAt: new Date().toISOString() };
       }
-      health = { status: "connected", checkedAt: new Date().toISOString(), tools, toolCount: tools.length, serverName: client.getServerVersion()?.name?.slice(0, 128), ...(workspaceRead ? { workspaceRead, message: "Authenticated workspace read verified. Select this connection in an environment; it applies on the next worker start." } : {}) };
+      health = { status: "connected", checkedAt: new Date().toISOString(), tools, toolCount: tools.length, serverName: client.getServerVersion()?.name?.slice(0, 128), ...(workspaceRead ? { workspaceRead, message: this.companies ? "Authenticated workspace read verified. Available to this company's chats on the next agent start." : "Authenticated workspace read verified. Select this connection in an environment; it applies on the next worker start." } : {}) };
     } catch (error) {
       const authError = [401, 403].includes(error.code) || [401, 403].includes(error.statusCode);
       health = { status: authError ? "needs_auth" : "error", checkedAt: new Date().toISOString(), message: authError ? "Authentication required or access denied. Sign in or check your credentials and permissions." : isLinearMcp(connection.url) ? "Linear verification failed. Reconnect, check workspace permissions and retry. Tool discovery alone is not a verified workspace read." : "Could not connect. Check the endpoint, transport and server availability. Redirects are not followed." };
@@ -130,9 +139,10 @@ export class McpConnections {
   async runtime(chatId, ids, origin, chat = {}) {
     await this.validateSelection(ids); this.revokeChat(chatId);
     const company = companyForChat(chat);
+    if (this.companies && company) await this.companies.get(company);
     // Match the primary repository, never secondary repositories or display groups.
     // Filter before granting credentials, including for stdio servers.
-    const connections = (await Promise.all(ids.map(id => this.get(id)))).filter(c => scopeAllows(c, company));
+    const connections = (await Promise.all(ids.map(id => this.get(id)))).filter(c => this.companies ? connectionCompany(c) === company && Boolean(company) : scopeAllows(c, company));
     const token = connections.length ? this.broker.issue({ chatId, provider: "mcp" }) : null;
     this.grants.set(chatId, new Map(connections.map(connection => [connection.id, { connection, sessions: new Set(), streams: new Set() }])));
     const names = new Set(connections.filter(c => !companyScope(c).companies.length).map(c => `relay_${c.name}`));

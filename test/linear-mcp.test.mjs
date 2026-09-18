@@ -177,7 +177,11 @@ test("independent same-name workspace OAuth reaches both selected provider envir
       } finally { await client.close(); }
     }, send: async () => ({ text: "verified" }), stop: async () => {} }) });
   await app.start(); t.after(() => app.stop());
-  await app.records.put("connection", "github", { id: "github", token: "synthetic-linear-github", revision: 1, companies: ["12-apps", "g2i"] });
+  const githubIds = new Map([...fixtures.keys()].map((company, index) => [company, `github_00000000-0000-0000-0000-${String(index + 1).padStart(12, "0")}`]));
+  for (const [companyId, id] of githubIds) {
+    await (await app.resources.forOwner(null)).companies.save({ id: companyId, name: companyId });
+    await app.records.put("github_connection", id, { id, companyId, token: `synthetic-linear-github-${companyId}`, revision: 1 });
+  }
   app.manager.github.fetch = async () => { throw new Error("Unexpected external GitHub request in Linear fixture"); };
   const mcps = app.manager.mcps; mcps.fetch = fetchImpl;
   const ids = [];
@@ -198,7 +202,7 @@ test("independent same-name workspace OAuth reaches both selected provider envir
     const chat = await app.manager.createChat({ agent, title: "Fixture scoped runtime", environmentId: environment.id });
     // Complete synthetic selections preserve real GitHub admission while the
     // fixture exercises Linear; no clone or upstream GitHub call is involved.
-    await app.store.update(chat.id, { repositories: [{ id: 31, githubConnectionId: "github", fullName: `${company}/fixture` }, { id: 32, githubConnectionId: "github", fullName: `${company === "g2i" ? "12-apps" : "g2i"}/secondary` }] });
+    await app.store.update(chat.id, { repositories: [{ id: 31, githubConnectionId: githubIds.get(company), fullName: `${company}/fixture` }, { id: 32, githubConnectionId: githubIds.get(company), fullName: `${company === "g2i" ? "12-apps" : "g2i"}/secondary` }] });
     await app.manager.send(chat.id, "fixture read");
     assert.equal(seen.at(-1).agent, agent); assert.equal(seen.at(-1).workspace, company);
     const token = seen.at(-1).server.headers.Authorization.slice(7);

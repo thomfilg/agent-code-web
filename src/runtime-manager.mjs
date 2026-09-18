@@ -227,8 +227,11 @@ export class RuntimeManager extends EventEmitter {
     this.attachments = attachments;
     this.mcps = mcps;
     this.resources = resources;
-    if (this.environments) this.environments.onSaved = environment => {
-      for (const chat of this.store.list()) if (chat.environmentId === environment.id) this.mcps?.restrictChat(chat.id, scopeAllows(environment, companyForChat(chat)) ? environment.mcpIds || [] : []);
+    if (this.environments) this.environments.onSaved = async environment => {
+      for (const chat of this.store.list()) if (chat.environmentId === environment.id) {
+        const company = companyForChat(chat);
+        this.mcps?.restrictChat(chat.id, scopeAllows(environment, company) ? this.mcps?.companies ? await this.mcps.forCompany(company) : environment.mcpIds || [] : []);
+      }
     };
     this.commands = commands;
     this.pullRequests = new PullRequestMonitor({ store, github: resources?.githubForMonitor() || github, publish: chat => this.publishChat(chat) });
@@ -794,6 +797,7 @@ export class RuntimeManager extends EventEmitter {
     if (agentAccountId || this.config.google?.enabled && ["codex", "claude"].includes(agent)) {
       if (!agentAccountId) throw new Error(`Choose a ${agent === "claude" ? "Claude" : "Codex"} account for this chat in Agent accounts`);
       await this.agentAccounts.select(chat.ownerId, agentAccountId, { ...chat, agent });
+      await this.agentAccounts.rememberProject(chat.ownerId, { ...chat, agent, agentAccountId });
     }
     if (agent === chat.agent && agentAccountId === (chat.agentAccountId || null)) return chat;
     this.#switching.add(chatId);
@@ -1095,6 +1099,7 @@ export class RuntimeManager extends EventEmitter {
     if (environment && environment.backend !== this.config.workerBackend) throw new Error(`This server uses ${this.config.workerBackend} workers. Select an environment with that backend.`);
     const repositories = input.repositories ? await services.github.resolveSelections(input.repositories) : [];
     const modelSettings = this.models ? await this.models.creationSettings(agent, { ...input, ownerId, agentAccountId }) : {};
+    if (agentAccountId) await this.agentAccounts.rememberProject(ownerId, { agent, agentAccountId, repositories });
     const chat = await this.store.create({ title, agent, ownerId, agentAccountId, ...modelSettings, modelSelectionSet: Object.hasOwn(input, "model") || Object.hasOwn(input, "effort"), source: repositories.length ? "" : source, repositories,
       environmentId: environment?.id, environmentName: environment?.name, autoTitle: !input.title });
     try {
@@ -1675,6 +1680,11 @@ export class RuntimeManager extends EventEmitter {
               env: { ...executor.environmentVariables, PATH: executor.environmentPath || process.env.PATH, HOME: executor.runtimeHome, LANG: "C.UTF-8", CI: "1" } });
           } catch { throw new Error("Environment setup script failed. Review the script and its agent-readable variables. Protected variables are not available to setup scripts."); }
         }
+      }
+      if (executor && !chat.environmentId) {
+        const mcps = (await this.servicesFor(chat)).mcps;
+        if (mcps?.companies) executor.mcpServers = await mcps.runtime(chatId, await mcps.forCompany(companyForChat(chat)), executor.gatewayOrigin || this.gatewayOrigin, chat);
+        checkCancelled();
       }
       if (executor && this.browsers) executor.mcpServers = { ...executor.mcpServers, ...this.browsers.runtime(chatId, executor.gatewayOrigin || this.gatewayOrigin) };
       if (executor && this.githubWorkers) {

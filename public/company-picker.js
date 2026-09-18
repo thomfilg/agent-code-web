@@ -1,10 +1,11 @@
 import { companyForChat, companyScope, normalizeCompanyScope } from "./company-scope.js";
 
 export function knownCompanies(state, records = []) {
+  if (Array.isArray(state?.companies)) return state.companies.map(company => company.id);
   return [...new Set([...(state?.chats || []).map(companyForChat), ...records.flatMap(record => [...companyScope(record).companies, record.login])].filter(Boolean))].sort();
 }
 export class CompanyPicker {
-  constructor(root, onChange = () => {}, { compact = false } = {}) {
+  constructor(root, onChange = () => {}, { compact = false, registeredOnly = false } = {}) {
     this.root = root; this.onChange = onChange;
     const fieldset = document.createElement("fieldset"); fieldset.className = "company-picker";
     const legend = document.createElement("legend"); legend.textContent = compact ? "Available to" : "Available companies";
@@ -27,7 +28,11 @@ export class CompanyPicker {
     this.input.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); addCompanies(); } };
     const help = document.createElement("p"); help.className = "muted";
     help.textContent = "Only checked companies can use this configuration. The first repository determines a chat’s company; secondary repositories never expand its access. No wildcard or global credentials.";
-    if (compact) {
+    if (registeredOnly) {
+      const manage = document.createElement("button"); manage.type = "button"; manage.className = "secondary-button"; manage.textContent = "Manage companies";
+      manage.onclick = () => { root.closest("dialog")?.close(); window.dispatchEvent(new Event("relay-open-companies")); };
+      fieldset.append(legend, this.choices, manage);
+    } else if (compact) {
       fieldset.classList.add("compact");
       this.extra = document.createElement("details"); this.extra.className = "company-picker-extra";
       const summary = document.createElement("summary"); summary.textContent = "Add a company";

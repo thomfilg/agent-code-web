@@ -2,6 +2,7 @@ import { GitHubConnection } from "./github.mjs";
 import { McpConnections } from "./mcp-connections.mjs";
 import { Environments } from "./environments.mjs";
 import { ChatOrganization } from "./chat-organization.mjs";
+import { Companies } from "./companies.mjs";
 
 // Keep IDs and encrypted payloads intact. Only the record namespace changes;
 // there is deliberately no fallback to another user's credentials or settings.
@@ -37,16 +38,17 @@ export class UserServices {
   }
   async create(ownerId) {
     const records = userRecords(this.records, ownerId);
-    const github = new GitHubConnection({ records, config: this.config.github });
+    const companies = new Companies(records);
+    const github = new GitHubConnection({ records, config: this.config.github, companies });
     github.onChange = id => this.githubChanged(ownerId, id);
-    const mcps = new McpConnections(records, { ttlMs: this.config.sessionCapabilityTtlMs });
+    const mcps = new McpConnections(records, { ttlMs: this.config.sessionCapabilityTtlMs, companies });
     const environments = new Environments(records, this.config.workerBackend, mcps);
     const organization = new ChatOrganization({ records, store: this.store, changed: this.changed });
     environments.onSaved = environment => {
       for (const chat of this.store.list()) if (chat.ownerId === ownerId && chat.environmentId === environment.id) mcps.restrictChat(chat.id, []);
     };
     await environments.initialize();
-    const services = { records, github, mcps, environments, organization };
+    const services = { records, github, mcps, environments, organization, companies };
     this.ready.set(ownerId, services); return services;
   }
   all() { return [this.legacy, ...this.ready.values()]; }

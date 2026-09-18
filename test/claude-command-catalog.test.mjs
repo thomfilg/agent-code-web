@@ -41,11 +41,11 @@ test("selected-account commands reuse verified model initialization without star
   assert.equal((await accounts.cachedCommands(alice, accountId, chat)).commands[0].name, "goal");
 });
 
-test("every cached catalog read revalidates owner, selected provider, company and revocation", async t => {
+test("cached catalogs follow the own account across projects and revalidate owner, provider and revocation", async t => {
   const { accounts, catalog, records } = await fixture(t);
   await accounts.models(alice, accountId); await catalog.list(chat);
   await assert.rejects(catalog.list({ ...chat, ownerId: bob }), { statusCode: 404 });
-  await assert.rejects(catalog.list({ ...chat, repositories: [{ fullName: "other/repo" }] }), { statusCode: 403 });
+  assert.equal((await catalog.list({ ...chat, repositories: [{ fullName: "other/repo" }] })).commands.some(item => item.name === "goal"), true);
   await assert.rejects(accounts.cachedCommands(alice, accountId, { ...chat, agent: "codex" }), /selected agent/);
   const record = await records.get("agent-account", accountId);
   await records.put("agent-account", accountId, { ...record, revision: 2 });

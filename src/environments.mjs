@@ -66,12 +66,14 @@ export class Environments {
     if (input.networkAccess && input.networkAccess !== "worker_default") throw new Error("Network restrictions must be enforced by the worker infrastructure; this backend cannot enforce a custom network policy");
     if (input.archived !== undefined && typeof input.archived !== "boolean") throw new Error("Archived must be true or false");
     const all = await this.records.list("environment");
-    const mcpIds = input.mcpIds ?? old?.mcpIds ?? [];
+    const scope = normalizeCompanyScope(input, old || {});
+    if (this.mcps?.companies) for (const company of scope.companies) await this.mcps.companies.get(company);
+    const mcpIds = this.mcps?.companies ? [] : input.mcpIds ?? old?.mcpIds ?? [];
     if (this.mcps) await this.mcps.validateSelection(mcpIds);
     else if (mcpIds.length) throw new Error("MCP connections are unavailable");
     if (all.some(env => env.id !== id && env.name.toLowerCase() === name.toLowerCase())) throw new Error("An environment with this name already exists");
     const value = {
-      id: id || `env_${randomUUID()}`, name, backend: input.backend, ...normalizeCompanyScope(input, old || {}),
+      id: id || `env_${randomUUID()}`, name, backend: input.backend, ...scope,
       mcpIds,
       description: String(input.description || "").slice(0, 500),
       variablesEnabled: input.variablesEnabled !== false,
@@ -96,7 +98,7 @@ export class Environments {
     return {
       id: env.id, name: env.name, revision: env.revision, backend: env.backend, software: env.software,
       ...companyScope(env),
-      mcpIds: env.mcpIds || [],
+      mcpIds: this.mcps?.companies ? await this.mcps.forCompany(company) : env.mcpIds || [],
       setupScript: env.setupScript || "", archived: Boolean(env.archived),
       variables: Object.fromEntries(env.variables.filter(v => env.variablesEnabled && v.enabled && !v.secret).map(v => [v.key, v.value])),
       protectedKeys: env.variables.filter(v => env.variablesEnabled && v.enabled && v.secret).map(v => v.key),

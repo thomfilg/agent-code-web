@@ -4,6 +4,8 @@ import { WorkspaceSettings } from "../public/workspace-settings.js";
 import { GitHubAccounts } from "../public/github-accounts.js";
 
 function documentFixture(t) {
+  const previousOption = globalThis.Option; globalThis.Option = class { constructor(text, value) { this.text = text; this.value = value; } };
+  t.after(() => { if (previousOption === undefined) delete globalThis.Option; else globalThis.Option = previousOption; });
   const previous = globalThis.document, nodes = new Map();
   globalThis.document = { querySelector: selector => {
     if (!nodes.has(selector)) nodes.set(selector, { value: "", textContent: "", open: false, replaceChildren() {}, append() {} });
@@ -13,6 +15,7 @@ function documentFixture(t) {
   return globalThis.document;
 }
 const snapshot = label => ({
+  "/api/companies": { companies: [] },
   "/api/github": { connected: true, login: label, repositoryAccess: "github", connections: [{ id: label, revision: 1, connected: true, repositoryAccess: "github" }] },
   "/api/environments": { environments: [{ id: label }], software: [] },
   "/api/preferences": { preferences: { repositories: [{ fullName: `${label}/repo` }] } },
@@ -57,12 +60,12 @@ test("a superseded GitHub refresh cannot commit settings even without a newer se
 });
 
 test("GitHub refresh does not reload repositories after a superseded workspace load", async t => {
-  const document = documentFixture(t); document.querySelector("#new-chat-dialog").open = true;
+  const document = documentFixture(t); document.querySelector("#new-chat-page").hidden = false;
   let repositoryLoads = 0, checks = 0;
   const accounts = Object.assign(Object.create(GitHubAccounts.prototype), {
     refreshRequest: 0, connections: [], render() {},
-    api: async () => snapshot("new")["/api/github"],
-    settings: { branchCache: new Map(), load: async ({ validWhile }) => { assert.equal(validWhile(), true); checks++; return false; }, loadRepositories: async () => { repositoryLoads++; } },
+    api: async route => snapshot("new")[route],
+    settings: { state: {}, branchCache: new Map(), load: async ({ validWhile }) => { assert.equal(validWhile(), true); checks++; return false; }, loadRepositories: async () => { repositoryLoads++; } },
   });
   await accounts.refresh(); assert.equal(checks, 1); assert.equal(repositoryLoads, 0);
 });
@@ -83,7 +86,7 @@ test("environment suggestions include agent scopes and selected repo companies w
 });
 
 test("opening a conversation waits for a newer startup load instead of using missing preferences", async t => {
-  const document = documentFixture(t); document.querySelector("#new-chat-dialog").open = true;
+  const document = documentFixture(t); document.querySelector("#new-chat-page").hidden = false;
   document.querySelector("#agent-select").options = [];
   const first = Promise.withResolvers(), second = Promise.withResolvers();
   let generation = 0, calls = 0, repositoryReads = 0, finished = false;
@@ -99,7 +102,7 @@ test("opening a conversation waits for a newer startup load instead of using mis
   second.resolve(); await startup; await opening;
   assert.equal(repositoryReads, 1); assert.equal(calls, 10, "Await existing replacement, without a third fetch round");
   assert.equal(document.querySelector("#create-chat-error").textContent, "");
-  assert.equal(document.querySelector("#repository-picker .repository-picker-dropdown").open, true);
+  assert.equal(document.querySelector("#repository-picker .repository-picker-dropdown").open, false);
 });
 
 test("opening before config is loaded fails safely before any settings requests", async t => {

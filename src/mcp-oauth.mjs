@@ -79,6 +79,7 @@ export class McpOAuth {
     for (const [state, flow] of this.flows) if (flow.expiresAt < Date.now()) this.flows.delete(state);
     if (this.flows.size >= 30) throw invalid("Too many pending sign-ins. Wait a few minutes and try again.");
     let connection = await this.connections.get(id);
+    if (this.connections.companies) await this.connections.companies.connectionScope({}, connection);
     if (connection.type !== "http" || connection.authMode !== "oauth") throw invalid("Choose OAuth authentication and save the connection first.");
     safeMcpUrl(redirectUrl);
     const flow = { state: nonce(), attemptId: nonce(), cookie: nonce(), id, expiresAt: Date.now() + 600000 };

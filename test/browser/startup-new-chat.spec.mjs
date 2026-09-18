@@ -16,13 +16,15 @@ test("new conversation waits for config and settings, including keyboard shortcu
   await page.route("**/api/chats", route => { if (route.request().method() === "POST") writes++; return route.continue(); });
   try {
     await page.goto("/"); await configEntered.promise;
-    await expect(page.locator("#welcome-new-chat")).toBeDisabled(); await expect(page.locator("#new-chat-button")).toBeDisabled();
-    await page.keyboard.press("Control+k"); await expect(page.locator("#new-chat-dialog")).toBeHidden();
+    await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", true); await expect(page.locator("#new-chat-button")).toBeDisabled();
+    await page.keyboard.press("Control+k"); await expect(page.locator("#new-chat-page")).toBeHidden();
     configReady.resolve(); await preferencesEntered.promise;
     await expect(page.locator("#new-chat-button")).toBeDisabled();
-    await page.keyboard.press("Control+k"); await expect(page.locator("#new-chat-dialog")).toBeHidden();
+    await page.keyboard.press("Control+k"); await expect(page.locator("#new-chat-page")).toBeHidden();
     preferencesReady.resolve(); await expect(page.locator("#new-chat-button")).toBeEnabled();
     await page.locator("#new-chat-button").click();
+    await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", false);
+    await page.getByRole("button", { name: "Add repositories", exact: true }).click();
     await expect(page.locator("#repository-results").getByRole("checkbox")).toHaveCount(1);
     await expect(page.locator("#repository-results")).toContainText("Fixture/project");
     await expect(page.locator("#create-chat-error")).toBeEmpty();

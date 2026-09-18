@@ -108,7 +108,7 @@ test("long PR branches do not widen the chat or its document overlay on mobile",
       await expect(page.locator("#chat-statusline")).toBeHidden();
       await expect(page.locator(".branch-only")).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
-      const composer = await page.locator(".composer-wrap").boundingBox(), bounds = await row.boundingBox();
+      const composer = await page.locator("#conversation .composer-wrap").boundingBox(), bounds = await row.boundingBox();
       expect(bounds.x).toBeGreaterThanOrEqual(composer.x);
       expect(bounds.x + bounds.width).toBeLessThanOrEqual(composer.x + composer.width + 1);
       await expect(row.getByRole("link", { name: "⑂ #1789" })).toBeInViewport();

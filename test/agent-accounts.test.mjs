@@ -38,16 +38,40 @@ test("device ceremony stays pending until consent; public records never include 
   assert.deepEqual(cipher.open("agent-account", stored.id, sealed), stored);
 });
 
-test("cross-user, cross-company and wrong-provider selection fail without any host fallback", async t => {
+test("own accounts work in any project; foreign users and wrong providers still fail without host fallback", async t => {
   const { accounts, fixture } = await setup(t); const id = await connect(accounts, fixture);
   assert.deepEqual(accounts.list(bob), []);
   for (const action of [() => accounts.status(bob, id), () => accounts.disconnect(bob, id), () => accounts.models(bob, id), () => accounts.credentials(bob, id, chat)]) await assert.rejects(action, { statusCode: 404 });
-  await assert.rejects(() => accounts.select(alice, id, { ...chat, repositories: [{ fullName: "g2i/private" }] }), { statusCode: 403 });
+  assert.equal((await accounts.select(alice, id, { ...chat, repositories: [{ fullName: "g2i/private" }] })).id, id);
+  assert.equal((await accounts.select(alice, id, { agent: "codex", repositories: [] })).id, id);
   await assert.rejects(() => accounts.select(alice, id, { ...chat, agent: "claude" }), /selected agent/);
   await assert.rejects(() => accounts.credentials(alice, id, chat, { previousAccountId: "another-company" }), { statusCode: 403 });
   await assert.rejects(() => accounts.begin(null, input), { statusCode: 401 });
-  await assert.rejects(() => accounts.begin(alice, { ...input, companies: ["*"] }), { statusCode: 400 });
   assert.equal(fixture.clients.length, 1, "denied operations never start a native process");
+  assert.equal(accounts.list(alice)[0].companies, undefined);
+  assert.equal(accounts.list(alice)[0].allowUnassigned, undefined);
+});
+
+test("project choices survive restart, use only the primary repo, and never expose another user's accounts", async t => {
+  const { accounts, records, fixture } = await setup(t);
+  const personal = await connect(accounts, fixture, alice, { provider: "codex", name: "Personal" });
+  const pending = await accounts.begin(alice, { provider: "codex", name: "Work" }); fixture.clients.at(-1).approve();
+  await waitFor(() => accounts.list(alice).filter(a => a.status === "connected").length === 2);
+  const work = pending.account.id;
+  const first = { agent: "codex", agentAccountId: personal, repositories: [{ fullName: "Acme/App", branch: "main" }, { fullName: "Other/Secondary" }] };
+  await accounts.rememberProject(alice, first);
+  await accounts.rememberProject(alice, { ...first, agentAccountId: work, repositories: [{ fullName: "Other/Project", branch: "dev" }] });
+  const restarted = new AgentAccounts({ records, clientFactory: fixture.factory }); await restarted.initialize(); t.after(() => restarted.close());
+  assert.deepEqual(await restarted.projectPreferences(alice), { "acme/app": { agent: "codex", agentAccountId: personal }, "other/project": { agent: "codex", agentAccountId: work } });
+  assert.deepEqual(await restarted.projectPreferences(bob), {});
+  await assert.rejects(() => restarted.rememberProject(bob, first), { statusCode: 404 });
+  await assert.rejects(() => restarted.rememberProject(alice, { ...first, agent: "claude" }), /selected agent/);
+  await restarted.rememberProject(alice, { ...first, agentAccountId: work, repositories: [{ fullName: "ACME/app", branch: "feature/new" }] });
+  assert.equal((await restarted.projectPreferences(alice))["acme/app"].agentAccountId, work);
+  await restarted.disconnect(alice, work);
+  assert.deepEqual(await restarted.projectPreferences(alice), {});
+  await assert.rejects(() => restarted.rememberProject(alice, { ...first, agentAccountId: work }), { statusCode: 409 });
+  assert.deepEqual(await restarted.projectPreferences(bob), {});
 });
 
 test("multiple named accounts persist independently and refresh only the selected identity", async t => {

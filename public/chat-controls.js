@@ -46,7 +46,9 @@ export class ChatControls {
       if (!files.length) return; // Leave text and unsupported OS file paths alone.
       event.preventDefault(); void this.attach(files);
     });
-    document.addEventListener("click", event => document.querySelectorAll(".control-menu[open]").forEach(menu => { if (!menu.contains(event.target)) menu.open = false; }));
+    // An action may replace its own DOM before the click bubbles here. The
+    // dispatch path still identifies the menu that was actually clicked.
+    document.addEventListener("click", event => document.querySelectorAll(".control-menu[open]").forEach(menu => { if (!event.composedPath().includes(menu)) menu.open = false; }));
     document.addEventListener("keydown", event => { if (event.key === "Escape") document.querySelectorAll(".control-menu[open]").forEach(menu => menu.open = false); });
   }
   async copy(text, message = "Copied") { try { await navigator.clipboard.writeText(text); this.toast(message); } catch { this.dialog("Copy", el("pre", text)); } }
@@ -175,24 +177,10 @@ export class ChatControls {
       if (branch) root.append(button(`Copy branch · ${branch}`, () => this.copy(branch, "Branch name copied")));
     }
     if (!chat.repositories?.length) root.append(el("p", "No GitHub repositories selected", "muted"));
-    root.append(button("Add repository…", () => this.addRepository()));
-  }
-  async addRepository() {
-    const chatId = this.state.active.id;
-    this.dialog("Add repository", el("p", "Loading your GitHub repositories…"));
-    try {
-      const { repositories } = await this.api("/api/github/repositories");
-      const select = el("select"); select.setAttribute("aria-label", "Repository to add");
-      for (const repo of repositories.filter(repo => !this.state.active.repositories?.some(existing => existing.fullName === repo.fullName))) { const option = el("option", `${repo.fullName}${repo.connectionName ? ` · ${repo.connectionName}` : ""}`); option.value = repo.fullName; option.dataset.connectionId = repo.githubConnectionId || ""; select.append(option); }
-      const branch = el("input"); branch.placeholder = "Default branch"; branch.setAttribute("aria-label", "Branch to add");
-      const save = button("Add repository", async () => {
-        save.disabled = true;
-        try { const { chat } = await this.api(`/api/chats/${chatId}/repositories`, { method: "POST", body: JSON.stringify({ fullName: select.value, branch: branch.value || undefined, githubConnectionId: select.selectedOptions[0]?.dataset.connectionId || undefined }) }); this.updated(chat); $("#controls-dialog").close(); }
-        catch (error) { this.toast(error.message); }
-        finally { save.disabled = false; }
-      }); save.disabled = !select.options.length;
-      $("#controls-content").replaceChildren(el("p", "Stop active work first. Your original primary repository and company grouping stay unchanged. New repositories clone on the next message.", "muted"), select, branch, save);
-    } catch (error) { $("#controls-content").replaceChildren(el("p", error.message, "form-error")); }
+    root.append(button("Add repository…", () => {
+      $("#repositories-menu").open = false;
+      const picker = $("#chat-workspace-strip details"); picker.open = true; picker.querySelector("summary").focus();
+    }));
   }
   pullRequests(chat) {
     const root = $("#pull-request-bars"); root.replaceChildren();

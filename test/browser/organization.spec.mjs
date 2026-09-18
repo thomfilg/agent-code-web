@@ -99,9 +99,11 @@ test("GitHub picker preserves repository order, branches, selection and inline e
   await expect(page.locator("#github-companies")).toHaveCount(0);
   await page.getByRole("button", { name: "Close GitHub dialog", exact: true }).click();
   await expect(page.locator("#github-dialog")).not.toBeVisible();
-  await expect(page.locator(".repository-picker-dropdown")).toHaveAttribute("open", "");
+  await expect(page.locator("#repository-picker .repository-picker-dropdown")).not.toHaveAttribute("open", "");
+  await page.getByRole("button", { name: "Add repositories", exact: true }).click();
   await page.getByRole("checkbox", { name: /^Acme\/api / }).check();
   await page.getByRole("checkbox", { name: /^Other\/library / }).check();
+  await page.getByRole("button", { name: "Add repositories", exact: true }).click();
   await page.getByLabel("Branch for Acme/api").focus();
   await expect(page.getByLabel("Branch for Acme/api").locator("option")).toHaveCount(2);
   await page.getByLabel("Branch for Acme/api").selectOption("develop");
@@ -109,8 +111,10 @@ test("GitHub picker preserves repository order, branches, selection and inline e
   await page.getByLabel("New chat model", { exact: true }).selectOption("fixture-gpt");
   await page.getByLabel("New chat effort", { exact: true }).selectOption("high");
   await expect(page.locator("#repository-group-hint")).toContainText("Other → library");
-  await page.getByRole("button", { name: "Create chat", exact: true }).click();
-  await expect(page.locator("#new-chat-dialog")).not.toBeVisible();
+  await page.route("**/api/chats/*/messages", route => route.request().method() === "POST" ? route.fulfill({ json: { accepted: true } }) : route.continue());
+  await page.locator("#initial-prompt").fill("Fixture initial message");
+  await page.getByRole("button", { name: "Send first message", exact: true }).click();
+  await expect(page.locator("#new-chat-page")).not.toBeVisible();
   await expect(page.locator('[data-section="company:other"]')).toContainText("library");
   await expect(page.getByLabel("Chat model", { exact: true })).toHaveValue("fixture-gpt");
   await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("high");
@@ -118,15 +122,16 @@ test("GitHub picker preserves repository order, branches, selection and inline e
   await page.getByLabel("Chat effort", { exact: true }).selectOption("low");
   await page.getByLabel("Choose effort", { exact: true }).click();
   await page.reload(); await page.getByRole("button", { name: /New chat/ }).click();
-  await expect(page.locator(".repository-chip").first()).toContainText("Other/library");
+  await expect(page.locator("#selected-repositories .repository-chip").first()).toContainText("library");
   await expect(page.getByLabel("Branch for Acme/api")).toHaveValue("develop");
   await expect(page.getByLabel("New chat effort", { exact: true })).toHaveValue("high");
   await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("low");
   await page.route("**/api/chats", route => route.request().method() === "POST" ? route.fulfill({ status: 403, json: { error: "GitHub permission revoked. Reconnect your account." } }) : route.continue());
-  await page.getByRole("button", { name: "Create chat", exact: true }).click();
+  await page.locator("#initial-prompt").fill("Keep this draft on failure");
+  await page.getByRole("button", { name: "Send first message", exact: true }).click();
   await expect(page.locator("#create-chat-error")).toBeVisible();
   await expect(page.locator("#create-chat-error")).toContainText("permission revoked");
-  await expect(page.getByRole("button", { name: "Create chat", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Send first message", exact: true })).toBeEnabled();
 });
 
 test("mobile group menu and masked environment editor", async ({ page }) => {

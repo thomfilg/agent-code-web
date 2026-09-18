@@ -1,5 +1,5 @@
-import { scopeLabel } from "./company-scope.js";
-import { CompanyPicker, knownCompanies } from "./company-picker.js";
+import { scopeLabel, companyForChat } from "./company-scope.js";
+import { companyOptions } from "./companies.js";
 import { isLinearMcp } from "./mcp-provider.js";
 const $ = s => document.querySelector(s);
 const el = (tag, text, cls) => { const node = document.createElement(tag); node.textContent = text; if (cls) node.className = cls; return node; };
@@ -7,9 +7,13 @@ const statuses = { unverified: "Not tested", needs_auth: "Sign-in required", con
 export class McpSettings {
   constructor({ api, toast, state }) {
     Object.assign(this, { api, toast, state });
-    this.companyPicker = new CompanyPicker($("#mcp-companies"), () => { this.dirty = true; this.actions(); });
     $("#mcps-button").onclick = () => this.open(); $("#mcp-close").onclick = () => $("#mcp-dialog").close();
-    $("#mcp-new").onclick = () => { this.edit(); $("#mcp-name").focus(); };
+    $("#mcp-new").onclick = () => this.edit();
+    $("#mcp-back").onclick = () => this.overview();
+    $("#mcp-manage-companies").onclick = () => { $("#mcp-dialog").close(); window.dispatchEvent(new Event("relay-open-companies")); };
+    $("#mcp-company-filter").onchange = () => { this.companyId = $("#mcp-company-filter").value; this.renderCards(); };
+    $("#mcp-connection-select").onchange = () => this.edit(this.connections.find(connection => connection.id === $("#mcp-connection-select").value), this.preset);
+    $("#mcp-add-another").onclick = () => this.edit(this.preset ? this.presetDraft(this.preset) : null, this.preset);
     $("#mcp-type").onchange = () => this.transport(); $("#mcp-auth").onchange = () => this.transport();
     $("#mcp-form").oninput = $("#mcp-form").onchange = event => {
       this.dirty = true;
@@ -18,29 +22,81 @@ export class McpSettings {
       this.actions();
     };
     $("#mcp-form").onsubmit = event => this.save(event);
+    $("#mcp-form").addEventListener("invalid", event => { if ($("#mcp-advanced").contains(event.target)) $("#mcp-advanced").open = true; }, true);
     for (const action of ["delete", "test", "disconnect"]) $("#mcp-" + action).onclick = () => this.action(action);
     $("#mcp-connect").onclick = () => this.connect();
     $("#mcp-dialog").addEventListener("close", () => { $("#mcp-headers").value = ""; $("#mcp-client-secret").value = ""; this.current = null; clearTimeout(this.oauthTimer); this.pendingOAuth = null; });
     if (location.hash === "#mcp-connections") setTimeout(() => this.open(), 500);
   }
   async load() {
-    const [saved, catalog] = await Promise.all([this.api("/api/mcps"), this.api("/api/mcps/presets")]); this.connections = saved.connections;
-    $("#mcp-list").replaceChildren(...this.connections.map(connection => {
-      const pending = ["pending", "connecting"].includes(connection.signIn?.status);
-      const b = el("button", `${scopeLabel(connection)} · ${connection.name} · ${pending ? "Sign-in in progress" : statuses[connection.health?.status] || "Not tested"}`, "secondary-button"); b.type = "button"; b.onclick = () => this.edit(connection); return b;
+    const [saved, catalog, { companies }, github] = await Promise.all([this.api("/api/mcps"), this.api("/api/mcps/presets"), this.api("/api/companies"), this.api("/api/github")]);
+    this.github = github.connections;
+    this.connections = saved.connections; this.presets = catalog.presets; this.companies = companies; this.state.companies = companies;
+    if (!companies.some(company => company.id === this.companyId)) this.companyId = companies.find(company => company.id === companyForChat(this.state.active || {}))?.id || companies[0]?.id || "";
+    companyOptions($("#mcp-company-filter"), companies, this.companyId);
+    this.renderCards();
+  }
+  matchesPreset(connection, preset) { return connection.type === "http" && connection.url?.replace(/\/$/, "") === preset.url.replace(/\/$/, ""); }
+  connectionsFor(preset) { return this.connections.filter(connection => this.matchesPreset(connection, preset) && (connection.companyId === this.companyId || !connection.companyId && (!connection.companies?.length || connection.companies.includes(this.companyId)))); }
+  presetDraft(preset) {
+    let name = preset.id, suffix = 1;
+    while (this.connections.some(connection => connection.companyId === this.companyId && connection.name === name)) name = `${preset.id}-${++suffix}`;
+    return { name, companyId: this.companyId, type: "http", url: preset.url, authMode: preset.authMode, oauthScopes: preset.oauthScopes };
+  }
+  status(connection) {
+    if (!connection) return "Not connected";
+    if (!connection.companyId) return "Choose a company";
+    if (["pending", "connecting"].includes(connection.signIn?.status)) return "Sign-in in progress";
+    if (connection.oauthConnected && connection.health?.status === "unverified") return "Signed in · not verified";
+    return statuses[connection.health?.status] || "Not tested";
+  }
+  renderCards() {
+    $("#mcp-overview-note").textContent = this.companyId ? "Choose a tool to manage this company's connections." : "Add a company first to connect your tools.";
+    $("#mcp-new").disabled = !this.companyId;
+    $("#mcp-presets").replaceChildren(...this.presets.map(preset => {
+      if (preset.id === "github") {
+        const connection = this.github.find(account => account.companyId === this.companyId);
+        const button = el("button", "", "mcp-preset"); button.type = "button"; button.disabled = !this.companyId; button.dataset.preset = preset.id;
+        button.append(el("strong", preset.name), el("span", "Repository tools · uses this company's GitHub account", "muted"), el("span", connection?.connected ? `Connected · ${connection.login}` : "Not connected", connection?.connected ? "connection-status connected" : "connection-status"));
+        button.onclick = () => { $("#mcp-dialog").close(); window.dispatchEvent(new CustomEvent("relay-open-github", { detail: { companyId: this.companyId } })); }; return button;
+      }
+      const connections = this.connectionsFor(preset), connected = connections.find(connection => connection.companyId && connection.health?.status === "connected");
+      const button = el("button", "", "mcp-preset"); button.type = "button"; button.disabled = !this.companyId;
+      button.dataset.preset = preset.id;
+      button.append(el("strong", preset.name), el("span", preset.description, "muted"), el("span", `${this.status(connected || connections[0])}${connections.length > 1 ? ` · ${connections.length} connections` : ""}`, connected ? "connection-status connected" : "connection-status"));
+      button.onclick = () => this.edit(connections[0] || this.presetDraft(preset), preset); return button;
     }));
-    if (!this.connections.length) $("#mcp-list").append(el("p", "No connections yet. Choose a preset or add a custom MCP.", "muted"));
-    $("#mcp-presets").replaceChildren(...catalog.presets.map(preset => {
-      const button = el("button", "", "mcp-preset"); button.type = "button"; button.append(el("strong", preset.name), el("span", preset.description, "muted"));
-      button.onclick = () => { this.edit({ name: preset.id, type: "http", url: preset.url, authMode: preset.authMode, oauthScopes: preset.oauthScopes }); $("#mcp-catalog").open = false; $("#mcp-name").focus(); }; return button;
+    const custom = this.connections.filter(connection => !this.presets.some(preset => this.matchesPreset(connection, preset)) && (connection.companyId === this.companyId || !connection.companyId));
+    $("#mcp-list").replaceChildren(...custom.map(connection => {
+      const button = el("button", "", "mcp-preset"); button.type = "button"; button.append(el("strong", connection.name), el("span", this.status(connection), "connection-status"));
+      button.onclick = () => this.edit(connection); return button;
     }));
   }
-  async open() { try { await this.load(); this.edit(this.connections[0]); $("#mcp-dialog").showModal(); } catch (error) { this.toast(error.message); } }
-  edit(connection = null) {
+  overview() {
+    if (this.busy) return;
+    this.current = null; this.dirty = false; this.preset = null;
+    $("#mcp-headers").value = ""; $("#mcp-client-secret").value = "";
+    $("#mcp-title").textContent = "MCP connections"; $("#mcp-overview").hidden = false; $("#mcp-detail").hidden = true;
+    this.renderCards();
+  }
+  async open() { try { await this.load(); this.overview(); if (!$("#mcp-dialog").open) $("#mcp-dialog").showModal(); } catch (error) { this.toast(error.message); } }
+  edit(connection = null, preset = null) {
     this.current = connection?.id ? connection : null; this.dirty = false;
+    this.preset = preset || this.presets.find(candidate => connection && this.matchesPreset(connection, candidate)) || null;
+    $("#mcp-title").textContent = this.preset?.name || connection?.name || "Custom MCP";
+    $("#mcp-overview").hidden = true; $("#mcp-detail").hidden = false;
+    $("#mcp-advanced").open = !this.preset;
+    $("#mcp-oauth-fields").open = false;
+    companyOptions($("#mcp-company"), this.companies, this.current ? connection.companyId : this.companyId);
+    $("#mcp-company-review").hidden = !this.current || Boolean(connection.companyId);
+    $("#mcp-detail-company").textContent = this.companies.find(company => company.id === this.companyId)?.name || "";
+    const siblings = this.preset ? this.connectionsFor(this.preset) : [];
+    $("#mcp-connection-switcher").hidden = !siblings.length;
+    $("#mcp-connection-select").closest("label").hidden = siblings.length < 2;
+    $("#mcp-connection-select").replaceChildren(...siblings.map(item => new Option(item.name, item.id)));
+    $("#mcp-connection-select").value = connection?.id || "";
     $("#mcp-error").textContent = ""; $("#mcp-save-status").textContent = "";
     $("#mcp-name").value = connection?.name || ""; $("#mcp-type").value = connection?.type || "http";
-    this.companyPicker.set(connection || {}, knownCompanies(this.state, this.connections));
     $("#mcp-url").value = connection?.url || ""; $("#mcp-headers").value = ""; $("#mcp-auth").value = connection?.authMode || "oauth";
     $("#mcp-headers").placeholder = connection?.hasCredentials ? `Saved: ${connection.headerNames.join(", ")} · leave blank to keep` : '{"Authorization":"Bearer …"}';
     $("#mcp-client-id").value = connection?.oauthClientId || ""; $("#mcp-scopes").value = connection?.oauthScopes || "";
@@ -55,22 +111,32 @@ export class McpSettings {
     }
   }
   renderStatus() {
-    const section = $("#mcp-connection-status"); section.replaceChildren(); if (!this.current) return;
+    const section = $("#mcp-connection-status"); section.replaceChildren();
+    const company = this.companies.find(company => company.id === this.current?.companyId)?.name || this.current?.companyId;
+    const ready = this.current?.oauthConnected || this.current?.hasCredentials || this.current?.authMode === "none" || this.current?.type === "stdio";
+    $("#mcp-availability").textContent = company ? ready ? `Available to ${company} chats. Changes load on the next agent start.` : `Sign in to enable tools for ${company} chats.` : "";
+    if (!this.current) return;
     if (["pending", "connecting"].includes(this.current.signIn?.status)) return;
     const health = this.current.health || {};
-    section.append(el("p", `${statuses[health.status] || "Not tested"}${health.toolCount === undefined ? "" : ` · ${health.toolCount} tools`}${this.current.oauthConnected && health.status !== "needs_auth" ? " · OAuth signed in" : ""}`));
-    if (health.message) section.append(el("p", health.message, "muted"));
-    if (health.checkedAt) section.append(el("p", `Last checked ${new Date(health.checkedAt).toLocaleString()}`, "muted"));
+    section.append(el("p", `${this.status(this.current)}${health.toolCount === undefined ? "" : ` · ${health.toolCount} tools`}`));
+    if (health.message && ["error", "needs_auth"].includes(health.status)) section.append(el("p", health.message, "form-error"));
     if (health.tools?.length) {
-      const details = document.createElement("details"); details.append(el("summary", "Available tools")); const list = el("ul", "", "mcp-tool-list");
+      const details = document.createElement("details"); details.append(el("summary", "Connection details"));
+      if (health.checkedAt) details.append(el("p", `Last verified ${new Date(health.checkedAt).toLocaleString()}`, "muted"));
+      const list = el("ul", "", "mcp-tool-list");
       for (const tool of health.tools) { const item = el("li", ""); item.append(el("strong", tool.name), el("p", tool.description, "muted")); list.append(item); } details.append(list); section.append(details);
     }
   }
   actions() {
     const http = this.current?.type === "http", oauth = this.current?.authMode === "oauth";
     $("#mcp-connect").hidden = !http || !oauth; $("#mcp-test").hidden = !http; $("#mcp-disconnect").hidden = !http || !this.current?.oauthConnected;
+    $("#mcp-connect").textContent = this.current?.oauthConnected ? "Reconnect" : "Connect with OAuth";
+    $("#mcp-connect").className = this.current?.oauthConnected ? "secondary-button" : "primary-button";
     const pending = ["pending", "connecting"].includes(this.current?.signIn?.status);
-    for (const id of ["mcp-connect", "mcp-test", "mcp-disconnect"]) { $("#" + id).disabled = Boolean(this.dirty || this.busy || pending); $("#" + id).title = this.dirty ? "Save your changes first" : ""; }
+    for (const id of ["mcp-connect", "mcp-test", "mcp-disconnect"]) { $("#" + id).disabled = Boolean(this.dirty || this.busy || pending || !this.current?.companyId); $("#" + id).title = this.dirty ? "Save your changes first" : ""; }
+    for (const id of ["mcp-back", "mcp-save", "mcp-delete", "mcp-company", "mcp-connection-select", "mcp-add-another"]) $("#" + id).disabled = Boolean(this.busy);
+    for (const input of $("#mcp-form").querySelectorAll("input, textarea, select")) input.disabled = Boolean(this.busy);
+    $("#mcp-save").disabled = Boolean(this.busy || this.current && !this.dirty && this.current.companyId);
     $("#mcp-test").textContent = isLinearMcp(this.current?.url) ? "Verify Linear workspace" : "Test connection";
   }
   transport() {
@@ -85,15 +151,16 @@ export class McpSettings {
     }
   }
   async save(event) {
-    event.preventDefault(); event.submitter.disabled = true; $("#mcp-error").textContent = "";
+    event.preventDefault(); if (this.busy) return; this.busy = true; this.actions(); $("#mcp-error").textContent = "";
     try {
-      if (!this.state?.config?.features?.companyScopes) throw new Error("Restart Relay to activate company-scoped settings before saving. This server still uses the old global settings.");
+      if (!this.state?.config?.features?.companyRegistry) throw new Error("Restart Relay to activate registered companies before saving.");
       const type = $("#mcp-type").value, headers = $("#mcp-headers").value.trim(), secret = $("#mcp-client-secret").value;
-      const data = { name: $("#mcp-name").value, ...this.companyPicker.value(), type, revision: this.current?.revision,
+      const data = { name: $("#mcp-name").value, companyId: $("#mcp-company").value, type, revision: this.current?.revision,
         ...(type === "http" ? { url: $("#mcp-url").value, authMode: $("#mcp-auth").value, oauthClientId: $("#mcp-client-id").value, oauthScopes: $("#mcp-scopes").value, ...(secret ? { oauthClientSecret: secret } : {}), ...(headers ? { headers: JSON.parse(headers) } : {}) } : { command: $("#mcp-command").value, args: JSON.parse($("#mcp-args").value || "[]") }) };
       const { connection } = await this.api(this.current ? `/api/mcps/${this.current.id}` : "/api/mcps", { method: this.current ? "PATCH" : "POST", body: JSON.stringify(data) });
-      await this.load(); this.edit(connection); $("#mcp-save-status").textContent = connection.authMode === "oauth" && !connection.oauthConnected ? "Saved configuration — not signed in yet. Connect with OAuth, then verify access before selecting this connection in an environment." : "Saved. Test access, then select this MCP in an environment. It applies on the next worker start.";
-    } catch (error) { $("#mcp-error").textContent = error.message; } finally { event.submitter.disabled = false; }
+      this.companyId = connection.companyId;
+      await this.load(); this.edit(connection); $("#mcp-save-status").textContent = connection.authMode === "oauth" && !connection.oauthConnected ? "Saved — not signed in yet. Connect below to authorize this company's tools." : "Saved. Available to this company's chats on the next agent start.";
+    } catch (error) { $("#mcp-error").textContent = error.message; } finally { this.busy = false; this.actions(); }
   }
   async action(action) {
     if (!this.current || this.busy) return;
@@ -103,7 +170,7 @@ export class McpSettings {
     $("#mcp-error").textContent = ""; $("#mcp-save-status").textContent = action === "test" ? "Connecting and discovering tools…" : "Updating connection…";
     try {
       const result = await this.api(`/api/mcps/${id}${action === "delete" ? "" : `/${action}`}`, { method: action === "delete" ? "DELETE" : "POST" });
-      await this.load(); if (this.current?.id === id && !this.dirty) this.edit(result.connection);
+      await this.load(); if (this.current?.id === id && !this.dirty) { if (action === "delete") { this.busy = false; this.overview(); } else this.edit(result.connection); }
     } catch (error) { $("#mcp-error").textContent = error.message; } finally { this.busy = false; this.actions(); }
   }
   async connect() {
@@ -129,7 +196,7 @@ export class McpSettings {
       this.oauthTimer = setTimeout(() => this.pollOAuth(), 1000);
     } catch (error) {
       this.popup?.close(); this.popup = null; $("#mcp-save-status").textContent = ""; $("#mcp-error").textContent = error.message;
-      if (error.message.includes("pre-registered")) { $("#mcp-oauth-fields").open = true; $("#mcp-client-id").focus(); }
+      if (error.message.includes("pre-registered")) { $("#mcp-advanced").open = true; $("#mcp-oauth-fields").open = true; $("#mcp-client-id").focus(); }
     }
     finally { this.busy = false; this.actions(); }
   }

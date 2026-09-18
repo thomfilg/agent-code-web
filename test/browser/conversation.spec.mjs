@@ -302,7 +302,7 @@ test("composer and command picker have readable controls and fit desktop and mob
     await expect(page.locator("#slash-menu")).toBeInViewport({ ratio: 1 });
     for (const selector of ["#composer", "#slash-menu"]) expect(await page.locator(selector).evaluate(n => n.scrollWidth <= n.clientWidth + 1)).toBe(true);
     await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeInViewport();
-    const compact = await page.locator(".composer-wrap").evaluate(n => n.clientWidth <= 540);
+    const compact = await page.locator("#conversation .composer-wrap").evaluate(n => n.clientWidth <= 540);
     await expect(page.getByLabel("Chat model", { exact: true })).toHaveCSS("font-size", compact ? "12px" : "13px");
     if (width === 1440 || width === 390) await page.screenshot({ path: `test-results/composer-commands-${width}.png`, fullPage: true });
     await input.press("Escape");
@@ -402,19 +402,20 @@ test("busy composer accepts queued messages and its main button stops the agent"
   await input.fill("Do this next"); await input.press("Enter"); await expect.poll(() => queued).toBe("Do this next");
   await page.getByRole("button", { name: "Stop agent", exact: true }).click(); await expect.poll(() => stopped).toBe(true);
 });
-test("MCP connection can be saved masked then selected in an environment", async ({ page }) => {
+test("MCP connection is saved masked and assigned once to its company", async ({ page }) => {
   await page.goto("/"); await page.getByRole("button", { name: "MCP connections", exact: true }).click();
+  await page.locator("#mcp-company-filter").selectOption("acme"); await page.locator("#mcp-new").click();
   await page.locator("#mcp-dialog").getByLabel("Connection name", { exact: true }).fill("browser-tools");
-  await page.locator("#mcp-companies").getByRole("checkbox", { name: "Unassigned chats (no company)", exact: true }).check();
   await page.getByLabel("MCP endpoint URL").fill("https://mcp.example.com/mcp");
   await page.locator("#mcp-auth").selectOption("headers");
   await page.locator("#mcp-headers").fill('{"Authorization":"Bearer fixture-secret"}');
   await page.getByRole("button", { name: "Save connection" }).click(); await expect(page.locator("#mcp-save-status")).toContainText("Saved");
   await expect(page.locator("#mcp-headers")).toHaveValue("");
   await page.getByLabel("Close MCP connections").click(); await page.getByRole("button", { name: "Environments", exact: true }).click();
-  await page.locator("#environment-mcp-options").getByRole("checkbox", { name: "browser-tools · http" }).check();
+  await expect(page.locator("#environment-mcp-options")).toContainText("browser-tools · acme");
+  await expect(page.locator("#environment-mcp-options input")).toHaveCount(0);
   await page.getByRole("button", { name: "Save environment" }).click(); await expect(page.locator("#environment-save-status")).toContainText("Saved securely");
-  const { environments } = await (await page.request.get("/api/environments")).json(); expect(environments.some(e => e.mcpIds?.length)).toBe(true);
+  const { environments } = await (await page.request.get("/api/environments")).json(); expect(environments.every(e => !e.mcpIds?.length)).toBe(true);
 });
 
 test("same-name MCP connections can have independent organization scopes in one environment", async ({ page }) => {
@@ -422,23 +423,20 @@ test("same-name MCP connections can have independent organization scopes in one 
   try {
     await page.goto("/"); await page.getByRole("button", { name: "MCP connections", exact: true }).click();
     for (const org of ["12-apps", "g2i"]) {
-      await page.getByRole("button", { name: "Custom MCP" }).click();
+      await page.locator("#mcp-company-filter").selectOption(org); await page.locator("#mcp-new").click();
       await page.locator("#mcp-dialog").getByLabel("Connection name", { exact: true }).fill("linear-scoped");
-      await page.locator("#mcp-companies").getByLabel("Add companies", { exact: true }).fill(org);
-      await page.locator("#mcp-companies").getByRole("button", { name: "Add companies", exact: true }).click();
       await page.getByLabel("MCP endpoint URL").fill("https://mcp.linear.app/mcp");
       await page.getByRole("button", { name: "Save connection" }).click(); await expect(page.locator("#mcp-save-status")).toContainText("Saved");
-      await expect(page.locator("#mcp-list")).toContainText(`${org} · linear-scoped · Sign-in required`);
+      await expect(page.locator("#mcp-company")).toHaveValue(org); await page.locator("#mcp-back").click();
     }
     const { connections } = await (await page.request.get("/api/mcps")).json(); ids.push(...connections.filter(c => c.name === "linear-scoped").map(c => c.id)); expect(ids.length).toBe(2);
-    await page.locator("#mcp-list").getByRole("button", { name: /^12-apps · linear-scoped/ }).click(); await expect(page.locator("#mcp-companies").getByRole("checkbox", { name: "12-apps", exact: true })).toBeChecked();
+    await page.locator("#mcp-company-filter").selectOption("12-apps"); await page.locator('[data-preset="linear"]').click(); await expect(page.locator("#mcp-company")).toHaveValue("12-apps");
     await page.getByLabel("Close MCP connections").click(); await page.getByRole("button", { name: "Environments", exact: true }).click();
     await page.getByRole("button", { name: "Add environment", exact: false }).click(); await page.getByLabel("Environment name", { exact: true }).fill("Scoped MCP test");
-    await page.locator("#environment-companies").getByLabel("Add companies", { exact: true }).fill("12-apps, g2i");
-    await page.locator("#environment-companies").getByRole("button", { name: "Add companies", exact: true }).click();
-    for (const org of ["12-apps", "g2i"]) await page.locator("#environment-mcp-options").getByRole("checkbox", { name: `linear-scoped · http · ${org}`, exact: true }).check();
+    for (const org of ["12-apps", "g2i"]) await page.locator("#environment-companies").getByRole("checkbox", { name: org, exact: true }).check();
+    await expect(page.locator("#environment-mcp-options input")).toHaveCount(0);
     await page.getByRole("button", { name: "Save environment" }).click(); await expect(page.locator("#environment-save-status")).toContainText("Saved securely");
-    const { environments } = await (await page.request.get("/api/environments")).json(); env = environments.find(e => e.name === "Scoped MCP test"); expect(env.mcpIds.sort()).toEqual(ids.sort());
+    const { environments } = await (await page.request.get("/api/environments")).json(); env = environments.find(e => e.name === "Scoped MCP test"); expect(env.mcpIds).toEqual([]);
   } finally {
     if (env) await page.request.delete(`/api/environments/${env.id}`);
     for (const id of ids) await page.request.delete(`/api/mcps/${id}`);
@@ -448,26 +446,26 @@ test("same-name MCP connections can have independent organization scopes in one 
 test("all development MCP presets populate their official endpoint without installing or authorizing", async ({ page }) => {
   const before = await (await page.request.get("/api/mcps")).json();
   await page.goto("/"); await page.getByRole("button", { name: "MCP connections", exact: true }).click();
+  await page.locator("#mcp-company-filter").selectOption("other");
   const presets = [
     ["linear", "Linear", "https://mcp.linear.app/mcp", "oauth"],
     ["atlassian", "Atlassian", "https://mcp.atlassian.com/v2/mcp", "oauth"],
-    ["github", "GitHub", "https://api.githubcopilot.com/mcp/", "headers"],
     ["sentry", "Sentry", "https://mcp.sentry.dev/mcp", "oauth"],
     ["figma", "Figma", "https://mcp.figma.com/mcp", "oauth"],
     ["notion", "Notion", "https://mcp.notion.com/mcp", "oauth"],
     ["context7", "Context7", "https://mcp.context7.com/mcp", "none"],
   ];
   for (const [id, name, endpoint, auth] of presets) {
-    await page.locator("#mcp-catalog").evaluate(node => { node.open = true; });
     await page.locator("#mcp-presets").getByRole("button", { name: new RegExp(`^${name} `) }).click();
     await expect(page.locator("#mcp-name")).toHaveValue(id);
     await expect(page.locator("#mcp-url")).toHaveValue(endpoint);
     await expect(page.locator("#mcp-type")).toHaveValue("http");
     await expect(page.locator("#mcp-auth")).toHaveValue(auth);
     await expect(page.locator("#mcp-headers")).toHaveValue("");
+    await page.locator("#mcp-back").click();
   }
   expect(await (await page.request.get("/api/mcps")).json()).toEqual(before);
-  await page.getByRole("button", { name: "Custom MCP" }).click();
+  await page.locator("#mcp-new").click();
   await expect(page.locator("#mcp-name")).toHaveValue("");
   await expect(page.locator("#mcp-url")).toHaveValue("");
 });
@@ -476,14 +474,14 @@ test("MCP presets, custom OAuth consent, real tool discovery and mobile layout",
   await page.goto("/"); await page.getByRole("button", { name: "MCP connections", exact: true }).click();
   await page.locator("#mcp-presets").getByRole("button", { name: /^Linear/ }).click();
   await expect(page.locator("#mcp-url")).toHaveValue("https://mcp.linear.app/mcp"); await expect(page.locator("#mcp-auth")).toHaveValue("oauth");
-  await page.getByRole("button", { name: "Custom MCP" }).click(); await expect(page.locator("#mcp-url")).toHaveValue("");
+  await page.locator("#mcp-back").click(); await page.locator("#mcp-new").click(); await expect(page.locator("#mcp-url")).toHaveValue("");
   await page.locator("#mcp-name").fill("oauth-fixture"); await page.locator("#mcp-url").fill("http://127.0.0.1:8881/mcp");
   await page.getByRole("button", { name: "Save connection" }).click(); await expect(page.locator("#mcp-connection-status")).toContainText("Sign-in required");
   const popupReady = page.waitForEvent("popup"); await page.getByRole("button", { name: "Connect with OAuth" }).click();
   const popup = await popupReady; await popup.getByRole("link", { name: "Approve access" }).click();
   await expect(popup.getByRole("heading", { name: "MCP connected" })).toBeVisible();
   await expect(page.locator("#mcp-connection-status")).toContainText("Connected · 1 tools");
-  await page.getByText("Available tools", { exact: true }).click(); await expect(page.locator(".mcp-tool-list")).toContainText("fixture_echo");
+  await page.getByText("Connection details", { exact: true }).click(); await expect(page.locator(".mcp-tool-list")).toContainText("fixture_echo");
   const { connections } = await (await page.request.get("/api/mcps")).json(); const connection = connections.find(c => c.name === "oauth-fixture");
   expect(connection.oauthConnected).toBe(true); expect(JSON.stringify(connections)).not.toContain("fixture-access-secret");
   await popup.close(); await page.setViewportSize({ width: 390, height: 844 });
