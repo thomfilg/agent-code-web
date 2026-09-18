@@ -13,6 +13,9 @@ button reached `accounts.google.com`, which returned **Error 400:
 redirect_uri_mismatch**. No identity, password or consent was supplied. Register
 the exact cloud callback below before trying provider onboarding; restarting
 Relay or re-entering the Google client secret cannot register that URI.
+The reviewed [repeatable probe](deployed-login-probe.md) confirmed the same
+result at 10:10 UTC and can recheck provider initiation after configuration;
+it never completes account consent.
 
 - [ ] Operator: confirm `AGENT_WEB_PUBLIC_URL` is
   `https://d20atclccf8cku.cloudfront.net`, the Google client's JavaScript origin

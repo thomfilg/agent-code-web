@@ -137,6 +137,18 @@ reached `accounts.google.com`, which rejected the cloud callback with
 client; no Relay restart can substitute for that console configuration. No
 credentials or consent were entered by this check.
 
+The repeatable [public login probe](deployed-login-probe.md) now verifies the
+three entry widths through official Playwright MCP. Its optional Google
+initiation check reproduced the same mismatch at 10:10 UTC, with confirmed
+process cleanup and without entering credentials:
+
+```bash
+taskset -c 0,1 nice -n 10 node scripts/smoke-deployed-login.mjs --run --check-google-redirect
+```
+
+Inspect its explicit provider/error flags: command completion does not mean
+that Google consent or login succeeded.
+
 ## Deploy, observe and roll back
 
 ```bash

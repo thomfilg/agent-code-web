@@ -66,6 +66,17 @@ does not infer deployment identity from public UI behavior or caller input.
 It cannot close authenticated SSE, provider consent, selected-account native
 turn/resume, or GitHub/Linear integration acceptance gates.
 
+## Recorded deployed observation
+
+On 2026-09-18 at 10:10 UTC, the reviewed operator ran against the separately
+verified `3a0b7b3` release. All three viewport checks passed and the Google
+button reached `accounts.google.com`. Google returned `redirect_uri_mismatch`
+and Error 400; no email entry was displayed, no credentials were entered and
+no consent was submitted. Browser/client closure and the actual MCP child-close
+event were observed; private transient directories were removed. The three
+pre-provider PNGs remain in the task-private ignored screenshot directory.
+This repeats the callback configuration blocker, not a successful login.
+
 Offline deterministic coverage:
 
 ```sh
