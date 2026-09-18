@@ -6,9 +6,12 @@ or modify this application's infrastructure stack.
 
 One chat owns one VM and encrypted EBS root volume. The controller starts or
 resumes it on demand, stops it after idle, and terminates it when its runtime is
-deleted. Master provider/MCP credentials stay on the controller; the worker
-receives revocable, scoped gateway capabilities. Do not use a shared VM for
-untrusted users. Docker access is root-equivalent inside this one-chat VM.
+deleted. MCP and provider-API-key integrations use revocable gateway
+capabilities; their upstream credentials stay on the controller. Native named
+Codex/Claude accounts require the selected account's short-lived access token
+inside this one-chat VM. Refresh tokens and durable account credentials stay
+encrypted on the controller. Do not use a shared VM for untrusted users.
+Docker access is root-equivalent inside this one-chat VM.
 
 The controller uses its IAM role through the default AWS credential chain:
 leave `AWS_PROFILE` empty on EC2. An explicit named profile remains supported
