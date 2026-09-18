@@ -220,8 +220,22 @@ At 12:22 UTC the deployed public checks passed all 13 fixed Git/MCP denials,
 readiness 200, anonymous SSE 401, WSS 101 with bidirectional frames and expected
 authentication rejection, and official-MCP login entry at 1600/390/320 pixels
 without horizontal overflow. These checks do not authenticate a user.
-Actual CloudFront preview-host provisioning/deletion acceptance is still pending;
+Actual isolated CloudFront preview-host provisioning/deletion passed at
+12:47 UTC through SSM `5af3fbe1-d454-4fca-875d-1bd83c7a3481`. The exact controller
+role created one temporary distribution, verified readiness, reloaded its
+durable record in a fresh provider, revoked it and confirmed deletion. The
+temporary operator container was observed stopped and removed; its private
+journal was retained. Independent complete distribution inventory confirmed the
+temporary ID absent and the Relay distribution present. This is provider-state
+reinitialization, not a controller reboot or authenticated application traffic.
+See the [scoped receipt](preview-host-acceptance.md#actual-isolated-controller-role-receipt--2026-09-18).
 Google callback registration and real provider consent remain open.
+
+The post-test deployment-tagged EC2/volume inventory contained only the intended
+running controller and its unchanged encrypted data volume; no tagged temporary
+instance or acceptance volume remained. The controller, NAT, storage, retained
+images and backup artifacts remain billable. This is scoped cleanup, not an
+infrastructure teardown.
 
 Before any preview host creation, the same verified digest/configuration was
 deployed a second time: SSM `d33ae45e-c52b-4d54-abbb-38203c8c4034` completed

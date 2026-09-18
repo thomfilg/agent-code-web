@@ -100,6 +100,14 @@ record was written by the verification, no production user/chat was fabricated,
 and no provider consent or model prompt occurred. AWS still runs the immutable
 revision in the activation receipt below until a later rollout is recorded.
 
+The real isolated controller-role CloudFront lifecycle passed at 12:47 UTC:
+one address created, ready state verified and revalidated from its durable
+record, access revoked, distribution deleted and exact operator container
+removed. Root independently confirmed a complete inventory with the temporary
+distribution absent. This closes only the provider/IAM lifecycle primitive,
+not Google consent, a controller reboot or authenticated app HTTP/WS/SSE.
+See [the receipt and its limits](preview-host-acceptance.md).
+
 Continuation checkpoint (2026-09-18 12:25 UTC): the user renewed autonomous
 work for two hours, ending at 13:39:52 UTC (10:39:52 São Paulo). The isolated
 remote-app preview now has committed controller routing, persistent

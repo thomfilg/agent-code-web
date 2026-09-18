@@ -28,6 +28,8 @@ const relayHost = "relay.fixture.test", previewHost = "app.preview-fixture.test"
 const destination = "/future-drink/menu?cart=1#saved";
 const provider = googleOidcFixture(), rows = [], children = [], streams = new Set(), tlsSockets = new Set();
 const observed = [], apiCalls = []; let acquisitions = 0, app, upstream, wss, front, client, transport, phase = "setup", receipt, failure;
+let releaseAcquisition;
+const acquisitionGate = new Promise(resolve => { releaseAcquisition = resolve; });
 let transportClosed; const observedTransportClose = new Promise(resolve => { transportClosed = resolve; });
 const bounded = async (promise, timeout = 10000) => {
   let timer; try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("fixture timeout")), timeout); })]); } finally { clearTimeout(timer); }
@@ -80,7 +82,7 @@ window.fixtureEvents=new EventSource('/events');fixtureEvents.onmessage=e=>docum
     AGENT_PREVIEW_ACCOUNT_ID: "111122223333", AGENT_EC2_DEPLOYMENT: "relay-fixture", AGENT_PREVIEW_VPC_ORIGIN_ID: "vo_fixture",
     AGENT_PREVIEW_CONTROLLER_INSTANCE_ID: "i-0123456789abcdef0", AGENT_PREVIEW_CONTROLLER_ORIGIN_DNS: "ip-10-0-0-1.us-east-2.compute.internal", AGENT_PREVIEW_RELAY_DISTRIBUTION_ID: "ERELAYFIXTURE", AGENT_IDLE_TIMEOUT_MS: "60000" });
   app = await createAgentWebServer({ config, googleAuthOptions: { fetchImpl: provider.fetch }, previewHosts: hosts,
-    workerBackend: { acquire: async () => { acquisitions++; return { workspace: directory, spawn(command, args, options) {
+    workerBackend: { acquire: async () => { acquisitions++; await acquisitionGate; return { workspace: directory, spawn(command, args, options) {
       assert.equal(command, "/usr/bin/node"); assert.deepEqual(args, ["--input-type=module", "-e", WORKER_TCP_BRIDGE]); assert.deepEqual(options.env, {});
       const child = spawn(process.execPath, ["--input-type=module", "-e", SSH_WORKER_LAUNCHER], { ...options, env: {} }); children.push(child);
       child.stdin.write(sshWorkerRequest({ command: process.execPath, args, cwd: directory, env: {}, heartbeat })); return child;
@@ -134,12 +136,20 @@ window.fixtureEvents=new EventSource('/events');fixtureEvents.onmessage=e=>docum
   for (const width of [1600, 390, 320]) await run(`await page.setViewportSize({width:${width},height:1000});if(!(await page.locator('#app-preview-dialog').evaluate(el=>el.scrollWidth<=el.clientWidth)))throw Error('Preview overflow');await page.screenshot({path:${JSON.stringify(path.join(output, `ready-${width}.png`))}});`);
   phase = "ui-open-popup";
   await run(`const created=page.waitForEvent('popup');await page.getByRole('button',{name:'Open app ↗',exact:true}).click();await created;`);
+  phase = "cold-worker-preparation-ui";
+  await run(`await page.getByRole('status').filter({hasText:'Preparing this chat'}).waitFor();const popup=page.context().pages().find(p=>p.url()==='about:blank');if(!popup)throw Error('Preparation tab missing');if(!await popup.evaluate(()=>window.opener===null&&document.body.textContent.includes('Preparing this chat')))throw Error('Preparation state missing');await page.screenshot({path:${JSON.stringify(path.join(output, "worker-preparing-320.png"))}});`);
+  assert.equal(acquisitions, 1); assert.equal(observed.length, 0);
+  assert.ok(apiCalls.some(row => row.method === "POST" && row.path.endsWith("/app-preview/open") && row.status === 202));
+  assert.ok(!apiCalls.some(row => row.path === "/api/app-preview/bootstrap"));
+  assert.ok(app.store.list().every(chat => chat.messages.length === 0));
+  releaseAcquisition();
   phase = "trusted-bootstrap-app-http";
   await run(`const popup=page.context().pages().find(p=>!p.url().startsWith('${origin}/#chat='));if(!popup)throw Error('Fixture popup missing');await popup.getByRole('heading',{name:'Isolated fixture app',exact:true}).waitFor({timeout:15000});if(popup.url()!=='https://${previewHost}${destination}')throw Error('App target changed');if(!await popup.evaluate(()=>window.opener===null&&document.referrer===''&&!document.cookie.includes('relay')))throw Error('Popup isolation failed');`);
   phase = "app-websocket-sse";
   await run(`const popup=page.context().pages().find(p=>p.url().startsWith('https://${previewHost}/'));await popup.locator('#ws').filter({hasText:'fixture echo'}).waitFor({timeout:10000});await popup.locator('#sse').filter({hasText:'incremental'}).waitFor({timeout:10000});await popup.screenshot({path:${JSON.stringify(path.join(output, "app-live.png"))}});`);
   phase = "upstream-isolation-assertions";
   assert.ok(acquisitions > 0); assert.ok(streams.size > 0); assert.ok(wss.clients.size > 0);
+  assert.ok(apiCalls.some(row => row.method === "POST" && row.path.endsWith("/app-preview/open") && row.status === 200));
   assert.ok(observed.some(row => row.path === destination.split("#")[0]));
   assert.ok(observed.every(row => row.host === previewHost && !row.authorization && row.cookieNames.every(name => name === "app_cookie")));
   assert.ok(app.store.list().every(chat => chat.messages.length === 0));
@@ -149,7 +159,7 @@ window.fixtureEvents=new EventSource('/events');fixtureEvents.onmessage=e=>docum
   assert.equal(rows[0].status, "revoking"); assert.ok(app.store.list().every(chat => chat.messages.length === 0));
   assert.ok(!observed.some(row => row.path === "/after-revoke"));
   receipt = { schema: 1, fixtureOnly: true, actualRelayUiAndApis: true, officialPlaywrightMcp: true, separateHttpsOrigins: true, signedOidcFixture: true,
-    explicitAsyncSetup: true, originalPathQueryFragment: true, detachedNoReferrerTab: true, workerCookiesIsolated: true, http: true, websocket: true, incrementalSse: true,
+    explicitAsyncSetup: true, coldWorkerPreparationUi: true, workerReadyBeforeBootstrap: true, originalPathQueryFragment: true, detachedNoReferrerTab: true, workerCookiesIsolated: true, http: true, websocket: true, incrementalSse: true,
     revokeClosesStreams: true, noModelPrompts: true, localLauncherChildrenClosed: true, realAwsOrAccountConsent: false, screenshots: "test-results/preview-ui-integrated-mcp" };
 } catch (error) { failure = { ok: false, fixtureOnly: true, phase, category: ["fixture-dns", "fixture-tls", "browser-timeout", "ambiguous-locator", "browser-assertion", "browser-transport"].includes(error?.category) ? error.category : "fixture-assertion",
   diagnostics: { acquisitions, upstreamRequests: observed.length, websocketClients: wss?.clients.size || 0, sseStreams: streams.size,
@@ -157,6 +167,7 @@ window.fixtureEvents=new EventSource('/events');fixtureEvents.onmessage=e=>docum
     bootstrapStatuses: apiCalls.filter(row => row.path === "/api/app-preview/bootstrap").map(row => row.status || 0).slice(-5) } }; }
 finally {
   let cleanup = true;
+  releaseAcquisition(); // A failed assertion must not strand a pending fixture executor.
   if (client) await bounded(call("browser_close", {})).catch(() => { cleanup = false; });
   await bounded(client?.close() || Promise.resolve(), 6000).catch(() => { cleanup = false; });
   if (transport) await bounded(Promise.all([transport.close(), observedTransportClose]), 6000).catch(() => { cleanup = false; });
