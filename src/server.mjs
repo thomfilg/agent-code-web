@@ -119,6 +119,7 @@ export async function createAgentWebServer(options = {}) {
   let stopping;
   let draining = false;
   let activeMutations = 0;
+  let browserAttachments = 0;
   const sidebarChanged = () => { for (const response of sidebarClients) response.write('data: {"type":"sidebar_changed"}\n\n'); };
   const agentAccounts = new AgentAccounts({ records, config, ...options.agentAccountsOptions,
     onChange: ownerId => { for (const response of sidebarClients) if (response.ownerId === ownerId) response.write('data: {"type":"agent_accounts_changed"}\n\n'); },
@@ -154,6 +155,7 @@ export async function createAgentWebServer(options = {}) {
     if (stopping) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
     securityHeaders(response);
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+    let mutationPending = false;
     try {
       if (url.pathname.startsWith("/internal/deploy/")) {
         // SSM runs this on the controller itself. Forwarded headers and browser
@@ -166,18 +168,21 @@ export async function createAgentWebServer(options = {}) {
           return json(response, 200, { ok: true });
         }
         if (url.pathname !== "/internal/deploy/drain") return json(response, 404, { error: "Not found" });
-        const busy = activeMutations || agentAccounts.flows.size || store.list().some(chat =>
+        const providerLogin = resources.all().some(service => service.github.pending?.size ||
+          [...service.mcps.oauth.flows.values()].some(flow => flow.expiresAt > Date.now()));
+        const busy = activeMutations || browserAttachments || agentAccounts.flows.size || providerLogin || store.list().some(chat =>
           manager?.isBusy(chat.id) || manager?.sideChats.busy(chat.id) || ["starting", "stopping", "running", "waiting"].includes(chat.status));
         if (busy) return json(response, 409, { ok: false, error: "Wait for active work and sign-in attempts to finish" });
         draining = true;
+        for (const socket of browserSockets.clients) socket.close(1012, "Relay is restarting");
+        for (const socket of personalSockets.clients) socket.close(1012, "Relay is restarting");
         return json(response, 200, { ok: true });
       }
       if (draining) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
-      if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+      if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method) ||
+          ["/api/auth/callback/google", "/oauth/mcp/callback"].includes(url.pathname)) {
         activeMutations++;
-        let released = false;
-        const release = () => { if (!released) { released = true; activeMutations--; } };
-        response.once("finish", release); response.once("close", release);
+        mutationPending = true;
       }
       if (url.pathname === "/readyz" && request.method === "GET") {
         const ok = await ready();
@@ -693,11 +698,16 @@ export async function createAgentWebServer(options = {}) {
     } catch (error) {
       if (response.headersSent) return response.end();
       return json(response, error.statusCode || 400, { error: errorMessage(error) });
+    } finally {
+      // A disconnected HTTP client does not cancel an already running save or
+      // OAuth exchange. Keep it counted until the handler itself has finished.
+      if (mutationPending) activeMutations--;
     }
   });
 
   server.on("upgrade", async (request, socket, head) => {
     const reject = code => { socket.end(`HTTP/1.1 ${code}\r\nConnection: close\r\n\r\n`); };
+    if (stopping || draining) { reject("503 Service Unavailable"); return; }
     let url, origin;
     try { url = new URL(request.url, `http://${request.headers.host}`); origin = new URL(request.headers.origin); }
     catch { reject("403 Forbidden"); return; }
@@ -709,6 +719,7 @@ export async function createAgentWebServer(options = {}) {
     const expectedProtocol = config.cookieSecure || googleAuth.config.origin?.startsWith("https:") ? "https:" : "http:";
     if (origin.host !== request.headers.host || origin.protocol !== expectedProtocol || url.search || !auth.authenticated(request)) { reject("403 Forbidden"); return; }
     let user; try { user = await browserUsers.session(request); } catch { reject("503 Service Unavailable"); return; }
+    if (stopping || draining) { reject("503 Service Unavailable"); return; }
     if (!manager || !routed || routed.tail !== "browser/live" || !browserUsers.canRead(store.get(routed.chatId), user)) { reject("404 Not Found"); return; }
     browserSockets.handleUpgrade(request, socket, head, ws => {
       ws.ownerId = user?.id;
@@ -721,10 +732,11 @@ export async function createAgentWebServer(options = {}) {
         alive = false; ws.ping();
       }, 15000);
       heartbeat.unref?.(); ws.once("close", () => clearInterval(heartbeat));
+      browserAttachments++;
       void manager.browsers.attach(routed.chatId, ws).catch(error => {
         if (ws.readyState === 1) ws.send(JSON.stringify({ event: "closed", value: { message: errorMessage(error) } }));
         ws.close(1011, "Browser unavailable");
-      });
+      }).finally(() => { browserAttachments--; });
     });
   });
 

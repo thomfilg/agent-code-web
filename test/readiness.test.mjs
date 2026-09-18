@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readinessProbe } from "../src/readiness.mjs";
 import { createAgentWebServer } from "../src/server.mjs";
-import { temporaryDirectory, testConfig } from "./helpers.mjs";
+import { WebSocket } from "ws";
+import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
 
 test("readiness requires decryptable database and writable data directories", async t => {
   const directory = await temporaryDirectory(t);
@@ -54,4 +55,42 @@ test("deployment drain rejects browser requests, busy work and pauses new admiss
   assert.equal((await fetch(url + "/api/chats", { method: "POST" })).status, 503);
   assert.equal((await fetch(url + "/internal/deploy/resume", { method: "POST" })).status, 200);
   assert.equal((await fetch(url + "/readyz")).status, 200);
+});
+
+test("deployment drain keeps disconnected mutations counted until the action ends", async t => {
+  const root = await temporaryDirectory(t);
+  const app = await createAgentWebServer({ config: testConfig(root) });
+  const { url } = await app.start(); t.after(() => app.stop());
+  const original = app.browserUsers.session.bind(app.browserUsers);
+  let entered, release;
+  const reached = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  app.browserUsers.session = async request => { if (request.method === "POST") { entered(); await gate; } return original(request); };
+  const abort = new AbortController();
+  const pending = fetch(url + "/api/chats", { method: "POST", body: "{}", signal: abort.signal }).catch(() => {});
+  try {
+    await reached; abort.abort(); await pending;
+    assert.equal((await fetch(url + "/internal/deploy/drain", { method: "POST" })).status, 409);
+    release();
+    await waitFor(async () => (await fetch(url + "/internal/deploy/drain", { method: "POST" })).status === 200);
+  } finally { release(); abort.abort(); }
+});
+
+for (const waitingForIdentity of [false, true]) test(`drain rejects browser WebSocket admission (${waitingForIdentity ? "pending identity" : "new upgrade"})`, async t => {
+  const root = await temporaryDirectory(t), app = await createAgentWebServer({ config: testConfig(root) });
+  const { url } = await app.start(); t.after(() => app.stop());
+  let release, entered;
+  const reached = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  if (waitingForIdentity) app.browserUsers.session = async () => { entered(); await gate; return null; };
+  const open = () => new Promise(resolve => {
+    const ws = new WebSocket(url.replace("http:", "ws:") + "/api/chats/chat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/browser/live", { origin: url });
+    ws.on("unexpected-response", (_request, response) => { response.resume(); resolve(response.statusCode); ws.terminate(); });
+    ws.on("error", () => {});
+  });
+  let response;
+  if (waitingForIdentity) { response = open(); await reached; }
+  assert.equal((await fetch(url + "/internal/deploy/drain", { method: "POST" })).status, 200);
+  release();
+  assert.equal(await (response || open()), 503);
 });
