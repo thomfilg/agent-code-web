@@ -9,6 +9,7 @@ import { relayTemplate } from "../deploy/aws/template.mjs";
 
 const execute = promisify(execFile);
 export const target = Object.freeze({ profile: "code-web", region: "us-east-2", account: "456808212788", stack: "agent-relay-mvp" });
+export const engineRevision = "848182b33461640e9ac0feb7315f747a67877c88";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const operatorDirectory = path.join(os.homedir(), ".local/share/agent-relay-aws-mvp");
 
@@ -61,9 +62,13 @@ export async function main(args, env = process.env) {
   const engine = env.CI_AWS_ENGINE;
   if (!engine || !path.isAbsolute(engine)) throw new Error("Set CI_AWS_ENGINE to the absolute scripts/deploy/aws.mjs path in the documented pinned 12-apps/ci checkout");
   await access(engine);
+  const engineRoot = path.resolve(path.dirname(engine), "../..");
+  const installedRevision = (await execute("git", ["-C", engineRoot, "rev-parse", "HEAD"])).stdout.trim();
+  const engineChanges = (await execute("git", ["-C", engineRoot, "diff", "--name-only", "HEAD", "--", "scripts/deploy"])).stdout.trim();
+  if (installedRevision !== engineRevision || engineChanges) throw new Error(`Use the clean reviewed 12-apps/ci engine revision ${engineRevision}`);
   if (extra.some((value, index) => index % 2 === 0 && !["--image", "--command-id"].includes(value))) throw new Error("Only --image or --command-id may be passed through; deployment target is pinned");
   await verifyTarget();
-  const options = [action, "--profile", target.profile, "--region", target.region, "--expected-account", target.account, "--stack", target.stack, "--container", "relay", "--mount", "/srv/relay/data", "--destination", "/var/lib/relay", "--port", "8787", "--health", "/readyz", ...extra];
+  const options = [action, "--profile", target.profile, "--region", target.region, "--expected-account", target.account, "--stack", target.stack, "--container", "relay", "--mount", "/srv/relay/data", "--destination", "/var/lib/relay", "--ready-file", "/var/lib/relay-controller-ready", "--port", "8787", "--health", "/readyz", ...extra];
   if (["plan", "provision"].includes(action)) {
     await privateOperatorDirectory();
     const templatePath = path.join(operatorDirectory, "template.json");
