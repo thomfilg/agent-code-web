@@ -147,7 +147,7 @@ test("worker recipe removes builder identity, generates new host keys and does n
 });
 
 test("bootstrap diagnostics expose only fixed stages and booleans, never private output", () => {
-  const receipt = { kind: "relay-worker-bootstrap", schema: 1, status: "error", failedModules: ["scripts-user"], sshOrderingCycle: true, checks: Object.fromEntries(["node", "codex", "claude", "docker", "chrome", "readyMarker", "finalizer", "auditHelper"].map(key => [key, false])), privateField: "DO-NOT-PRINT" };
+  const receipt = { kind: "relay-worker-bootstrap", schema: 1, status: "error", failedModules: ["scripts-user"], sshOrderingCycle: true, checks: Object.fromEntries(["node", "codex", "claude", "docker", "chrome", "readyMarker", "finalizer", "auditHelper", "systemdVerified"].map(key => [key, false])), privateField: "DO-NOT-PRINT" };
   const safe = safeBootstrapReceipt(JSON.stringify(receipt));
   assert.equal(safe.sshOrderingCycle, true);
   assert.equal(JSON.stringify(safe).includes("DO-NOT-PRINT"), false);
