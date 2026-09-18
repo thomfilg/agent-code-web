@@ -131,7 +131,17 @@ user's account. Codex/GitHub provide device URLs/codes; Claude provides its
 native authorization URL and asks for the complete returned code. Linear uses
 browser OAuth and a read-only workspace verification before claiming success.
 
-Actual public-browser check (2026-09-18 09:59 UTC): **Continue with Google**
+Latest OAuth checkpoint (2026-09-18 13:19 UTC): the user confirmed adding both
+cloud values above while retaining localhost. The official-MCP public probe
+then reached `accounts.google.com` without detecting `redirect_uri_mismatch`
+or Error 400. It did not observe a visible email field at its sampling point,
+and **did not establish a completed login or successful callback**. All three
+entry widths passed again, anonymous chats returned 401, and browser/client/
+transport closure plus private transient cleanup were confirmed. No credentials
+or consent were entered. The next gate is the user's legitimate cloud sign-in,
+followed by the separate provider consents and authenticated acceptance.
+
+Historical public-browser check (2026-09-18 09:59 UTC): **Continue with Google**
 reached `accounts.google.com`, which rejected the cloud callback with
 `redirect_uri_mismatch` (Error 400). Register the exact URI above in the Google
 client; no Relay restart can substitute for that console configuration. No
@@ -240,8 +250,10 @@ authentication rejection. At 13:04 UTC official MCP confirmed the login entry
 at 1600/390/320 pixels without horizontal overflow. Google initiation still
 returned **redirect_uri_mismatch / Error 400**; no credentials or consent were
 entered. Browser/client/transport closure and private transient cleanup were
-confirmed. Google callback registration, all real provider consents and
-authenticated deployed app/transport/selected-account execution remain open.
+confirmed. At 13:19 UTC, after the user confirmed registering the cloud callback,
+the repeat probe no longer detected either Google error. Completed Google login,
+all real provider consents and authenticated deployed app/transport/
+selected-account execution remain open; see the latest OAuth checkpoint above.
 
 Local runtime `f0e57ca` has the same application sources. Its controlled restart
 used cold private checkpoint `checkpoint-eDMBUp`; the credential file remained

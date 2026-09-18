@@ -109,9 +109,14 @@ passed; none of those fixtures establish authenticated deployed app traffic.
 
 The published Google entry/anonymous denials and real WSS transport checks
 passed again. Actual Google initiation at 13:04 UTC still returned
-`redirect_uri_mismatch`: the cloud callback and real provider consents remain
-open, followed by selected-account execution/resume and authenticated deployed
-transport/app acceptance. The MVP is **not complete**. Test totals do not close
+`redirect_uri_mismatch`. The user subsequently confirmed registering the cloud
+origin/callback while retaining localhost; a fresh official-MCP check at
+13:19 UTC reached Google without detecting that error or Error 400. It did not
+observe a visible email field at its sampling point and did not complete login;
+all browser/client/transport and private transient cleanup was confirmed.
+Legitimate Google sign-in and real provider consents remain open, followed by
+selected-account execution/resume and authenticated deployed transport/app
+acceptance. The MVP is **not complete**. Test totals do not close
 the historical priority re-audits or change the number of recorded requests.
 See [current deployment receipts](aws-deployment.md) and
 [preview operation limits](app-preview-operations.md).
@@ -342,7 +347,8 @@ AWS checkpoint (2026-09-18 09:51 UTC):
   configuration-only probes and the official-MCP guest UI fixture; the four new
   deployed-denial probe tests passed separately. The immutable publication and
   deployed negative behavior checks are recorded in the current checkpoint above.
-- The cloud Google callback to register is
+- The cloud Google callback, confirmed registered by the user at the latest
+  13:19 UTC checkpoint, is
   `https://d20atclccf8cku.cloudfront.net/api/auth/callback/google`.
   Fresh product consent for Codex/Claude/GitHub/Linear, selected-account execution,
   and deployed authenticated transports remain explicit open gates.
