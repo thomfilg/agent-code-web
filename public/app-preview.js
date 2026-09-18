@@ -54,9 +54,35 @@ export function previewOpenUrl(value, relayOrigin) {
   return url.href;
 }
 
+const pause = (ms, signal) => new Promise((resolve, reject) => {
+  const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(new Error("App opening cancelled")); };
+  const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, ms);
+  signal.addEventListener("abort", abort, { once: true }); if (signal.aborted) abort();
+});
+
+// Only polls Relay's preparation job. It never retries an application request.
+export async function waitForPreviewLaunch({ request, target, signal, current, pending, requestTimeoutMs = 30000, wait = pause }) {
+  let warmingId;
+  for (;;) {
+    if (signal.aborted || !current()) throw new Error("App opening cancelled");
+    const timeout = new AbortController(), timer = setTimeout(() => timeout.abort(), requestTimeoutMs);
+    let result;
+    try { result = await request({ ...target, ...(warmingId ? { warmingId } : {}) }, AbortSignal.any([signal, timeout.signal])); }
+    finally { clearTimeout(timer); }
+    if (signal.aborted || !current()) throw new Error("App opening cancelled");
+    if (result?.url && !result.warming) return result.url;
+    const status = result?.warming;
+    if (result?.url || !status || status.status !== "pending" || typeof status.id !== "string" || status.id.length !== 41 ||
+        !/^warm_[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(status.id) ||
+        warmingId && status.id !== warmingId || !Number.isInteger(status.retryAfterMs) || status.retryAfterMs < 250 || status.retryAfterMs > 5000)
+      throw new Error("Worker preparation status could not be verified");
+    warmingId = status.id; pending(); await wait(status.retryAfterMs, signal);
+  }
+}
+
 export class AppPreviewDialog {
-  constructor({ api, getChat, getBackend, openWindow = () => window.open("about:blank", "_blank"), pollMs = 2500, requestTimeoutMs = 30000 }) {
-    Object.assign(this, { api, getChat, getBackend, openWindow, pollMs, requestTimeoutMs }); this.version = 0;
+  constructor({ api, getChat, getBackend, openWindow = () => window.open("about:blank", "_blank"), pollMs = 2500, requestTimeoutMs = 30000, warmTimeoutMs = 250000 }) {
+    Object.assign(this, { api, getChat, getBackend, openWindow, pollMs, requestTimeoutMs, warmTimeoutMs }); this.version = 0;
     this.dialog = node("dialog"); this.dialog.id = "app-preview-dialog"; this.dialog.setAttribute("aria-labelledby", "app-preview-title");
     const card = node("section", undefined, "dialog-card app-preview-card"), heading = node("div", undefined, "dialog-heading");
     const title = node("h2", "Open app"); title.id = "app-preview-title";
@@ -128,7 +154,7 @@ export class AppPreviewDialog {
       if (link.url) this.local.href = link.url; return;
     }
     this.refresh.disabled = busy;
-    if (busy) this.status.textContent = ({ loading: "Checking preview status…", POST: "Starting preview setup…", DELETE: "Revoking preview access…", opening: "Preparing a secure app tab…" })[this.operation];
+    if (busy) this.status.textContent = ({ loading: "Checking preview status…", POST: "Starting preview setup…", DELETE: "Revoking preview access…", opening: "Preparing a secure app tab…", warming: "Preparing this chat’s worker… This can take a few minutes. No agent prompt is sent." })[this.operation];
     else if (!info) this.status.textContent = "Choose a port, then refresh its preview status.";
     else this.status.textContent = info.message || ({ none: `No preview is set up for port ${port}.`, pending: "Preparing the isolated app origin. First setup can take several minutes; you can close this dialog and return.", ready: "Ready to open in a separate tab. The app must be listening on this port.", revoking: "Access revoked. Preview infrastructure cleanup is still running.", deleted: "Preview revoked. Set it up again to get a new private origin.", error: "Preview setup failed. Retry if available, or ask the operator to check the deployment.", unavailable: "Remote app previews are unavailable on this deployment." })[info.status];
     if (!info) return;
@@ -180,11 +206,14 @@ export class AppPreviewDialog {
       popup.document.title = "Opening app preview"; popup.document.body.textContent = "Preparing your private app preview…";
     } catch { try { popup?.close(); } catch {} this.error.textContent = "Allow popups for Relay, then choose Open app again. No preview access was issued."; return; }
     this.pendingWindow = popup; this.request = controller; this.operation = "opening"; clearTimeout(this.timer); this.error.textContent = ""; this.render();
-    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const timeout = setTimeout(() => controller.abort(), this.warmTimeoutMs);
     try {
-      const result = await this.api(this.endpoint() + "/open", { method: "POST", body: JSON.stringify(target), signal: controller.signal });
+      const address = await waitForPreviewLaunch({ target, signal: controller.signal, requestTimeoutMs: this.requestTimeoutMs,
+        current: () => this.current(version) && !popup.closed,
+        request: (body, signal) => this.api(this.endpoint() + "/open", { method: "POST", body: JSON.stringify(body), signal }),
+        pending: () => { this.operation = "warming"; this.render(); popup.document.body.textContent = "Preparing this chat’s worker… This can take a few minutes. No agent prompt is sent."; } });
       if (!this.current(version) || popup.closed) { popup.close(); return; }
-      const url = previewOpenUrl(result.url, location.origin);
+      const url = previewOpenUrl(address, location.origin);
       // Navigate from a no-referrer anchor in the new document. Calling its
       // Location from Relay can still use the opener document's referrer policy.
       const link = popup.document.createElement("a"); link.href = url; link.rel = "noreferrer"; link.referrerPolicy = "no-referrer";

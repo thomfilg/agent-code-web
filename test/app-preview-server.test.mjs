@@ -11,7 +11,7 @@ import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
 // Real Relay HTTP/Auth.js/bootstrap/proxy routes; only OIDC, CloudFront host
 // registry and worker acquisition are local fixtures. No production login/AWS.
 const relayOrigin = "https://relay.fixture.example", previewHost = "dpreviewfixture.cloudfront.net";
-async function fixture(t, { previewsEnabled = true } = {}) {
+async function fixture(t, { previewsEnabled = true, acquireGate = Promise.resolve() } = {}) {
   const root = await temporaryDirectory(t), provider = googleOidcFixture(), rows = [], children = [], observed = [];
   const upstream = http.createServer((request, response) => {
     observed.push({ path: request.url, headers: request.headers });
@@ -32,7 +32,7 @@ async function fixture(t, { previewsEnabled = true } = {}) {
     AGENT_PREVIEW_ACCOUNT_ID: "111122223333", AGENT_EC2_DEPLOYMENT: "relay-fixture", AGENT_PREVIEW_VPC_ORIGIN_ID: "vo_fixture",
     AGENT_PREVIEW_CONTROLLER_INSTANCE_ID: "i-0123456789abcdef0", AGENT_PREVIEW_CONTROLLER_ORIGIN_DNS: "ip-10-0-0-1.us-east-2.compute.internal", AGENT_PREVIEW_RELAY_DISTRIBUTION_ID: "ERELAYFIXTURE", AGENT_IDLE_TIMEOUT_MS: "10000" });
   const app = await createAgentWebServer({ config, googleAuthOptions: { fetchImpl: provider.fetch }, previewHosts: hosts,
-    workerBackend: { acquire: async () => { acquisitions++; return { workspace: root, spawn(command, args, options) {
+    workerBackend: { acquire: async () => { acquisitions++; await acquireGate; return { workspace: root, spawn(command, args, options) {
       assert.equal(command, "/usr/bin/node"); const child = spawn(process.execPath, args, { ...options, env: {} }); children.push(child); return child;
     } }; }, sleep: async () => {}, destroy: async () => {} } });
   const address = await app.start(), localPort = Number(new URL(address.url).port);
@@ -60,9 +60,18 @@ async function fixture(t, { previewsEnabled = true } = {}) {
   const callback = new URL(provider.approve(signIn.json().url)); assert.equal((await browser.call(callback.pathname + callback.search)).status, 302);
   const created = await browser.call("/api/chats", { method: "POST", body: { agent: "mock", title: "Preview fixture" } }); assert.equal(created.status, 201, created.text);
   const chatId = created.json().chat.id, api = `/api/chats/${chatId}/app-preview`;
+  const prepareOpen = async (path = "/future-drink/menu?cart=1#saved") => {
+    let result = await browser.call(api + "/open", { method: "POST", body: { port, path } });
+    for (let i = 0; result.status === 202 && i < 100; i++) {
+      assert.equal(result.json().warming.status, "pending");
+      await new Promise(resolve => setTimeout(resolve, 5));
+      result = await browser.call(api + "/open", { method: "POST", body: { port, path, warmingId: result.json().warming.id } });
+    }
+    assert.equal(result.status, 200, result.text); return result;
+  };
   const open = async () => {
     assert.equal((await browser.call(api, { method: "POST", body: { port } })).status, 200);
-    const opened = await browser.call(api + "/open", { method: "POST", body: { port, path: "/future-drink/menu?cart=1#saved" } }); assert.equal(opened.status, 200, opened.text);
+    const opened = await prepareOpen();
     const launchUrl = new URL(opened.json().url), launch = launchUrl.searchParams.get("launch");
     const page = await browser.call(launchUrl.pathname + launchUrl.search); assert.equal(page.status, 200); assert.ok(!page.text.includes("pbt_"));
     const headers = { "x-relay-preview-launch": launch };
@@ -72,13 +81,13 @@ async function fixture(t, { previewsEnabled = true } = {}) {
     assert.equal((await preview.call("/__relay_preview/probe", { method: "POST", headers, body: { launch } })).status, 200);
     return { launch, url: launchUrl };
   };
-  return { app, client, browser, preview, open, api, port, chatId, observed, localPort, get acquisitions() { return acquisitions; } };
+  return { app, client, browser, preview, open, prepareOpen, api, port, chatId, observed, localPort, get acquisitions() { return acquisitions; } };
 }
 
 test("complete Relay login-to-preview HTTP route retains path and isolates hosts, cookies and chat context", async t => {
   const f = await fixture(t);
   assert.equal((await f.browser.call(f.api + "?port=" + f.port)).json().preview.status, "none"); assert.equal(f.acquisitions, 0);
-  await f.open(); assert.equal(f.acquisitions, 0);
+  await f.open(); assert.equal(f.acquisitions, 1);
   const result = await f.preview.call("/future-drink/menu?cart=1", { headers: { cookie: f.preview.header() + "; " + f.browser.header() + "; app_cookie=fixture" } });
   assert.equal(result.status, 200, result.text); assert.deepEqual(result.json(), { app: true, path: "/future-drink/menu?cart=1" });
   assert.equal(f.observed.at(-1).headers.cookie, "app_cookie=fixture"); assert.equal(f.observed.at(-1).headers.host, previewHost);
@@ -140,8 +149,8 @@ test("real WebSocket preview round trip closes immediately on Relay logout", asy
 test("cross-site requests cannot wake a worker and preview bootstrap reads prevent deploy drain", async t => {
   const f = await fixture(t); await f.open();
   assert.equal((await f.preview.call("/change", { method: "POST", body: {}, headers: { origin: "https://attacker.example" } })).status, 403);
-  assert.equal(f.acquisitions, 0);
-  const open = await f.browser.call(f.api + "/open", { method: "POST", body: { port: f.port, path: "/" } });
+  assert.equal(f.acquisitions, 1);
+  const open = await f.prepareOpen("/");
   const launch = new URL(open.json().url).searchParams.get("launch"), body = JSON.stringify({ launch });
   const partial = http.request({ hostname: "127.0.0.1", port: f.localPort, path: "/__relay_preview/challenge", method: "POST",
     headers: { host: previewHost, origin: relayOrigin, "content-type": "application/json", "x-relay-preview-launch": launch, "content-length": Buffer.byteLength(body) } });
@@ -152,4 +161,17 @@ test("cross-site requests cannot wake a worker and preview bootstrap reads preve
   await waitFor(() => f.app.previews.active === 0);
   const idle = await fetch(`http://127.0.0.1:${f.localPort}/internal/deploy/drain`, { method: "POST" }); assert.equal(idle.status, 200); await idle.body.cancel();
   const resumed = await fetch(`http://127.0.0.1:${f.localPort}/internal/deploy/resume`, { method: "POST" }); assert.equal(resumed.status, 200); await resumed.body.cancel();
+});
+
+test("cold-open API responds 202 before acquisition completes, blocks drain and sends no prompt", async t => {
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const f = await fixture(t, { acquireGate: gate }); t.after(() => release());
+  await f.browser.call(f.api, { method: "POST", body: { port: f.port } });
+  const pending = await f.browser.call(f.api + "/open", { method: "POST", body: { port: f.port, path: "/app" } });
+  assert.equal(pending.status, 202); assert.equal(pending.json().warming.status, "pending"); assert.equal(pending.json().url, undefined);
+  assert.equal(f.acquisitions, 1); assert.equal(f.observed.length, 0); assert.deepEqual(f.app.store.get(f.chatId).messages, []);
+  const drain = await fetch(`http://127.0.0.1:${f.localPort}/internal/deploy/drain`, { method: "POST" }); assert.equal(drain.status, 409); await drain.body.cancel();
+  release(); await new Promise(resolve => setImmediate(resolve));
+  const ready = await f.browser.call(f.api + "/open", { method: "POST", body: { port: f.port, path: "/app", warmingId: pending.json().warming.id } });
+  assert.equal(ready.status, 200, ready.text); assert.ok(ready.json().url); assert.equal(f.acquisitions, 1); assert.equal(f.observed.length, 0);
 });

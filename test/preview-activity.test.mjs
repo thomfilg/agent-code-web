@@ -29,6 +29,28 @@ test("stop revokes pending acquisition and cannot admit its late executor", asyn
   await assert.rejects(pending, /no longer active/); assert.equal(activity.has("chat-a"), false);
 });
 
+test("real RuntimeManager Stop waits for late cold acquisition then sleeps it without starting a model", async t => {
+  const root = await temporaryDirectory(t), config = testConfig(root, { AGENT_WORKER_BACKEND: "ec2", AGENT_EC2_GATEWAY_ORIGIN: "https://gateway.fixture.example" }), store = new ChatStore(root); await store.initialize();
+  const entered = Promise.withResolvers(), finishAcquire = Promise.withResolvers(), calls = [];
+  let agents = 0;
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10000 }),
+    workerBackend: { acquire: async () => { calls.push("acquire"); entered.resolve(); await finishAcquire.promise; calls.push("acquired"); return {}; },
+      sleep: async () => { calls.push("sleep"); }, destroy: async () => {} },
+    adapterFactory: () => { agents++; throw new Error("No model may be started"); } });
+  try {
+  const chat = await store.create({ agent: "codex", title: "Cold preview fixture" });
+  const hold = manager.previewActivity.hold(chat.id, manager.previewGeneration(chat.id), new AbortController().signal);
+  const rejected = assert.rejects(hold, /cancelled|no longer active/); await entered.promise;
+  let stopped = false; const stopping = manager.stop(chat.id).then(() => { stopped = true; });
+  await waitFor(() => store.get(chat.id).status === "stopping");
+  assert.equal(manager.previewActivity.has(chat.id), false); assert.equal(manager.previewGeneration(chat.id), null);
+  assert.equal(stopped, false); assert.deepEqual(calls, ["acquire"]);
+  finishAcquire.resolve(); await Promise.all([rejected, stopping]);
+  assert.deepEqual(calls, ["acquire", "acquired", "sleep"]); assert.equal(store.get(chat.id).status, "stopped");
+  assert.equal(agents, 0); assert.deepEqual(store.get(chat.id).messages, []);
+  } finally { finishAcquire.resolve(); await manager.shutdown(); }
+});
+
 test("old lifecycle and cancelled or missing identity cannot acquire an executor", async t => {
   let calls = 0;
   const activity = new PreviewActivity({ generation: () => 1, acquire: async () => { calls++; } });
@@ -99,7 +121,9 @@ test("verified runtime restart restores preview admission after fatal error with
   const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10000 }),
     workerBackend: { acquire: async () => ({}), sleep: async () => {}, destroy: async () => {} },
     adapterFactory: ({ hooks }) => { const adapter = { hooks, start: async () => {}, send: async () => ({ text: "fixture reply" }), stop: async () => {} }; adapters.push(adapter); return adapter; } });
-  t.after(() => manager.shutdown());
+  // temporaryDirectory's cleanup hook is registered first; stop all writers
+  // before returning (including assertion failures), not in a later hook.
+  try {
   const chat = await manager.createChat({ agent: "mock" }); await manager.send(chat.id, "first fixture");
   const old = await manager.previewActivity.hold(chat.id, manager.previewGeneration(chat.id), new AbortController().signal);
   await adapters[0].hooks.onFatal(Error("fixture failure"));
@@ -108,6 +132,7 @@ test("verified runtime restart restores preview admission after fatal error with
   assert.equal(adapters.length, 2); assert.equal(manager.previewGeneration(chat.id), 1);
   const fresh = await manager.previewActivity.hold(chat.id, 1, new AbortController().signal);
   assert.equal(fresh.signal.aborted, false); assert.equal(old.signal.aborted, true); fresh.release();
+  } finally { await manager.shutdown(); }
 });
 
 test("Stop during final startup persistence cannot announce or restore a cancelled preview runtime", async t => {

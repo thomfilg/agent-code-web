@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { previewTarget, previewAddress, previewState, previewOpenUrl } from "../public/app-preview.js";
+import { previewTarget, previewAddress, previewState, previewOpenUrl, waitForPreviewLaunch } from "../public/app-preview.js";
 
 test("preview targets preserve arbitrary allowed port and local path/query/hash", () => {
   for (const port of [1024, 8081, 65535]) assert.deepEqual(previewTarget(String(port), "/app?a=1#tab"), { port, path: "/app?a=1#tab" });
@@ -8,6 +8,34 @@ test("preview targets preserve arbitrary allowed port and local path/query/hash"
   for (const port of [0, 80, 1023, 65536, "3000\n", "3e3", " 3000", "3000.0", "3000/", null]) assert.throws(() => previewTarget(port));
   assert.equal(previewTarget(3000, "/" + "a".repeat(4095)).path.length, 4096);
   for (const path of ["", "https://evil.test/", "//evil.test/", "/\\evil", "/\nfoo", "/\x7f", "/__relay_preview/bootstrap", "/other/../__relay_preview/probe", "/%00bad", "/%5Cbad", "/%7f", "/" + "a".repeat(4096), "/" + "é".repeat(1000)]) assert.throws(() => previewTarget(3000, path));
+});
+
+test("worker preparation polling retains one job and exact target until a trusted launch is returned", async () => {
+  const id = "warm_11111111-2222-4333-8444-555555555555", target = { port: 8081, path: "/app?q=1#tab" }, calls = [];
+  let progress = 0;
+  const result = await waitForPreviewLaunch({ target, signal: new AbortController().signal, current: () => true, pending: () => progress++, wait: async () => {},
+    request: async body => { calls.push(body); return calls.length < 3 ? { warming: { id, status: "pending", retryAfterMs: 1000 } } : { url: "https://relay.example/app-preview/open?launch=ready" }; } });
+  assert.equal(progress, 2); assert.equal(result, "https://relay.example/app-preview/open?launch=ready");
+  assert.deepEqual(calls, [target, { ...target, warmingId: id }, { ...target, warmingId: id }]);
+});
+
+test("warming cancellation/stale identity stop polling; malformed status never becomes a launch", async () => {
+  const id = "warm_11111111-2222-4333-8444-555555555555", target = { port: 8081, path: "/" };
+  for (const stale of [false, true]) {
+    const controller = new AbortController(); let calls = 0, current = true;
+    await assert.rejects(waitForPreviewLaunch({ target, signal: controller.signal, current: () => current, pending: () => {},
+      request: async () => { calls++; return { warming: { id, status: "pending", retryAfterMs: 1000 } }; },
+      wait: async () => { if (stale) current = false; else controller.abort(); } }));
+    assert.equal(calls, 1);
+  }
+  for (const warming of [{ id, status: "ready", retryAfterMs: 1000 }, { id: "private malformed", status: "pending", retryAfterMs: 1000 }, { id, status: "pending", retryAfterMs: 0 }]) {
+    await assert.rejects(waitForPreviewLaunch({ target, signal: new AbortController().signal, current: () => true, pending: () => {}, request: async () => ({ warming }) }));
+  }
+});
+
+test("individual warming requests have their own short timeout", async () => {
+  await assert.rejects(waitForPreviewLaunch({ target: { port: 3000, path: "/" }, signal: new AbortController().signal, current: () => true, pending: () => {}, requestTimeoutMs: 10,
+    request: async (_body, signal) => new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("timeout")), { once: true })) }));
 });
 
 test("only HTTP worker loopback seeds a remote app target", () => {

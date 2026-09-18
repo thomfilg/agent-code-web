@@ -1,5 +1,7 @@
 import { PreviewGrants } from "./preview-grants.mjs";
 import { createWorkerPreviewProxy } from "./worker-preview-proxy.mjs";
+import { randomUUID } from "node:crypto";
+import { previewAppPath } from "./preview-bootstrap.mjs";
 
 const fail = (message = "App preview is unavailable", statusCode = 409) => Object.assign(new Error(message), { statusCode });
 const portNumber = value => {
@@ -13,9 +15,11 @@ const replies = { none: "Choose the port where your app is running.", pending: "
 // Owns the integration between authenticated Relay users, persistent host
 // assignments and revocable HTTP/WS leases. Browsing never becomes a prompt.
 export class AppPreviews {
-  constructor({ hosts, identity, store, manager, bootstrapFactory, relayOrigin, validateSession, proxy = createWorkerPreviewProxy() }) {
+  constructor({ hosts, identity, store, manager, bootstrapFactory, relayOrigin, validateSession, proxy = createWorkerPreviewProxy(), warmTtlMs = 240000 }) {
+    if (!Number.isSafeInteger(warmTtlMs) || warmTtlMs < 1 || warmTtlMs > 240000) throw fail("Invalid worker preparation deadline");
     Object.assign(this, { hosts, identity, store, manager, relayOrigin, proxy });
     this.sessions = new Map(); this.closed = false; this.operations = new Set(); this.reconciling = null; this.pendingRequests = 0;
+    this.warming = new Map(); this.warmAcquisitions = new Set(); this.warmTtlMs = warmTtlMs;
     this.validateSession = validateSession || (async binding => {
       if (identity.revoked?.has(binding.sessionId)) return false;
       const session = await identity.records.get("relay-session", binding.sessionId);
@@ -75,22 +79,72 @@ export class AppPreviews {
   async remove(user, chatId, port) {
     const entry = await this.selected(user, chatId, port);
     if (!entry || entry.status === "deleted") return this.public(entry, port);
-    if (entry.hostname) this.bootstrap.revokeHostname(entry.hostname);
+    if (entry.hostname) { this.cancelWarming(job => job.binding.hostname === entry.hostname); this.bootstrap.revokeHostname(entry.hostname); }
     await this.hosts.revoke(entry.id, { ownerId: user.id, chatId });
     this.grants.prune(); this.reconcile(); return this.status(user, chatId, port);
   }
-  async open(user, chatId, port, path) {
+  finishWarming(job) {
+    if (this.warming.get(job.id) === job) this.warming.delete(job.id);
+    clearTimeout(job.timer); job.controller.abort(); job.held?.release();
+  }
+  cancelWarming(predicate) { for (const job of [...this.warming.values()]) if (predicate(job)) this.finishWarming(job); }
+  async open(user, chatId, port, path = "/", warmingId) {
     const entry = await this.selected(user, chatId, port);
     if (entry?.status !== "ready") throw fail("Wait until the app address is ready");
+    // Validate before any worker acquisition. This is the same parser used by
+    // the trusted launch document; an invalid app path must never start a VM.
+    path = previewAppPath(path, entry.hostname);
     const binding = Object.freeze({ ownerId: user.id, sessionId: user.sessionId, chatId, hostname: entry.hostname, port, runtimeGeneration: this.manager.previewGeneration(chatId) });
-    if (!await this.validateSession(binding) || !this.isCurrent(binding)) throw fail("Sign in again before opening this app", 401);
-    return this.bootstrap.start({ binding, user, path });
+    if (!await this.validateSession(binding) || !this.isCurrent(binding)) {
+      this.cancelWarming(job => job.binding.ownerId === binding.ownerId && job.binding.sessionId === binding.sessionId);
+      throw fail("Sign in again before opening this app", 401);
+    }
+    const key = JSON.stringify(binding);
+    let job;
+    if (warmingId !== undefined) {
+      job = typeof warmingId === "string" && this.warming.get(warmingId);
+      if (!job || job.key !== key || job.path !== path) throw fail("Worker preparation expired or was cancelled. Choose Open app again.");
+    } else job = [...this.warming.values()].find(value => value.key === key && value.path === path);
+    if (job && (job.expiresAt <= Date.now() || job.controller.signal.aborted || !this.isCurrent(job.binding))) { this.finishWarming(job); throw fail("Worker preparation expired or was cancelled. Choose Open app again."); }
+    if (job?.status === "error") { this.finishWarming(job); throw fail("The worker could not be prepared. Choose Open app again.", 503); }
+    if (job?.status === "ready") {
+      // validateSession above runs on every poll, including this last one.
+      // start() mints a fresh bootstrap only now, never while warming/polling.
+      try { return this.bootstrap.start({ binding, user, path }); }
+      finally { this.finishWarming(job); }
+    }
+    if (!job) {
+      // A cancelled lease cannot cancel an already-issued backend operation.
+      // Keep its capacity/drain reservation until the acquisition actually ends.
+      const reserved = [...new Set([...this.warming.values(), ...this.warmAcquisitions])];
+      if (reserved.length >= 16 || reserved.filter(value => value.binding.ownerId === user.id).length >= 4) throw fail("Too many workers are being prepared. Wait before opening another app.", 429);
+      job = { id: "warm_" + randomUUID(), key, binding, path, status: "pending", controller: new AbortController(), held: null,
+        expiresAt: Math.min(Date.now() + this.warmTtlMs, user.expiresAt) };
+      this.warming.set(job.id, job); // Count before the first acquisition await.
+      this.warmAcquisitions.add(job);
+      job.timer = setTimeout(() => this.finishWarming(job), Math.max(1, job.expiresAt - Date.now())); job.timer.unref?.();
+      const current = job;
+      void (async () => {
+        try {
+          const held = await this.manager.previewActivity.hold(chatId, binding.runtimeGeneration, current.controller.signal);
+          current.held = held;
+          if (this.warming.get(current.id) !== current || current.controller.signal.aborted || held.signal.aborted ||
+              !await this.validateSession(binding) || this.warming.get(current.id) !== current || current.expiresAt <= Date.now() || current.controller.signal.aborted ||
+              !this.isCurrent(binding)) { this.finishWarming(current); return; }
+          current.status = "ready";
+        } catch { if (this.warming.get(current.id) === current) { current.status = "error"; current.held?.release(); } }
+        finally { this.warmAcquisitions.delete(current); }
+      })();
+    }
+    return { warming: { id: job.id, status: "pending", retryAfterMs: 1000, message: "Preparing this chat’s worker. No agent prompt is sent." } };
   }
   revokeOwner(ownerId) {
+    this.cancelWarming(job => job.binding.ownerId === ownerId);
     this.bootstrap.revokeOwner(ownerId);
     for (const [key, user] of this.sessions) if (user.id === ownerId) this.sessions.delete(key);
   }
   revokeChat(chatId) {
+    this.cancelWarming(job => job.binding.chatId === chatId);
     for (const user of this.sessions.values()) this.bootstrap.revokeChat(user.id, chatId);
   }
   async removeChatHosts(chatId) {
@@ -108,7 +162,7 @@ export class AppPreviews {
   }
   reconcile() {
     if (this.closed || this.reconciling) return this.reconciling;
-    this.reconciling = this.track(Promise.resolve().then(() => this.hosts.reconcile()).finally(() => { this.reconciling = null; this.grants.prune(); }));
+    this.reconciling = this.track(Promise.resolve().then(() => this.hosts.reconcile()).finally(() => { this.reconciling = null; this.grants.prune(); this.cancelWarming(job => !this.isCurrent(job.binding)); }));
     return this.reconciling;
   }
   start() {
@@ -154,9 +208,10 @@ export class AppPreviews {
     } catch { if (!socket.destroyed) socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", () => socket.destroySoon()); }
     finally { abort.abort(); held?.release(); socket.removeListener("close", disconnected); this.pendingRequests--; }
   }
-  get active() { return this.pendingRequests + this.manager.previewActivity.chats.size + this.operations.size; }
+  get active() { return this.pendingRequests + this.manager.previewActivity.chats.size + this.operations.size + this.warming.size + this.warmAcquisitions.size; }
   async close() {
     this.closed = true; clearInterval(this.timer); this.bootstrap.close(); this.grants.close();
+    this.cancelWarming(() => true);
     this.manager.removeListener("preview-revoke", this.onRevoke);
     await Promise.allSettled([...this.operations]); await this.hosts.close(); this.sessions.clear();
   }
