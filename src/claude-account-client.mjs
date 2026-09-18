@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, watch } from "node:fs";
 import { mkdtemp, mkdir, open, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -20,6 +20,52 @@ export class ClaudeAccountError extends Error {
 }
 const validText = (value, limit = 64000) => typeof value === "string" && value.length > 0 && value.length <= limit && !/[\x00-\x20\x7f]/.test(value);
 const safeLabel = (value, limit) => typeof value === "string" ? value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, limit) : null;
+const validModels = models => Array.isArray(models) && models.length <= 100 && models.every(model => model && typeof model === "object" && !Array.isArray(model));
+
+// 2.1.222 starts its account bootstrap asynchronously. Its native config writer
+// publishes both keys only after the validated bootstrap response. Observe that
+// completion in this freshly-created profile, never a user's host config or an
+// auth file; then list_models can see the actual account-aware model inventory.
+function observeModelBootstrap(directory, { signal, timeoutMs }) {
+  const result = Promise.withResolvers();
+  let observer, timer, finished = false, checking = false, dirty = false;
+  const finish = ready => {
+    if (finished) return;
+    finished = true; clearTimeout(timer); observer?.close(); signal.removeEventListener("abort", aborted); result.resolve(ready);
+  };
+  const aborted = () => finish(false);
+  const check = async () => {
+    if (finished) return;
+    if (checking) { dirty = true; return; }
+    checking = true;
+    try {
+      do {
+        dirty = false; let file;
+        try {
+          file = await open(path.join(directory, ".claude.json"), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+          const stat = await file.stat();
+          if (!stat.isFile() || stat.nlink !== 1 || stat.size > 1048576) { finish(false); return; }
+          const bytes = Buffer.alloc(1048577), { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+          if (bytesRead > 1048576) { finish(false); return; }
+          const value = JSON.parse(bytes.subarray(0, bytesRead).toString("utf8"));
+          if (Array.isArray(value?.modelAccessCache) && Array.isArray(value?.additionalModelOptionsCache)) finish(true);
+        } catch (error) {
+          // A writer may rename a new config or briefly expose incomplete JSON.
+          // A symlink/permission failure is never a reason to read elsewhere.
+          if (error.code && error.code !== "ENOENT") finish(false);
+        } finally { await file?.close().catch(() => {}); }
+      } while (dirty && !finished);
+    } finally { checking = false; }
+  };
+  signal.addEventListener("abort", aborted, { once: true });
+  if (signal.aborted) finish(false);
+  else {
+    try { observer = watch(directory, (_event, filename) => { if (filename === null || filename === ".claude.json") void check(); }); observer.on("error", () => finish(false)); }
+    catch { finish(false); }
+    if (!finished) { timer = setTimeout(() => finish(false), timeoutMs); void check(); }
+  }
+  return { ready: result.promise, close: () => finish(false) };
+}
 export async function readClaudeAuth(filename) {
   const file = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
@@ -99,13 +145,39 @@ export class ClaudeAccountClient {
   }
   async initialize() {
     if (this.initialized) return this.initialized;
-    const child = this.launch(["--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json", "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--settings", '{"disableAllHooks":true}']);
-    child.on("error", () => {}); child.stderr.on("data", () => {});
-    const channel = new ClaudeControlChannel(child, this.timeoutMs), lines = readline.createInterface({ input: child.stdout });
-    lines.on("line", line => { if (line.length > 262144) return; try { channel.accept(JSON.parse(line)); } catch {} });
-    try { this.initialized = await channel.request("initialize"); return this.initialized; }
-    catch { throw new ClaudeAccountError(); }
-    finally { channel.close(); lines.close(); await terminateWorker(child); }
+    if (this.abort.signal.aborted) throw new ClaudeAccountError("temporary");
+    const bootstrap = observeModelBootstrap(this.home, { signal: this.abort.signal, timeoutMs: Math.min(this.timeoutMs, 8000) });
+    let child, channel, lines;
+    try {
+      child = this.launch(["--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json", "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--settings", '{"disableAllHooks":true}']);
+      child.on("error", () => bootstrap.close()); child.once("close", () => bootstrap.close()); child.stderr.on("data", () => {});
+      channel = new ClaudeControlChannel(child, this.timeoutMs); lines = readline.createInterface({ input: child.stdout });
+      lines.on("line", line => { if (line.length > 262144) return; try { channel.accept(JSON.parse(line)); } catch {} });
+      const initialized = await channel.request("initialize");
+      const bootstrapReady = await bootstrap.ready;
+      if (this.abort.signal.aborted) throw new ClaudeAccountError("temporary");
+      // initialize contains a startup snapshot. The installed native CLI's
+      // list_models control rebuilds its account/policy-aware picker, including
+      // disabled rows and their native descriptions. Neither is a user turn.
+      let models;
+      try {
+        channel.timeoutMs = Math.min(this.timeoutMs, 10000);
+        ({ models } = await channel.request("list_models"));
+        if (!validModels(models)) throw new ClaudeAccountError("temporary");
+      } catch {
+        // Older CLI/control failures must not erase this account's valid
+        // initialization snapshot, nor silently become host/alias discovery.
+        if (this.abort.signal.aborted || !validModels(initialized.models)) throw new ClaudeAccountError("temporary");
+        models = [...initialized.models];
+        Object.defineProperty(models, "discoveryIncomplete", { value: true });
+      }
+      if (!bootstrapReady && !models.discoveryIncomplete) Object.defineProperty(models, "discoveryIncomplete", { value: true });
+      if (this.abort.signal.aborted) throw new ClaudeAccountError("temporary");
+      this.initialized = { ...initialized, models };
+      return this.initialized;
+    }
+    catch { throw new ClaudeAccountError("temporary"); }
+    finally { bootstrap.close(); channel?.close(); lines?.close(); await terminateWorker(child); }
   }
   async snapshot({ refresh = false, onCredentials = async () => {} } = {}) {
     try {

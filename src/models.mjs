@@ -17,6 +17,7 @@ export class ModelCatalog {
     const defaults = catalog.defaults || this.defaults(agent);
     const model = input.model || defaults.model;
     const selected = catalog.models.find(item => item.id === model);
+    if (agent === "claude" && input.agentAccountId && !selected) throw fail("No enabled Claude models were reported for this account. Reload the model list before creating a chat.");
     return this.validate(agent, { model, effort: input.effort || (selected?.efforts.includes(defaults.effort) ? defaults.effort : selected?.defaultEffort) || null }, input);
   }
   async list(agent, context = {}) {
@@ -36,14 +37,17 @@ export class ModelCatalog {
     }
     if (context.agentAccountId && agent === "claude") {
       const native = await this.accounts.models(context.ownerId, context.agentAccountId, agent);
-      const models = native.filter(model => typeof model.value === "string" && /^[a-zA-Z0-9_.\[\]-]{1,150}$/.test(model.value)).map(model => ({
+      const seen = new Set();
+      const models = native.filter(model => model && typeof model.value === "string" && /^[a-zA-Z0-9_.\[\]-]{1,150}$/.test(model.value) && !seen.has(model.value) && seen.add(model.value)).map(model => ({
         id: model.value, label: typeof model.displayName === "string" ? model.displayName.slice(0, 150) : model.value,
         description: typeof model.description === "string" ? model.description.slice(0, 500) : "",
-        isDefault: model.value === "default", efforts: ["auto", ...(model.supportedEffortLevels || []).filter(e => ["low", "medium", "high", "xhigh", "max"].includes(e))], defaultEffort: "auto",
+        ...(model.disabled === true ? { disabled: true, disabledReason: typeof model.description === "string" ? model.description.slice(0, 500) : "Unavailable in this Claude account or CLI." } : {}),
+        isDefault: model.value === "default", efforts: ["auto", ...new Set((Array.isArray(model.supportedEffortLevels) ? model.supportedEffortLevels : []).filter(e => ["low", "medium", "high", "xhigh", "max"].includes(e)))], defaultEffort: "auto",
       }));
-      const model = models.find(item => item.id === this.defaults(agent).model) || models.find(item => item.isDefault) || models[0];
+      const enabled = models.filter(item => !item.disabled);
+      const model = enabled.find(item => item.id === this.defaults(agent).model) || enabled.find(item => item.isDefault) || enabled[0];
       const defaults = { model: model?.id || null, effort: model?.efforts.includes(this.defaults(agent).effort) ? this.defaults(agent).effort : "auto" };
-      return { models, source: "claude-account", note: "Models reported by Claude for this account; availability is enforced when you send.", configuredDefault: defaults.model, configuredDefaultEffort: defaults.effort, defaults };
+      return { models, source: "claude-account", note: native.discoveryIncomplete ? "Claude's full model list could not be confirmed. Showing models reported by this account's CLI; additional models may be missing. Reload to retry." : "Models reported by Claude for this account; availability is enforced when you send.", configuredDefault: defaults.model, configuredDefaultEffort: defaults.effort, defaults };
     }
     if (this.config.google?.enabled) throw fail("Connect and select an agent account for this user");
     const cached = this.cache.get(agent);
@@ -91,6 +95,7 @@ export class ModelCatalog {
     const catalog = await this.list(agent, context);
     const selected = catalog.models.find(item => item.id === (model || catalog.configuredDefault)) || (!model ? catalog.models.find(item => item.isDefault) : null);
     if (agent === "mock" || (model && !selected)) throw fail("Choose a model from the available models list");
+    if (selected?.disabled) throw fail("This model is currently unavailable in the selected Claude account or CLI. Choose an enabled model.");
     const allowed = selected?.efforts || (agent === "claude" ? catalog.models.find(item => item.id === "opus")?.efforts : []);
     if (effort && !(agent === "claude" && effort === "auto") && !allowed?.includes(effort)) throw fail("This effort level is not supported by the selected model");
     const extra = {};
@@ -120,7 +125,9 @@ export class ModelCatalog {
     const catalog = await this.list(chat.agent, chat);
     const target = chat.model || catalog.configuredDefault;
     const selected = catalog.models.find(item => item.id === target) || (!target ? catalog.models.find(item => item.isDefault) : null);
+    if (chat.agent === "claude" && chat.agentAccountId && !selected) throw fail("No enabled Claude models were reported for this account. Reload the model list before sending a message.");
     if (target && !selected) throw fail(`Model ${target} is not available. Choose another model before sending a message.`);
+    if (selected?.disabled) throw fail("This model is currently unavailable in the selected Claude account or CLI. Choose an enabled model before sending a message.");
     const effort = chat.agent === "claude" && chat.effort === "auto" ? null : chat.effort || (selected?.efforts.includes(catalog.configuredDefaultEffort) ? catalog.configuredDefaultEffort : selected?.defaultEffort) || null;
     return { model: chat.model || catalog.configuredDefault || selected?.id || (chat.agent === "claude" ? "default" : null), effort, resetEffort: !effort,
       ...(chat.agent === "claude" && typeof chat.claudeFastMode === "boolean" ? { fastMode: chat.claudeFastMode && chat.claudeFastScope === claudeFastScope(chat), fastCredential: chat.claudeFastCredential, fastCooldown: chat.claudeFastCooldown,

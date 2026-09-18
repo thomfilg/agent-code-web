@@ -28,13 +28,21 @@ export class ModelPicker {
       const catalog = await catalogs.get(catalogKey); if (version !== this.version) return;
       this.catalog = catalog;
       if (useDefaults) selected = { model: selected.model || catalog.defaults?.model, effort: selected.effort || catalog.defaults?.effort };
-      const defaultModel = catalog.configuredDefault || catalog.models.find(model => model.isDefault)?.label;
+      const defaultModel = catalog.configuredDefault || catalog.models.find(model => model.isDefault)?.id;
       const label = value => this.root.classList.contains("compact-model-controls") ? value.replace(/^GPT-\d+(?:\.\d+)?-/i, "") : value;
-      this.model.replaceChildren(option("", defaultModel ? `Default · ${label(defaultModel)}` : "Account default"), ...catalog.models.map(model => option(model.id, label(model.label))));
-      if (selected.model && !catalog.models.some(model => model.id === selected.model)) this.model.append(option(selected.model, `${selected.model} (saved; unavailable)`));
-      this.model.value = selected.model || "";
+      const nativeDefault = agent === "claude" && catalog.models.some(model => model.id === "default");
+      const useNativeDefault = nativeDefault && (!defaultModel || defaultModel === "default");
+      this.noEnabledModels = catalog.source === "claude-account" && !catalog.models.some(model => model.disabled !== true);
+      const configuredLabel = catalog.models.find(model => model.id === defaultModel)?.label || defaultModel;
+      this.model.replaceChildren(...(useNativeDefault || this.noEnabledModels ? [] : [option("", configuredLabel ? `${nativeDefault ? "Configured default" : "Default"} · ${label(configuredLabel)}` : "Account default")]), ...catalog.models.map(model => {
+        const el = option(model.id, label(model.label) + (model.disabled ? ` — ${model.disabledReason || model.description || "Unavailable"}` : ""));
+        el.disabled = model.disabled === true; el.title = model.disabledReason || model.description || ""; return el;
+      }));
+      if (!catalog.models.length && this.noEnabledModels) { const el = option("", "No available Claude models"); el.disabled = true; this.model.append(el); }
+      if (selected.model && !catalog.models.some(model => model.id === selected.model)) { const el = option(selected.model, `${selected.model} (saved; unavailable)`); el.disabled = true; this.model.append(el); }
+      this.model.value = selected.model || (useNativeDefault ? "default" : "");
       this.renderEfforts(selected.effort);
-      this.model.disabled = false; this.note.textContent = catalog.note; this.root.dataset.status = "ready";
+      this.model.disabled = this.noEnabledModels; this.root.dataset.status = "ready";
       this.model.title = `Model · ${selected.model || defaultModel || "Account default"}`;
       this.effort.title = `Effort · ${this.effort.value || catalog.configuredDefaultEffort || "Default"}`;
     } catch (error) { if (version === this.version) { this.model.replaceChildren(option("", "Default model")); this.note.textContent = error.message; this.root.dataset.status = "error"; this.key = null; } }
@@ -47,8 +55,8 @@ export class ModelPicker {
     const defaultEffort = levels.includes(this.catalog?.configuredDefaultEffort) ? this.catalog.configuredDefaultEffort : model?.defaultEffort;
     this.effort.replaceChildren(option("", !levels.length ? "N/A" : defaultEffort ? `Default · ${defaultEffort}` : "Default"), ...levels.map(level => option(level, level === "xhigh" ? "Extra high" : level[0].toUpperCase() + level.slice(1))));
     this.effort.value = levels.includes(selected) ? selected : "";
-    this.effort.disabled = !levels.length;
-    this.note.textContent = this.catalog?.note || "";
+    this.effort.disabled = !levels.length || model?.disabled === true || this.noEnabledModels;
+    this.note.textContent = model?.disabled ? model.disabledReason || model.description || "This model is currently unavailable." : this.noEnabledModels ? "No enabled Claude models were reported for this account. Reload to retry." : this.catalog?.note || "";
     this.syncEffort();
   }
   syncEffort() {
