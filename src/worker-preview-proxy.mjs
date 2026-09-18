@@ -26,7 +26,7 @@ function reserve(binding, limits) {
 }
 
 function reservedCookie(name) {
-  return /^(?:__Host-)?relay\.auth\./i.test(name) || /^(?:agent_web_session|relay_browser_identity|__Host-relay-preview)$/i.test(name) || /^relay_mcp_/i.test(name);
+  return /^(?:__Host-)?relay\.auth\./i.test(name) || /^(?:agent_web_session|relay_browser_identity)$/i.test(name) || /^__Host-relay-preview(?:-|$)/i.test(name) || /^relay_mcp_/i.test(name);
 }
 function filteredCookies(value) {
   if (!value) return undefined;
