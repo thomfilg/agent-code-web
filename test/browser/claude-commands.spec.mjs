@@ -12,7 +12,11 @@ async function fixture(page) {
   await page.route(`**/api/chats/${chat.id}/events*`, route => route.fulfill({ contentType: "text/event-stream", body: ": fixture\n\n" }));
   await page.route(`**/api/chats/${chat.id}/commands`, async route => { f.reads++; const commands = [...webCommands("claude"), { name: "reload-skills" }, ...f.catalog]; await f.gate; await route.fulfill({ json: { commands } }); });
   for (const tail of ["messages", "queue"]) await page.route(`**/api/chats/${chat.id}/${tail}`, route => { f.calls.push({ tail, ...route.request().postDataJSON() }); return route.fulfill({ status: f.responseStatus, json: f.responseStatus === 202 ? {} : { error: f.responseError || "/config and /settings do not accept attachments. Remove them or send them in a separate message." } }); });
-  await page.goto(`/#chat=${chat.id}`); await expect(page.locator("#chat-title")).toHaveText(chat.title);
+  await page.goto(`/#chat=${chat.id}`);
+  // Wait for fixture boot under the deliberately CPU-limited browser run;
+  // command assertions below retain their normal timeouts.
+  await expect(page.locator("#chat-title")).toHaveText(chat.title, { timeout: 15000 });
+  await expect.poll(() => page.evaluate(id => window.fixtureSources.some(source => source.url.includes(`/chats/${id}/events`)), chat.id)).toBe(true);
   f.emit = async () => {
     f.snapshot = { ...f.snapshot, revision: f.snapshot.revision + 1, commandCatalogRevision: f.snapshot.commandCatalogRevision + 1 };
     await page.evaluate(chat => window.fixtureSources.find(source => source.url.includes(`/chats/${chat.id}/events`)).dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "chat_updated", chat }) })), f.snapshot);

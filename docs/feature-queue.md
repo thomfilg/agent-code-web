@@ -1,5 +1,22 @@
 # Feature queue — original request order
 
+Latest chat follow-up (2026-09-18): incoming agent messages are not followed by
+the viewport. Reproduce automatic follow while already at the bottom, retain
+intentional manual scrollback, and verify Jump to latest with streaming and
+virtualized history. This refines item 26, not permission to inject messages in
+the user's real chat. The earlier controls report was clarified as intermittent:
+normally the controls respond, but in that instance none did. It remains open;
+the expected stopping-state restrictions alone do not establish its cause.
+
+Follow-up source acceptance (2026-09-18): checkpoints `317c82d` and `27a3e12`
+are pushed. The full Node suite passed 1,166/1,166 before the final frontend
+command-cache callback; that delta passed 14/14 focused cases. Claude model and
+command browser checks passed 49 distinct cases (47 on the initial run plus
+two startup-only failures passing after explicit fixture readiness). The
+incoming-message follow defect is reproduced and its fix is in progress.
+See [the scoped evidence and remaining limits](validation-2026-09-18-chat-ui.md).
+This is not a deployment receipt or real-account Fable confirmation.
+
 Source checkpoint (2026-09-18, 15:24 UTC; rollout still pending): GitHub's extra
 company gate is removed, existing connections need no migration, and the
 default duplicate footer is hidden with observed branches in the PR strip.
