@@ -1,11 +1,13 @@
 """Offline tests for the actual image helper embedded in cloud-init."""
 import ast
+import base64
 import contextlib
 import errno
 import io
 import json
 import pathlib
 import subprocess
+import sys
 import tempfile
 import types
 import unittest
@@ -91,6 +93,34 @@ class ImageAuditTest(unittest.TestCase):
 
     def test_scan_errors_fail_closed(self):
         self.assertGreater(self.counts(errors=True)['scanErrors'], 0)
+
+    def test_whole_rendered_helper_executes_top_level_and_emits_strict_receipt(self):
+        public = b'ssh-ed25519 AAAAWholeHelperFixture\n'
+        source = script_at('/usr/local/sbin/agent-web-audit-image').replace('__RELAY_WORKER_PUBLIC_KEY_BASE64__', base64.b64encode(public).decode())
+        def read_text(file, *args, **kwargs):
+            if str(file) == '/usr/local/share/agent-relay-builder-identity.json': return json.dumps({'machine': 'old-machine-hash', 'hostKeys': {'old': 'old-public-hash'}})
+            raise AssertionError('Unexpected fixture read')
+        def read_bytes(file):
+            if str(file) == '/etc/machine-id': return b'new-machine-id'
+            if str(file) == '/home/ubuntu/.ssh/authorized_keys': return public
+            if str(file) == '/etc/ssh/ssh_host_ed25519_key.pub': return b'ssh-ed25519 AAAANewHostKey\n'
+            raise AssertionError('Unexpected fixture read')
+        def glob(file, pattern):
+            if str(file) == '/etc/ssh': return iter([pathlib.Path('/etc/ssh/ssh_host_ed25519_key.pub')])
+            return iter([])
+        def unit(args, **kwargs):
+            return types.SimpleNamespace(returncode=1 if 'ssm' in args[-1] else 0)
+        output = io.StringIO()
+        with patch.object(namespace['os'], 'geteuid', return_value=0), patch.object(sys, 'argv', ['helper']), patch.object(namespace['os'], 'walk', return_value=[]), patch.object(pathlib.Path, 'read_text', read_text), patch.object(pathlib.Path, 'read_bytes', read_bytes), patch.object(pathlib.Path, 'glob', glob), patch.object(pathlib.Path, 'is_file', lambda p: str(p) in ('/opt/agent-web/IMAGE_FINALIZED', '/etc/cloud/cloud-init.disabled')), patch.object(pathlib.Path, 'is_dir', return_value=False), patch.object(pathlib.Path, 'exists', return_value=False), patch.object(namespace['os'].path, 'lexists', return_value=False), patch.object(subprocess, 'run', side_effect=unit), patch('urllib.request.build_opener', return_value=types.SimpleNamespace(open=lambda *args, **kwargs: (_ for _ in ()).throw(urllib.error.HTTPError('PRIVATE', 403, 'PRIVATE', {}, None)))), contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as raised:
+                exec(compile(source, '/usr/local/sbin/agent-web-audit-image', 'exec'), {})
+        self.assertEqual(raised.exception.code, 0)
+        receipt = json.loads(output.getvalue())
+        self.assertIs(receipt['valid'], True)
+        self.assertIs(receipt['credentialsAbsent'], True)
+        self.assertIs(receipt['metadataReachable'], False)
+        self.assertEqual(receipt['metadataProbe'], 'http-403-denied')
+        self.assertNotIn('PRIVATE', output.getvalue())
 
     def test_finalizer_shell_is_valid_and_removes_only_exact_builder_package(self):
         finalizer = script_at('/usr/local/sbin/agent-web-finalize-image')
