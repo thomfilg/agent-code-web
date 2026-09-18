@@ -122,6 +122,11 @@ AWS checkpoint (2026-09-18 09:10 UTC):
   it does not prove authenticated GitHub access. Readiness 200, anonymous SSE
   401, and real WSS 101/bidirectional frames/expected rejection 1008 passed again.
   No account imports, external provider writes, model prompts or test users.
+- Final integrated regression including the new deployed-probe suite passed
+  **952/952**, no skips/failures (186.8 seconds), on the published runtime plus
+  documentation-only updates. Both opt-ins were enabled: native GitHub
+  environment/configuration probes and official-MCP guest UI. Single test
+  process at a time, CPUs 0–1 and nice 10.
 
 - Cold backup/restore passed on the actual encrypted EBS volume. Snapshot
   `snap-08d0e108e9596b5df` is retained; a distinct restored volume matched both

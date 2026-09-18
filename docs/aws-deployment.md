@@ -180,8 +180,9 @@ CodeBuild `ImageBuild-t8BSbSkDsHYX:e30e293e-2f63-432e-8d0d-64f022cb57ca`
 used source version `2fG7w5FyzVPGoZ2KlgMRX9YAC5ubDpaV`; deploy SSM
 `7ae5f84e-89ef-40d9-ab3b-d60936820e52` completed healthy. The scoped Git/PR
 gateway, its complete request lifecycle and legacy source-only compatibility
-are deployed. The 948-test full regression and four new negative-probe tests
-passed without skips. Actual CloudFront checks then passed all 13 fixed Git/MCP
+are deployed. The final integrated regression passed 952 tests without skips,
+including the native configuration, official-MCP guest UI and new denial-probe
+suites. Actual CloudFront checks then passed all 13 fixed Git/MCP
 denials with exact public bodies/no-store, readiness 200, anonymous SSE 401,
 and WSS 101 with bidirectional frames followed by unauthenticated close 1008.
 Pair the behavior-only denial receipt with this immutable deployment receipt;
