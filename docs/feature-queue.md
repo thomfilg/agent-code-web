@@ -85,6 +85,28 @@ is the current prerequisite; item 20's unfinished doctor work stays paused.
 
 ## MVP release gate — 2026-09-17
 
+Continuation checkpoint (2026-09-18 12:13 UTC): the user renewed autonomous
+work for two hours, ending at 13:39:52 UTC (10:39:52 São Paulo). The isolated
+remote-app preview now has committed controller routing, persistent
+owner/chat/port CloudFront assignments, trusted-Relay browser bootstrap,
+explicit Open app UI and runtime/logout revocation. These changes are pushed
+on the integration branch, with component PRs 30–32. They are **not yet deployed**;
+the old dormant-preview deployment description below remains accurate for AWS.
+The reviewed infrastructure change set adds only the opt-in controller preview
+IAM policy; it replaces no controller or data volume. Runtime activation and
+actual AWS lifecycle/HTTP/WS acceptance are still in progress.
+
+New evidence: 29 focused controller/auth/config/runtime checks and an independent
+35-test review passed. Actual local HTTP/WS integration verifies cookie and host
+isolation, no browser-to-agent messages, immediate logout/Stop revocation,
+foreign-origin denial before worker acquisition, and deploy-drain protection
+during an incomplete bootstrap request. A separate official Playwright MCP
+browser run proved that an active hostile app service worker cannot intercept
+the trusted Relay-origin bootstrap; blocked third-party cookies fail closed.
+The full UI-to-server browser acceptance and integrated regression are pending.
+These fixture checks do not replace Google/provider consent in the deployed
+product. The AWS Google callback still needs the user's console configuration.
+
 Latest local activation (2026-09-18 09:50 UTC): the integrated Codex/Claude,
 GitHub/Linear, scoped worker Git/PR gateway and account-deletion version is active
 on `http://localhost:8787` (revision `1f79d26`, same runtime as AWS `3a0b7b3`
