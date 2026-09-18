@@ -223,9 +223,15 @@ Remote HEAD matched, Git config had no credentials, and a second prepare retaine
 the remote sentinel. Fixture/SSM and exact VM/encrypted-volume cleanup passed.
 This isolated local-controller test used no credentials/models; it does not
 establish private selected-GitHub or deployed-controller admission.
-Guest Chrome's actual AWS UI attempt failed while connecting and remains open;
-its VM and disk were retired. The Chrome sandbox gate has not been weakened.
-Cloud Google/provider consent, selected-product-account execution, guest Chrome,
-protected SSE/live-browser acceptance and remote
+Guest Chrome subsequently passed all six DPR-2 presets, same-tab sharp pixels,
+mouse/keyboard, live canvas update, viewer presence, renderer sandbox and Stop:
+run `1d452529-ac01-42a6-86cc-bf3322b2b069`, VM `i-0c48a75efb1ede65b`.
+The earlier fixture's five-second initial UI wait was replaced by an explicit
+45-second bound and safe diagnostics; all sandbox/process checks remain strict.
+Fixture/SSM and VM/encrypted-volume cleanup passed, with no provider credentials,
+model turns or transcript messages. This is a real AWS guest controlled through
+an isolated local Relay, not deployed authenticated CloudFront acceptance.
+Cloud Google/provider consent, selected-product-account execution,
+protected deployed SSE/live-browser acceptance and remote
 application forwarding remain open. See the [feature queue](feature-queue.md)
 for the latest evidence and explicit release gates.

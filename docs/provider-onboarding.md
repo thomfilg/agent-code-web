@@ -45,8 +45,10 @@ conversations. Never choose another account silently when a selected one fails.
   Consent must succeed before sending it; do not extend this into an automatic
   quota-consuming test suite.
 - AWS readiness, anonymous-access denial, encrypted cold backup/restore and
-  controlled failed-rollout recovery passed. Fresh-worker/native and protected
-  browser/stream acceptance remain separately tracked in the
+  controlled failed-rollout recovery passed, as did fresh/resumed worker audits,
+  isolated native Claude execution, guest Chrome and public workspace upload.
+  Protected deployed browser/streams and selected-product-account execution
+  remain separate from these isolated tests; see the
   [feature queue](feature-queue.md).
 - The recent 28 browser fixtures and official Playwright MCP screenshots
   verify account-scoped UX, not the user's external authorization.
