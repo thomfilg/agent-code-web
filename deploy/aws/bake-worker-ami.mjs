@@ -11,6 +11,16 @@ const recipePath = fileURLToPath(new URL("worker-cloud-init.yaml", import.meta.u
 const exec = promisify(execFile);
 export const CLI_VERSIONS = { codex: "0.154.0", claude: "2.1.222" };
 
+export function safeBootstrapReceipt(output) {
+  try {
+    const value = JSON.parse(output);
+    const stages = ["init-local", "init-network", "modules-config", "modules-final", "package-update-upgrade-install", "scripts-user", "ssh"];
+    const checkNames = ["node", "codex", "claude", "docker", "chrome", "readyMarker", "finalizer", "auditHelper"];
+    if (value.kind !== "relay-worker-bootstrap" || value.schema !== 1 || !["done", "running", "error", "disabled", "not run", "unknown"].includes(value.status) || !Array.isArray(value.failedModules) || value.failedModules.some(stage => !stages.includes(stage)) || typeof value.sshOrderingCycle !== "boolean" || checkNames.some(key => typeof value.checks?.[key] !== "boolean")) return null;
+    return { status: value.status, failedModules: [...new Set(value.failedModules)], checks: Object.fromEntries(checkNames.map(key => [key, value.checks[key]])), sshOrderingCycle: value.sshOrderingCycle };
+  } catch { return null; }
+}
+
 export function parseOptions(args) {
   const options = { region: "us-east-1", profile: "", instanceType: "t3.medium", volumeGb: 20, dryRun: false };
   const keys = { "--expected-account": "expectedAccount", "--region": "region", "--profile": "profile", "--subnet-id": "subnetId", "--security-group-id": "securityGroupId", "--key-name": "keyName", "--builder-instance-profile": "builderInstanceProfile", "--base-image-id": "baseImageId", "--deployment": "deployment", "--instance-type": "instanceType", "--volume-gb": "volumeGb", "--name": "name" };
@@ -81,7 +91,10 @@ export async function bakeWorkerImage(options, { run = defaultRun, sleep = ms =>
       try { invocation = await json("ssm", "get-command-invocation", "--instance-id", builderId, "--command-id", commandId); }
       catch (error) { if (/InvocationDoesNotExist/.test(error.message)) return false; throw error; }
       if (["Pending", "InProgress", "Delayed"].includes(invocation.Status)) return false;
-      if (invocation.Status !== "Success" || invocation.ResponseCode !== 0) throw new Error(`Builder SSM command failed (${invocation.Status}); inspect command ${commandId} in AWS`);
+      if (invocation.Status !== "Success" || invocation.ResponseCode !== 0) {
+        const receipt = safeBootstrapReceipt(invocation.StandardOutputContent);
+        throw new Error(`Builder SSM command failed (${invocation.Status}); inspect command ${commandId} in AWS${receipt ? `; safe bootstrap receipt: ${JSON.stringify(receipt)}` : ""}`);
+      }
       return invocation;
     });
   }
@@ -135,7 +148,8 @@ export async function bakeWorkerImage(options, { run = defaultRun, sleep = ms =>
       const info = await json("ssm", "describe-instance-information", "--filters", JSON.stringify([{ Key: "InstanceIds", Values: [builderId] }]), "--query", "InstanceInformationList");
       return info?.length === 1 && info[0].InstanceId === builderId && info[0].PingStatus === "Online";
     });
-    await ssm(["set -eu", "cloud-init status --wait", "test -f /opt/agent-web/READY", "test \"$(codex --version)\" = 'codex-cli 0.154.0'", "test \"$(claude --version)\" = '2.1.222 (Claude Code)'", "test -x /usr/local/sbin/agent-web-finalize-image"]);
+    const bootstrap = await readFile(new URL("worker-bootstrap-check.py", import.meta.url), "utf8");
+    await ssm([`python3 -I -c 'import base64;exec(base64.b64decode("${Buffer.from(bootstrap).toString("base64")}"))'`]);
     log("Pinned CLIs verified. Scheduling credential scrub and builder shutdown.");
     await ssm(["set -eu", "systemd-run --unit=agent-relay-image-finalize --on-active=15s /usr/local/sbin/agent-web-finalize-image"], "60");
     await poll("sanitized builder shutdown", async () => (await builder()).State?.Name === "stopped");

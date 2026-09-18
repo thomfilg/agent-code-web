@@ -54,6 +54,13 @@ not produce an AMI. The finalizer clears cloud-init/SSM registration and logs,
 user credential locations, machine identity and SSH host private keys, and
 performs a credential-filename scan without printing contents.
 
+The build updates package indexes and installs explicit dependencies; it does
+not perform a full OS upgrade inside cloud-init. A temporary needrestart policy
+protects only bootstrap/SSM services during installation and is removed before
+imaging. Normal worker security-update policy remains intact. Bootstrap failures
+include a validated stage/boolean receipt (installed tools, ready marker,
+cloud-init status and SSH ordering-cycle check), never raw private diagnostics.
+
 Final workers use **IMDS disabled**, no IAM profile and no public IP. Therefore
 the image retains only the deployment's selected **public** SSH key; it is tied
 to `WorkerKeyName`. Rotate the private key by baking a new AMI with a new key.

@@ -2,7 +2,9 @@
 # Builds a credential-free Agent Relay worker. Provider keys belong only on the
 # control plane and must never be added here, in an AMI, or in EC2 user-data.
 package_update: true
-package_upgrade: true
+# The selected Canonical base is pinned by the stack. Do not restart/upgrade
+# cloud-init underneath its own image build; explicit packages still update.
+package_upgrade: false
 packages:
   - ca-certificates
   - curl
@@ -37,6 +39,14 @@ users:
     shell: /bin/bash
 
 write_files:
+  - path: /etc/needrestart/conf.d/99-agent-relay-build.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      # Builder-only: keep bootstrap and SSM alive through APT transactions.
+      # Removed by the image finalizer; normal update/restart policy is retained.
+      $nrconf{override_rc}->{qr(^cloud-(init(-(local|main))?|config|final)\.service$)} = 0;
+      $nrconf{override_rc}->{qr(^(amazon-ssm-agent|snap\.amazon-ssm-agent\.amazon-ssm-agent)\.service$)} = 0;
   - path: /usr/local/sbin/agent-web-finalize-image
     owner: root:root
     permissions: "0700"
@@ -74,6 +84,7 @@ write_files:
         fi
       done
       cloud-init clean --logs --seed --machine-id
+      rm -f /etc/needrestart/conf.d/99-agent-relay-build.conf
       # Cloud-init's original netplan may match the builder NIC's MAC address.
       # Fresh workers use plain DHCP and do not contact IMDS for networking.
       rm -f /etc/netplan/50-cloud-init.yaml
@@ -157,6 +168,10 @@ write_files:
     content: |
       [Unit]
       Description=Generate unique SSH host keys on a credential-free worker
+      # Socket units precede basic.target. Avoid the normal service dependency
+      # After=basic.target, which would form a cycle with ssh.socket.
+      DefaultDependencies=no
+      After=local-fs.target
       Before=ssh.service ssh.socket
       [Service]
       Type=oneshot

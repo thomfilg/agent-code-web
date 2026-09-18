@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
-import { bakeWorkerImage, parseOptions } from "../deploy/aws/bake-worker-ami.mjs";
+import { bakeWorkerImage, parseOptions, safeBootstrapReceipt } from "../deploy/aws/bake-worker-ami.mjs";
 
 const required = ["--expected-account", "123456789012", "--deployment", "relay-fixture", "--subnet-id", "subnet-aaaaaaaaaaaaaaaaa", "--security-group-id", "sg-aaaaaaaaaaaaaaaaa", "--key-name", "relay-fixture-worker", "--builder-instance-profile", "relay-fixture-builder", "--base-image-id", "ami-aaaaaaaaaaaaaaaaa"];
 const builderId = "i-aaaaaaaaaaaaaaaaa";
@@ -65,7 +65,7 @@ test("AMI baker uses private SSM-only builder, tags image/snapshot, finalizes be
   const sends = f.calls.filter(c => c.includes("send-command"));
   assert.equal(sends.length, 2);
   for (const send of sends) assert.ok(Array.isArray(JSON.parse(send[send.indexOf("--parameters") + 1]).executionTimeout));
-  assert.ok(sends[0].join(" ").includes("cloud-init status --wait"));
+  assert.ok(sends[0].join(" ").includes("python3 -I"));
   assert.ok(sends[1].join(" ").includes("agent-web-finalize-image"));
   assert.ok(f.calls.indexOf(sends[1]) < f.calls.findIndex(c => c.includes("create-image")));
   const created = f.calls.find(c => c.includes("create-image"));
@@ -129,4 +129,19 @@ test("worker recipe removes builder identity, generates new host keys and does n
   assert.ok(recipe.includes("#!/usr/bin/python3 -I"));
   assert.ok(recipe.includes("agent-relay-builder-identity.json"));
   assert.ok(recipe.includes("metadataReachable"));
+  assert.ok(recipe.includes("package_upgrade: false"));
+  assert.ok(recipe.includes("package_update: true"));
+  assert.ok(recipe.includes("/etc/needrestart/conf.d/99-agent-relay-build.conf"));
+  assert.ok(recipe.includes("rm -f /etc/needrestart/conf.d/99-agent-relay-build.conf"));
+  assert.ok(recipe.includes("DefaultDependencies=no\n      After=local-fs.target\n      Before=ssh.service ssh.socket"));
+});
+
+test("bootstrap diagnostics expose only fixed stages and booleans, never private output", () => {
+  const receipt = { kind: "relay-worker-bootstrap", schema: 1, status: "error", failedModules: ["scripts-user"], sshOrderingCycle: true, checks: Object.fromEntries(["node", "codex", "claude", "docker", "chrome", "readyMarker", "finalizer", "auditHelper"].map(key => [key, false])), privateField: "DO-NOT-PRINT" };
+  const safe = safeBootstrapReceipt(JSON.stringify(receipt));
+  assert.equal(safe.sshOrderingCycle, true);
+  assert.equal(JSON.stringify(safe).includes("DO-NOT-PRINT"), false);
+  assert.equal(safeBootstrapReceipt(JSON.stringify({ ...receipt, failedModules: ["PRIVATE DATA"] })), null);
+  assert.equal(safeBootstrapReceipt(JSON.stringify({ ...receipt, checks: { ...receipt.checks, node: "SECRET" } })), null);
+  assert.equal(safeBootstrapReceipt("raw private error"), null);
 });
