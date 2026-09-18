@@ -190,7 +190,8 @@ export class McpConnections {
 export function codexMcpArgs(servers = {}) {
   const toml = value => Array.isArray(value) ? `[${value.map(toml).join(",")}]` : typeof value === "object" ? `{${Object.entries(value).map(([key, v]) => `${JSON.stringify(key)}=${toml(v)}`).join(",")}}` : JSON.stringify(value);
   return Object.entries(servers).flatMap(([name, server]) => {
-    const fields = server.type === "http" ? { url: server.url, http_headers: server.headers } : { command: server.command, args: server.args };
+    const fields = server.type === "http" ? { url: server.url, ...(server.headers ? { http_headers: server.headers } : {}),
+      ...(server.bearerTokenEnvVar ? { bearer_token_env_var: server.bearerTokenEnvVar } : {}) } : { command: server.command, args: server.args };
     return Object.entries(fields).flatMap(([key, value]) => ["-c", `mcp_servers.${name}.${key}=${toml(value)}`]);
   });
 }

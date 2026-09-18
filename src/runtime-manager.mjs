@@ -33,6 +33,8 @@ import { claudeFastRequest, claudeFastScope, claudeFastCredential } from "./clau
 import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR } from "./claude-mcp.mjs";
 import { claudePluginReloadRequest, CLAUDE_PLUGIN_PRIVATE_ERROR } from "./claude-plugins.mjs";
 import { claudeDebugRequest, CLAUDE_DEBUG_PRIVATE_ERROR } from "./claude-debug.mjs";
+import { githubWorkerMcpConfig } from "./github-worker-mcp.mjs";
+import { runtimeMcpSecrets } from "./worker-capabilities.mjs";
 
 const ADAPTERS = {
   codex: CodexAdapter,
@@ -177,7 +179,7 @@ export class RuntimeManager extends EventEmitter {
     }
   }
 
-  constructor({ store, config, broker, gatewayOrigin, workerBackend = null, adapterFactory = null, github = null, environments = null, models = null, attachments = null, mcps = null, commands = null, resources = null, agentAccounts = null }) {
+  constructor({ store, config, broker, gatewayOrigin, workerBackend = null, adapterFactory = null, github = null, githubWorkers = null, environments = null, models = null, attachments = null, mcps = null, commands = null, resources = null, agentAccounts = null }) {
     super();
     this.store = store;
     this.config = config;
@@ -201,6 +203,7 @@ export class RuntimeManager extends EventEmitter {
     };
     this.adapterFactory = adapterFactory;
     this.github = github;
+    this.githubWorkers = githubWorkers;
     this.agentAccounts = agentAccounts;
     this.environments = environments;
     this.models = models;
@@ -1361,6 +1364,7 @@ export class RuntimeManager extends EventEmitter {
     // Gateway access ends at Stop, not after slow persistence, side-chat or
     // worker shutdown. Native interruption can still checkpoint its journal.
     this.broker.revokeChat(chatId);
+    this.githubWorkers?.revokeChat(chatId);
     this.revokeChatMcps(chatId);
     this.publishChat(await this.store.update(chatId, { queuePaused: true, ...(reason === "manual" ? { forkGoalPending: false } : {}) }));
     const runtime = this.#runtimes.get(chatId);
@@ -1451,6 +1455,7 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async shutdown() {
+    this.githubWorkers?.shutdown();
     this.presence.clear();
     this.workspacePresence.clear();
     for (const timer of this.#workspaceIdleTimers.values()) clearTimeout(timer);
@@ -1513,7 +1518,12 @@ export class RuntimeManager extends EventEmitter {
         const credentials = await this.agentAccounts.credentials(current.ownerId, current.agentAccountId, current, options);
         checkCancelled(); return credentials;
       } } : {}),
-      onFatal: (error) => this.#fatal(chatId, error).catch((fatalError) => console.error("runtime fatal handler:", errorMessage(fatalError))),
+      onFatal: (error) => {
+        // A stopped adapter may report a late exit after another runtime has
+        // resumed the chat. It cannot revoke or terminate that newer lease.
+        if (!runtime || this.#runtimes.get(chatId) !== runtime || (this.#lifecycleVersions.get(chatId) || 0) !== version) return Promise.resolve();
+        return this.#fatal(chatId, error).catch((fatalError) => console.error("runtime fatal handler:", errorMessage(fatalError)));
+      },
     };
     const Adapter = ADAPTERS[chat.agent];
     if (!Adapter) throw new Error(`unsupported agent: ${chat.agent}`);
@@ -1543,6 +1553,24 @@ export class RuntimeManager extends EventEmitter {
         }
       }
       if (executor && this.browsers) executor.mcpServers = { ...executor.mcpServers, ...this.browsers.runtime(chatId, executor.gatewayOrigin || this.gatewayOrigin) };
+      if (executor && this.githubWorkers) {
+        checkCancelled();
+        const origin = executor.gatewayOrigin || this.gatewayOrigin;
+        const grant = await this.githubWorkers.runtime(chatId, origin, { validWhile: () => {
+          const current = this.store.get(chatId);
+          return (this.#lifecycleVersions.get(chatId) || 0) === version && Boolean(current) && !current.archived;
+        } });
+        checkCancelled();
+        // Setup runs before issuance. Nothing is written to .git/config, chat
+        // records or executor metadata; Git inherits a revocable per-chat grant.
+        executor.environmentVariables = { ...executor.environmentVariables, ...grant.environmentVariables };
+        executor.capabilitySecrets = new Set([...(executor.capabilitySecrets || []), ...(grant.token ? [grant.token] : [])]);
+        if (grant.token) {
+          if (executor.mcpServers?.relay_github) throw new Error("The relay_github MCP name is reserved for the selected GitHub connection");
+          executor.mcpServers = { ...executor.mcpServers, ...githubWorkerMcpConfig(origin, grant.token) };
+        }
+      }
+      if (executor) executor.capabilitySecrets = runtimeMcpSecrets(executor.mcpServers, executor.gatewayOrigin || this.gatewayOrigin, executor.capabilitySecrets);
       if (forkRecord && chat.forkContextPending) {
         const files = new Map(), mappings = [];
         for (const entry of forkRecord.paths || []) {
@@ -1557,6 +1585,7 @@ export class RuntimeManager extends EventEmitter {
       }
       checkCancelled();
     } catch (error) {
+      this.githubWorkers?.revokeChat(chatId);
       this.revokeChatMcps(chatId);
       await this.browsers?.stop(chatId);
       this.#executors.delete(chatId);
@@ -1564,12 +1593,13 @@ export class RuntimeManager extends EventEmitter {
       if (error.name !== "AbortError") await this.#setStatus(chatId, "error", errorMessage(error), null);
       throw error;
     }
-    const adapter = this.adapterFactory
-      ? this.adapterFactory({ chat, hooks, executor, restoreFork: forkRecord && !forkRecord.initialized ? forkRecord.bundle : null, savedAgentThreads })
-      : new Adapter({ chat, store: this.store, config: this.config, broker: this.broker, gatewayOrigin: this.gatewayOrigin, executor, hooks, restoreFork: forkRecord && !forkRecord.initialized ? forkRecord.bundle : null, savedAgentThreads });
-    runtime = { adapter, executor, forkContext, busy: false, idleTimer: null, generation: 0, eventQueue: Promise.resolve() };
-    this.#runtimes.set(chatId, runtime);
+    let adapter;
     try {
+      adapter = this.adapterFactory
+        ? this.adapterFactory({ chat, hooks, executor, restoreFork: forkRecord && !forkRecord.initialized ? forkRecord.bundle : null, savedAgentThreads })
+        : new Adapter({ chat, store: this.store, config: this.config, broker: this.broker, gatewayOrigin: this.gatewayOrigin, executor, hooks, restoreFork: forkRecord && !forkRecord.initialized ? forkRecord.bundle : null, savedAgentThreads });
+      runtime = { adapter, executor, forkContext, busy: false, idleTimer: null, generation: 0, eventQueue: Promise.resolve() };
+      this.#runtimes.set(chatId, runtime);
       await adapter.start();
       checkCancelled();
       await this.#setStatus(chatId, "idle", "Runtime ready", null);
@@ -1577,10 +1607,11 @@ export class RuntimeManager extends EventEmitter {
       return runtime;
     } catch (error) {
       this.#runtimes.delete(chatId);
+      this.githubWorkers?.revokeChat(chatId);
       this.revokeChatMcps(chatId);
       await this.browsers?.stop(chatId);
       this.#executors.delete(chatId);
-      await adapter.stop().catch(() => {});
+      await adapter?.stop().catch(() => {});
       if (chat.agent !== "mock") await this.workerBackend.sleep(chat).catch(() => {});
       if (error.name !== "AbortError") await this.#setStatus(chatId, "error", errorMessage(error), null);
       throw error;
@@ -1715,11 +1746,13 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async #fatal(chatId, error) {
+    this.githubWorkers?.revokeChat(chatId);
     this.#forking.get(chatId)?.controller.abort(error);
     this.workspacePresence.remove(chatId);
     clearTimeout(this.#workspaceIdleTimers.get(chatId)); this.#workspaceIdleTimers.delete(chatId);
     const runtime = this.#runtimes.get(chatId);
     if (!runtime) return;
+    this.#lifecycleVersions.set(chatId, (this.#lifecycleVersions.get(chatId) || 0) + 1);
     runtime.generation += 1;
     if (runtime.idleTimer) clearTimeout(runtime.idleTimer);
     this.#runtimes.delete(chatId);

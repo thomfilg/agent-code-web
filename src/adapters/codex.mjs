@@ -6,6 +6,7 @@ import { buildWorkerEnvironment } from "../worker-process.mjs";
 import { inspectDesktopSession } from "../desktop-handoff.mjs";
 import { errorMessage, redact } from "../utils.mjs";
 import { SecretTextStream } from "../secret-text-stream.mjs";
+import { capabilityMcpServers, codexShellEnvironmentArgs } from "../worker-capabilities.mjs";
 import { codexUsage, safeRateLimits, cliVersionFromUserAgent, safeSessionDetails } from "../session-info.mjs";
 import { codexMcpArgs } from "../mcp-connections.mjs";
 import { captureSessionBundle, workerSessionIO } from "../codex-session-bundle.mjs";
@@ -100,7 +101,7 @@ export class CodexAdapter {
     this.children = new Set();
     this.sharedParent = null;
     this.sharedListeners = null;
-    this.credentialSecrets = new Set();
+    this.credentialSecrets = new Set(executor?.capabilitySecrets || []);
   }
 
   async start() {
@@ -156,14 +157,9 @@ export class CodexAdapter {
 
     const args = ["app-server"];
     if (authMode === "account") args.push("-c", 'cli_auth_credentials_store="ephemeral"', "-c", 'model_provider="openai"');
-    args.push(...codexMcpArgs(this.executor?.mcpServers));
+    args.push(...codexMcpArgs(capabilityMcpServers(this.executor?.mcpServers, this.credentialSecrets, env, "codex")));
     if (authMode === "gateway") args.push(...gatewayArgs(this.gatewayOrigin));
-    args.push(
-      "-c", `shell_environment_policy.inherit=${toml("core")}`,
-      "-c", "shell_environment_policy.ignore_default_excludes=false",
-      "-c", `shell_environment_policy.exclude=[${toml("AGENT_SESSION_TOKEN")},${toml("OPENAI_API_KEY")},${toml("ANTHROPIC_API_KEY")}]`,
-    );
-    for (const [name, value] of Object.entries(this.executor?.environmentVariables || {})) args.push("-c", `shell_environment_policy.set.${name}=${toml(value)}`);
+    args.push(...codexShellEnvironmentArgs(env, this.executor?.environmentVariables, this.credentialSecrets));
 
     const rpc = new JsonRpcProcess({
       command: this.config.codex.bin,
@@ -171,7 +167,7 @@ export class CodexAdapter {
       isolation: this.executor ? "none" : this.config.processIsolation,
       spawnFn: this.executor ? this.executor.spawn.bind(this.executor) : null,
       spawnOptions: { cwd: this.workspace, env },
-      deferAgentDeltaRedaction: authMode === "account",
+      deferAgentDeltaRedaction: authMode === "account" || this.credentialSecrets.size > 0,
       redactSecrets: value => {
         for (const secret of [...this.credentialSecrets].sort((a, b) => b.length - a.length)) value = value.replaceAll(secret, "[redacted]");
         return value;
@@ -188,14 +184,14 @@ export class CodexAdapter {
     const imports = this.importControls;
     this.importStop = null;
     this.agents = new CodexAgentThreads({ rpc, root: () => this.threadId, workspace: this.workspace, model: this.config.codex.model, saved: this.savedAgentThreads,
-      secrets: authMode === "account" ? this.credentialSecrets : null,
+      secrets: authMode === "account" || this.credentialSecrets.size ? this.credentialSecrets : null,
       publish: snapshot => this.hooks.onAgentThreads?.(snapshot), log: text => this.hooks.onLog?.(text) });
     rpc.on("notification", (message) => this.#notification(message));
     rpc.on("request", (message) => this.#serverRequest(message));
     // Native diagnostics can split a credential across stderr chunks. Named
     // accounts expose structured, redacted errors, never raw native stderr.
-    rpc.on("stderr", (text) => { if (authMode !== "account") this.hooks.onLog?.(redact(text)); });
-    rpc.on("protocolError", (error) => this.hooks.onLog?.(errorMessage(error)));
+    rpc.on("stderr", (text) => { if (authMode !== "account" && !this.credentialSecrets.size) this.hooks.onLog?.(redact(text)); });
+    rpc.on("protocolError", (error) => this.hooks.onLog?.(this.credentialSecrets.size ? "Codex returned invalid protocol output; private diagnostics were omitted." : errorMessage(error)));
     rpc.on("error", (error) => this.hooks.onFatal?.(error));
     rpc.on("exit", ({ code, signal }) => {
       const confirmed = this.executor?.metadata?.backend !== "ec2" || Number.isInteger(code) && code >= 0 && code < 255 && !signal;
@@ -717,7 +713,7 @@ export class CodexAdapter {
     }
     if (method === "item/agentMessage/delta" && this.current) {
       const current = this.current;
-      if (this.nativeAuthMode === "account") current.outputRedactor ||= new SecretTextStream(this.credentialSecrets);
+      if (this.nativeAuthMode === "account" || this.credentialSecrets.size) current.outputRedactor ||= new SecretTextStream(this.credentialSecrets);
       const delta = current.outputRedactor ? current.outputRedactor.push(params.delta || "") : params.delta || "";
       current.text += delta;
       if (delta) this.hooks.onEvent?.({ type: "assistant_delta", delta });

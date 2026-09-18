@@ -17,10 +17,17 @@ export function userRecords(records, ownerId) {
 }
 
 export class UserServices {
-  constructor({ records, config, identity, store, legacy, changed }) {
-    Object.assign(this, { records, config, identity, store, legacy, changed });
+  constructor({ records, config, identity, store, legacy, changed, githubChanged = () => {} }) {
+    Object.assign(this, { records, config, identity, store, legacy, changed, githubChanged });
     this.entries = new Map();
     this.ready = new Map();
+    legacy.github.onChange = id => {
+      // The pre-Google namespace belongs only to its explicit migrated owner
+      // (or local-mode owners), never every user's identically named record.
+      const owners = new Set([null, identity.legacyOwnerId || null,
+        ...store.list().filter(chat => this.isLegacy(chat.ownerId)).map(chat => chat.ownerId || null)]);
+      for (const ownerId of owners) this.githubChanged(ownerId, id);
+    };
   }
   isLegacy(ownerId) { return !this.identity.enabled || !ownerId || ownerId === this.identity.legacyOwnerId; }
   async forOwner(ownerId) {
@@ -31,6 +38,7 @@ export class UserServices {
   async create(ownerId) {
     const records = userRecords(this.records, ownerId);
     const github = new GitHubConnection({ records, config: this.config.github });
+    github.onChange = id => this.githubChanged(ownerId, id);
     const mcps = new McpConnections(records, { ttlMs: this.config.sessionCapabilityTtlMs });
     const environments = new Environments(records, this.config.workerBackend, mcps);
     const organization = new ChatOrganization({ records, store: this.store, changed: this.changed });
