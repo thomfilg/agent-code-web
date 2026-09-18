@@ -303,6 +303,7 @@ export async function createAgentWebServer(options = {}) {
         const accountRoute = /^\/api\/agent-accounts\/(account_[a-f0-9-]{36})(?:\/(cancel|disconnect|code))?$/.exec(url.pathname);
         if (accountRoute && request.method === "POST" && accountRoute[2] === "code") return json(response, 200, await agentAccounts.submitCode(user.id, accountRoute[1], await bodyJson(request, config.maxBodyBytes)));
         if (accountRoute && request.method === "GET" && !accountRoute[2]) return json(response, 200, await agentAccounts.status(user.id, accountRoute[1]));
+        if (accountRoute && request.method === "DELETE" && !accountRoute[2]) return json(response, 200, await agentAccounts.remove(user.id, accountRoute[1]));
         if (accountRoute && request.method === "POST" && accountRoute[2]) return json(response, 200, await agentAccounts[accountRoute[2]](user.id, accountRoute[1]));
         return json(response, 404, { error: "Agent account action not found" });
       }

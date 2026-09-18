@@ -20,7 +20,7 @@ const post = (browser, route, body = {}) => browser.request(route, { method: "PO
 async function connect(ctx) {
   const response = await post(ctx.browser, "/api/agent-accounts", { provider: "codex", name: "Personal", companies: [], allowUnassigned: true });
   assert.equal(response.status, 201); const { account } = await response.json();
-  ctx.codex.clients.at(-1).approve(); await waitFor(() => ctx.app.agentAccounts.hasConnected(ctx.user.id, "codex"));
+  ctx.codex.clients.at(-1).approve(); await waitFor(() => ctx.app.agentAccounts.list(ctx.user.id).find(item => item.id === account.id)?.status === "connected");
   return account.id;
 }
 
@@ -90,4 +90,33 @@ test("account selection is explicit for old chats, remains user-owned after cont
   assert.equal(restored.agentAccountId, personal); assert.equal(restored.ownerId, user.id);
   assert.equal((await restarted.browser.request(`/api/models?agent=codex&account=${personal}`)).status, 200);
   assert.equal(restarted.codex.clients.some(client => client.approve), false, "restart does not open a new consent ceremony");
+});
+
+test("account deletion enforces owner and Origin, stops its worker, keeps messages/binding and never falls back to another account", { timeout: 20000 }, async t => {
+  const ctx = await setup(t), { app, browser, user } = ctx, id = await connect(ctx);
+  const created = await post(browser, "/api/chats", { agent: "codex", agentAccountId: id, title: "Keep my conversation" });
+  const { chat } = await created.json(); await app.manager.setMode(chat.id, "auto");
+  const turn = await app.manager.submit(chat.id, "fixture deletion turn"); turn.completion.catch(() => {});
+  const approval = await waitFor(() => app.store.get(chat.id).pendingRequest);
+  await app.manager.respond(chat.id, approval.requestId, { decision: "accept" }); await turn.completion;
+  const messages = structuredClone(app.store.get(chat.id).messages);
+  const replacement = await connect(ctx);
+  const member = cookieClient(ctx.url); await member.login(ctx.google, { sub: "member", email: "member@example.com", email_verified: true });
+  const route = `/api/agent-accounts/${id}`;
+  assert.equal((await member.request(route, { method: "DELETE" })).status, 404);
+  assert.equal((await browser.request(route, { method: "DELETE", headers: { origin: "https://evil.example" } })).status, 403);
+  assert.equal((await fetch(`${ctx.url}${route}`, { method: "DELETE", headers: { origin: ctx.url } })).status, 401);
+  assert.equal(app.agentAccounts.hasConnected(user.id, "codex"), true);
+  const deleted = await browser.request(route, { method: "DELETE" });
+  assert.equal(deleted.status, 200); assert.deepEqual(await deleted.json(), { deleted: true, id });
+  assert.equal(app.store.get(chat.id).status, "stopped"); assert.equal(app.store.get(chat.id).agentAccountId, id);
+  assert.deepEqual(app.store.get(chat.id).messages, messages);
+  assert.equal((await browser.request(route)).status, 404);
+  assert.equal((await browser.request(`/api/models?agent=codex&account=${id}`)).status, 404);
+  assert.deepEqual(app.agentAccounts.list(user.id).map(account => account.id), [replacement]);
+  const nativeClients = ctx.codex.clients.length;
+  await app.manager.send(chat.id, "must not use replacement automatically");
+  assert.match(app.store.get(chat.id).queueError, /account not found/);
+  assert.equal(app.store.get(chat.id).agentAccountId, id); assert.equal(ctx.codex.clients.length, nativeClients);
+  assert.equal(app.agentAccounts.hasConnected(user.id, "codex"), true);
 });

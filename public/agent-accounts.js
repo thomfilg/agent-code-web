@@ -9,7 +9,7 @@ const button = (text, action) => { const element = node("button", text, "seconda
 export class AgentAccountSettings {
   constructor({ api, state, changed, chatUpdated, toast }) {
     Object.assign(this, { api, state, changed, chatUpdated, toast });
-    this.accounts = []; this.logins = new Map(); this.errors = new Map(); this.actions = new Map(); this.accountVersions = new Map(); this.generation = 0; this.listRequest = 0;
+    this.accounts = []; this.logins = new Map(); this.errors = new Map(); this.actions = new Map(); this.accountVersions = new Map(); this.deleted = new Set(); this.generation = 0; this.listRequest = 0;
     this.companies = new CompanyPicker($("#agent-account-companies"), () => {}, { compact: true });
     $("#agent-accounts-button").onclick = () => this.open();
     $("#connect-codex-button").onclick = () => this.open();
@@ -78,6 +78,17 @@ export class AgentAccountSettings {
         }));
         else if (account.status === "pending") this.renderLogin(row, account);
         else row.append(button("Reconnect", () => this.reconnect(account)));
+        row.append(button("Delete account", () => {
+          if (!confirm(`Delete “${account.name}” from Relay? Its saved credentials will be removed, pending sign-in cancelled, and running chats stopped. Conversations stay saved and require an explicitly selected replacement account. This does not delete your ${providerLabel(account.provider)} account.`)) return;
+          return this.act(account, "Deleting account…", async () => {
+            try { await this.api(`/api/agent-accounts/${account.id}`, { method: "DELETE" }); }
+            catch (error) { await this.refresh(); throw error; }
+            this.deleted.add(account.id); this.listRequest++;
+            this.accounts = this.accounts.filter(item => item.id !== account.id);
+            this.logins.delete(account.id); this.errors.delete(account.id);
+            this.renderList(); this.notifyChanged();
+          });
+        }));
       }
       list.append(row);
     }
@@ -159,11 +170,15 @@ export class AgentAccountSettings {
     const request = ++this.listRequest;
     const data = await this.api("/api/agent-accounts");
     if (request !== this.listRequest) return;
-    this.accounts = data.accounts;
+    // A fresh owner-scoped list is authoritative, including deletion in
+    // another tab. Older status/POST responses must not resurrect that ID.
+    for (const account of this.accounts) if (!data.accounts.some(item => item.id === account.id)) this.deleted.add(account.id);
+    this.accounts = data.accounts.filter(account => !this.deleted.has(account.id));
     for (const id of this.logins.keys()) if (!this.accounts.some(account => account.id === id && account.status === "pending")) this.logins.delete(id);
     this.renderList(); this.notifyChanged(); this.schedulePoll(0);
   }
   accept(result) {
+    if (this.deleted.has(result.account.id)) return;
     // A slow POST response must not turn an already connected account back into
     // a pending one after a newer status request or event has completed it.
     const current = this.accounts.find(account => account.id === result.account.id);
