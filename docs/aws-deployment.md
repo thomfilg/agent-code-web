@@ -96,9 +96,6 @@ the opt-in CI consumer uses a repository/environment-scoped OIDC role.
 
 ```bash
 aws sts get-caller-identity --profile code-web
-git clone https://github.com/12-apps/ci.git /YOUR/OPERATOR/PATH/ci-aws
-git -C /YOUR/OPERATOR/PATH/ci-aws switch --detach 848182b33461640e9ac0feb7315f747a67877c88
-export CI_AWS_ENGINE=/YOUR/OPERATOR/PATH/ci-aws/scripts/deploy/aws.mjs
 node scripts/aws-deploy.mjs plan
 node scripts/aws-deploy.mjs provision
 node scripts/aws-deploy.mjs status
@@ -109,7 +106,10 @@ do not run it for an ordinary image update. It checks the account, stack owner,
 in-progress state and infrastructure template. The wrapper rejects a dirty or
 different engine revision. It creates the deployment SSH key and pins the base
 Ubuntu AMI under `~/.local/share/agent-relay-aws-mvp` (private directory); only
-the public key enters CloudFormation. Keep the private key outside Git/backups
+the public key enters CloudFormation. The wrapper uses the reviewed engine
+saved under `scripts/deploy` and verifies both runtime file hashes before every
+operation. `CI_AWS_ENGINE` is only an optional override for the same clean,
+pinned upstream revision. Keep the private key outside Git/backups
 shared with other users. An update preserves the original pinned base AMI.
 
 Wait for `CREATE_COMPLETE` / `UPDATE_COMPLETE`. A submitted operation is not a

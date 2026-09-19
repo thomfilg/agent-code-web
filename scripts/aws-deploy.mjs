@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { access, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -11,7 +12,37 @@ const execute = promisify(execFile);
 export const target = Object.freeze({ profile: "code-web", region: "us-east-2", account: "456808212788", stack: "agent-relay-mvp" });
 export const engineRevision = "848182b33461640e9ac0feb7315f747a67877c88";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+export const deploymentEngine = Object.freeze({
+  upstream: "https://github.com/12-apps/ci.git",
+  revision: engineRevision,
+  entrypoint: path.join(root, "scripts/deploy/aws.mjs"),
+  files: Object.freeze({
+    "aws.mjs": "c56a37bbb34ff1fcb9895f131acf8ad475597beb3f95ed778d5fa893cfbc4f43",
+    "aws-rollout.py": "8e0822900924b20fc98c178a195bdd8d47affdc3ffab8b3472d1ea7094be27f6",
+  }),
+});
 const operatorDirectory = path.join(os.homedir(), ".local/share/agent-relay-aws-mvp");
+
+async function sha256(filename) {
+  return createHash("sha256").update(await readFile(filename)).digest("hex");
+}
+
+export async function resolveDeploymentEngine(env = process.env) {
+  const engine = env.CI_AWS_ENGINE || deploymentEngine.entrypoint;
+  if (!path.isAbsolute(engine)) throw new Error("CI_AWS_ENGINE must be an absolute path when overriding the repository-pinned deployment engine");
+  if (path.basename(engine) !== "aws.mjs") throw new Error("Deployment engine entrypoint must be scripts/deploy/aws.mjs");
+  await access(engine);
+  const directory = path.dirname(engine);
+  for (const [filename, expected] of Object.entries(deploymentEngine.files)) {
+    if (await sha256(path.join(directory, filename)) !== expected) throw new Error(`Deployment engine does not match reviewed 12-apps/ci revision ${engineRevision}`);
+  }
+  if (path.resolve(engine) === deploymentEngine.entrypoint) return engine;
+  const engineRoot = path.resolve(directory, "../..");
+  const installedRevision = (await execute("git", ["-C", engineRoot, "rev-parse", "HEAD"])).stdout.trim();
+  const engineChanges = (await execute("git", ["-C", engineRoot, "diff", "--name-only", "HEAD", "--", "scripts/deploy"])).stdout.trim();
+  if (installedRevision !== engineRevision || engineChanges) throw new Error(`Use the clean reviewed 12-apps/ci engine revision ${engineRevision}`);
+  return engine;
+}
 
 export async function aws(operation, args = []) {
   try {
@@ -59,13 +90,7 @@ async function provisionParameters() {
 export async function main(args, env = process.env) {
   const [action, ...extra] = args;
   if (!["plan", "provision", "status", "deploy", "rollback"].includes(action)) throw new Error("Usage: node scripts/aws-deploy.mjs plan|provision|status|deploy|rollback [--image ECR_URI@sha256:DIGEST] [--command-id UUID]");
-  const engine = env.CI_AWS_ENGINE;
-  if (!engine || !path.isAbsolute(engine)) throw new Error("Set CI_AWS_ENGINE to the absolute scripts/deploy/aws.mjs path in the documented pinned 12-apps/ci checkout");
-  await access(engine);
-  const engineRoot = path.resolve(path.dirname(engine), "../..");
-  const installedRevision = (await execute("git", ["-C", engineRoot, "rev-parse", "HEAD"])).stdout.trim();
-  const engineChanges = (await execute("git", ["-C", engineRoot, "diff", "--name-only", "HEAD", "--", "scripts/deploy"])).stdout.trim();
-  if (installedRevision !== engineRevision || engineChanges) throw new Error(`Use the clean reviewed 12-apps/ci engine revision ${engineRevision}`);
+  const engine = await resolveDeploymentEngine(env);
   if (extra.some((value, index) => index % 2 === 0 && !["--image", "--command-id"].includes(value))) throw new Error("Only --image or --command-id may be passed through; deployment target is pinned");
   await verifyTarget();
   const options = [action, "--profile", target.profile, "--region", target.region, "--expected-account", target.account, "--stack", target.stack, "--container", "relay", "--mount", "/srv/relay/data", "--destination", "/var/lib/relay", "--ready-file", "/var/lib/relay-controller-ready", "--port", "8787", "--health", "/readyz", ...extra];

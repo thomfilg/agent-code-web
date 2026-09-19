@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
@@ -8,10 +6,10 @@ import { zipSync, strToU8 } from "fflate";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { target, engineRevision } from "./aws-deploy.mjs";
+import { target, engineRevision, deploymentEngine, resolveDeploymentEngine } from "./aws-deploy.mjs";
 import { buildTarget } from "./aws-build.mjs";
 
-const execute = promisify(execFile), digest = value => createHash("sha256").update(value).digest("hex");
+const digest = value => createHash("sha256").update(value).digest("hex");
 const imagePattern = /^456808212788\.dkr\.ecr\.us-east-2\.amazonaws\.com\/[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$/;
 const fail = message => { throw Error(message); };
 export function parseRollbackOptions(args) {
@@ -24,6 +22,7 @@ export function parseRollbackOptions(args) {
     if (!name || !args[index + 1] || args[index + 1].startsWith("--")) fail("Invalid rollback acceptance option");
     options[name] = args[++index];
   }
+  options.engine ||= deploymentEngine.entrypoint;
   if (options.run && options.action !== "plan") {
     if (!imagePattern.test(options.baseImage || "") || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(options.acceptanceId || "") || !path.isAbsolute(options.engine || "")) fail("Explicit acceptance requires an immutable owned base image, UUID and absolute pinned engine path");
     if (["status", "verify"].includes(options.action) && !/^[A-Za-z0-9_-]+:[a-f0-9-]{36}$/.test(options.buildId || "")) fail("Status/verify require the exact acceptance CodeBuild ID");
@@ -38,11 +37,8 @@ export function acceptanceArchive(baseImage, acceptanceId) {
 }
 
 async function loadEngine(filename) {
-  const root = path.resolve(path.dirname(filename), "../..");
-  const revision = (await execute("git", ["-C", root, "rev-parse", "HEAD"])).stdout.trim();
-  const changed = (await execute("git", ["-C", root, "diff", "--name-only", "HEAD", "--", "scripts/deploy"])).stdout.trim();
-  if (revision !== engineRevision || changed || filename !== path.join(root, "scripts/deploy/aws.mjs")) fail("Use the clean pinned shared AWS engine");
-  return { module: await import(pathToFileURL(filename).href), source: await readFile(path.join(root, "scripts/deploy/aws-rollout.py"), "utf8") };
+  filename = await resolveDeploymentEngine({ CI_AWS_ENGINE: filename });
+  return { module: await import(pathToFileURL(filename).href), source: await readFile(path.join(path.dirname(filename), "aws-rollout.py"), "utf8") };
 }
 
 export function acceptanceBuild(build, selected, options) {

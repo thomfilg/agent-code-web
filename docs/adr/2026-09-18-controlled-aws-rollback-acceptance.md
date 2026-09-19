@@ -82,17 +82,14 @@ do not reuse it blindly after another deployment.
 taskset -c 0,1 nice -n 10 node scripts/smoke-aws-rollback.mjs plan
 
 taskset -c 0,1 nice -n 10 node scripts/smoke-aws-rollback.mjs build --run \
-  --engine /absolute/pinned/ci/scripts/deploy/aws.mjs \
   --base-image ECR_REPOSITORY@sha256:CURRENT_DIGEST \
   --acceptance-id NEW_UUID
 
 taskset -c 0,1 nice -n 10 node scripts/smoke-aws-rollback.mjs status --run \
-  --engine /absolute/pinned/ci/scripts/deploy/aws.mjs \
   --base-image ECR_REPOSITORY@sha256:CURRENT_DIGEST \
   --acceptance-id SAME_UUID --build-id PROJECT:RETURNED_BUILD_UUID
 
 taskset -c 0,1 nice -n 10 node scripts/smoke-aws-rollback.mjs verify --run \
-  --engine /absolute/pinned/ci/scripts/deploy/aws.mjs \
   --base-image ECR_REPOSITORY@sha256:CURRENT_DIGEST \
   --acceptance-id SAME_UUID --build-id PROJECT:RETURNED_BUILD_UUID
 ```

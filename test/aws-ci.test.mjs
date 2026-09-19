@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ciDeploymentTemplate, ciTarget, renderCiTemplate } from "../deploy/aws/ci-template.mjs";
-import { target, engineRevision } from "../scripts/aws-deploy.mjs";
+import { target, engineRevision, deploymentEngine, resolveDeploymentEngine } from "../scripts/aws-deploy.mjs";
 
 const providerArn = `arn:aws:iam::${ciTarget.account}:oidc-provider/token.actions.githubusercontent.com`;
 const instance = "i-0123456789abcdef0";
@@ -26,6 +26,24 @@ test("CI target matches the reviewed application target and shared engine", () =
   assert.equal(ciTarget.engineRevision, engineRevision);
   assert.equal(ciTarget.enabledByDefault, false);
   assert.notEqual(ciTarget.ciStack, ciTarget.applicationStack);
+});
+
+test("operator wrapper uses the hash-pinned deployment engine in this repository", async () => {
+  assert.equal(deploymentEngine.revision, engineRevision);
+  assert.equal(deploymentEngine.upstream, "https://github.com/12-apps/ci.git");
+  assert.equal(path.basename(deploymentEngine.entrypoint), "aws.mjs");
+  assert.equal(await resolveDeploymentEngine({}), deploymentEngine.entrypoint);
+  assert.deepEqual(Object.keys(deploymentEngine.files).sort(), ["aws-rollout.py", "aws.mjs"]);
+});
+
+test("operator wrapper rejects a modified engine override before AWS access", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "relay-aws-engine-"));
+  try {
+    const entrypoint = path.join(directory, "aws.mjs");
+    await writeFile(entrypoint, await readFile(deploymentEngine.entrypoint));
+    await writeFile(path.join(directory, "aws-rollout.py"), "modified rollout");
+    await assert.rejects(resolveDeploymentEngine({ CI_AWS_ENGINE: entrypoint }), /does not match reviewed/);
+  } finally { await rm(directory, { recursive: true }); }
 });
 
 test("leaf references an existing provider without adopting or modifying it", () => {
