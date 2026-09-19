@@ -9,7 +9,16 @@ current candidate. They are **not newly published or accepted in production**.
 See the [combined validation and remaining gates](validation-2026-09-19-company-ui-integration.md).
 Historical checkpoints below retain their original evidence scope.
 
-Candidate `007d620` passed **1,396/1,396 Node** cases with all optional checks
+Runtime follow-up candidate `188282e` passed **1,464/1,464 Node** cases with
+optional checks enabled and **40/40 targeted browser** cases without retries.
+It includes the Claude ambient-workflow cancellation fix, fatal-exit transcript
+preservation, fenced offline agent snapshots and the local reconnection
+foundations described below. Failed intermediate runs and the unroot-caused
+local Chrome crash remain recorded in the
+[runtime integration receipt](validation-2026-09-19-runtime-integration.md).
+The reported live chat has not been recovered and production remains unchanged.
+
+Earlier candidate `007d620` passed **1,396/1,396 Node** cases with all optional checks
 enabled and **157/157 browser** cases without retries. Separate official MCP
 account/configuration and preview HTTP/WS/SSE fixture checks passed. Failed
 intermediate runs, the still-unconfirmed clipboard telemetry hypothesis and
