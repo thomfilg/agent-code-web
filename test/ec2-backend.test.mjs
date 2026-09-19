@@ -78,6 +78,44 @@ test("EC2 clone failure or cancellation after SSH never uploads a workspace", as
   }
 });
 
+test("hibernation opt-in denies direct acquisition before any AWS/SSH operation", async () => {
+  const { backend, calls } = fixture({ config: ec2Config({ AGENT_IDLE_POLICY: "hibernate" }) });
+  await assert.rejects(backend.acquire(chat), { code: "HIBERNATION_UNAVAILABLE" });
+  assert.deepEqual(calls, []);
+});
+
+test("running worker admission rejection produces no rollback authority", async () => {
+  const { backend, calls } = fixture({ initial: instance({ State: { Name: "running" } }), ami: image({ Tags: [] }) });
+  const mutations = [];
+  await assert.rejects(backend.acquire(chat, { onMutation: receipt => mutations.push(receipt) }), /AMI|accept/);
+  assert.deepEqual(mutations, []); assert.ok(!calls.some(call => call.args.includes("stop-instances")));
+});
+
+test("new and started worker rollback receipts keep exact instance ownership and are idempotent", async () => {
+  for (const initial of [null, instance()]) {
+    const lookup = initial ? [initial] : [], { backend, calls } = fixture({ initial, lookup });
+    let receipt;
+    const executor = await backend.acquire(chat, { onMutation: value => { receipt = value; } });
+    assert.equal(receipt.instanceId, "i-aaaaaaaaaaaaaaaaa");
+    // A chat lookup now points at a replacement; the old attempt must never
+    // acquire authority to stop it during its deferred failure cleanup.
+    lookup.splice(0, lookup.length, instance({ InstanceId: "i-bbbbbbbbbbbbbbbbb", State: { Name: "running" } }));
+    const before = calls.length;
+    await Promise.all([receipt.release(), receipt.release(), executor.releaseAcquisition()]);
+    const cleanup = calls.slice(before);
+    assert.ok(!cleanup.some(call => call.args.includes("--filters")));
+    const stops = cleanup.filter(call => call.args.includes("stop-instances"));
+    assert.equal(stops.length, 1); assert.equal(stops[0].args.at(-1), "i-aaaaaaaaaaaaaaaaa");
+  }
+});
+
+test("late launched ID publishes cleanup authority before cancelled admission can throw", async () => {
+  const { backend, calls } = fixture({ initial: null }); let receipt, cancelled = false;
+  await assert.rejects(backend.acquire(chat, { onMutation: value => { receipt = value; cancelled = true; }, check: () => { if (cancelled) throw Error("Fixture cancellation"); } }), /Fixture cancellation/);
+  assert.ok(receipt); await receipt.release();
+  assert.equal(calls.filter(call => call.args.includes("stop-instances")).length, 1);
+});
+
 test("EC2 launch requires tagged pinned image; encrypts and tags volumes; disables IMDS, public IP and IAM", async () => {
   const { backend, calls } = fixture({ initial: null, config: ec2Config({ AWS_PROFILE: "fixture" }) });
   await backend.acquire(chat);

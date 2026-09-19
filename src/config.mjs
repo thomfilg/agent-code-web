@@ -53,6 +53,10 @@ export function loadConfig(env = process.env) {
 
   const isolationDefault = os.platform() === "linux" ? "namespace" : "none";
   const workerBackend = choice(env, "AGENT_WORKER_BACKEND", "local", ["local", "ec2"]);
+  // Requested policy is distinct from runtime support. Hibernation is a
+  // fail-closed opt-in until transport and image acceptance are implemented.
+  const idlePolicy = choice(env, "AGENT_IDLE_POLICY", "stop", ["stop", "hibernate"]);
+  if (idlePolicy === "hibernate" && workerBackend !== "ec2") throw new Error("AGENT_IDLE_POLICY=hibernate requires EC2 workers");
   const codexAuthMode = choice(env, "CODEX_AUTH_MODE", "gateway", ["gateway", "host"]);
   const claudeAuthMode = choice(env, "CLAUDE_AUTH_MODE", "gateway", ["gateway", "host"]);
   const ec2GatewayOrigin = (env.AGENT_EC2_GATEWAY_ORIGIN || "").replace(/\/$/, "");
@@ -105,7 +109,8 @@ export function loadConfig(env = process.env) {
       cliPath: env.AGENT_GITHUB_CLI || "gh",
       apiBase: "https://api.github.com",
     },
-    idleTimeoutMs: integer(env, "AGENT_IDLE_TIMEOUT_MS", 300_000, { min: 100, max: 86_400_000 }),
+    idlePolicy,
+    idleTimeoutMs: integer(env, "AGENT_IDLE_TIMEOUT_MS", idlePolicy === "hibernate" ? 120_000 : 300_000, { min: 100, max: 86_400_000 }),
     dataDir: path.resolve(APP_ROOT, env.AGENT_DATA_DIR || "data"),
     workspaceSource: env.AGENT_WORKSPACE_SOURCE || "",
     workerBackend,
