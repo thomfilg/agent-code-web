@@ -2,11 +2,12 @@
 
 Run `taskset -c 0,1 nice -n 10 node scripts/smoke-preview-ui-mcp.mjs` with the installed official Playwright MCP and Chrome. This starts only disposable loopback services and browser state. It does not accept a production origin, cookie file, account credential or AWS target.
 
-The fixture uses the real Relay UI, Google/Auth.js session handling, chat APIs, AppPreviews, PreviewBootstrap, HTTP/WebSocket proxy, framed TCP bridge and unchanged SSH worker launcher. The Google provider is a signed synthetic OIDC fixture; the saved CloudFront registry is an in-memory stand-in; an isolated local child process stands in for EC2's SSH connection. TLS and two distinct browser sites exercise real browser cookies/CORS and the trusted launch page. All destinations are locally mapped; the sole Google navigation is fulfilled by the fixture provider, not sent to Google.
+The fixture uses the real Relay UI, Google/Auth.js session handling, chat APIs, company/environment/repository admission, AppPreviews, PreviewBootstrap, HTTP/WebSocket proxy, framed TCP bridge and unchanged SSH worker launcher. The Google provider is a signed synthetic OIDC fixture; the selected Codex account and GitHub metadata are synthetic, and its first turn uses the mock adapter, not a model. A disposable preinitialized repository stands in for an already checked-out workspace (repository cloning is not tested). The saved CloudFront registry is an in-memory stand-in; an isolated local child process stands in for EC2's SSH connection. TLS and two distinct browser sites exercise real browser cookies/CORS and the trusted launch page. All destinations are locally mapped; the sole Google navigation is fulfilled by the fixture provider, not sent to Google.
 
 Assertions cover:
 
-- Google login UI and real signed fixture callback; chat creation without a prompt.
+- Google login UI and real signed fixture callback; the current **inline** new-chat page, with no creation popup. Select a company environment, repository and branch, choose the combined agent account, type the first message and click Send. No direct `/api/chats` browser injection replaces this flow.
+- The stored chat retains the selected company, environment, repository, branch and account; exactly one chat and one initial message are submitted. The mock reply completes before the fixture stops that runtime to arrange a cold preview.
 - Explicit port/path setup, pending status, ready status, and no worker acquisition or launch minting during setup/polling.
 - Real **Open app** click with deliberately gated worker acquisition: the API
   returns 202 and both the dialog and detached tab show preparation, before any
@@ -14,7 +15,7 @@ Assertions cover:
   bounded poll to obtain a fresh launch and retain the exact app path/query/fragment.
 - HTTP app content, a WebSocket echo and incremental SSE through the real proxy/bridge.
 - Application-only upstream cookies; no Relay session/preview grant or authorization header reaches the fixture app.
-- UI revocation closes both live streams, rejects subsequent app requests and leaves no transcript/model messages.
+- UI revocation closes both live streams and rejects subsequent app requests. All preview actions preserve the initial conversation exactly and send no additional messages; no real model is called at any point.
 - Exact locally spawned launcher children and browser transport are observed closed before successful cleanup is reported.
 
 Only fixed booleans and the current phase on failure are printed. Screenshots under ignored `test-results/preview-ui-integrated-mcp/` show synthetic identities and app content, not browser cookies or launch URLs. On unconfirmed cleanup the private temporary fixture directory is retained and the script fails.
@@ -24,9 +25,27 @@ The delayed-acquisition assertion proves the asynchronous UI/API contract; it
 does not measure a real EC2 cold-start duration or establish deployed cold/resume
 acceptance.
 
-The gated version passed against integrated runtime `ce9fdbe` (recorded in
+The earlier gated version passed against integrated runtime `ce9fdbe` (recorded in
 `6bf9524`) on 2026-09-18 before the immutable AWS image build. The receipt had
 `coldWorkerPreparationUi`, `workerReadyBeforeBootstrap`, `http`, `websocket`,
 `incrementalSse`, `revokeClosesStreams`, `noModelPrompts` and `cleanupConfirmed`
 all true, while `realAwsOrAccountConsent` remained false. The 320-pixel
 preparation screenshot was visually inspected by the primary reviewer.
+
+That historical result used a direct API-created empty chat and did **not**
+verify the later inline creation flow. The current schema-2 harness removes
+that bypass and adds `inlineCompanyChatCreation`,
+`selectedEnvironmentAndRepository`, `firstMessageViaComposer`,
+`initialMockMessagesPreserved` and `previewSendsNoPrompts`. These augment rather
+than replace the cold-start, proxy, isolation, stream-revocation and cleanup
+assertions. `noModelPrompts` means no real model invocation, not an empty chat:
+the initial user message and mock response are deliberately present.
+
+The schema-2 version passed on **2026-09-19**, developed from integrated runtime
+`3f52aa6`. Every receipt invariant above was true, including HTTP, WebSocket,
+incremental SSE, cold worker preparation, transcript preservation, revocation
+and confirmed cleanup; `realAwsOrAccountConsent` remained false. The inline
+company draft, 390px ready dialog, 320px worker-preparing dialog and live app
+screenshots were visually inspected. The draft showed the company environment,
+repository/branch chips, combined account selector and model/effort controls
+without a creation modal; the mobile preview dialogs fit their viewport.
