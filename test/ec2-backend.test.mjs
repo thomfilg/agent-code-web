@@ -5,7 +5,7 @@ import { Ec2Backend } from "../src/worker-backends.mjs";
 import { once } from "node:events";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { temporaryDirectory } from "./helpers.mjs";
+import { temporaryDirectory, waitFor } from "./helpers.mjs";
 
 const chat = { id: `chat_${"a".repeat(32)}`, workspace: "/tmp/relay-workspace-fixture" };
 function ec2Config(overrides = {}) {
@@ -53,6 +53,29 @@ test("EC2 starts/stops only a private deployment/chat worker and uses the IAM de
   assert.ok(ssh.includes("IdentitiesOnly=yes"));
   assert.ok(ssh.some(arg => arg.startsWith("UserKnownHostsFile=")));
   assert.ok(ssh.includes("HostKeyAlias=relay-fixture-i-aaaaaaaaaaaaaaaaa"));
+});
+
+test("EC2 boots and connects while clone is pending, but workspace preparation waits for clone success", async () => {
+  const { backend, calls } = fixture(), gate = Promise.withResolvers(), stages = [];
+  const pending = backend.acquire(chat, { workspaceReady: gate.promise, onStage: async (id, status) => { stages.push([id, status]); } });
+  await waitFor(() => stages.some(([id, status]) => id === "connection" && status === "completed"));
+  assert.ok(calls.some(call => call.args.includes("start-instances")));
+  assert.ok(!calls.some(call => call.command === "ssh" && call.args.at(-1).includes("install -d")));
+  gate.resolve(); await pending;
+  assert.deepEqual(stages, [["machine", "running"], ["machine", "completed"], ["connection", "running"], ["connection", "completed"], ["workspace", "running"], ["workspace", "completed"]]);
+});
+
+test("EC2 clone failure or cancellation after SSH never uploads a workspace", async () => {
+  for (const cancelled of [false, true]) {
+    const { backend, calls } = fixture(), gate = Promise.withResolvers(), stages = []; let stop = false;
+    const pending = backend.acquire(chat, { workspaceReady: gate.promise, check: () => { if (stop) throw Object.assign(Error("Fixture cancelled"), { name: "AbortError" }); }, onStage: async (id, status) => { stages.push([id, status]); } });
+    const rejection = assert.rejects(pending, /Fixture/);
+    await waitFor(() => stages.some(([id, status]) => id === "connection" && status === "completed"));
+    if (cancelled) { stop = true; gate.resolve(); } else gate.reject(Error("Fixture clone failed"));
+    await rejection;
+    assert.ok(!calls.some(call => call.command === "ssh" && call.args.at(-1).includes("install -d")));
+    assert.ok(!stages.some(([id]) => id === "workspace"));
+  }
 });
 
 test("EC2 launch requires tagged pinned image; encrypts and tags volumes; disables IMDS, public IP and IAM", async () => {
