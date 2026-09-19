@@ -355,8 +355,35 @@ dialog { max-height: calc(100dvh - 28px); }
 .token-form { display: flex; flex-direction: column; gap: 14px; }
 .device-code { display: flex; gap: 14px; color: var(--lime); font-size: 13px; }
 .device-code a { color: inherit; }
-#environments-dialog { width: min(1000px, calc(100% - 28px)); background: #191b1d; }
-.environment-card { gap: 22px; }
+#environments-dialog { width: min(740px, calc(100% - 28px)); background: var(--panel-raised); overflow: hidden; }
+#environments-dialog .environment-card { gap: 16px; max-height: calc(100dvh - 30px); }
+.environment-selectors { display: grid; gap: 12px; flex: none; }
+.environment-navigation { align-items: end; }
+.environment-navigation > label { flex: 1; min-width: 0; }
+#environment-form { display: flex; flex-direction: column; min-height: 0; gap: 12px; }
+.environment-scroll { overflow-y: auto; min-height: 0; overscroll-behavior: contain; padding: 1px 3px 4px; }
+#environment-overview > label { display: block; }
+#environment-backend { padding: 10px 0; }
+.environment-summary-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 10px 0 18px; }
+.environment-summary-card { display: flex; flex-direction: column; align-items: start; gap: 10px; padding: 16px; border: 1px solid var(--line-bright); border-radius: 10px; background: var(--panel); color: var(--text); text-align: left; min-width: 0; }
+.environment-summary-card:hover { border-color: var(--lime); }
+.environment-summary-card span, .environment-summary-card small { color: var(--muted); font-size: 11px; }
+#environment-advanced > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+#environment-advanced > .checkbox-label { margin-top: 16px; }
+#environment-editor-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+#environment-editor-heading h3 { font-size: 15px; margin: 0; }
+.environment-save-actions { flex: none; margin-top: 0; padding-top: 12px; border-top: 1px solid var(--line); }
+#environment-error:empty { display: none; }
+@media (max-width: 600px) {
+  #environments-dialog .environment-card { padding: 14px; gap: 12px; }
+  .environment-summary-cards { grid-template-columns: 1fr; }
+  .environment-summary-card { padding: 13px; gap: 7px; }
+  .environment-navigation { flex-direction: column; align-items: stretch; }
+  #environments-dialog #software-options { grid-template-columns: 1fr; }
+  #environments-dialog .variables-toolbar { flex-wrap: wrap; }
+  #environments-dialog .environment-save-actions { gap: 8px; flex-wrap: wrap; }
+  #environment-save-status:empty { display: none; }
+}
 .environment-navigation, #environment-tabs { display: flex; gap: 8px; flex-wrap: wrap; }
 .environment-navigation { justify-content: space-between; }
 .environment-tab { padding: 10px 13px; color: #a7aaad; background: #232629; border: 1px solid #383c40; border-radius: 7px; font-size: 12px; }
