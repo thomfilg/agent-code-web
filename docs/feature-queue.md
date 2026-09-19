@@ -26,10 +26,22 @@ does not enable it. The native MCP mutation and `/code-review` combinations
 remain unsupported, and actual selected-account workflow acceptance is still
 open; local protocol fixtures do not prove those gates.
 
-Two-minute process-preserving hibernation remains open. Its integrated foundation
-rejects unavailable opt-in admission and avoids destructive idle fallback; it
-does not implement reconnectable transport, image acceptance or resume. The
+Two-minute process-preserving hibernation remains open. The candidate includes
+worker-owned process transport, durable lease authority and a locally wired
+Shared Chrome link-reconnection slice. The latter proves same-controller link
+recovery with disposable Chrome, not controller restart or EC2 suspend/resume.
+Remote image/service ownership and native adapter reconnection remain gates;
+hibernation admission stays unavailable, without destructive idle fallback. The
 production idle policy and automatic-deployment restrictions remain unchanged.
+See [local reconnection scope](shared-browser-reconnect-local.md).
+
+The reported Claude cancellation timeout has a reproduced source regression
+fixed in the candidate: unknown housekeeping notifications marked
+`skip_transcript` no longer consume real workflow report slots. The live chat's
+journal does not retain enough metadata to prove its historical cause, and this
+fix does not repair an already-stuck in-memory tracker. Publication/recovery
+remains pending authorization to interrupt the active environments. See the
+[regression receipt](claude-ambient-workflow-notifications.md).
 
 ## Settings UX — included in MVP, requested 2026-09-19
 
@@ -931,7 +943,7 @@ References inspected for this request:
 | 38 | Drag and drop files and images onto the chat to attach them to the current draft without sending automatically; preserve existing text/attachments and apply the same validation and previews | New report appended after item 37; not started |
 | 39 | Add a saved-prompts composer dropdown: truncated prompt rows with per-row (…) edit/delete menus, + Prompt and edit popups, drag-to-reorder, and availability for selected projects or all projects. Clicking a prompt inserts it into the composer without sending | New feature appended after item 38; panel sketch and interactions captured; implementation not started |
 | 40 | Search across messages the user wrote and the AI's final answers, with conversation/result navigation. Do not store or index reasoning/chain-of-thought for this feature; exclude tool activity and intermediate responses from results | New feature appended after saved prompts; search-screen reference received; not started |
-| 41 | Deleting a worker/container must preserve the chat and its messages outside disposable storage; only explicit chat deletion removes the conversation. Reproduce actual container deletion independently of stop/restart, using disposable fixtures | New data-loss report appended; item 05 stop/restart verification does not establish container-deletion safety; not started |
+| 41 | Deleting a worker/container must preserve the chat and its messages outside disposable storage; only explicit chat deletion removes the conversation. Reproduce actual container deletion independently of stop/restart, using disposable fixtures | Partial candidate: fatal worker exits checkpoint visible partial responses and fenced offline child-agent snapshots; disposable process-death/reload tests pass. Actual container deletion, native journal restoration and controller-loss durability remain open; process death is not container-deletion acceptance |
 | 42 | Explore and implement a third-column panel showing the main agent's active secondary agents, with native status and supported conversation details. Selecting a secondary agent opens a popup/composer for prompts addressed to that agent, including while it is working; retain accessible keyboard navigation and keep the main agent/conversation independent. Investigate actual Claude Code/Claude web and Codex capabilities, reusing item 20's Codex descendant-navigation work where applicable. Do not invent child sessions or claim unsupported native messaging/steering | Codex feasibility confirmed read-only: descendant listing, status and direct input/steering are available, with experimental API caveats. Claude capability investigation and the requested both-provider panel/popup remain queued, not implemented |
 | 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | Both providers' native onboarding is implemented and active, with account-scoped progress/link/code/retry UX. Integrated fixtures pass. Personal/umg need fresh consent; selected-account real turn/resume remains open. No global profile is imported |
 | 44 | Authenticate Relay users with Google using `@12-apps/auth`; persist data privately per user and support multiple named Claude/Codex accounts (personal/company), explicitly selected per chat with no credential fallback | Google identity and both providers' named accounts are implemented and active locally/AWS. Persistence, isolation, explicit binding and access-only renewal pass automated checks. Fresh product consent, selected-account real turns and deployed restart/resume remain open |

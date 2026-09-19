@@ -68,6 +68,8 @@ test("public HTTPS origin hop preserves Google ownership, SSE replay and authent
 
   const actions = [], browser = new EventEmitter();
   browser.state = { running: true, mode: "guest", tabs: [], tabId: null };
+  let connectionChecks = 0;
+  browser.ensureConnected = async () => { connectionChecks++; };
   browser.command = async (action, params) => { actions.push({ action, params }); return {}; };
   browser.stop = async () => {};
   const entry = { browser, viewers: new Set() }; entry.ready = Promise.resolve(entry);
@@ -84,6 +86,7 @@ test("public HTTPS origin hop preserves Google ownership, SSE replay and authent
   t.after(() => socket.terminate());
   const messages = []; socket.on("message", value => messages.push(JSON.parse(value))); await once(socket, "open");
   await waitFor(() => messages.some(message => message.event === "status"));
+  assert.equal(connectionChecks, 1, "only the authorized browser connection reaches the process readiness check");
   socket.send(JSON.stringify({ id: 1, action: "text", params: { text: "remote input" } }));
   await waitFor(() => messages.some(message => message.id === 1));
   assert.ok(actions.some(action => action.action === "text" && action.params.text === "remote input"));
