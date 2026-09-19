@@ -6,6 +6,7 @@ import readline from "node:readline";
 import { timingSafeEqual } from "node:crypto";
 import { ClaudeControlChannel } from "./claude-mcp.mjs";
 import { spawnWorker, terminateWorker } from "./worker-process.mjs";
+import { ultracodeDiscovery } from "./claude-ultracode.mjs";
 
 const messages = {
   startup: "The server could not start Claude sign-in. Try again or contact the Relay administrator.",
@@ -172,6 +173,10 @@ export class ClaudeAccountClient {
         Object.defineProperty(models, "discoveryIncomplete", { value: true });
       }
       if (!bootstrapReady && !models.discoveryIncomplete) Object.defineProperty(models, "discoveryIncomplete", { value: true });
+      let applied;
+      channel.timeoutMs = Math.min(this.timeoutMs, 2000);
+      try { applied = await channel.request("get_settings"); } catch { /* Older native contracts remain unverified, not supported. */ }
+      Object.defineProperty(models, "ultracodeDiscovery", { value: ultracodeDiscovery(initialized, applied) });
       if (this.abort.signal.aborted) throw new ClaudeAccountError("temporary");
       this.initialized = { ...initialized, models };
       return this.initialized;

@@ -8,6 +8,7 @@ import { terminateWorker } from "./worker-process.mjs";
 import { ClaudeRequests } from "./claude-requests.mjs";
 import { ClaudeDebugLog } from "./claude-debug.mjs";
 import { claudeCommandMetadata } from "./command-catalog.mjs";
+import { applyUltracode } from "./claude-ultracode.mjs";
 
 const flag = (args, name) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
 
@@ -376,11 +377,15 @@ export class ClaudeSession {
     } else if (event.type === "result") this.scheduleCalls.clear();
   }
 
-  async open(args, env, { resetEffort = false } = {}) {
+  async open(args, env, { resetEffort = false, ultracode, selectionCurrent } = {}) {
     if (this.ended || this.error) throw this.error || Error("Claude application session ended; retry to resume it");
     if (this.pending || this.active) throw Error("A Claude application turn is already running");
     this.pending = true;
+    const checkSelection = () => {
+      if (this.stopping || this.ended || selectionCurrent && !selectionCurrent()) throw new Error("Claude settings changed or the worker stopped before input. Retry with the current selection.");
+    };
     try {
+      checkSelection();
       if (!this.initialized) {
         const initialized = await this.control.request("initialize");
         const commands = claudeCommandMetadata(initialized?.commands);
@@ -416,13 +421,22 @@ export class ClaudeSession {
         await this.control.request("apply_flag_settings", { settings });
         if (enableGatewayFast) this.env = { ...this.env, CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK: "1" };
       }
-      if (this.ended) throw Error("Claude application session stopped before input");
+      checkSelection();
+      const xhigh = flag(args, "--effort") === "xhigh" || env.CLAUDE_CODE_EFFORT_LEVEL === "xhigh";
+      if (typeof ultracode === "boolean" || this.ultracode === true || xhigh) {
+        await applyUltracode(this.control, ultracode === true, checkSelection, {
+          allowUnsupported: ultracode !== true && this.ultracode !== true && !xhigh,
+        });
+        this.ultracode = ultracode === true;
+      }
+      checkSelection();
       const turn = new EventEmitter();
       Object.assign(turn, { stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, signalCode: null });
       const streaming = flag(args, "--input-format") === "stream-json";
       const write = packet => {
         if (this.active !== turn || this.ended) throw Error("Claude application turn stopped before input");
         if (packet.type === "user") {
+          checkSelection();
           if (turn.commandUuid) throw Error("Only one user input is allowed per Claude application turn");
           turn.commandUuid = randomUUID(); packet = { ...packet, uuid: turn.commandUuid };
         }

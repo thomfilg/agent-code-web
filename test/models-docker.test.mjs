@@ -33,7 +33,7 @@ test("model catalog validates provider-specific effort and resets sticky Codex s
   assert.deepEqual(await catalog.creationSettings("codex"), { model: "gpt-5.6-sol", effort: "high" });
   assert.deepEqual(await catalog.creationSettings("claude"), { model: "opus", effort: "high" });
   assert.deepEqual(await catalog.creationSettings("claude", { model: "haiku" }), { model: "haiku", effort: null });
-  assert.deepEqual(await catalog.turnSettings({ agent: "claude", modelSelectionSet: true }), { model: "opus", effort: "high", resetEffort: false });
+  assert.deepEqual(await catalog.turnSettings({ agent: "claude", modelSelectionSet: true }), { model: "opus", effort: "high", resetEffort: false, ultracode: false });
 });
 
 test("Fast and personality settings use the selected model's advertised capabilities", async () => {

@@ -452,7 +452,9 @@ export async function createAgentWebServer(options = {}) {
         if (googleAuth.enabled && !["mock", "codex", "claude"].includes(body.agent)) return json(response, 403, { error: "No agent account is connected for this user" });
         await environments.get(body.environmentId);
         if (!Array.isArray(body.repositories) || body.repositories.length > 100 || body.repositories.some(repo => typeof repo.fullName !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(repo.fullName) || typeof repo.branch !== "string" || repo.branch.length > 250)) throw new Error("Invalid repository preferences");
-        const modelSettings = await models.validate(body.agent, body, { ...body, ownerId: user?.id });
+        // Ultracode is an explicit per-chat mode, never a user/project default.
+        const { ultracode: ignoredUltracode, ...preferenceInput } = body;
+        const { ultracode: ignoredDefault, ...modelSettings } = await models.validate(body.agent, preferenceInput, { ...preferenceInput, ownerId: user?.id });
         if (body.repositories.some(repo => repo.githubConnectionId && !/^github(?:_[a-f0-9-]{36})?$/.test(repo.githubConnectionId))) throw new Error("Invalid GitHub connection preference");
         const connections = github.connections ? await github.connections() : [];
         const preferences = { environmentId: body.environmentId, agent: ["codex", "claude", "mock"].includes(body.agent) ? body.agent : null,
