@@ -65,6 +65,37 @@ The complete corrected workspace-context file passed **5/5**, no retries,
 `/tmp/relay-mvp-workspace-readiness-focused.log`.
 The full six-file selection has **not** yet been rerun after this test fix.
 
+## Saved prompts and stuck-chat follow-up
+
+PR 76's feature-only commit `1a20185` is integrated as `91d0ef7` on top of
+`ae7ace6`; its attachment, mobile-header and workspace-readiness prerequisites
+were already present. Desktop picker, mobile picker and mobile editor images
+were visually inspected. This adds an owner-private saved-prompt library, not
+automatic message submission or any production session change.
+
+Fresh focused tests of the existing cancellation correction on `ae7ace6`:
+
+- Claude session: **109/109 passed**, no skips/cancellations, 11.89 seconds,
+  session `84067`, `/tmp/relay-claude-stuck-chat-current.log`.
+- Session queue: **15/15 passed**, no skips/cancellations, 1.93 seconds,
+  session `58298`, `/tmp/relay-stuck-chat-queue-current.log`.
+
+These include ambient report-FIFO handling and retained queued messages after
+failed cancellation. They do not prove the historical cause or recover the
+reported live chat. No cancellation timeout was bypassed or fabricated.
+
+On integrated saved-prompt candidate `91d0ef7`, its complete Node file passed
+**5/5**, no skips/cancellations, 3.49 seconds, session `1855`,
+`/tmp/relay-saved-prompts-integrated-node.log`. The earlier full-suite failures
+above remain recorded; these focused checks do not replace full reruns.
+
+The complete saved-prompts and controls browser files on this same candidate
+passed **11/11**, no retries, 41.1 seconds, session `9992`,
+`/tmp/relay-saved-prompts-integrated-browser.log`. This includes retained
+drafts/attachments, no automatic send, owner/project filtering, stale request
+fences and compact desktop/mobile controls. The full combined browser and Node
+suites still need rerunning after integration.
+
 ## Open gates
 
 - Full combined suite reruns after the two fixture-readiness corrections.
