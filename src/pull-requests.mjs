@@ -1,5 +1,6 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { repositoryGroup, workflowPatch } from "../public/chat-organization.js";
 import { companyForChat } from "../public/company-scope.js";
 
@@ -100,7 +101,7 @@ export function checkSummary(runs, combined) {
 export class PullRequestMonitor {
   constructor({ store, github, publish, intervalMs = 60000 }) {
     Object.assign(this, { store, github, publish, intervalMs });
-    this.inflight = new Map(); this.stopped = false; this.requests = new Map();
+    this.inflight = new Map(); this.stopped = false; this.requests = new Map(); this.again = new Set();
   }
   start() {
     if (!this.github?.request || this.timer) return;
@@ -108,6 +109,7 @@ export class PullRequestMonitor {
     this.timer = setInterval(() => this.tick(), this.intervalMs); this.timer.unref?.();
   }
   tick() {
+    this.onTick?.();
     for (const chat of this.store.list()) if (!chat.archived && (chat.pullRequests?.length || chat.gitBranches?.length || pullRequestLinks(chat).length)) {
       this.refresh(chat.id).catch(() => {});
     }
@@ -128,10 +130,11 @@ export class PullRequestMonitor {
     for (const [key, value] of this.requests) if (value.until < Date.now()) this.requests.delete(key);
     return promise;
   }
-  refresh(id) {
+  refresh(id, { force = false } = {}) {
     if (this.stopped || !this.github?.request) return Promise.resolve();
-    if (this.inflight.has(id)) return this.inflight.get(id);
-    const pending = this.sync(id).finally(() => this.inflight.delete(id));
+    if (force) this.requests.clear();
+    if (this.inflight.has(id)) { if (force) this.again.add(id); return this.inflight.get(id); }
+    const pending = (async () => { do { this.again.delete(id); await this.sync(id); if (this.again.has(id)) this.requests.clear(); } while (this.again.has(id) && !this.stopped); })().finally(() => this.inflight.delete(id));
     this.inflight.set(id, pending); return pending;
   }
   tracked(id, repository, number) {
@@ -186,6 +189,8 @@ export class PullRequestMonitor {
   async sync(id) {
     const chat = this.store.get(id);
     if (!chat || chat.archived) return;
+    const binding = value => JSON.stringify([value?.ownerId, value?.agent, value?.agentAccountId, value?.environmentId, value?.repositories, value?.archived]);
+    const capturedBinding = binding(chat);
     const request = route => this.request(route, this.connectionOptions(chat, /^\/repos\/([^/?]+\/[^/?]+)/.exec(route)?.[1]));
     const allowed = new Set(chatRepositories(chat).map(repo => repo.fullName.toLowerCase()));
     const candidates = new Map();
@@ -213,9 +218,12 @@ export class PullRequestMonitor {
       const previous = chat.pullRequests?.find(pr => pr.repository.toLowerCase() === candidate.repository.toLowerCase() && pr.number === candidate.number);
       try {
         const route = `/repos/${candidate.repository}`;
+        const connection = this.github.requireConnection ? await this.github.requireConnection(this.connectionOptions(chat, candidate.repository)) : null;
         const pr = await request(`${route}/pulls/${candidate.number}`);
-        if (pr.base?.repo?.full_name?.toLowerCase() !== candidate.repository.toLowerCase() || pr.number !== candidate.number) throw new Error("PR repository mismatch");
-        let checks = "none", checksStale = false, ci = null;
+        const selected = chatRepositories(chat).find(repo => repo.fullName.toLowerCase() === candidate.repository.toLowerCase());
+        if (pr.base?.repo?.full_name?.toLowerCase() !== candidate.repository.toLowerCase() || pr.number !== candidate.number
+          || this.onObserved && pr.base?.repo?.id !== selected?.id) throw new Error("PR repository mismatch");
+        let checks = "none", checksStale = false, ci = null, checksFingerprint = null;
         if (pr.state === "open") {
           try {
             if (!/^[a-f0-9]{40,64}$/i.test(pr.head?.sha || "")) throw new Error("Missing PR head");
@@ -236,6 +244,18 @@ export class PullRequestMonitor {
             }
             checks = checkState(runs, combined);
             ci = checkSummary(runs, combined);
+            checksFingerprint = createHash("sha256").update(JSON.stringify([
+              runs.map(run => [run.id, run.name, run.status, run.conclusion, run.completed_at]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+              combined.statuses.map(status => [status.id, status.context, status.state, status.updated_at]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+            ])).digest("hex");
+            // A multi-request aggregate must still belong to the same head.
+            // Bypass the short request cache for this final identity check.
+            if (this.onObserved) {
+              const latest = await this.github.request(`${route}/pulls/${candidate.number}`, this.connectionOptions(chat, candidate.repository));
+              const selected = chatRepositories(chat).find(repo => repo.fullName.toLowerCase() === candidate.repository.toLowerCase());
+              if (latest.head?.sha !== pr.head.sha || latest.state !== pr.state || latest.number !== candidate.number
+                || latest.base?.repo?.id !== selected?.id || latest.base?.repo?.full_name?.toLowerCase() !== candidate.repository.toLowerCase()) throw new Error("PR changed during check refresh");
+            }
           } catch {
             checks = previous?.headSha === pr.head.sha ? previous.checks : "unknown";
             checksStale = true;
@@ -243,22 +263,26 @@ export class PullRequestMonitor {
             warning = "PR status verified, but checks could not be refreshed. Check GitHub permissions or the API limit.";
           }
         }
-        prs.push({ repository: candidate.repository, number: pr.number, url: `https://github.com/${candidate.repository}/pull/${pr.number}`, title: pr.title,
+        prs.push({ repository: candidate.repository, repositoryId: pr.base?.repo?.id, number: pr.number, url: `https://github.com/${candidate.repository}/pull/${pr.number}`, title: pr.title,
           state: pr.state, merged: Boolean(pr.merged_at || pr.merged), headSha: pr.head?.sha || null, headRef: pr.head?.ref || null, baseRef: pr.base?.ref || null,
           additions: pr.additions || 0, deletions: pr.deletions || 0, changedFiles: pr.changed_files || 0,
           conflicts: pr.mergeable_state === "dirty" ? true : pr.mergeable === null || pr.mergeable === undefined ? null : pr.mergeable === false,
-          autoMerge: Boolean(pr.auto_merge), draft: Boolean(pr.draft), ci, checks, checksStale, verifiedAt: new Date().toISOString() });
+          autoMerge: Boolean(pr.auto_merge), draft: Boolean(pr.draft), ci, checks, checksStale, checksFingerprint, ...(connection ? { connectionRevision: connection.revision || 0 } : {}), verifiedAt: new Date().toISOString() });
       } catch {
-        if (previous) prs.push(previous);
+        if (previous) prs.push({ ...previous, checksStale: true });
         warning = "GitHub sync unavailable. Check your connection, repository permissions or API limit. Showing last verified status.";
       }
     }
-    if (this.stopped || !this.store.get(id)) return;
+    if (this.stopped || !this.store.get(id) || binding(this.store.get(id)) !== capturedBinding) return;
     // Successful polling with no changes must not change last-updated sorting or idle timers.
     const comparable = values => JSON.stringify(values.map(({ verifiedAt, ...pr }) => pr));
-    if (comparable(prs) === comparable(chat.pullRequests || []) && (chat.githubSyncWarning || null) === warning) return;
-    const updated = await this.store.update(id, current => ({ pullRequests: prs, githubSyncWarning: warning,
-      ...workflowPatch({ ...current, pullRequests: prs }) }));
-    this.publish(updated);
+    if (comparable(prs) !== comparable(chat.pullRequests || []) || (chat.githubSyncWarning || null) !== warning) {
+      const updated = await this.store.update(id, current => {
+        if (binding(current) !== capturedBinding) return {};
+        return { pullRequests: prs, githubSyncWarning: warning, ...workflowPatch({ ...current, pullRequests: prs }) };
+      });
+      this.publish(updated);
+    }
+    if (binding(this.store.get(id)) === capturedBinding) await this.onObserved?.(id, prs);
   }
 }

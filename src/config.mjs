@@ -108,6 +108,7 @@ export function loadConfig(env = process.env) {
     github: {
       cliPath: env.AGENT_GITHUB_CLI || "gh",
       apiBase: "https://api.github.com",
+      webhookSecret: env.AGENT_GITHUB_WEBHOOK_SECRET || "",
     },
     idlePolicy,
     idleTimeoutMs: integer(env, "AGENT_IDLE_TIMEOUT_MS", idlePolicy === "hibernate" ? 120_000 : 300_000, { min: 100, max: 86_400_000 }),

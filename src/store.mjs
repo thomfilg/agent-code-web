@@ -183,6 +183,7 @@ export class ChatStore {
     await this.#writes.get(id);
     if (this.records) await this.records.delete("chat", id);
     if (this.records) await this.records.delete("native-session", id);
+    if (this.records) await this.records.delete("github-event-state", id);
     if (this.records) await this.records.delete("native-fork", id);
     if (this.records) await this.records.delete("native-agents", id);
     if (this.records) await this.records.delete("native-import", id);

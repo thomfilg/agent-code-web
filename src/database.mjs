@@ -4,8 +4,21 @@ import path from "node:path";
 import pg from "pg";
 import { admissionRecordKind, assertAttemptFence, canonical, leaseFailure, recordLockKey, revision, scopeRecords, synchronousTransition, workerTransportKey } from "./worker-lease-scope.mjs";
 import { nativeSessionRecords, sessionFailure } from "./native-session-scope.mjs";
+import { githubEventRecords, githubEventLockedKind, githubEventNext, webhookId, githubEventFailure, githubEventSessionRecords, assertGitHubEventSession } from "./github-event-scope.mjs";
 
 const admissionSnapshot = values => Object.fromEntries(["chat", "account", "disconnection", "company", "environment"].map((key, index) => [key, values[index]]));
+// One dispatcher per database. A session lock (not an open transaction) owns
+// crash recovery. Handles are opaque in-process capabilities, never API input.
+const eventControllers = new WeakMap();
+const eventControllerKeys = [182654783, 9826341];
+const eventControllerQuery = `SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid
+  WHERE l.locktype='advisory' AND l.granted AND l.classid=$1::oid AND l.objid=$2::oid AND l.objsubid=2
+  AND l.pid=$3 AND a.backend_start::text=$4) AS held`;
+function requireEventController(records, handle) {
+  const holder = handle && eventControllers.get(handle);
+  if (!holder || holder.records !== records || !holder.active) throw githubEventFailure("CONTROLLER_FENCED");
+  return holder;
+}
 function expectedRevision(actual, expected) { if (!revision(expected) || actual !== expected) throw leaseFailure("CAS_CONFLICT"); }
 function attemptId(id) { if (!/^[a-f0-9]{64}$/.test(id || "")) throw leaseFailure("IDENTITY_INVALID"); return id; }
 function nextAttempt(previous, next, scope) {
@@ -57,13 +70,13 @@ export class EncryptedRecords {
   async put(kind, id, value) {
     const write = client => client.query(`INSERT INTO relay_records(kind,id,payload) VALUES($1,$2,$3)
       ON CONFLICT(kind,id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=now()`, [kind, id, this.cipher.seal(kind, id, value)]);
-    if (admissionRecordKind(kind) || kind === "native-session") await this.#transaction([recordLockKey(kind, id)], write);
+    if (admissionRecordKind(kind) || kind === "native-session" || githubEventLockedKind(kind)) await this.#transaction([recordLockKey(kind, id)], write);
     else await write(this.pool);
     return structuredClone(value);
   }
   async delete(kind, id) {
     const remove = client => client.query("DELETE FROM relay_records WHERE kind=$1 AND id=$2", [kind, id]);
-    if (admissionRecordKind(kind) || kind === "native-session") await this.#transaction([recordLockKey(kind, id)], remove);
+    if (admissionRecordKind(kind) || kind === "native-session" || githubEventLockedKind(kind)) await this.#transaction([recordLockKey(kind, id)], remove);
     else await remove(this.pool);
   }
   async #transaction(keys, action, requireCommit = false) {
@@ -101,6 +114,61 @@ export class EncryptedRecords {
     return { revision: next, value: structuredClone(value) };
   }
   async workerAttemptGet(id) { return this.#workerGet(this.pool, "attempt", attemptId(id)); }
+  async acquireGitHubEventController() {
+    if (typeof this.pool.release === "function") throw githubEventFailure("COMMIT_OWNERSHIP_REQUIRED");
+    const client = await this.pool.connect(); let holder;
+    try {
+      const acquired = (await client.query("SELECT pg_try_advisory_lock($1::integer,$2::integer) AS held", eventControllerKeys)).rows[0].held;
+      if (!acquired) { client.release(); return null; }
+      const identity = (await client.query("SELECT pg_backend_pid() AS pid, backend_start::text AS started FROM pg_stat_activity WHERE pid=pg_backend_pid()")).rows[0];
+      holder = { records: this, active: true, client, ...identity };
+      const lost = () => { holder.active = false; }; client.on("error", lost); client.on("end", lost);
+      let released = false;
+      const handle = Object.freeze({ release: async () => {
+        if (released) return; released = true; holder.active = false;
+        try { await client.query("SELECT pg_advisory_unlock($1::integer,$2::integer)", eventControllerKeys); }
+        finally { client.removeListener("error", lost); client.removeListener("end", lost); client.release(true); }
+      } }); eventControllers.set(handle, holder); return handle;
+    } catch (error) { holder && (holder.active = false); client.release(true); throw error; }
+  }
+  assertGitHubEventController(handle) { requireEventController(this, handle); }
+  async githubEventTransaction({ chatId, scope, controller, session, expectedRevision: expected }, transition) {
+    return this.#githubTransaction("github-event-state", chatId, [...githubEventRecords(chatId, scope), ...githubEventSessionRecords(session)], expected, transition,
+      (next, revision) => githubEventNext(next, chatId, revision), controller, session);
+  }
+  async githubWebhookTransaction({ deliveryId, expectedRevision: expected }, transition) {
+    webhookId(deliveryId);
+    return this.#githubTransaction("github-webhook", deliveryId, [], expected, transition, (next, revision) => {
+      if (!next || next.id !== deliveryId || !Number.isSafeInteger(revision + 1) || Buffer.byteLength(JSON.stringify(next)) > 4096) throw githubEventFailure("INVALID_TRANSITION");
+      return { ...next, revision: revision + 1 };
+    });
+  }
+  async #githubTransaction(kind, id, refs, expected, transition, validate, controller, session) {
+    return this.#transaction([...(kind === "github-webhook" ? [recordLockKey("github-webhook-inbox", "capacity")] : []), recordLockKey(kind, id), ...refs.map(([type, key]) => recordLockKey(type, key))], async client => {
+      if (controller) {
+        const holder = requireEventController(this, controller);
+        if (!(await client.query(eventControllerQuery, [...eventControllerKeys, holder.pid, holder.started])).rows[0].held) { holder.active = false; throw githubEventFailure("CONTROLLER_FENCED"); }
+      }
+      const read = async (type, key) => {
+        const result = await client.query("SELECT payload FROM relay_records WHERE kind=$1 AND id=$2", [type, key]);
+        return result.rows[0] ? this.cipher.open(type, key, result.rows[0].payload) : null;
+      };
+      const value = await read(kind, id), revision = value?.revision || 0;
+      if (expected !== undefined && (!Number.isSafeInteger(expected) || expected < 0 || revision !== expected)) throw githubEventFailure("CAS_CONFLICT");
+      const records = [];
+      for (const [type, key] of refs) records.push(await read(type, key));
+      assertGitHubEventSession(session, records.at(-1), records[0], Date.now());
+      const next = synchronousTransition(transition, { value, revision, records, now: Date.now() });
+      if (controller) requireEventController(this, controller);
+      if (next === undefined) return { value, revision };
+      if (expected === undefined) throw githubEventFailure("INVALID_TRANSITION");
+      const updated = validate(next, revision);
+      if (kind === "github-webhook" && !value && Number((await client.query("SELECT count(*) AS count FROM relay_records WHERE kind='github-webhook'")).rows[0].count) >= 1000) throw Object.assign(githubEventFailure("WEBHOOK_BACKLOG_FULL"), { statusCode: 503 });
+      await client.query(`INSERT INTO relay_records(kind,id,payload) VALUES($1,$2,$3)
+        ON CONFLICT(kind,id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=now()`, [kind, id, this.cipher.seal(kind, id, updated)]);
+      return { value: structuredClone(updated), revision: updated.revision };
+    }, true);
+  }
   async nativeSessionTransaction({ scope, expectedRevision: expected }, transition) {
     const refs = nativeSessionRecords(scope), id = scope.chatId, kind = "native-session";
     return this.#transaction([recordLockKey(kind, id), ...refs.map(([type, key]) => recordLockKey(type, key))], async client => {
@@ -167,11 +235,11 @@ export class MemoryRecords {
   async list(kind) { return [...this.rows.entries()].filter(([k]) => k.startsWith(`${kind}/`)).map(([, v]) => structuredClone(v)); }
   async put(kind, id, value) {
     const write = () => { this.rows.set(`${kind}/${id}`, structuredClone(value)); return structuredClone(value); };
-    return admissionRecordKind(kind) || kind === "native-session" ? this.#locked([recordLockKey(kind, id)], write) : write();
+    return admissionRecordKind(kind) || kind === "native-session" || githubEventLockedKind(kind) ? this.#locked([recordLockKey(kind, id)], write) : write();
   }
   async delete(kind, id) {
     const remove = () => { this.rows.delete(`${kind}/${id}`); };
-    return admissionRecordKind(kind) || kind === "native-session" ? this.#locked([recordLockKey(kind, id)], remove) : remove();
+    return admissionRecordKind(kind) || kind === "native-session" || githubEventLockedKind(kind) ? this.#locked([recordLockKey(kind, id)], remove) : remove();
   }
   async #locked(keys, action) {
     const releases = [];
@@ -191,6 +259,39 @@ export class MemoryRecords {
     const next = { revision: row.revision + 1, value: structuredClone(value) }; this.workerRows.set(`${kind}/${id}`, next); return structuredClone(next);
   }
   async workerAttemptGet(id) { return this.#workerGet("attempt", attemptId(id)); }
+  async acquireGitHubEventController() {
+    if (this.eventController?.active) return null;
+    const holder = { records: this, active: true }; this.eventController = holder;
+    const handle = Object.freeze({ release: async () => { holder.active = false; } }); eventControllers.set(handle, holder); return handle;
+  }
+  assertGitHubEventController(handle) { requireEventController(this, handle); }
+  async githubEventTransaction({ chatId, scope, controller, session, expectedRevision: expected }, transition) {
+    return this.#githubTransaction("github-event-state", chatId, [...githubEventRecords(chatId, scope), ...githubEventSessionRecords(session)], expected, transition,
+      (next, revision) => githubEventNext(next, chatId, revision), controller, session);
+  }
+  async githubWebhookTransaction({ deliveryId, expectedRevision: expected }, transition) {
+    webhookId(deliveryId);
+    return this.#githubTransaction("github-webhook", deliveryId, [], expected, transition, (next, revision) => {
+      if (!next || next.id !== deliveryId || !Number.isSafeInteger(revision + 1) || Buffer.byteLength(JSON.stringify(next)) > 4096) throw githubEventFailure("INVALID_TRANSITION");
+      return { ...next, revision: revision + 1 };
+    });
+  }
+  async #githubTransaction(kind, id, refs, expected, transition, validate, controller, session) {
+    return this.#locked([...(kind === "github-webhook" ? [recordLockKey("github-webhook-inbox", "capacity")] : []), recordLockKey(kind, id), ...refs.map(([type, key]) => recordLockKey(type, key))], () => {
+      if (controller) requireEventController(this, controller);
+      const value = structuredClone(this.rows.get(`${kind}/${id}`) || null), revision = value?.revision || 0;
+      if (expected !== undefined && (!Number.isSafeInteger(expected) || expected < 0 || revision !== expected)) throw githubEventFailure("CAS_CONFLICT");
+      const records = refs.map(([type, key]) => structuredClone(this.rows.get(`${type}/${key}`) || null));
+      assertGitHubEventSession(session, records.at(-1), records[0], Date.now());
+      const next = synchronousTransition(transition, { value, revision, records, now: Date.now() });
+      if (next === undefined) return { value, revision };
+      if (expected === undefined) throw githubEventFailure("INVALID_TRANSITION");
+      const updated = validate(next, revision);
+      if (kind === "github-webhook" && !value && [...this.rows.keys()].filter(key => key.startsWith("github-webhook/")).length >= 1000) throw Object.assign(githubEventFailure("WEBHOOK_BACKLOG_FULL"), { statusCode: 503 });
+      this.rows.set(`${kind}/${id}`, structuredClone(updated));
+      return { value: structuredClone(updated), revision: updated.revision };
+    });
+  }
   async nativeSessionTransaction({ scope, expectedRevision: expected }, transition) {
     const refs = nativeSessionRecords(scope), id = scope.chatId, key = `native-session/${id}`;
     return this.#locked([recordLockKey("native-session", id), ...refs.map(([type, value]) => recordLockKey(type, value))], () => {

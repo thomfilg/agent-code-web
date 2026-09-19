@@ -9,6 +9,7 @@ import { runtimeWorkflowPatch, workflowPatch } from "../public/chat-organization
 import { responsePrompt, extractResponse, ResponseStream } from "./response-protocol.mjs";
 import { provisionalTitlePatch } from "./title-protocol.mjs";
 import { PullRequestMonitor, inspectBranches, inspectWorkspaceStatus } from "./pull-requests.mjs";
+import { GitHubEvents, githubEventText } from "./github-events.mjs";
 import { handoffPrompt } from "./agent-handoff.mjs";
 import { snapshotChanges } from "./workspace-changes.mjs";
 import { mergeUsage } from "./session-info.mjs";
@@ -111,6 +112,27 @@ export class RuntimeManager extends EventEmitter {
     return chat;
   }
 
+  async #enqueueGitHubEvent(chatId, event) {
+    const version = this.#lifecycleVersions.get(chatId) || 0;
+    const stoppedSinceEvent = current => current?.githubEventsStoppedAt && Date.parse(event.reviewedAt || event.createdAt) <= Date.parse(current.githubEventsStoppedAt);
+    const chat = this.store.get(chatId);
+    if (!chat || chat.archived || this.#previewStops.has(chatId) || ["starting", "stopping", "deleting", "error"].includes(chat.status)) return;
+    if (chat.githubEventsStoppedAt && Date.parse(event.reviewedAt || event.createdAt) <= Date.parse(chat.githubEventsStoppedAt)) { await this.githubEvents.settle(chatId, event.id, "cancelled"); return; }
+    if (chat.status === "stopped" && event.checks !== "passing") return;
+    if (chat.queuedMessages?.some(item => item.githubEventId === event.id)) return;
+    await this.githubEvents.validate(chatId, event.id);
+    const item = { id: `github_${event.id}`, githubEventId: event.id, githubWake: event.checks === "passing", text: event.text, attachmentIds: [], createdAt: event.createdAt };
+    const updated = await this.store.update(chatId, current => {
+      if (this.#previewStops.has(chatId) || version !== (this.#lifecycleVersions.get(chatId) || 0) || current.archived
+        || ["starting", "stopping", "deleting", "error"].includes(current.status) || stoppedSinceEvent(current)) return {};
+      if (current.queuedMessages?.some(entry => entry.githubEventId === event.id)) return {};
+      if ((current.queuedMessages || []).length >= 20) throw new Error("Queue holds at most 20 messages");
+      return { queuedMessages: [...(current.queuedMessages || []), item] };
+    });
+    this.publishChat(updated);
+    if (version === (this.#lifecycleVersions.get(chatId) || 0) && !this.#previewStops.has(chatId) && !stoppedSinceEvent(this.store.get(chatId))) void this.#drainQueue(chatId);
+  }
+
   async editQueue(chatId, { removeId, resume = false, sendNowId } = {}) {
     if (sendNowId !== undefined) {
       if (removeId !== undefined || resume) throw new Error("Choose one queue action at a time");
@@ -118,6 +140,10 @@ export class RuntimeManager extends EventEmitter {
     }
     if (this.#sendingNow.has(chatId) || this.#interruptions.has(chatId)) throw Object.assign(new Error("The agent is changing turns; please wait"), { statusCode: 409 });
     const removed = this.store.get(chatId)?.queuedMessages?.find(item => item.id === removeId);
+    if (removed?.githubEventId) {
+      if (this.#queueClaims.get(chatId) === removeId) throw Object.assign(new Error("This GitHub notification is already being sent"), { statusCode: 409 });
+      await this.githubEvents.dismiss(chatId, removed.githubEventId);
+    }
     if (removed?.nativeApprovalId) {
       if (this.#queueClaims.get(chatId) === removeId) throw Object.assign(new Error("This approval retry is already being sent"), { statusCode: 409 });
       await this.approvals.cancel(chatId, removed.nativeApprovalId);
@@ -186,12 +212,27 @@ export class RuntimeManager extends EventEmitter {
     this.#queueClaims.set(chatId, item.id);
     let approval;
     try {
+      let githubClaim;
+      if (item.githubEventId) {
+        const check = () => {
+          if (version !== (this.#lifecycleVersions.get(chatId) || 0) || this.#previewStops.has(chatId)) throw Object.assign(new Error("GitHub delivery cancelled by Stop"), { name: "AbortError" });
+          this.#assertNativeAccount(chatId);
+        };
+        check(); await this.pullRequests.refresh(chatId, { force: true }); check();
+        githubClaim = await this.githubEvents.claim(chatId, item.githubEventId, check); check();
+      }
       approval = item.nativeApprovalId ? await this.approvals.claim(chatId, item.nativeApprovalId) : null;
       if (version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(new Error("Queued message cancelled because the chat stopped"), { name: "AbortError" });
-      const submitted = await this.#submit(chatId, item.text, item.attachmentIds, action, approval);
+      const submitted = await this.#submit(chatId, githubClaim ? githubEventText(githubClaim) : item.text, githubClaim ? [] : item.attachmentIds, action, approval, githubClaim);
+      if (githubClaim) submitted.completion = submitted.completion.then(async value => { await this.githubEvents.settle(chatId, item.githubEventId, submitted.githubDelivered?.() ? "delivered" : "uncertain"); return value; }, async error => { await this.githubEvents.settle(chatId, item.githubEventId, "uncertain"); throw error; });
       this.publishChat(await this.store.update(chatId, current => ({ queuedMessages: (current.queuedMessages || []).filter(entry => entry.id !== item.id) })));
       return submitted;
     } catch (error) {
+      if (item.githubEventId) {
+        await this.githubEvents.settle(chatId, item.githubEventId, error.name === "AbortError" ? "cancelled" : "uncertain").catch(() => {});
+        this.publishChat(await this.store.update(chatId, current => ({ queuedMessages: (current.queuedMessages || []).filter(entry => entry.id !== item.id) })));
+        return { completion: Promise.resolve() };
+      }
       if (approval) await this.approvals.cancel(chatId, approval.id).catch(() => {});
       throw error;
     } finally { this.#queueClaims.delete(chatId); }
@@ -208,8 +249,11 @@ export class RuntimeManager extends EventEmitter {
     try {
       while (true) {
         const chat = this.store.get(chatId);
-        if (!chat || chat.queuePaused || chat.archived || this.isBusy(chatId) || chat.status === "stopping" || !chat.queuedMessages?.length) break;
-        const item = chat.queuedMessages[0];
+        if (!chat || chat.archived || this.isBusy(chatId) || chat.status === "stopping" || this.#previewStops.has(chatId) || !chat.queuedMessages?.length) break;
+        // An explicitly subscribed passing event may wake a stopped chat, but
+        // must not resume the user's independently paused ordinary queue.
+        const item = chat.queuePaused ? chat.status === "stopped" ? chat.queuedMessages.find(entry => entry.githubEventId && entry.githubWake) : null : chat.queuedMessages[0];
+        if (!item) break;
         const submitted = await this.#submitQueued(chatId, item);
         await submitted.completion;
       }
@@ -269,6 +313,13 @@ export class RuntimeManager extends EventEmitter {
     };
     this.commands = commands;
     this.pullRequests = new PullRequestMonitor({ store, github: resources?.githubForMonitor() || github, publish: chat => this.publishChat(chat) });
+    if (store.records?.githubEventTransaction && this.pullRequests.github?.requireConnection) {
+      this.githubEvents = new GitHubEvents({ records: store.records, store, github: this.pullRequests.github, monitor: this.pullRequests,
+        secret: config.github.webhookSecret || "", isLegacy: ownerId => resources?.isLegacy(ownerId) ?? !config.google?.enabled,
+        notify: (id, event) => this.#enqueueGitHubEvent(id, event), publish: chat => this.publishChat(chat) });
+      this.pullRequests.onObserved = (id, prs) => this.githubEvents.observe(id, prs);
+      this.pullRequests.onTick = () => this.githubEvents.process();
+    }
     this.agentThreads = new NativeAgentSnapshots(store, (chatId, snapshot) => this.#emit(chatId, { type: "agent_threads_updated", ...snapshot }, false));
     this.approvals = new CodexApprovals(store, config);
     this.feedback = new CodexFeedback(store, config);
@@ -1388,7 +1439,7 @@ export class RuntimeManager extends EventEmitter {
     this.publishChat(chat); return chat;
   }
 
-  async #submit(chatId, rawText, attachmentIds = [], queueAction = null, approval = null) {
+  async #submit(chatId, rawText, attachmentIds = [], queueAction = null, approval = null, githubEvent = null) {
     if (this.#runtimes.get(chatId)?.cleanupFailed) throw Object.assign(new Error("Worker cleanup is incomplete. Retry stopping the environment before resuming."), { statusCode: 409 });
     if (this.#runtimes.get(chatId)?.failing) throw Object.assign(new Error("The failed worker is being disconnected. Wait before resuming this chat."), { statusCode: 409 });
     if (this.#workerWakes.has(chatId)) throw Object.assign(new Error("The environment is waking up. Wait until it is ready before sending a message."), { statusCode: 409 });
@@ -1403,7 +1454,7 @@ export class RuntimeManager extends EventEmitter {
       throw Object.assign(new Error("this chat already has a running turn"), { statusCode: 409 });
     }
     this.#queued.add(chatId);
-    const turn = { cancelled: false, ...Promise.withResolvers() };
+    const turn = { cancelled: false, githubEvent, ...Promise.withResolvers() };
     turn.done = turn.promise;
     this.#submissions.set(chatId, turn);
     const finish = () => {
@@ -1428,15 +1479,20 @@ export class RuntimeManager extends EventEmitter {
         else if (command?.web) throw new Error(`/${slash[1]} opens a web control. Run it without arguments, or choose it from the / menu.`);
       }
       if (turn.cancelled || version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(new Error("Turn cancelled"), { name: "AbortError" });
+      if (githubEvent) await this.githubEvents.assertDispatch(chatId, githubEvent, () => {
+        if (turn.cancelled || version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(new Error("GitHub event cancelled"), { name: "AbortError" });
+        this.#assertNativeAccount(chatId);
+      });
       await this.store.update(chatId, { awaitingUser: false, pendingRequest: null, ...(!chat.queuedMessages?.length ? { queuePaused: false, queueError: null } : {}) });
-      const userMessage = await this.store.appendMessage(chatId, { role: "user", kind: "message", text, ...(files.length ? { attachments: files.map(file => this.attachments.public(file)) } : {}) });
+      const userMessage = await this.store.appendMessage(chatId, { role: "user", kind: "message", text,
+        ...(githubEvent ? { meta: { githubEventId: githubEvent.id, source: "github" } } : {}), ...(files.length ? { attachments: files.map(file => this.attachments.public(file)) } : {}) });
       this.#emit(chatId, { type: "message", message: userMessage });
       if (Object.keys(provisionalTitlePatch(this.store.get(chatId), text, { hasAttachments: files.length > 0 })).length) {
         this.publishChat(await this.store.update(chatId, current => provisionalTitlePatch(current, text, { hasAttachments: files.length > 0 })));
       }
       if (turn.cancelled || version !== (this.#lifecycleVersions.get(chatId) || 0)) { finish(); return { message: userMessage, completion: Promise.resolve() }; }
       const completion = this.#runTurn(chatId, text, files, userMessage.id, skill, turn, commandAction).finally(finish);
-      return { message: userMessage, completion };
+      return { message: userMessage, completion, githubDelivered: () => turn.githubDelivered === true };
     } catch (error) {
       finish();
       throw error;
@@ -1453,6 +1509,10 @@ export class RuntimeManager extends EventEmitter {
 
     if (!runtime) {
       try {
+        if (turn.githubEvent) await this.githubEvents.assertDispatch(chatId, turn.githubEvent, () => {
+          if (turn.cancelled) throw Object.assign(new Error("GitHub event cancelled"), { name: "AbortError" });
+          this.#assertNativeAccount(chatId);
+        });
         runtime = await this.#start(chatId);
       } catch (error) {
         if (commandAction?.approval) await this.approvals.cancel(chatId, commandAction.approval.id).catch(() => {});
@@ -1547,7 +1607,12 @@ export class RuntimeManager extends EventEmitter {
       const modeState = { original: currentChat, mode: currentChat.mode, revision: currentChat.modeSettingsRevision };
       runtime.modeState = modeState;
       const modeActive = () => !turn.cancelled && runtime.generation === generation && this.#runtimes.get(chatId) === runtime;
-      const send = () => {
+      const send = async () => {
+        if (turn.githubEvent) await this.pullRequests.refresh(chatId, { force: true });
+        if (turn.githubEvent) await this.githubEvents.assertDispatch(chatId, turn.githubEvent, () => {
+          if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) throw Object.assign(new Error("GitHub event cancelled"), { name: "AbortError" });
+          this.#assertNativeAccount(chatId, runtime);
+        });
         if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) throw Object.assign(new Error("Turn cancelled before native dispatch"), { name: "AbortError" });
         this.#assertNativeAccount(chatId, runtime);
         return runtime.adapter.send(claude ? raw : metadata ? responsePrompt(prompt, automaticTitle) : prompt, {
@@ -1592,7 +1657,7 @@ export class RuntimeManager extends EventEmitter {
         await task;
       };
       const nativeSend = async () => {
-        try { return await send(); }
+        try { const result = await send(); if (turn.githubEvent) turn.githubDelivered = true; return result; }
         catch (error) {
           if (commandAction?.type === "claudeConfig") await syncConfiguration(error.nativeSettings);
           if (claude) await this.#syncClaudeFast(chatId, error, settingsChat, checkConfiguration);
@@ -1747,7 +1812,7 @@ export class RuntimeManager extends EventEmitter {
     this.broker.revokeChat(chatId);
     this.githubWorkers?.revokeChat(chatId);
     this.revokeChatMcps(chatId);
-    this.publishChat(await this.store.update(chatId, current => ({ queuePaused: true, startupProgress: failRunningStartup(current.startupProgress), ...(reason === "manual" ? { forkGoalPending: false } : {}) })));
+    this.publishChat(await this.store.update(chatId, current => ({ queuePaused: true, startupProgress: failRunningStartup(current.startupProgress), ...(reason === "manual" ? { forkGoalPending: false, githubEventsStoppedAt: nowIso() } : {}) })));
     const runtime = this.#runtimes.get(chatId);
     if (this.config.workerBackend === "ec2" && chat.agent !== "mock") {
       await this.#setStatus(chatId, "stopping", "Stopping EC2 worker", null);
@@ -1779,6 +1844,7 @@ export class RuntimeManager extends EventEmitter {
     this.broker.revokeChat(chatId);
     const detail = reason === "idle-timeout" ? "Stopped after idle timeout" : "Stopped manually";
     await this.#setStatus(chatId, "stopped", detail, null);
+    if (reason === "manual") this.publishChat(await this.store.update(chatId, { githubEventsStoppedAt: nowIso() }));
     this.#emit(chatId, { type: "runtime_stopped", reason });
     stopped = true;
     } finally {
@@ -1852,6 +1918,7 @@ export class RuntimeManager extends EventEmitter {
     for (const timer of this.#workspaceIdleTimers.values()) clearTimeout(timer);
     this.#workspaceIdleTimers.clear();
     await this.pullRequests.stop();
+    await this.githubEvents?.stop();
     await Promise.allSettled([...new Set([...this.#runtimes.keys(), ...this.#executors.keys(), ...this.#workerWakes.keys()])].map((chatId) => this.stop(chatId, "shutdown")));
     await Promise.allSettled([...this.#workerWakes.values()].map(operation => operation.completion || operation.admission));
     await this.browsers?.shutdown();
