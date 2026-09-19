@@ -465,6 +465,14 @@ export async function createAgentWebServer(options = {}) {
         if (googleAuth.enabled) await agentAccounts.rememberProject(user.id, preferences);
         return json(response, 200, { preferences });
       }
+      if (url.pathname === "/api/new-chat/commands" && request.method === "GET") {
+        const agent = url.searchParams.get("agent");
+        if (!["codex", "claude", "mock"].includes(agent) || agent === "mock" && !config.enableMock) return json(response, 400, { error: "Choose an available agent" });
+        const context = { agent, ownerId: user?.id, agentAccountId: url.searchParams.get("agentAccountId") || null };
+        // Fixture command services may only implement existing-chat discovery;
+        // the built-in draft path remains readonly and account-scoped.
+        return json(response, 200, await (commands.newChat ? commands : new CommandCatalog(config, models)).newChat(context));
+      }
       if (url.pathname === "/api/chats" && request.method === "GET") {
         return json(response, 200, { chats: visibleChats().map(summary) });
       }
