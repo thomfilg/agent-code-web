@@ -7,7 +7,9 @@ import { testConfig, waitFor } from "./helpers.mjs";
 import { searchMessages } from "../src/message-search.mjs";
 
 async function runtimeFixture(t, options = {}) {
-  const f = await eventFixture(t); await f.configure(); await f.monitor.stop(); await f.events.stop();
+  const f = await eventFixture(t, { agentFollowUp: options.automatic });
+  if (options.automatic) await f.monitor.refresh(f.chat.id, { force: true }); else await f.configure();
+  await f.monitor.stop(); await f.events.stop();
   const calls = []; let starts = 0, release;
   const manager = new RuntimeManager({ store: f.store, github: f.github, config: testConfig(f.root, { AGENT_IDLE_TIMEOUT_MS: "60000" }), broker: new CapabilityBroker({ ttlMs: 60000 }),
     agentAccounts: { assertConnected: (owner, id) => { assert.equal(owner, eventOwner); assert.equal(id, eventAccount); }, select: async () => f.records.get("agent-account", eventAccount) },
@@ -38,6 +40,15 @@ test("failed checks stay pending while stopped; explicitly subscribed passing ch
   const authored = f.store.get(f.chat.id).messages.find(message => message.text === "Find this ordinary user message");
   assert.equal(authored.meta.authorship, "user");
   assert.deepEqual(searchMessages([f.store.get(f.chat.id)], { query: "Find this ordinary", role: "user" }).results.map(match => match.messageId), [authored.id]);
+});
+
+test("automatic agent PR follow-up wakes the exact stopped chat for failures", async t => {
+  const f = await runtimeFixture(t, { automatic: true });
+  await f.update("failing");
+  await waitFor(async () => (await f.events.state(f.chat.id)).events.some(event => event.status === "delivered"), { timeoutMs: 5000 });
+  assert.equal(f.starts(), 1); assert.deepEqual(f.calls, ["github"]);
+  const generated = f.store.get(f.chat.id).messages.find(message => message.meta?.source === "github");
+  assert.match(generated.text, /One or more checks failed/); assert.match(generated.text, /Continue the follow-up loop/);
 });
 
 test("busy delivery joins user FIFO without interruption or unpausing independent messages", async t => {

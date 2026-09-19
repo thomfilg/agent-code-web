@@ -10,9 +10,10 @@ import { githubWorkerMcpConfig, handleGitHubWorkerMcp, runGitHubPrTool } from ".
 const repository = { id: 12, fullName: "example/project", githubConnectionId: "github_selected", branch: "main", defaultBranch: "main" };
 const create = { repositoryId: 12, repository: "example/project", head: "feature/mvp", base: "main", title: "MVP", body: "Description" };
 const edit = { repositoryId: 12, repository: "example/project", head: "feature/mvp", number: 73, title: "Updated" };
+const follow = { repositoryId: 12, repository: "example/project", head: "feature/mvp", number: 73 };
 const pull = () => ({ number: 73, state: "open", merged: false, title: "PRIVATE-UPSTREAM-TITLE", body: "PRIVATE-UPSTREAM-BODY",
-  html_url: "https://private.example/token", head: { ref: "feature/mvp", repo: { id: 12, full_name: "example/project" } },
-  base: { ref: "main", repo: { id: 12, full_name: "example/project" } } });
+  html_url: "https://private.example/token", head: { ref: "feature/mvp", sha: "a".repeat(40), repo: { id: 12, full_name: "example/project" } },
+  base: { ref: "main", repo: { id: 12, full_name: "example/project" } }, mergeable: true, mergeable_state: "clean" });
 const text = result => JSON.stringify(result);
 function fixture() {
   const state = { now: 0, owner: "alice", company: "example", revision: 1, connected: true, repository: { ...repository } }, calls = [];
@@ -76,6 +77,24 @@ test("edit verifies PR repository/head and permits only title/body, including cl
   assert.equal(f.calls[1].options.method, "PATCH"); assert.deepEqual(f.calls[1].options.body, { title: "Updated", body: "" });
   assert.equal(f.calls[1].route, "/repos/example/project/pulls/73");
 });
+test("follow-up reads bounded checks, annotations and all PR comment surfaces without generic API access", async () => {
+  const f = fixture(); f.hook = async route => {
+    if (route === "/repos/example/project/pulls/73") return pull();
+    if (route.includes("/commits/") && route.includes("/check-runs?")) return { check_runs: [{ id: 91, name: "quality", status: "completed", conclusion: "failure" }] };
+    if (route.includes("/commits/") && route.includes("/status?")) return { statuses: [{ id: 92, context: "legacy", state: "success" }] };
+    if (route.includes("/check-runs/91/annotations?")) return [{ path: "src/app.js", start_line: 4, end_line: 4, annotation_level: "failure", title: "Rule", message: "Fix this" }];
+    if (route.includes("/pulls/73/reviews?")) return [{ id: 93, user: { id: 50, login: "reviewer" }, body: "Review body", state: "CHANGES_REQUESTED", submitted_at: "2026-09-19T12:00:00Z" }];
+    if (route.includes("/pulls/73/comments?")) return [{ id: 94, user: { id: 51, login: "bot" }, body: "Inline body", path: "src/app.js", line: 4 }];
+    if (route.includes("/issues/73/comments?")) return [{ id: 95, user: { id: 52, login: "human" }, body: "Conversation body" }];
+    throw Error(`Unexpected route ${route}`);
+  };
+  const result = await runGitHubPrTool(f.gateway, f.token, "github_get_pull_request_follow_up", follow), value = JSON.parse(result.content[0].text);
+  assert.equal(result.isError, undefined); assert.equal(value.source, "github_external_data"); assert.match(value.warning, /untrusted external/);
+  assert.equal(value.pullRequest.url, "https://github.com/example/project/pull/73"); assert.equal(value.checks.runs[0].name, "quality");
+  assert.equal(value.checks.annotations[0].message, "Fix this"); assert.equal(value.reviews[0].body, "Review body");
+  assert.equal(value.inlineComments[0].body, "Inline body"); assert.equal(value.conversationComments[0].body, "Conversation body");
+  assert(f.calls.every(call => !call.options.method || call.options.method === "GET"));
+});
 test("unsupported tools, fields, fork heads and ref/path expressions never make an upstream request", async () => {
   const cases = [
     ["github_merge_pull_request", create], ["github_create_pull_request", { ...create, url: "https://evil.test" }],
@@ -88,6 +107,7 @@ test("unsupported tools, fields, fork heads and ref/path expressions never make 
     ["github_create_pull_request", { ...create, repositoryId: Number.MAX_SAFE_INTEGER + 1 }],
     ["github_edit_pull_request", { ...edit, state: "closed" }], ["github_edit_pull_request", { ...edit, base: "release" }],
     ["github_edit_pull_request", { ...edit, title: undefined }], ["github_edit_pull_request", { ...edit, number: "73" }],
+    ["github_get_pull_request_follow_up", { ...follow, body: "not allowed" }],
   ];
   for (const [name, input] of cases) { const f = fixture(); assert.equal((await runGitHubPrTool(f.gateway, f.token, name, input)).isError, true); assert.equal(f.calls.length, 0); }
 });
@@ -152,11 +172,12 @@ test("an upstream write receipt must confirm requested title/body and draft rath
   const f = fixture(); f.hook = async () => pull();
   assert.equal((await runGitHubPrTool(f.gateway, f.token, "github_edit_pull_request", edit)).isError, true);
 });
-test("official SDK client discovers only two scoped tools and performs both RPC operations", async t => {
+test("official SDK client discovers scoped read/write tools and performs both write operations", async t => {
   const f = await serverFixture(t), client = new Client({ name: "pr-mcp-test", version: "1" }); t.after(() => client.close());
   await client.connect(new StreamableHTTPClientTransport(new URL(f.url), { requestInit: { headers: { Authorization: `Bearer ${f.token}` } } }));
-  const listed = await client.listTools(); assert.deepEqual(listed.tools.map(tool => tool.name).sort(), ["github_create_pull_request", "github_edit_pull_request"]);
+  const listed = await client.listTools(); assert.deepEqual(listed.tools.map(tool => tool.name).sort(), ["github_create_pull_request", "github_edit_pull_request", "github_get_pull_request_follow_up"]);
   for (const tool of listed.tools) { assert.match(tool.description, /12: example\/project/); assert.doesNotMatch(JSON.stringify(tool), /PRIVATE|cap_/); }
+  assert.equal(listed.tools.find(tool => tool.name === "github_get_pull_request_follow_up").annotations.readOnlyHint, true);
   assert.equal((await client.callTool({ name: "github_create_pull_request", arguments: create })).isError, undefined);
   assert.equal((await client.callTool({ name: "github_edit_pull_request", arguments: edit })).isError, undefined);
   const count = f.calls.length;

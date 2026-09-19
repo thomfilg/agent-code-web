@@ -19,7 +19,11 @@ export function pullRequestLinks(chat) {
       if (!allowed.has(match[1].toLowerCase())) continue;
       const number = Number(match[2]);
       if (!Number.isSafeInteger(number) || number < 1) continue;
-      found.set(`${match[1].toLowerCase()}#${number}`, { repository: match[1], number });
+      const id = `${match[1].toLowerCase()}#${number}`, previous = found.get(id);
+      // A provider tool returning a verified PR URL is the durable evidence
+      // that this chat created or directly operated on that PR. Assistant prose
+      // still discovers a card, but cannot by itself opt a chat into paid wakeups.
+      found.set(id, { repository: match[1], number, agentFollowUp: Boolean(previous?.agentFollowUp || message.role === "tool") });
     }
   }
   return [...found.values()].slice(-30);
@@ -95,6 +99,35 @@ export function checkSummary(runs, combined) {
     else summary.inProgress++;
   }
   return summary;
+}
+
+async function paged(request, route, maxPages = 10) {
+  const rows = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const chunk = await request(`${route}${route.includes("?") ? "&" : "?"}per_page=100&page=${page}`);
+    if (!Array.isArray(chunk)) throw new Error("Invalid GitHub list response");
+    rows.push(...chunk);
+    if (chunk.length < 100) break;
+  }
+  return rows;
+}
+
+async function reviewSnapshot(request, route, number, accountId) {
+  const [reviews, inlineComments, conversationComments] = await Promise.all([
+    paged(request, `${route}/pulls/${number}/reviews`),
+    paged(request, `${route}/pulls/${number}/comments`),
+    paged(request, `${route}/issues/${number}/comments`),
+  ]);
+  const own = item => Number.isSafeInteger(accountId) && item.user?.id === accountId;
+  const external = rows => rows.filter(item => Number.isSafeInteger(item?.id) && !own(item));
+  const groups = [external(reviews), external(inlineComments), external(conversationComments)];
+  const tuples = groups.flatMap((rows, kind) => rows.map(item => [kind, item.id, item.user?.id || null,
+    String(item.updated_at || item.submitted_at || item.created_at || "").slice(0, 64), String(item.state || "").slice(0, 32)]));
+  tuples.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  return {
+    reviewActivity: { reviews: groups[0].length, inlineComments: groups[1].length, conversationComments: groups[2].length, total: tuples.length },
+    reviewFingerprint: createHash("sha256").update(JSON.stringify(tuples)).digest("hex"),
+  };
 }
 
 // Control-plane polling only: never acquire/wake a worker to inspect a PR.
@@ -194,8 +227,13 @@ export class PullRequestMonitor {
     const request = route => this.request(route, this.connectionOptions(chat, /^\/repos\/([^/?]+\/[^/?]+)/.exec(route)?.[1]));
     const allowed = new Set(chatRepositories(chat).map(repo => repo.fullName.toLowerCase()));
     const candidates = new Map();
+    const addCandidate = pr => {
+      if (!allowed.has(pr.repository?.toLowerCase()) || !Number.isSafeInteger(pr.number) || pr.number < 1) return;
+      const id = `${pr.repository.toLowerCase()}#${pr.number}`, old = candidates.get(id);
+      candidates.set(id, { ...old, ...pr, agentFollowUp: Boolean(old?.agentFollowUp || pr.agentFollowUp) });
+    };
     for (const pr of [...(chat.pullRequests || []), ...pullRequestLinks(chat)]) {
-      if (allowed.has(pr.repository?.toLowerCase()) && Number.isSafeInteger(pr.number) && pr.number > 0) candidates.set(`${pr.repository.toLowerCase()}#${pr.number}`, pr);
+      addCandidate(pr);
     }
     let warning = null;
     try {
@@ -208,7 +246,7 @@ export class PullRequestMonitor {
           if (pr.head?.ref !== ref.branch || pr.head?.repo?.full_name?.toLowerCase() !== ref.repository.toLowerCase()) continue;
           // Reused branch names must not attach old, closed PRs to a new chat.
           if (pr.state !== "open" && Date.parse(pr.updated_at) < Date.parse(chat.createdAt)) continue;
-          candidates.set(`${ref.repository.toLowerCase()}#${pr.number}`, { repository: ref.repository, number: pr.number });
+          addCandidate({ repository: ref.repository, number: pr.number });
         }
       }
     } catch { warning = "GitHub sync unavailable. Check your connection, repository permissions or API limit. Showing last verified status."; }
@@ -224,6 +262,7 @@ export class PullRequestMonitor {
         if (pr.base?.repo?.full_name?.toLowerCase() !== candidate.repository.toLowerCase() || pr.number !== candidate.number
           || this.onObserved && pr.base?.repo?.id !== selected?.id) throw new Error("PR repository mismatch");
         let checks = "none", checksStale = false, ci = null, checksFingerprint = null;
+        let reviewActivity = previous?.reviewActivity || null, reviewFingerprint = previous?.reviewFingerprint || null, reviewStale = false;
         if (pr.state === "open") {
           try {
             if (!/^[a-f0-9]{40,64}$/i.test(pr.head?.sha || "")) throw new Error("Missing PR head");
@@ -262,14 +301,22 @@ export class PullRequestMonitor {
             ci = previous?.headSha === pr.head.sha ? previous.ci : null;
             warning = "PR status verified, but checks could not be refreshed. Check GitHub permissions or the API limit.";
           }
+          try {
+            ({ reviewActivity, reviewFingerprint } = await reviewSnapshot(request, route, candidate.number, connection?.accountId));
+          } catch {
+            reviewStale = true;
+            warning = "PR status verified, but checks or review activity could not be refreshed. Check GitHub permissions or the API limit.";
+          }
         }
         prs.push({ repository: candidate.repository, repositoryId: pr.base?.repo?.id, number: pr.number, url: `https://github.com/${candidate.repository}/pull/${pr.number}`, title: pr.title,
           state: pr.state, merged: Boolean(pr.merged_at || pr.merged), headSha: pr.head?.sha || null, headRef: pr.head?.ref || null, baseRef: pr.base?.ref || null,
           additions: pr.additions || 0, deletions: pr.deletions || 0, changedFiles: pr.changed_files || 0,
           conflicts: pr.mergeable_state === "dirty" ? true : pr.mergeable === null || pr.mergeable === undefined ? null : pr.mergeable === false,
-          autoMerge: Boolean(pr.auto_merge), draft: Boolean(pr.draft), ci, checks, checksStale, checksFingerprint, ...(connection ? { connectionRevision: connection.revision || 0 } : {}), verifiedAt: new Date().toISOString() });
+          mergeState: pr.mergeable_state || null, autoMerge: Boolean(pr.auto_merge), draft: Boolean(pr.draft), ci, checks, checksStale, checksFingerprint,
+          reviewActivity, reviewFingerprint, reviewStale, agentFollowUp: Boolean(candidate.agentFollowUp || previous?.agentFollowUp),
+          ...(connection ? { connectionRevision: connection.revision || 0 } : {}), verifiedAt: new Date().toISOString() });
       } catch {
-        if (previous) prs.push({ ...previous, checksStale: true });
+        if (previous) prs.push({ ...previous, checksStale: true, reviewStale: true });
         warning = "GitHub sync unavailable. Check your connection, repository permissions or API limit. Showing last verified status.";
       }
     }

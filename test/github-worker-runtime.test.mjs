@@ -133,7 +133,9 @@ test("HTTP gateway is independently capability-authenticated: user cookies alone
   assert.equal((await post({})).status, 401);
   assert.equal((await post({ cookie: "agent_auth=synthetic-browser-password" })).status, 401);
   assert.equal((await post({ authorization: `Bearer ${grant.token}`, origin: url })).status, 403);
-  const response = await post({ authorization: `Bearer ${grant.token}` }); assert.equal(response.status, 200); assert.equal((await response.json()).result.tools.length, 2);
+  const response = await post({ authorization: `Bearer ${grant.token}` }); assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).result.tools.map(tool => tool.name).sort(),
+    ["github_create_pull_request", "github_edit_pull_request", "github_get_pull_request_follow_up"]);
   app.manager.githubWorkers.revokeChat(chat.id); assert.equal((await post({ authorization: `Bearer ${grant.token}` })).status, 401);
 });
 

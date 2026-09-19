@@ -83,8 +83,10 @@ test("PR links are scoped to selected repositories and come from assistant/tool 
     { role: "user", text: "https://github.com/Acme/api/pull/1" },
     { role: "assistant", text: "https://evil.test/Acme/api/pull/2 https://github.com/Other/api/pull/3 https://github.com/Acme/api/pull/4" },
     { role: "tool", meta: { output: "https://github.com/Acme/api/pull/4\nhttps://github.com/Acme/api/pull/5" } },
+    { role: "assistant", text: "Existing PR inspected: https://github.com/Acme/api/pull/6" },
   ] };
-  assert.deepEqual(pullRequestLinks(chat).map(pr => pr.number), [4, 5]);
+  assert.deepEqual(pullRequestLinks(chat).map(pr => pr.number), [4, 5, 6]);
+  assert.deepEqual(pullRequestLinks(chat).map(pr => pr.agentFollowUp), [true, true, false]);
 });
 async function monitorFixture(t) {
   const root = await temporaryDirectory(t); const store = new ChatStore(root, new MemoryRecords()); await store.initialize();
@@ -96,6 +98,7 @@ async function monitorFixture(t) {
     if (fixture.fail) throw new Error("private failure details must not leak");
     if (route.includes("pulls?")) return fixture.pulls;
     if (route.endsWith("/pulls/7")) return { number: 7, title: "Work", state: fixture.state, merged: fixture.merged, head: { sha: fixture.head }, base: { repo: { full_name: "Acme/api" } } };
+    if (route.includes("/pulls/7/reviews?") || route.includes("/pulls/7/comments?") || route.includes("/issues/7/comments?")) return [];
     if (fixture.checksFail) throw new Error("checks forbidden");
     if (route.includes("check-runs")) return { check_runs: [{ status: fixture.conclusion ? "completed" : "in_progress", conclusion: fixture.conclusion }] };
     if (route.endsWith("/status")) return { state: "pending", total_count: 0, statuses: [] };

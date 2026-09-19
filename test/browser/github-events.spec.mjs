@@ -58,3 +58,17 @@ test("closed PR allows consent removal and uncertain notification requires expli
     expect(f.writes[0].wakePassing).toBe(false);
   } finally { await page.close(); await request.delete(`/api/chats/${f.chat.id}`).catch(() => {}); }
 });
+
+test("agent-created PR shows automatic checks, conflicts and comment follow-up without opt-in toggles", async ({ page, request }) => {
+  const f = await fixture(page, request);
+  try {
+    f.replace({ ...f.snapshot(), githubEvents: { configured: true, revision: 1,
+      subscriptions: [{ repository: "acme/project", number: 7, notifyFailures: true, wakePassing: true, automatic: true }],
+      deliveries: [{ id: "automatic-review", repository: "acme/project", number: 7, checks: "pending", reasons: ["reviews"], status: "delivered" }] } });
+    await page.reload(); await f.open();
+    await expect(page.getByText("Automatic agent follow-up is on.")).toBeVisible();
+    await expect(page.getByText("GitHub notification: reviews · delivered", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Notify agent when checks fail for PR 7", { exact: true })).toHaveCount(0);
+    await expect(page.getByLabel("Wake this chat when checks pass for PR 7", { exact: true })).toHaveCount(0);
+  } finally { await page.close(); await request.delete(`/api/chats/${f.chat.id}`).catch(() => {}); }
+});

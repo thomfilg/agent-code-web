@@ -18,8 +18,10 @@ export async function eventFixture(t, options = {}) {
   const chat = await store.create({ ownerId: eventOwner, agent: "codex", agentAccountId: eventAccount, title: "GitHub events fixture",
     repositories: [{ id: 101, fullName: "acme/project", companyId: "acme", githubConnectionId: eventConnection, branch: "fixture" }] });
   await mkdir(chat.workspace, { recursive: true });
+  if (options.agentFollowUp) await store.appendMessage(chat.id, { role: "tool", kind: "tool", meta: { output: "https://github.com/acme/project/pull/7" } });
   await store.update(chat.id, { workspaceReady: true, pullRequests: [{ repository: "acme/project", number: 7, verifiedAt: new Date().toISOString() }] });
-  const canonical = { checks: "pending", headSha: "a".repeat(40), run: 1, state: "open", autoMerge: false, repositoryId: 101 }, requests = [], notifications = [];
+  const canonical = { checks: "pending", headSha: "a".repeat(40), headRef: "fixture", run: 1, state: "open", autoMerge: false, repositoryId: 101,
+    mergeable: true, mergeState: "clean", reviews: [], inlineComments: [], conversationComments: [] }, requests = [], notifications = [];
   const github = {
     async requireConnection({ connectionId, ownerId, chatCompany }) {
       assert.equal(ownerId, eventOwner); assert.equal(chatCompany, "acme"); assert.equal(connectionId, eventConnection);
@@ -30,8 +32,12 @@ export async function eventFixture(t, options = {}) {
       requests.push({ route, options: requestOptions }); assert(!requestOptions.method || requestOptions.method === "GET", "fixture never writes GitHub");
       await github.requireConnection(requestOptions);
       if (options.beforeRequest) await options.beforeRequest(route);
-      if (/\/pulls\/7$/.test(route)) return { number: 7, state: canonical.state, title: "Untrusted title ignored by event prompt", head: { sha: canonical.headSha },
-        base: { repo: { id: canonical.repositoryId, full_name: "acme/project" } }, auto_merge: canonical.autoMerge ? {} : null, mergeable: true };
+      if (/\/pulls\/7$/.test(route)) return { number: 7, state: canonical.state, title: "Untrusted title ignored by event prompt", head: { sha: canonical.headSha, ref: canonical.headRef },
+        base: { repo: { id: canonical.repositoryId, full_name: "acme/project" } }, auto_merge: canonical.autoMerge ? {} : null,
+        mergeable: canonical.mergeable, mergeable_state: canonical.mergeState };
+      if (route.includes("/pulls/7/reviews?")) return canonical.reviews;
+      if (route.includes("/pulls/7/comments?")) return canonical.inlineComments;
+      if (route.includes("/issues/7/comments?")) return canonical.conversationComments;
       if (route.includes("/check-runs?")) return { check_runs: canonical.checks === "none" ? [] : [{ id: canonical.run, name: "fixture", status: canonical.checks === "pending" ? "in_progress" : "completed", conclusion: canonical.checks === "passing" ? "success" : canonical.checks === "failing" ? "failure" : null, completed_at: `2026-09-19T12:00:${String(canonical.run).padStart(2, "0")}Z` }] };
       if (route.endsWith("/status")) return { state: "pending", total_count: 0, statuses: [] };
       throw Error(`Unexpected fixture route ${route}`);
@@ -44,5 +50,6 @@ export async function eventFixture(t, options = {}) {
   t.after(async () => { await monitor.stop(); await events.stop(); });
   const configure = async (patch = {}) => events.configure(chat.id, { repository: "acme/project", number: 7, notifyFailures: true, wakePassing: true, revision: (await events.state(chat.id))?.revision || 0, ...patch }, { ownerId: eventOwner });
   const update = async (checks, patch = {}) => { Object.assign(canonical, { checks, run: canonical.run + 1 }, patch); await monitor.refresh(chat.id, { force: true }); };
-  return { root, records, store, chat: store.get(chat.id), github, monitor, events, canonical, requests, notifications, configure, update };
+  const review = async patch => { Object.assign(canonical, patch); await monitor.refresh(chat.id, { force: true }); };
+  return { root, records, store, chat: store.get(chat.id), github, monitor, events, canonical, requests, notifications, configure, update, review };
 }

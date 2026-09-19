@@ -16,6 +16,42 @@ test("raw webhook authentication is constant-time HMAC-SHA256 and hints discard 
   assert.throws(() => verifiedWebhook(Buffer.alloc(1024 * 1024 + 1), signed(raw), eventSecret), { statusCode: 413 });
 });
 
+test("signed review and PR-comment webhooks retain only refresh hints", () => {
+  for (const type of ["pull_request_review", "pull_request_review_comment"]) {
+    const raw = payload({ repository: { id: 101, full_name: "acme/project" }, pull_request: { number: 7, head: { sha: "a".repeat(40) } }, review: { body: "untrusted review body" }, comment: { body: "untrusted comment body" } });
+    const result = verifiedWebhook(raw, signed(raw, `fixture-${type}`, type), eventSecret);
+    assert.deepEqual(result.hint, { type, repositoryId: 101, repository: "acme/project", number: 7, headSha: "a".repeat(40) });
+    assert.doesNotMatch(JSON.stringify(result), /untrusted/);
+  }
+  const raw = payload({ repository: { id: 101, full_name: "acme/project" }, issue: { number: 7, pull_request: { url: "ignored" } }, comment: { body: "untrusted conversation body" } });
+  const result = verifiedWebhook(raw, signed(raw, "fixture-issue-comment", "issue_comment"), eventSecret);
+  assert.deepEqual(result.hint, { type: "issue_comment", repositoryId: 101, repository: "acme/project", number: 7, headSha: null });
+  assert.doesNotMatch(JSON.stringify(result), /untrusted/);
+});
+
+test("agent-linked PRs auto-follow checks, conflicts and external comments without self-trigger loops", async t => {
+  const f = await eventFixture(t, { agentFollowUp: true });
+  await f.monitor.refresh(f.chat.id, { force: true });
+  let state = await f.events.state(f.chat.id);
+  assert.equal(state.subscriptions[0].automatic, true); assert.equal(state.events.length, 0);
+  assert.equal((await f.events.snapshot(f.chat.id)).subscriptions[0].automatic, true);
+
+  await f.review({ conversationComments: [{ id: 10, user: { id: 55 }, updated_at: "2026-09-19T12:00:00Z", body: "own text must be ignored" }] });
+  assert.equal((await f.events.state(f.chat.id)).events.length, 0);
+  await f.review({ conversationComments: [{ id: 11, user: { id: 77 }, updated_at: "2026-09-19T12:01:00Z", body: "untrusted external text" }] });
+  state = await f.events.state(f.chat.id); assert.deepEqual(state.events.at(-1).reasons, ["reviews"]);
+  assert.match(githubEventText(state.events.at(-1)), /Head branch: fixture/);
+  assert.match(githubEventText(state.events.at(-1)), /github_get_pull_request_follow_up/);
+  assert.doesNotMatch(githubEventText(state.events.at(-1)), /untrusted external text/);
+
+  await f.update("passing", { mergeable: false, mergeState: "dirty" });
+  state = await f.events.state(f.chat.id); assert.deepEqual(state.events.at(-1).reasons, ["conflicts"]);
+  assert.match(githubEventText(state.events.at(-1)), /Merge conflicts are present/);
+  await f.update("passing", { mergeable: true, mergeState: "clean" });
+  state = await f.events.state(f.chat.id); assert.deepEqual(state.events.at(-1).reasons, ["passing"]);
+  await assert.rejects(f.configure({ notifyFailures: false, wakePassing: false }), { code: "AUTOMATIC_SUBSCRIPTION" });
+});
+
 test("per-PR opt-in starts with a baseline; canonical failure transition creates one safe durable event", async t => {
   const f = await eventFixture(t); await f.monitor.refresh(f.chat.id);
   assert.equal(await f.events.state(f.chat.id), null); assert.equal(f.notifications.length, 0);

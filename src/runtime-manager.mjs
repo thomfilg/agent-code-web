@@ -120,10 +120,11 @@ export class RuntimeManager extends EventEmitter {
     const chat = this.store.get(chatId);
     if (!chat || chat.archived || this.#previewStops.has(chatId) || ["starting", "stopping", "deleting", "error"].includes(chat.status)) return;
     if (chat.githubEventsStoppedAt && Date.parse(event.reviewedAt || event.createdAt) <= Date.parse(chat.githubEventsStoppedAt)) { await this.githubEvents.settle(chatId, event.id, "cancelled"); return; }
-    if (chat.status === "stopped" && event.checks !== "passing") return;
+    const wake = Boolean(event.automatic || event.checks === "passing");
+    if (chat.status === "stopped" && !wake) return;
     if (chat.queuedMessages?.some(item => item.githubEventId === event.id)) return;
     await this.githubEvents.validate(chatId, event.id);
-    const item = { id: `github_${event.id}`, githubEventId: event.id, githubWake: event.checks === "passing", text: event.text, attachmentIds: [], createdAt: event.createdAt };
+    const item = { id: `github_${event.id}`, githubEventId: event.id, githubWake: wake, text: event.text, attachmentIds: [], createdAt: event.createdAt };
     const updated = await this.store.update(chatId, current => {
       if (this.#previewStops.has(chatId) || version !== (this.#lifecycleVersions.get(chatId) || 0) || current.archived
         || ["starting", "stopping", "deleting", "error"].includes(current.status) || stoppedSinceEvent(current)) return {};
@@ -252,8 +253,8 @@ export class RuntimeManager extends EventEmitter {
       while (true) {
         const chat = this.store.get(chatId);
         if (!chat || chat.archived || this.isBusy(chatId) || chat.status === "stopping" || this.#previewStops.has(chatId) || !chat.queuedMessages?.length) break;
-        // An explicitly subscribed passing event may wake a stopped chat, but
-        // must not resume the user's independently paused ordinary queue.
+        // An authorized PR follow-up event may wake a stopped chat, but must
+        // not resume the user's independently paused ordinary queue.
         const item = chat.queuePaused ? chat.status === "stopped" ? chat.queuedMessages.find(entry => entry.githubEventId && entry.githubWake) : null : chat.queuedMessages[0];
         if (!item) break;
         const submitted = await this.#submitQueued(chatId, item);
