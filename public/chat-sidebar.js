@@ -37,8 +37,8 @@ function statusIcon(chat) {
 }
 
 export class ChatSidebar {
-  constructor({ state, api, select, updated, remove, toast, agentLabel }) {
-    Object.assign(this, { state, api, select, updated, remove, toast, agentLabel });
+  constructor({ state, api, select, updated, remove, toast, agentLabel, newProject }) {
+    Object.assign(this, { state, api, select, updated, remove, toast, agentLabel, newProject });
     this.groups = []; this.preferences = { sort: "updated_desc", collapsed: [] };
     this.dragging = false; this.pendingPreferences = 0; this.preferenceVersion = 0; this.refreshVersion = 0;
     for (const [value, label] of SORT_OPTIONS) { const option = el("option", "", label); option.value = value; $("#chat-sort").append(option); }
@@ -187,6 +187,12 @@ export class ChatSidebar {
       const section = this.section(key, label, company.repositories.reduce((sum, repo) => sum + repo.chats.length, 0), { className: "company-group" });
       for (const repo of company.repositories) {
         const repository = this.section(`${key}/${repo.name.toLowerCase()}`, repo.name, repo.chats.length, { className: "repository-group" });
+        const origin = repositoryGroup(repo.chats[0]);
+        if (origin.fullName && this.newProject) {
+          const add = button("+", `New chat in ${origin.fullName}`, event => { event.preventDefault(); event.stopPropagation(); this.newProject({ companyId: origin.company.toLowerCase(), repository: origin.fullName }); }, "small-icon project-new-chat");
+          add.dataset.focusKey = `new-project:${origin.company.toLowerCase()}/${origin.fullName.toLowerCase()}`;
+          repository.querySelector("summary").append(add);
+        }
         repository.append(...repo.chats.map(chat => this.row(chat)));
         section.append(repository);
       }
