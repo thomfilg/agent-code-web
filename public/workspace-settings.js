@@ -11,7 +11,7 @@ const button = (text, action, cls = "secondary-button") => { const e = el("butto
 export class WorkspaceSettings {
   constructor({ api, state, toast }) {
     Object.assign(this, { api, state, toast }); this.selected = []; this.environments = []; this.repositories = []; this.branchCache = new Map(); this.repositoryRequest = 0;
-    this.environmentCompanies = new CompanyPicker($("#environment-companies"), scope => { Object.assign(this.draft, scope); this.renderEnvironmentMcps(); }, { registeredOnly: true });
+    this.environmentCompanies = new CompanyPicker($("#environment-companies"), scope => { Object.assign(this.draft, scope); this.renderEnvironmentMcps(); this.updateEnvironmentDirty(); }, { registeredOnly: true });
     this.githubAccounts = new GitHubAccounts(this);
     this.modelPicker = new ModelPicker({ root: $("#new-model-controls"), api, onChange: () => this.remember() });
     $("#github-button").addEventListener("click", () => this.openGitHub());
@@ -33,12 +33,26 @@ export class WorkspaceSettings {
     });
     $("#environment-settings").addEventListener("click", () => this.openEnvironments($("#environment-select").value));
     $("#environments-button").addEventListener("click", () => this.openEnvironments());
-    $("#add-environment").addEventListener("click", () => this.editEnvironment(null));
+    $("#add-environment").addEventListener("click", () => { if (this.discardEnvironmentEdits()) this.editEnvironment(null); });
+    $("#environment-company-filter").addEventListener("change", event => {
+      if (!this.discardEnvironmentEdits()) { event.target.value = this.settingsCompanyId; return; }
+      this.settingsCompanyId = event.target.value; this.editEnvironment(this.companyEnvironments()[0]);
+    });
+    $("#environment-editor-select").addEventListener("change", event => {
+      if (!this.discardEnvironmentEdits()) { event.target.value = this.draft.id || ""; return; }
+      this.editEnvironment(this.companyEnvironments().find(env => env.id === event.target.value));
+    });
+    document.querySelectorAll("[data-environment-section]").forEach(node => node.addEventListener("click", () => this.showEnvironmentSection(node.dataset.environmentSection)));
+    $("#environment-editor-back").addEventListener("click", () => this.showEnvironmentSection());
+    for (const type of ["input", "change"]) $("#environment-form").addEventListener(type, () => this.updateEnvironmentDirty());
     $("#environment-form").addEventListener("submit", event => this.saveEnvironment(event));
     $("#delete-environment").addEventListener("click", () => this.deleteEnvironment());
     $("#variable-search").addEventListener("input", () => this.filterVariables());
-    $("#add-variable").addEventListener("click", () => { this.draft.variables.push({ key: "", value: "", secret: true, enabled: true }); this.renderVariables(); $("#variables-table-body tr:last-child input").focus(); });
-    $("#environments-dialog").addEventListener("close", () => { this.draft = null; $("#variables-table-body").replaceChildren(); });
+    $("#add-variable").addEventListener("click", () => { this.draft.variables.push({ key: "", value: "", secret: true, enabled: true }); this.renderVariables(); this.updateEnvironmentDirty(); $("#variables-table-body tr:last-child input").focus(); });
+    const environmentDialog = $("#environments-dialog");
+    environmentDialog.addEventListener("cancel", event => { if (!this.discardEnvironmentEdits()) event.preventDefault(); });
+    environmentDialog.querySelector("[data-close-dialog]").addEventListener("click", event => { if (!this.discardEnvironmentEdits()) { event.preventDefault(); event.stopImmediatePropagation(); } }, true);
+    environmentDialog.addEventListener("close", () => { this.draft = null; this.environmentBaseline = null; $("#variables-table-body").replaceChildren(); });
   }
   load(options) { return this.loading = this.loadSnapshot(options); }
   async loadCurrent() {
@@ -273,14 +287,54 @@ export class WorkspaceSettings {
   async openGitHub() {
     await this.githubAccounts.open();
   }
-  async openEnvironments(id) {
-    try { await this.load(); this.editEnvironment(this.environments.find(env => env.id === id) || this.environments[0]); $("#environments-dialog").showModal(); }
+  companyEnvironments() { return this.environments.filter(env => this.settingsCompanyId === "__review__" ? !env.companies?.length && !env.allowUnassigned : scopeAllows(env, this.settingsCompanyId || null)); }
+  async openEnvironments(id, companyId = null) {
+    try {
+      await this.loadCurrent();
+      const requested = this.environments.find(env => env.id === id);
+      this.settingsCompanyId = companyId ?? requested?.companies?.[0] ?? this.state.companies?.[0]?.id ?? this.environments[0]?.companies?.[0] ?? "";
+      if (requested && !companyId && !requested.companies?.length) this.settingsCompanyId = requested.allowUnassigned ? "" : "__review__";
+      this.editEnvironment(this.companyEnvironments().find(env => env.id === id) || this.companyEnvironments()[0]);
+      $("#environments-dialog").showModal();
+    }
     catch (error) { this.toast(error.message); }
   }
+  discardEnvironmentEdits() { return !this.environmentSaving && (!this.environmentDirty() || confirm("Discard unsaved environment changes?")); }
+  captureEnvironmentFields() {
+    if (!this.draft) return;
+    Object.assign(this.draft, { name: $("#environment-name").value, variablesEnabled: $("#variables-enabled").checked,
+      setupScript: $("#environment-setup-script").value, archived: $("#environment-archived").checked });
+  }
+  environmentDirty() { this.captureEnvironmentFields(); return Boolean(this.draft && this.environmentBaseline !== JSON.stringify(this.draft)); }
+  updateEnvironmentDirty() {
+    $("#save-environment").disabled = Boolean(this.environmentSaving) || !this.environmentDirty();
+    if (!this.draft) return;
+    $("#environment-software-summary").textContent = `${this.draft.software.length} selected`;
+    $("#environment-variables-summary").textContent = this.draft.variablesEnabled ? `${this.draft.variables.length} ${this.draft.variables.length === 1 ? "variable" : "variables"}` : "Disabled";
+    $("#environment-setup-summary").textContent = this.draft.setupScript.trim() ? "Startup script configured" : "No startup script";
+  }
+  showEnvironmentSection(section = null) {
+    $("#environment-overview").hidden = Boolean(section); $("#environment-editor-heading").hidden = !section;
+    const titles = { software: "Installed software", variables: "Environment variables", setup: "Setup script" };
+    for (const id of Object.keys(titles)) $("#environment-" + id + "-editor").hidden = id !== section;
+    $("#environment-editor-title").textContent = titles[section] || "";
+    this.updateEnvironmentDirty();
+  }
   editEnvironment(environment) {
-    this.draft = structuredClone(environment || { name: "", backend: this.state.config.workerBackend, variablesEnabled: true, variables: [], software: [] });
+    this.draft = structuredClone(environment || { name: "", backend: this.state.config.workerBackend, variablesEnabled: true, variables: [], software: [], ...(this.settingsCompanyId && this.settingsCompanyId !== "__review__" ? { companies: [this.settingsCompanyId], allowUnassigned: false } : {}) });
     $("#environment-error").textContent = "";
-    $("#environment-tabs").replaceChildren(...this.environments.map(env => button(env.name, () => { if (confirm("Switch environments? Unsaved edits will be discarded.")) this.editEnvironment(env); }, `environment-tab${environment?.id === env.id ? " selected" : ""}`)));
+    $("#environment-save-status").textContent = "";
+    const companies = [...new Set([...(this.state.companies || []).map(company => company.id), ...this.environments.flatMap(env => env.companies || [])])];
+    const filter = $("#environment-company-filter");
+    filter.replaceChildren(...companies.map(id => option(id, this.state.companies?.find(company => company.id === id)?.name || id)));
+    if (!companies.length || this.settingsCompanyId === "" || this.environments.some(env => env.allowUnassigned)) filter.append(option("", "Unassigned chats"));
+    if (this.settingsCompanyId === "__review__" || this.environments.some(env => !env.companies?.length && !env.allowUnassigned)) filter.append(option("__review__", "Needs company assignment"));
+    filter.value = this.settingsCompanyId || "";
+    const select = $("#environment-editor-select");
+    select.replaceChildren(...this.companyEnvironments().map(env => option(env.id, `${env.name}${env.archived ? " · Archived" : ""}`)));
+    if (!environment) select.append(option("", "New environment"));
+    select.value = environment?.id || "";
+    $("#environment-advanced").open = false;
     $("#environment-name").value = this.draft.name;
     const companyState = { ...this.state, chats: [...(this.state.chats || []), ...this.selected.map(repository => ({ repositories: [repository] }))] };
     this.environmentCompanies.set(this.draft, knownCompanies(companyState, [...this.environments, ...this.mcps, ...(this.accounts || [])]));
@@ -298,6 +352,7 @@ export class WorkspaceSettings {
       label.append(input, el("span", "", `${pkg.name} ${pkg.version}`), el("small", "", pkg.description)); $("#software-options").append(label);
     }
     $("#variable-search").value = ""; this.renderVariables();
+    this.captureEnvironmentFields(); this.environmentBaseline = JSON.stringify(this.draft); this.showEnvironmentSection();
   }
   renderEnvironmentMcps() {
     if (this.state.config?.features?.companyMcpConnections) {
@@ -331,29 +386,31 @@ export class WorkspaceSettings {
         } catch (error) { $("#environment-error").textContent = error.message; }
       }); valueCell.append(value, reveal);
       const actions = el("td", "variable-actions"); const enabled = el("input"); enabled.type = "checkbox"; enabled.checked = variable.enabled; enabled.setAttribute("aria-label", `Variable ${index + 1} enabled`); enabled.addEventListener("change", () => { variable.enabled = enabled.checked; });
-      const remove = button("×", () => { this.draft.variables.splice(index, 1); this.renderVariables(); }, "small-icon"); remove.setAttribute("aria-label", `Delete variable ${index + 1}`); actions.append(enabled, remove);
+      const remove = button("×", () => { this.draft.variables.splice(index, 1); this.renderVariables(); this.updateEnvironmentDirty(); }, "small-icon"); remove.setAttribute("aria-label", `Delete variable ${index + 1}`); actions.append(enabled, remove);
       row.append(keyCell, typeCell, valueCell, actions); body.append(row);
     });
     this.filterVariables();
   }
   filterVariables() { const query = $("#variable-search").value.toLowerCase(); [...$("#variables-table-body").children].forEach((row, i) => { row.hidden = !this.draft.variables[i].key.toLowerCase().includes(query); }); }
   async saveEnvironment(event) {
-    event.preventDefault(); event.submitter.disabled = true;
-    this.draft.name = $("#environment-name").value; this.draft.variablesEnabled = $("#variables-enabled").checked;
-    Object.assign(this.draft, this.environmentCompanies.value());
-    this.draft.setupScript = $("#environment-setup-script").value; this.draft.archived = $("#environment-archived").checked;
+    event.preventDefault();
+    if (this.environmentSaving || !this.environmentDirty()) return;
+    if (!this.draft.name.trim()) { this.showEnvironmentSection(); $("#environment-name").focus(); return; }
+    this.environmentSaving = true; this.updateEnvironmentDirty(); $("#environment-error").textContent = "";
+    const fields = [...$("#environments-dialog").querySelectorAll("input, select, textarea, button")];
+    const disabled = fields.map(field => field.disabled); fields.forEach(field => { field.disabled = true; });
     try {
       this.requireCompanyScopes();
       const { environment } = await this.api(this.draft.id ? `/api/environments/${this.draft.id}` : "/api/environments", { method: this.draft.id ? "PATCH" : "POST", body: JSON.stringify(this.draft) });
       await this.load();
       if (!environment.archived) { $("#environment-select").value = environment.id; await this.changeEnvironment(); }
-      this.editEnvironment(environment); $("#environment-save-status").textContent = "Saved securely";
+      this.environmentBaseline = JSON.stringify(this.draft); $("#environments-dialog").close(); this.toast("Environment saved");
     } catch (error) { $("#environment-error").textContent = error.message; }
-    finally { event.submitter.disabled = false; }
+    finally { fields.forEach((field, index) => { field.disabled = disabled[index]; }); this.environmentSaving = false; this.updateEnvironmentDirty(); }
   }
   async deleteEnvironment() {
     if (!confirm(`Delete environment “${this.draft.name}”?`)) return;
-    try { await this.api(`/api/environments/${this.draft.id}`, { method: "DELETE" }); await this.load(); this.editEnvironment(this.environments[0]); }
+    try { await this.api(`/api/environments/${this.draft.id}`, { method: "DELETE" }); await this.load(); this.editEnvironment(this.companyEnvironments()[0]); }
     catch (error) { $("#environment-error").textContent = error.message; }
   }
   requireCompanyScopes() { if (!this.state.config?.features?.companyScopes) throw new Error("Restart Relay to activate company-scoped settings before saving. This server still uses the old global settings."); }

@@ -1,6 +1,29 @@
 # Feature queue — original request order
 
+## Startup follow-up — requested 2026-09-19
+
+- **Implement now:** start the chat's EC2 machine in parallel with repository
+  preparation; wait for both before transferring the workspace or starting the
+  agent. Preserve cancellation, company/account checks and failed-start cleanup.
+- **Implement now:** show the actual startup stages and their elapsed times,
+  including concurrent stages, with completed timings retained for inspection.
+- **Post-MVP, explicitly deferred by the user:** Git and dependency caches
+  isolated by company, repository and environment version. Dependency reuse
+  must also respect the lockfile/toolchain; do not share credentials or editable
+  chat workspaces between chats or companies.
+- **Post-MVP, explicitly deferred by the user:** pre-prepared environments,
+  containing reusable software/dependencies only, without credentials, browser
+  sessions or another chat's changes. No cache/prebuild implementation is part
+  of the immediate startup change.
+
 ## Current MVP audit — 2026-09-19
+
+**New user acceptance:** in the deployed g2i chat, the user requested assigned
+issues and reported a final result containing three tickets after five tool
+calls. This accepts the selected-chat Linear read as **user-observed**, not just
+discovery of tools or the controller verification button. The user also confirmed
+`/btw` worked while the main chat continued. No ticket contents are copied into
+this repository. See the [acceptance scope](validation-2026-09-19-linear-user-acceptance.md).
 
 **Pending publication:** native Codex MCP/dynamic tool events now retain sanitized
 arguments and error details, distinguish failed calls from missing results, and
@@ -51,7 +74,7 @@ This checkpoint supersedes stale status language in the historical entries below
 | Codex | User-reported connected account and successful deployed turns | Selected-account native conversation resume after worker restart; reconnect/revocation |
 | Claude | User-reported connected account and screenshots of responses/tool execution | Selected-account native conversation resume after worker restart; reconnect/revocation |
 | GitHub | Both company-bound product connections retained; repository selection/chat activity observed | Combined selected-product-connection worker clone/write/PR/restart |
-| Linear | g2i-only product binding; live controller tools/read verification succeeded | Authenticated selected-agent/worker read, not just the verification button |
+| Linear | g2i-only product binding; controller read plus user-reported selected-chat issue query with five tool calls and actual results | Same-connection read after a coordinated worker restart; independent operator observation not claimed |
 | AWS | Repeatable immutable deployment and recovery evidence; latest health/assets/denials matched | Combined authenticated product flows and authenticated remote-app HTTP/WS |
 
 The previous audit found expired `code-web` credentials while public readiness

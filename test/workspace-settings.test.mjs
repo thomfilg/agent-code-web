@@ -77,12 +77,13 @@ test("environment suggestions include agent scopes and selected repo companies w
     environments: [], mcps: [], software: [], accounts: [{ companies: ["agent-company"], allowUnassigned: false }],
     selected: [{ fullName: "Repo-Company/project" }], github: { connections: [{ repositoryAccess: "github", login: "not-an-access-scope" }] },
     environmentCompanies: { set: (record, known) => { offered = { record: structuredClone(record), known }; } },
-    renderEnvironmentMcps() {}, renderVariables() {},
+    renderEnvironmentMcps() {}, renderVariables() {}, showEnvironmentSection() {},
   });
+  globalThis.document.createElement = () => ({ value: "", textContent: "" });
   workspace.editEnvironment(null);
   assert.deepEqual(offered.known, ["agent-company", "repo-company"]);
   assert.equal(workspace.draft.companies, undefined); assert.equal(workspace.draft.allowUnassigned, undefined);
-  assert.deepEqual(offered.record, workspace.draft);
+  assert.deepEqual(offered.record, { name: "", backend: "local", variablesEnabled: true, variables: [], software: [] });
 });
 
 test("opening a conversation waits for a newer startup load instead of using missing preferences", async t => {

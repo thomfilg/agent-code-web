@@ -17,7 +17,13 @@ granular. Account reload/revocation, selected-account native restart/resume,
 selected-worker GitHub operations and authenticated preview remain separate gates.
 The company migration verified existing Linear with 79 tools and an authenticated
 controller workspace read, bound exclusively to g2i. A read through the selected
-agent/worker is still separate. See the [company publication receipt](validation-2026-09-18-company-chat.md).
+agent/worker was verified separately by the user on September 19: an assigned-issue
+query in the g2i chat returned three tickets after five tool calls. The user also
+confirmed `/btw`. Do not request the same baseline Linear read again merely to
+replace this user-reported evidence with another generic availability answer.
+Restart/resume acceptance remains separate. See the
+[user acceptance receipt](validation-2026-09-19-linear-user-acceptance.md) and
+[company publication receipt](validation-2026-09-18-company-chat.md).
 
 ## 1. Google cloud sign-in
 
@@ -136,9 +142,11 @@ Afterward:
   simply reopening the page does not establish resume. Wake sends no prompt.
   Composer **Stop/Escape** only interrupts the turn and submits the next queued
   message if one exists; it is not a worker-restart test.
-- [ ] A read-only Linear tool call through that selected worker/environment is
-  a separate runtime gate from the controller's verification button. If performed
-  through an agent prompt, obtain model-use authorization first. GitHub PR/check
+- [x] User-reported read-only Linear query through the selected g2i chat on
+  September 19: five tool calls and three returned issues, distinct from the
+  controller verification button. Exact tool payloads were not independently
+  inspected; restart/resume is not established by this read.
+- [ ] GitHub PR/check
   reads must likewise use the selected product connection. Push/PR creation or
   editing and Linear issue writes require separate exact-target authorization;
   do not create synthetic external records merely to complete this checklist.
