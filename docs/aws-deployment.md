@@ -1,5 +1,34 @@
 # AWS MVP operations
 
+Latest authorized publication (2026-09-19 21:07 UTC): source `d7814e5`, immutable
+image `sha256:d906684922d53a53a507708dfdd94795fbe112f01e99652bcb48844833b0ba21`.
+The full integrated Node suite passed **1,595/1,595** before build. Because one
+reported Claude chat was permanently busy in the old controller, the normal
+busy-drain gate correctly refused an automatic interruption. The user then
+explicitly ordered the deployment. A reviewed one-shot maintenance wrapper
+used the same pinned rollout engine, exact stack/controller/data-volume and
+host lock; it pulled and validated the new image and secret before stopping the
+exact old container. The old controller exited by SIGTERM (143), not OOM or the
+120-second SIGKILL fallback. The standard engine then retained it as rollback,
+started the new immutable image and passed readiness. SSM command
+`202e6773-6b93-428d-9e17-658f7fab90d7` completed Success/0.
+
+Read-only encrypted-record fingerprints before and after publication matched
+all three chats' message arrays, queued-message arrays and native session IDs.
+The affected chat retained 78 messages and its one queued message. No chat,
+account, browser profile, worker instance or data volume was deleted. The raw
+persisted status remains the pre-restart value, while normal `ChatStore`
+restoration presents every disconnected chat as stopped and pauses a nonempty
+queue; no queued prompt is replayed automatically. The affected EC2 worker
+remained running and can be reattached rather than recreated. Post-publication
+checks matched the running image, four source/public hashes and three public
+assets; readiness returned 200, anonymous chats 401, and all 13 fixed Git/MCP
+denial probes passed without provider calls. This receipt does not claim that
+the historical wire event can be reconstructed: its journal omitted the
+notification flags needed to prove the exact past sequence. The synthetic
+regression reproduces the observed stuck state and the source defect consistent
+with it; see [ambient workflow notifications](claude-ambient-workflow-notifications.md).
+
 Automatic-deployment requirement (2026-09-18): automatic publication must
 preserve already-running worker instances and their work. The current shutdown
 path does not satisfy that requirement, so the existing workflow remains
