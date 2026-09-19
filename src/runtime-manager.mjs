@@ -36,6 +36,7 @@ import { claudePluginReloadRequest, CLAUDE_PLUGIN_PRIVATE_ERROR } from "./claude
 import { claudeDebugRequest, CLAUDE_DEBUG_PRIVATE_ERROR } from "./claude-debug.mjs";
 import { githubWorkerMcpConfig } from "./github-worker-mcp.mjs";
 import { runtimeMcpSecrets } from "./worker-capabilities.mjs";
+import { HIBERNATION_UNAVAILABLE, hibernationAdmission, hibernationUnavailableError } from "./worker-suspension.mjs";
 import { startupStage, failRunningStartup } from "./startup-progress.mjs";
 
 const ADAPTERS = {
@@ -745,9 +746,13 @@ export class RuntimeManager extends EventEmitter {
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     if (chat.archived || this.#previewStops.has(chatId)) throw Object.assign(new Error("This environment is archived or stopping"), { statusCode: 409 });
     if (this.#executors.has(chatId)) return this.#executors.get(chatId);
+    if (this.config.idlePolicy === "hibernate" && !hibernationAdmission().available) {
+      await this.#suspensionUnavailable(chatId, { admission: true });
+      throw hibernationUnavailableError();
+    }
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const controller = new AbortController();
-    let acquisitionStarted = false;
+    let acquisitionStarted = false, acquisitionMutation;
     this.#startupControllers.set(chatId, controller);
     const check = () => { controller.signal.throwIfAborted(); if (!this.store.get(chatId) || this.store.get(chatId).archived || (this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" }); };
     const pending = (async () => {
@@ -773,6 +778,7 @@ export class RuntimeManager extends EventEmitter {
         if (this.config.workerBackend !== "ec2") { await repositories; check(); }
         check(); acquisitionStarted = true;
         return this.workerBackend.acquire(this.store.get(chatId), { workspaceReady: repositories, check,
+          onMutation: receipt => { acquisitionMutation = receipt; },
           onStage: (id, status) => this.#startupStage(chatId, id, status, version) });
       })());
       const [repoResult, workerResult] = await Promise.allSettled([repositories, acquisition]);
@@ -791,7 +797,10 @@ export class RuntimeManager extends EventEmitter {
       return executor;
     })().catch(async error => {
       if (acquisitionStarted && this.#executors.get(chatId) === pending) {
-        try { await this.workerBackend.sleep(chat); pending.workerReleased = true; }
+        try {
+          if (acquisitionMutation) { await acquisitionMutation.release(); pending.workerReleased = true; }
+          else if (this.config.workerBackend !== "ec2") { await this.workerBackend.sleep(chat); pending.workerReleased = true; }
+        }
         catch { pending.cleanupFailed = true; throw new Error("Worker startup failed and its machine could not be stopped. Use Stop to retry cleanup before waking it again."); }
       }
       if ((this.#lifecycleVersions.get(chatId) || 0) === version && this.store.get(chatId)) {
@@ -1631,6 +1640,9 @@ export class RuntimeManager extends EventEmitter {
   async stop(chatId, reason = "manual") {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("chat not found"), { statusCode: 404 });
+    // An idle request must never enter destructive Stop, even when suspension
+    // support or diagnostic persistence fails. Manual/revocation Stop is separate.
+    if (reason === "idle-timeout" && this.config.idlePolicy === "hibernate") return this.#suspensionUnavailable(chatId);
     const stoppingExecutor = this.#executors.get(chatId);
     this.#previewStops.set(chatId, (this.#previewStops.get(chatId) || 0) + 1);
     let stopped = false;
@@ -1898,7 +1910,7 @@ export class RuntimeManager extends EventEmitter {
       await this.browsers?.stop(chatId);
       checkCancelled();
       if (!this.#executors.get(chatId)?.cleanupFailed) this.#executors.delete(chatId);
-      if (executor) await this.workerBackend.sleep(chat).catch(() => {});
+      if (executor) await (this.config.workerBackend === "ec2" ? executor.releaseAcquisition?.() : this.workerBackend.sleep(chat))?.catch(() => {});
       checkCancelled();
       await this.store.update(chatId, current => { checkCancelled(); return { startupProgress: failRunningStartup(current.startupProgress) }; });
       checkCancelled();
@@ -1936,7 +1948,7 @@ export class RuntimeManager extends EventEmitter {
       this.#executors.delete(chatId);
       await adapter?.stop().catch(() => {});
       checkCancelled();
-      if (chat.agent !== "mock") await this.workerBackend.sleep(chat).catch(() => {});
+      if (chat.agent !== "mock") await (this.config.workerBackend === "ec2" ? executor?.releaseAcquisition?.() : this.workerBackend.sleep(chat))?.catch(() => {});
       checkCancelled();
       await this.store.update(chatId, current => { checkCancelled(); return { startupProgress: failRunningStartup(current.startupProgress) }; });
       checkCancelled();
@@ -1962,9 +1974,24 @@ export class RuntimeManager extends EventEmitter {
     runtime.idleTimer = setTimeout(() => {
       if (this.#importPending(chatId) || this.#forking.has(chatId) || runtime.adapter.hasScheduledWork?.() || runtime.adapter.agents?.busy() || this.sideChats.busy(chatId) || this.browsers?.hasViewers(chatId) || this.previewActivity.has(chatId) || this.workspacePresence.has(chatId) || this.presence.has(chatId)) { void this.#scheduleIdleStop(chatId, runtime); return; }
       if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.trustReviewing || runtime.adapter.isBackgroundBusy?.()) return;
-      this.stop(chatId, "idle-timeout").catch((error) => this.#fatal(chatId, error));
+      this.stop(chatId, "idle-timeout").catch((error) => {
+        if (this.config.idlePolicy === "hibernate") this.#emit(chatId, { type: "runtime_log", text: "Hibernation unavailable; its diagnostic could not be saved. Worker left running; use Stop explicitly." });
+        else this.#fatal(chatId, error);
+      });
     }, this.config.idleTimeoutMs);
     runtime.idleTimer.unref?.();
+  }
+
+  async #suspensionUnavailable(chatId, { admission = false } = {}) {
+    const version = this.#lifecycleVersions.get(chatId) || 0;
+    const updated = await this.store.update(chatId, current => {
+      if ((this.#lifecycleVersions.get(chatId) || 0) !== version || current.archived || current.status === "stopping") return {};
+      if (!admission && (this.isBusy(chatId) || current.status === "running" || this.sideChats.busy(chatId) || this.presence.has(chatId) || this.previewActivity.has(chatId) || this.workspacePresence.has(chatId) || this.browsers?.hasViewers(chatId))) return {};
+      return { idleDeadlineAt: null, idleKeepAwakeReason: "hibernation-unavailable", statusDetail: HIBERNATION_UNAVAILABLE,
+        suspension: { policy: "hibernate", status: "unavailable", checkedAt: nowIso() } };
+    });
+    if ((this.#lifecycleVersions.get(chatId) || 0) === version && updated) this.publishChat(updated);
+    return updated;
   }
 
   async #setStatus(chatId, status, statusDetail, idleDeadlineAt) {
