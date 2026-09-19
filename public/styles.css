@@ -656,7 +656,8 @@ dialog { max-height: calc(100dvh - 28px); }
 .native-feature-confirm button + button { margin-left: 0; }
 #controls-content button { border: 1px solid var(--line); padding: 8px; border-radius: 5px; color: var(--text); background: var(--panel); }
 #controls-content .native-memory-confirm .danger { color: var(--red); border-color: rgba(245,139,131,.35); }
-.attachment-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.attachment-chips, .message-attachments { display: flex; flex-wrap: nowrap; gap: 8px; max-width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; padding: 3px 1px 8px; }
+.attachment-chips:empty { display: none; }
 .composer .relay-vim-editor { height: auto; min-width: 0; max-width: 100%; background: transparent; color: var(--text); font: 14px/1.6 ui-monospace, monospace; }
 .composer .relay-vim-editor .CodeMirror-scroll { max-height: 220px; min-height: 58px; }
 .composer .relay-vim-editor .CodeMirror-lines { padding: 4px 0; }
@@ -670,12 +671,20 @@ dialog { max-height: calc(100dvh - 28px); }
 .vim-status[hidden] { display: none; }
 #vim-mode { color: var(--lime); font-weight: 600; }
 .vim-status button { border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; background: transparent; color: var(--text); font: inherit; }
-.attachment-chip { display: flex; align-items: center; gap: 4px; max-width: 200px; padding: 3px 6px; font-size: 10px; background: var(--panel); border-radius: 6px; }
-.attachment-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.attachment-open { min-width: 0; padding: 7px 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
-.attachment-open:hover { color: var(--lime); text-decoration: underline; }
-.message-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-.message-attachments .attachment-open { max-width: 240px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }
+.attachment-chip { display: flex; flex: 0 0 auto; position: relative; }
+.attachment-open { display: flex; align-items: center; gap: 10px; flex: 0 0 204px; width: 204px; height: 70px; min-width: 0; padding: 10px; text-align: left; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
+.attachment-chip .attachment-open { padding-right: 28px; }
+.attachment-open:hover { border-color: var(--lime); background: var(--panel-raised, #242820); }
+.attachment-open:focus-visible, .attachment-chip > .small-icon:focus-visible { outline: 2px solid var(--lime); outline-offset: 1px; }
+.attachment-chip > .small-icon { position: absolute; top: 3px; right: 3px; width: 25px; height: 25px; min-width: 25px; padding: 0; border-radius: 50%; background: var(--panel); }
+.attachment-icon { display: grid; place-items: center; flex: 0 0 42px; width: 42px; height: 44px; overflow: hidden; font-size: 10px; color: var(--muted); background: var(--bg); border-radius: 5px; }
+.attachment-icon img { width: 100%; height: 100%; object-fit: cover; }
+.attachment-image-card .attachment-icon { flex-basis: 54px; width: 54px; height: 48px; }
+.attachment-info { display: flex; flex-direction: column; gap: 5px; overflow: hidden; min-width: 0; }
+.attachment-info strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+.attachment-info small { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.message-attachments { margin-top: 10px; }
+.attachment-drop-active::after { content: "Drop files to attach · nothing will be sent"; position: fixed; z-index: 90; inset: 12px; display: grid; place-items: center; padding: 24px; text-align: center; border: 2px dashed var(--lime); border-radius: 14px; background: #171d17eb; color: var(--lime); pointer-events: none; font-size: 18px; }
 .attachment-image-preview { display: block; max-width: 100%; height: auto; margin: 0 auto; }
 .image-actual-size .attachment-image-preview { max-width: none; margin: 0; }
 #environment-setup-script { width: 100%; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px; font: 12px/1.5 ui-monospace, monospace; }

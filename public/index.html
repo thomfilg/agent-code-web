@@ -126,8 +126,10 @@
                   <p id="new-slash-status" role="status" hidden></p>
                   <div class="slash-footer" aria-hidden="true"><span><kbd>↑</kbd> <kbd>↓</kbd> Navigate</span><span><kbd>↵</kbd> Insert</span><span><kbd>esc</kbd> Close</span></div>
                 </div>
-                <label class="sr-only" for="initial-prompt">New chat message</label><textarea id="initial-prompt" rows="1" maxlength="100000" required placeholder="Describe a task or ask a question…"></textarea>
+                <div id="new-attachment-chips" class="attachment-chips" aria-label="New message attachments"></div>
+                <label class="sr-only" for="initial-prompt">New chat message</label><textarea id="initial-prompt" rows="1" maxlength="100000" placeholder="Describe a task or ask a question…"></textarea>
                 <div class="composer-footer">
+                  <button type="button" id="new-add-attachments" class="small-icon" aria-label="Add files or photos" title="Add files or photos">+</button>
                   <div class="draft-agent-picker" id="new-agent-account-field"><select id="agent-select" aria-label="Agent" required></select><select id="new-agent-account" aria-label="Agent" hidden><option value="">Select an agent account</option></select><button type="button" class="small-icon" id="connect-codex-button" aria-label="Manage agent accounts" title="Manage agent accounts" hidden>⚙</button></div>
                   <div class="model-controls compact-model-controls" id="new-model-controls"><select class="model-select" aria-label="New chat model" title="Model"></select><select class="effort-select" aria-label="New chat effort" title="Effort"></select><p class="model-note" role="status"></p></div>
                   <button class="send-button" id="create-chat-button" type="submit" aria-label="Send first message" title="Send message" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg></button>
@@ -178,7 +180,7 @@
                 <div id="file-options" role="listbox" aria-label="Workspace references"></div>
                 <p id="file-status" role="status"></p>
               </div>
-              <div id="attachment-chips" class="attachment-chips"></div>
+              <div id="attachment-chips" class="attachment-chips" aria-label="Message attachments"></div>
               <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message" aria-describedby="composer-keyboard-hint"></textarea>
               <div id="vim-status" class="vim-status" hidden><span id="vim-mode" role="status"></span><span class="muted">i to edit · Esc for Normal</span><button type="button" id="vim-help">Keys</button><button type="button" id="vim-disable">Vim off</button></div>
               <div class="composer-footer">
