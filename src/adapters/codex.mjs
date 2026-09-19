@@ -693,6 +693,7 @@ export class CodexAdapter {
       if (current.goalRun && current.awaitingContinuation) {
         clearTimeout(current.continuationTimer); current.awaitingContinuation = false;
         current.text = ""; current.finalText = ""; current.outputRedactor = null;
+        current.agentMessageId = undefined; current.pendingAgentMessageId = undefined; current.agentMessageIds = new Set();
         this.hooks.onEvent?.({ type: "goal_turn_started" });
       }
       current.turnId = params.turn?.id || current.turnId;
@@ -712,15 +713,16 @@ export class CodexAdapter {
       return;
     }
     if (method === "item/agentMessage/delta" && this.current) {
-      const current = this.current;
-      if (this.nativeAuthMode === "account" || this.credentialSecrets.size) current.outputRedactor ||= new SecretTextStream(this.credentialSecrets);
-      const delta = current.outputRedactor ? current.outputRedactor.push(params.delta || "") : params.delta || "";
-      current.text += delta;
-      if (delta) this.hooks.onEvent?.({ type: "assistant_delta", delta });
+      this.#appendAgentMessage(this.current, params.delta || "", params.itemId);
       return;
     }
     if ((method === "item/started" || method === "item/completed") && params.item) {
+      if (method === "item/started" && params.item.type === "agentMessage" && this.current) this.current.pendingAgentMessageId = params.item.id;
       if (method === "item/completed" && params.item.type === "agentMessage" && this.current) {
+        const id = params.item.id ?? this.current.pendingAgentMessageId ?? "legacy-message";
+        // Some transports deliver only a completed message. Keep that block
+        // too, without appending a second copy of already-streamed text.
+        if (!this.current.agentMessageIds?.has(id)) this.#appendAgentMessage(this.current, params.item.text || "", id);
         this.current.finalText = params.item.text || "";
       }
       if (method === "item/completed" && params.item.type === "exitedReviewMode" && this.current) this.current.reviewText = params.item.review || "";
@@ -803,6 +805,28 @@ export class CodexAdapter {
     clearTimeout(current.timer);
     clearTimeout(current.continuationTimer);
     current.rejectTurn(error);
+  }
+
+  #appendAgentMessage(current, text, itemId) {
+    if (!text) return;
+    const id = itemId ?? current.pendingAgentMessageId ?? "legacy-message";
+    current.agentMessageIds ||= new Set();
+    if (current.agentMessageId !== undefined && current.agentMessageId !== id) {
+      // Native agentMessage items are separate visible updates, not arbitrary
+      // token chunks. Flush redaction safely and retain their paragraph break
+      // in both the live stream and the saved turn text.
+      const tail = current.outputRedactor?.boundary() || "";
+      current.text += tail;
+      if (tail) this.hooks.onEvent?.({ type: "assistant_delta", delta: tail });
+      const separator = current.text ? current.text.endsWith("\n\n") ? "" : current.text.endsWith("\n") ? "\n" : "\n\n" : "";
+      current.text += separator;
+      if (separator) this.hooks.onEvent?.({ type: "assistant_delta", delta: separator });
+    }
+    current.agentMessageId = id; current.agentMessageIds.add(id);
+    if (this.nativeAuthMode === "account" || this.credentialSecrets.size) current.outputRedactor ||= new SecretTextStream(this.credentialSecrets);
+    const delta = current.outputRedactor ? current.outputRedactor.push(text) : text;
+    current.text += delta;
+    if (delta) this.hooks.onEvent?.({ type: "assistant_delta", delta });
   }
 
   #finishOutput(current) {

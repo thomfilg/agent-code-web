@@ -703,6 +703,11 @@ export async function createAgentWebServer(options = {}) {
           submitted.completion.catch((error) => console.error(`turn ${chatId}:`, errorMessage(error)));
           return json(response, 202, { accepted: true, message: submitted.message });
         }
+        if (tail === "interrupt" && request.method === "POST") {
+          await bodyJson(request, 1000); request.guardChat();
+          const chat = await manager.interrupt(chatId);
+          request.guardChat(); return json(response, 200, { chat });
+        }
         if (tail === "stop" && request.method === "POST") {
           await manager.stop(chatId, "manual");
           return json(response, 200, { stopped: true });

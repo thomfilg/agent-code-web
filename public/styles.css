@@ -190,6 +190,21 @@ button { border: 0; cursor: pointer; }
 .message.user .message-text { color: #c0c5bb; }
 .message.system { opacity: .82; }
 .message.system.error .message-text { color: var(--red); }
+.message.assistant:has(+ .inline-tool-group) { margin-bottom: 8px; }
+.message.commentary { margin-bottom: 10px; }
+.message.commentary .message-avatar { visibility: hidden; }
+.message.commentary .message-label { display: none; }
+.inline-tool-group { margin: 0 0 16px 41px; color: var(--muted); font-size: 13px; }
+.inline-tool-group > summary { cursor: pointer; list-style: none; width: fit-content; padding: 4px 0; }
+.inline-tool-group > summary::after { content: " ›"; display: inline-block; margin-left: 5px; }
+.inline-tool-group[open] > summary::after { transform: rotate(90deg); }
+.inline-tool-list { border: 1px solid var(--line); border-radius: 9px; margin-top: 7px; overflow: hidden; }
+.inline-tool-list .tool-details { border: 0; border-radius: 0; margin: 0; padding: 9px 12px; }
+.inline-tool-list .tool-details + .tool-details { border-top: 1px solid var(--line); }
+.inline-tool-list summary { cursor: pointer; overflow-wrap: anywhere; }
+.inline-tool-list pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 400px; overflow: auto; font: 12px/1.5 ui-monospace, monospace; }
+.inline-tool-list .tool-input { padding: 9px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; color: var(--text); }
+@media (max-width: 540px) { .inline-tool-group { margin-left: 0; } }
 .message.tool { grid-template-columns: 29px minmax(0, 1fr); margin-top: -14px; margin-bottom: 20px; }
 .message.tool .message-avatar { color: var(--blue); }
 .message.tool.running { opacity: .76; }
@@ -445,6 +460,8 @@ dialog { max-height: calc(100dvh - 28px); }
 .browser-panel input:focus-visible, .browser-panel select:focus-visible { outline: 2px solid var(--lime); outline-offset: 1px; }
 .browser-toolbar input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; padding: 9px; }
 .browser-tabbar select { padding: 8px; font-size: 12px; }
+.working-status { color: var(--muted); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 6px 0 10px; overflow-wrap: anywhere; }
+.working-status::before { content: "●"; color: var(--lime); margin-right: 8px; }
 .browser-options { flex-wrap: wrap; }
 .browser-options select { padding: 7px; font-size: 11px; }
 .browser-options button { padding: 7px 9px; font-size: 11px; }

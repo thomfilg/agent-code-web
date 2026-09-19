@@ -46,6 +46,7 @@ import { RuntimeWake } from "./runtime-wake.js";
 import { agentAccountLabel } from "./agent-account-options.js";
 import { ChatRepositoryPicker } from "./chat-repository-picker.js";
 import { CompaniesPage } from "./companies.js";
+import { workingStatus, canInterruptWithEscape } from "./working-status.js";
 
 const state = {
   config: null,
@@ -149,6 +150,7 @@ function renderMessage(message, streaming = false) {
   }
   const role = message.role || "system";
   const wrapper = node("article", `message ${role}${message.kind === "error" ? " error" : ""}`);
+  if (role === "assistant" && (message.meta?.commentary || message.meta?.segmentedTurn)) wrapper.classList.add("commentary");
   wrapper.dataset.messageId = message.id || "stream";
   wrapper.append(node("div", "message-avatar", role === "assistant" ? glyph(message.agent || state.active?.agent) : role === "user" ? "YOU" : "!"));
   const body = node("div", "message-body");
@@ -168,14 +170,16 @@ function renderMessage(message, streaming = false) {
 
 const messageWindow = new MessageWindow();
 function renderMessages() {
+  renderWorkingStatus();
   if (!state.active) return;
   const changedChat = messageWindow.chatId !== state.active.id;
   const render = messageFollow.begin({ reset: changedChat });
   const oldTop = elements.messages.getBoundingClientRect().top;
   const anchor = [...elements.messages.querySelectorAll(".message")].find(n => n.getBoundingClientRect().bottom > oldTop + 10);
   const anchorId = anchor?.dataset.messageId, anchorOffset = anchor ? anchor.getBoundingClientRect().top - oldTop : 0;
+  toolActivity.captureExpanded();
   elements.messages.replaceChildren();
-  const persisted = (state.active.messages || []).filter(message => !message.meta?.renderingSample);
+  const persisted = (state.active.messages || []).filter(message => !message.meta?.renderingSample && !(message.meta?.segmentedTurn && !message.text?.trim()));
   if (!persisted.length && !state.stream && !state.liveTools.size) {
     messageWindow.update(state.active.id, []);
     toolActivity.update(state.active.id, new Map());
@@ -189,8 +193,9 @@ function renderMessages() {
     for (const message of visible) elements.messages.append(message.kind === "tool_group" ? toolActivity.button(message.key) : renderMessage(message));
     if (messageWindow.end < rows.length) {
       elements.messages.append(pager(`Load newer messages · ${rows.length - messageWindow.end} below`, () => { messageWindow.move(1); renderMessages(); }));
-    } else if (state.stream) elements.messages.append(renderMessage({ id: state.stream.id, role: "assistant", text: state.stream.text }, true));
+    } else if (state.stream?.text.trim()) elements.messages.append(renderMessage({ id: state.stream.id, role: "assistant", text: state.stream.text }, true));
   }
+  toolActivity.restoreInlineFocus();
   messageNavigator.update();
   if (!render.follow && anchorId) {
     const retained = [...elements.messages.querySelectorAll(".message")].find(n => n.dataset.messageId === anchorId);
@@ -261,11 +266,13 @@ function renderActive() {
   const switching = state.switchingChat === chat.id;
   const firstMessagePending = state.initialMessageChat === chat.id;
   const busy = ["running", "starting"].includes(chat.status);
+  renderWorkingStatus();
   const unavailable = deleting || switching || chat.status === "stopping" || chat.workflowState === "archived";
-  elements.send.disabled = unavailable || firstMessagePending || runtimeWake.isWaiting(chat.id);
+  elements.send.disabled = unavailable || firstMessagePending || runtimeWake.isWaiting(chat.id) || interruptingChats.has(chat.id);
   elements.input.disabled = unavailable;
   elements.send.type = busy ? "button" : "submit";
-  elements.send.setAttribute("aria-label", busy ? "Stop agent" : "Send message");
+  elements.send.setAttribute("aria-label", interruptingChats.has(chat.id) ? "Stopping agent turn" : busy ? "Stop agent" : "Send message");
+  elements.send.title = busy ? (chat.queuedMessages?.length ? "Interrupt this turn and send the next queued message" : "Interrupt this turn; keep the environment running") : "Send message";
   elements.send.querySelector("path").setAttribute("d", busy ? "M7 7h10v10H7z" : "m5 12 7-7 7 7M12 5v14");
   $("#queue-message").hidden = !busy || runtimeWake.isWaiting(chat.id); $("#queue-message").disabled = unavailable || firstMessagePending;
   renderKeyboardHints();
@@ -390,6 +397,7 @@ function connectEvents(chatId) {
       renderActive();
       if (commandsChanged) slashComposer.refresh(chatId);
     } else if (event.type === "message") {
+      if (event.message.meta?.commentary && state.stream?.id === event.message.meta.streamId) state.stream.text = "";
       if (event.message.role === "user") state.active.messages = state.active.messages.filter(message => message.id !== `initial-${chatId}` || message.text !== event.message.text);
       if (event.message.kind === "tool" && event.message.meta?.itemId) state.liveTools.delete(event.message.meta.itemId);
       const index = state.active.messages.findIndex((message) => message.id === event.message.id);
@@ -806,7 +814,28 @@ $("#initial-prompt").addEventListener("keydown", event => {
 $("#initial-prompt").addEventListener("input", event => { event.target.style.height = "auto"; event.target.style.height = `${Math.min(170, event.target.scrollHeight)}px`; });
 elements.agentSelect.addEventListener("change", renderSecurityHint);
 $("#composer").addEventListener("submit", sendMessage);
-elements.send.addEventListener("click", () => { if (elements.send.type === "button") $("#stop-button").click(); });
+const interruptingChats = new Set();
+async function interruptAgent() {
+  const id = state.active?.id;
+  if (!id || interruptingChats.has(id)) return;
+  interruptingChats.add(id); elements.send.disabled = true; elements.send.setAttribute("aria-label", "Stopping agent turn");
+  try {
+    const { chat } = await api(`/api/chats/${id}/interrupt`, { method: "POST", body: "{}" });
+    if (chat) { updateChatSummary(chat); if (state.active?.id === id && (chat.revision || 0) >= (state.active.revision || 0)) state.active = chat; }
+  } catch (error) { toast(`Could not interrupt the agent: ${error.message}`); }
+  finally { interruptingChats.delete(id); if (state.active?.id === id) renderActive(); }
+}
+elements.send.addEventListener("click", () => { if (elements.send.type === "button") void interruptAgent(); });
+function renderWorkingStatus() {
+  const text = workingStatus(state.active, state.liveTools);
+  $("#working-status").textContent = text;
+  $("#working-status").hidden = !text;
+}
+setInterval(() => { if (!document.hidden) renderWorkingStatus(); }, 1000);
+document.addEventListener("keydown", event => {
+  if (!["running", "starting"].includes(state.active?.status) || !canInterruptWithEscape(event)) return;
+  event.preventDefault(); void interruptAgent();
+});
 elements.input.addEventListener("input", resizeInput);
 function keyboardAction(event, action) {
   if (action === "new_chat") { event.preventDefault(); if (!event.repeat) openNewChat(); return true; }
@@ -964,7 +993,7 @@ function renderKeyboardHints() {
   const binding = (context, action, defaults) => (keymap.snapshot.bindings[context]?.[action] ?? defaults).map(label).join(" / ");
   const send = binding("composer", "send", ["enter"]), newline = binding("composer", "newline", ["shift-enter"]);
   const busy = ["running", "starting"].includes(state.active?.status);
-  $(".composer-hint").textContent = `${send ? `${send} to ${busy ? "queue" : "send"}` : "Use the send/queue button"}${busy ? " · Stop pauses the queue" : ""}${newline ? ` · ${newline} for a new line` : ""}`;
+  $(".composer-hint").textContent = `${send ? `${send} to ${busy ? "queue" : "send"}` : "Use the send/queue button"}${busy ? " · Stop interrupts and sends the next queued message" : ""}${newline ? ` · ${newline} for a new line` : ""}`;
   if (elements.input.relayVimEditor && !elements.input.relayVimEditor.state.vim?.insertMode) $(".composer-hint").textContent = `Vim Normal/Visual: i to edit · Use the ${busy ? "Queue" : "Send"} button to ${busy ? "queue" : "send"}`;
   const keys = keymap.snapshot.bindings.global?.new_chat ?? ["ctrl-k", "meta-k"], preferred = keys.find(key => key.startsWith(navigator.platform?.includes("Mac") ? "meta-" : "ctrl-")) || keys[0];
   const badge = $("#new-chat-button kbd"); badge.textContent = preferred ? label(preferred) : ""; badge.hidden = !preferred;

@@ -43,6 +43,11 @@ const ADAPTERS = {
   mock: MockAdapter,
 };
 
+function remainingAssistantText(runtime, text) {
+  const published = (runtime.assistantText || "").slice(0, runtime.assistantPublishedLength || 0);
+  return published && text.startsWith(published.trimEnd()) ? text.slice(published.length).replace(/^\n+/, "") : text;
+}
+
 export class RuntimeManager extends EventEmitter {
   #runtimes = new Map();
   #queued = new Set();
@@ -54,6 +59,7 @@ export class RuntimeManager extends EventEmitter {
   #switching = new Set();
   #draining = new Map();
   #submissions = new Map();
+  #interruptions = new Map();
   #sendingNow = new Map();
   #queueClaims = new Map();
   #executors = new Map();
@@ -86,7 +92,7 @@ export class RuntimeManager extends EventEmitter {
       if (removeId !== undefined || resume) throw new Error("Choose one queue action at a time");
       return this.sendQueuedNow(chatId, sendNowId);
     }
-    if (this.#sendingNow.has(chatId)) throw Object.assign(new Error("A queued message is being sent; please wait"), { statusCode: 409 });
+    if (this.#sendingNow.has(chatId) || this.#interruptions.has(chatId)) throw Object.assign(new Error("The agent is changing turns; please wait"), { statusCode: 409 });
     const removed = this.store.get(chatId)?.queuedMessages?.find(item => item.id === removeId);
     if (removed?.nativeApprovalId) {
       if (this.#queueClaims.get(chatId) === removeId) throw Object.assign(new Error("This approval retry is already being sent"), { statusCode: 409 });
@@ -107,7 +113,7 @@ export class RuntimeManager extends EventEmitter {
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     const pending = this.#sendingNow.get(chatId);
     if (pending?.id === itemId) return pending.promise;
-    if (pending || this.#switching.has(chatId) || chat.status === "stopping") throw Object.assign(new Error("This chat is already changing; please wait"), { statusCode: 409 });
+    if (pending || this.#interruptions.has(chatId) || this.#switching.has(chatId) || chat.status === "stopping") throw Object.assign(new Error("This chat is already changing; please wait"), { statusCode: 409 });
     if (chat.archived) throw Object.assign(new Error("Unarchive this chat before sending a message"), { statusCode: 409 });
     const item = typeof itemId === "string" && chat.queuedMessages?.find(entry => entry.id === itemId);
     if (!item) throw Object.assign(new Error("Queued message not found; it may already have been sent"), { statusCode: 404 });
@@ -129,7 +135,10 @@ export class RuntimeManager extends EventEmitter {
       try {
         const adapter = this.#runtimes.get(chatId)?.adapter;
         // Interrupt the provider turn, not the worker/VM or shared Chrome.
-        if (adapter) await (adapter.interrupt ? adapter.interrupt() : adapter.stop());
+        if (adapter) {
+          if (!adapter.interrupt) throw new Error("This agent does not support turn interruption");
+          await adapter.interrupt();
+        }
       } catch (error) { turn.cancelled = false; throw error; }
       await turn.done;
       this.#emit(chatId, { type: "turn_interrupted" });
@@ -1248,7 +1257,7 @@ export class RuntimeManager extends EventEmitter {
     const commandAction = approval ? { type: "approvalRetry", approval,
       prompt: "I confirmed the specific denied action recorded by the native approval immediately before this message. Retry that exact action once in the same context, using the current permission policy. Do not broaden the operation, change permissions, or treat this as permission for other actions. If the action is no longer appropriate or still denied, explain and stop this retry." } : messageCommand(chat.agent, text);
     if (chat.workflowState === "archived") throw Object.assign(new Error("Unarchive this chat before sending a message"), { statusCode: 409 });
-    if (this.#switching.has(chatId) || this.#queued.has(chatId) || this.#runtimes.get(chatId)?.busy || this.#runtimes.get(chatId)?.adapter.isBackgroundBusy?.() || (this.#sendingNow.has(chatId) && this.#sendingNow.get(chatId) !== queueAction)) {
+    if (this.#interruptions.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || this.#runtimes.get(chatId)?.busy || this.#runtimes.get(chatId)?.adapter.isBackgroundBusy?.() || (this.#sendingNow.has(chatId) && this.#sendingNow.get(chatId) !== queueAction)) {
       throw Object.assign(new Error("this chat already has a running turn"), { statusCode: 409 });
     }
     this.#queued.add(chatId);
@@ -1320,7 +1329,10 @@ export class RuntimeManager extends EventEmitter {
     runtime.idleTimer = null;
     const assistantMessageId = newId("msg");
     runtime.assistantMessageId = assistantMessageId;
-    await this.store.update(chatId, { taskProgress: null });
+    runtime.assistantText = "";
+    runtime.assistantPublishedLength = 0;
+    runtime.toolMessages = new Map();
+    await this.store.update(chatId, { taskProgress: null, workingStartedAt: nowIso() });
     await this.#setStatus(chatId, "running", "Agent is working", null);
     this.#emit(chatId, { type: "turn_started", messageId: assistantMessageId });
 
@@ -1439,7 +1451,8 @@ export class RuntimeManager extends EventEmitter {
         role: "assistant",
         agent: this.store.get(chatId).agent,
         kind: "message",
-        text: output.text,
+        text: remainingAssistantText(runtime, output.text),
+        ...(runtime.assistantPublishedLength ? { meta: { segmentedTurn: true } } : {}),
       });
       this.#emit(chatId, { type: "turn_completed", message });
       }
@@ -1461,12 +1474,62 @@ export class RuntimeManager extends EventEmitter {
       this.#emit(chatId, { type: "turn_failed", message });
     } finally {
       if (commandAction?.approval) await this.approvals.cancel(chatId, commandAction.approval.id).catch(() => {});
+      if (turn.cancelled && runtime.generation === generation && this.#runtimes.get(chatId) === runtime) {
+        await runtime.eventQueue;
+        const remaining = remainingAssistantText(runtime, runtime.assistantText || "");
+        if (remaining && !this.store.get(chatId).messages.some(message => message.id === assistantMessageId)) {
+          const message = await this.store.appendMessage(chatId, { id: assistantMessageId, role: "assistant", agent: this.store.get(chatId).agent, kind: "message", text: remaining, meta: { interrupted: true } });
+          this.#emit(chatId, { type: "message", message });
+        }
+      }
       runtime.titleStream = null;
       if (runtime.generation === generation && this.#runtimes.get(chatId) === runtime) {
         runtime.busy = false;
         await this.#scheduleIdleStop(chatId, runtime);
         this.pullRequests.refresh(chatId).catch(() => {});
       }
+    }
+  }
+
+  interrupt(chatId) {
+    if (this.#interruptions.has(chatId)) return this.#interruptions.get(chatId);
+    // Use the existing serialized queue handoff: cancel only the active turn
+    // and submit the next queued message, keeping the rest in FIFO order.
+    if (this.#sendingNow.has(chatId)) return this.#sendingNow.get(chatId).promise;
+    const next = this.store.get(chatId)?.queuedMessages?.[0];
+    if (next) return this.sendQueuedNow(chatId, next.id);
+    const action = this.#interruptTurn(chatId).finally(() => this.#interruptions.delete(chatId));
+    this.#interruptions.set(chatId, action);
+    return action;
+  }
+
+  async #interruptTurn(chatId) {
+    const chat = this.store.get(chatId);
+    if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    if (chat.status === "stopping" || this.#sendingNow.has(chatId) || this.#switching.has(chatId)) throw Object.assign(new Error("This chat is already changing; please wait"), { statusCode: 409 });
+    const version = this.#lifecycleVersions.get(chatId) || 0;
+    const turn = this.#submissions.get(chatId);
+    if (turn) turn.cancelled = true;
+    this.publishChat(await this.store.update(chatId, { queuePaused: true }));
+    const runtime = this.#runtimes.get(chatId);
+    try {
+      // Equivalent to native Escape: preserve the worker, browser, services,
+      // credentials and native session. Never fall back to stop()/VM shutdown.
+      if (runtime && (turn || runtime.adapter.isBackgroundBusy?.())) {
+        if (!runtime.adapter.interrupt) throw new Error("This agent does not support turn interruption");
+        await runtime.adapter.interrupt();
+      }
+      await turn?.done;
+      await runtime?.eventQueue;
+      if (version !== (this.#lifecycleVersions.get(chatId) || 0)) return this.store.get(chatId);
+      this.publishChat(await this.store.update(chatId, { pendingRequest: null, awaitingUser: false, queuePaused: true }));
+      this.#emit(chatId, { type: "turn_interrupted" });
+      const active = this.#runtimes.get(chatId);
+      if (active) { active.busy = false; await this.#scheduleIdleStop(chatId, active); }
+      return this.store.get(chatId);
+    } catch (error) {
+      if (turn && this.#submissions.get(chatId) === turn) turn.cancelled = false;
+      throw error;
     }
   }
 
@@ -1623,7 +1686,7 @@ export class RuntimeManager extends EventEmitter {
             .catch(() => this.#emit(chatId, { type: "runtime_log", text: "A native denial could not be safely retained for /approve. No approval was granted." }));
           return runtime.eventQueue;
         }
-        if (event.type === "goal_turn_completed") runtime.titleStream?.flush();
+        if (event.type === "goal_turn_completed" || event.type === "tool" && (runtime.titleStream?.buffer || runtime.titleStream?.title?.buffer)) runtime.titleStream?.flush();
         if (event.type === "goal_turn_started") runtime.titleStream = new ResponseStream(delta => { runtime.eventQueue = runtime.eventQueue.then(() => this.#agentEvent(chatId, delta)); }, this.store.get(chatId)?.autoTitle);
         if (event.type === "assistant_delta" && runtime.titleStream) { runtime.titleStream.delta(event.delta || ""); return runtime.eventQueue; }
         runtime.eventQueue = runtime.eventQueue.then(() => this.#agentEvent(chatId, event));
@@ -1790,6 +1853,7 @@ export class RuntimeManager extends EventEmitter {
       ...runtimeWorkflowPatch(current, status),
       status,
       statusDetail,
+      ...(status === "running" && !["running", "starting"].includes(current.status) ? { workingStartedAt: nowIso() } : {}),
       idleDeadlineAt,
       idleKeepAwakeReason: null,
       lastActivityAt: nowIso(),
@@ -1798,6 +1862,10 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async #agentEvent(chatId, event) {
+    if (event.type === "assistant_delta") {
+      const runtime = this.#runtimes.get(chatId);
+      if (runtime?.busy) runtime.assistantText = (runtime.assistantText || "") + (event.delta || "");
+    }
     if (event.type === "task_progress") {
       const chat = this.store.get(chatId);
       if (event.agent === chat?.agent && event.sessionId === chat?.agentSessionId) this.publishChat(await this.store.update(chatId, { taskProgress: event.progress }));
@@ -1829,6 +1897,7 @@ export class RuntimeManager extends EventEmitter {
     if (event.type === "goal_turn_started") {
       const runtime = this.#runtimes.get(chatId); if (!runtime) return;
       runtime.assistantMessageId = newId("msg");
+      runtime.assistantText = ""; runtime.assistantPublishedLength = 0; runtime.toolMessages = new Map();
       this.#emit(chatId, { type: "turn_started", messageId: runtime.assistantMessageId }); return;
     }
     if (event.type === "goal_turn_completed") {
@@ -1836,7 +1905,7 @@ export class RuntimeManager extends EventEmitter {
       const output = extractResponse(event.text || "", chat.autoTitle);
       if (output.title) await this.#agentEvent(chatId, { type: "title", title: output.title });
       await this.store.update(chatId, { awaitingUser: output.awaitingUser, needsAgentHandoff: false });
-      const message = await this.store.appendMessage(chatId, { id: runtime.assistantMessageId, role: "assistant", agent: chat.agent, kind: "message", text: output.text });
+      const message = await this.store.appendMessage(chatId, { id: runtime.assistantMessageId, role: "assistant", agent: chat.agent, kind: "message", text: remainingAssistantText(runtime, output.text), ...(runtime.assistantPublishedLength ? { meta: { segmentedTurn: true } } : {}) });
       this.#emit(chatId, { type: "turn_completed", message }); return;
     }
     if (event.type === "native_account_updated") {
@@ -1864,13 +1933,27 @@ export class RuntimeManager extends EventEmitter {
       if (chat?.autoTitle && chat.title !== event.title) this.publishChat(await this.store.update(chatId, { title: event.title }));
       return;
     }
-    if (event.type === "tool" && event.state === "completed") {
-      const message = await this.store.appendMessage(chatId, {
-        role: "tool",
-        kind: "tool",
-        text: event.title,
-        meta: event,
-      });
+    if (event.type === "tool") {
+      const runtime = this.#runtimes.get(chatId);
+      // Commit commentary before its actions. Tool completion updates the
+      // original row instead of moving it after later commentary.
+      const existing = runtime?.toolMessages?.get(event.itemId);
+      if (runtime?.busy && !existing) {
+        const commentary = (runtime.assistantText || "").slice(runtime.assistantPublishedLength || 0);
+        if (commentary.trim()) {
+          const message = await this.store.appendMessage(chatId, { role: "assistant", agent: this.store.get(chatId).agent, kind: "message", text: commentary.replace(/^\n+/, "").trimEnd(), meta: { commentary: true, streamId: runtime.assistantMessageId } });
+          runtime.assistantPublishedLength = runtime.assistantText.length;
+          this.#emit(chatId, { type: "message", message });
+        }
+      }
+      let message;
+      if (existing) {
+        const updated = await this.store.update(chatId, chat => ({ messages: chat.messages.map(previous => previous.id === existing ? { ...previous, text: event.title, meta: event } : previous) }));
+        message = updated.messages.find(message => message.id === existing);
+      } else {
+        message = await this.store.appendMessage(chatId, { role: "tool", kind: "tool", text: event.title, meta: event });
+        if (runtime && event.itemId) { runtime.toolMessages ||= new Map(); runtime.toolMessages.set(event.itemId, message.id); }
+      }
       this.#emit(chatId, { type: "message", message });
     } else if (event.type === "notice") {
       const message = await this.store.appendMessage(chatId, {

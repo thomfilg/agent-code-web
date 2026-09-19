@@ -212,13 +212,13 @@ test("raw and fenced HTML stay isolated across messages and cannot load remote r
   expect(escapedRequests).toEqual([]);
 });
 
-test("25 tool uses collapse into one row and open real inputs/results in the side panel", async ({ page }) => {
+test("25 tool uses collapse into one inline group with nested real inputs and results", async ({ page }) => {
   const messages = [{ id: "u", role: "user", text: "Inspect the code" }, ...Array.from({ length: 25 }, (_, i) => ({ id: `t${i}`, role: "tool", kind: "tool", text: "Bash", meta: { itemId: `call${i}`, tool: "Bash", title: "npm test", input: '{"command":"npm test"}', output: i === 0 ? "Permission denied" : "All tests passed", failed: i === 0, state: "completed" } })), { id: "a", role: "assistant", text: "Inspection complete" }];
-  await openFixture(page, messages); await expect(page.locator("#messages .tool-details")).toHaveCount(0);
-  await page.getByRole("button", { name: "Tools used: 25 ›" }).click(); await expect(page.locator("#tools-panel details")).toHaveCount(25);
-  await page.locator("#tools-panel details summary").first().click(); await expect(page.locator("#tools-panel details").first()).toContainText("Permission denied");
-  await expect(page.locator("#tools-panel details").first()).toContainText("npm test");
-  await page.keyboard.press("Escape"); await expect(page.locator("#tools-panel")).not.toBeVisible();
+  await openFixture(page, messages); await expect(page.locator("#messages .tool-details").first()).toBeHidden();
+  await page.getByText("Ran 25 commands", { exact: true }).click(); await expect(page.locator("#messages .tool-details")).toHaveCount(25);
+  await page.locator("#messages .tool-details summary").first().click(); await expect(page.locator("#messages .tool-details").first()).toContainText("Permission denied");
+  await expect(page.locator("#messages .tool-details").first()).toContainText("npm test");
+  await expect(page.locator("#tools-panel")).not.toBeVisible();
 });
 test("agent questions have clickable choices, keep draft answers during updates and ignore stale resolution", async ({ page }) => {
   await page.addInitScript(() => { const Native = window.EventSource; window.relaySources = []; window.EventSource = class extends Native { constructor(...args) { super(...args); window.relaySources.push(this); } }; });
