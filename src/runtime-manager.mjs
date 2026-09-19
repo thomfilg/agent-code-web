@@ -1726,7 +1726,8 @@ export class RuntimeManager extends EventEmitter {
     this.#previewStops.set(chatId, (this.#previewStops.get(chatId) || 0) + 1);
     let stopped = false;
     try {
-    this.#lifecycleVersions.set(chatId, (this.#lifecycleVersions.get(chatId) || 0) + 1);
+    const stopVersion = (this.#lifecycleVersions.get(chatId) || 0) + 1;
+    this.#lifecycleVersions.set(chatId, stopVersion);
     this.#startupControllers.get(chatId)?.abort(Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" }));
     // Storage failure must not leave a warmed native RPC reusable. Keep the
     // reference for retry cleanup, but invalidate admission before any await.
@@ -1755,6 +1756,7 @@ export class RuntimeManager extends EventEmitter {
       this.#runtimes.delete(chatId);
       await this.sideChats.close(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Side stop warning: ${errorMessage(error)}` }));
       await runtime.adapter.stop().catch((error) => this.#emit(chatId, { type: "runtime_log", text: `Adapter stop warning: ${errorMessage(error)}` }));
+      await this.#checkpointStoppedAgentThreads(chatId, runtime, stopVersion).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
       await runtime.eventQueue; // Flush final context/usage before worker storage disappears.
       await this.agentThreads.flush(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
     }
@@ -2204,6 +2206,18 @@ export class RuntimeManager extends EventEmitter {
     this.#emit(chatId, { type: "request", request: pendingRequest });
   }
 
+  async #checkpointStoppedAgentThreads(chatId, runtime, version) {
+    // Generic callbacks from retired adapters are fenced. Pull only this
+    // explicitly stopped observer's final, sanitized display snapshot, while
+    // the same lifecycle and account still own cleanup.
+    const chat = this.store.get(chatId), current = this.#runtimes.get(chatId);
+    if (!chat || (this.#lifecycleVersions.get(chatId) || 0) !== version
+      || runtime.accountBinding !== runtimeAccountBinding(chat) || current && current !== runtime) return;
+    const snapshot = runtime.adapter.agents?.snapshot?.();
+    if (snapshot?.awake !== false || snapshot.rootThreadId !== chat.agentSessionId) return;
+    await this.agentThreads.update(chatId, snapshot);
+  }
+
   #fatal(chatId, error) {
     const runtime = this.#runtimes.get(chatId);
     if (!runtime) return Promise.resolve();
@@ -2225,7 +2239,8 @@ export class RuntimeManager extends EventEmitter {
     this.#forking.get(chatId)?.controller.abort(error);
     this.workspacePresence.remove(chatId);
     clearTimeout(this.#workspaceIdleTimers.get(chatId)); this.#workspaceIdleTimers.delete(chatId);
-    this.#lifecycleVersions.set(chatId, (this.#lifecycleVersions.get(chatId) || 0) + 1);
+    const failureVersion = (this.#lifecycleVersions.get(chatId) || 0) + 1;
+    this.#lifecycleVersions.set(chatId, failureVersion);
     runtime.generation += 1;
     if (runtime.idleTimer) clearTimeout(runtime.idleTimer);
     this.broker.revokeChat(chatId);
@@ -2258,6 +2273,7 @@ export class RuntimeManager extends EventEmitter {
         const cleanupErrors = [];
         await this.sideChats.close(chatId).catch(() => {});
         await runtime.adapter.stop().catch(error => cleanupErrors.push(error));
+        await this.#checkpointStoppedAgentThreads(chatId, runtime, failureVersion).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
         await this.agentThreads.flush(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
         try { await this.browsers?.stop(chatId); } catch (error) { cleanupErrors.push(error); }
         const chat = this.store.get(chatId);
