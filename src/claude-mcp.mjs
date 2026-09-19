@@ -18,11 +18,11 @@ export class ClaudeControlChannel {
     child.once("close", this.onClose); child.once("error", this.onClose);
     child.stdin.on("error", this.onClose);
   }
-  request(subtype, fields = {}, { onSuccess } = {}) {
+  request(subtype, fields = {}, { onSuccess, timeoutMs = this.timeoutMs } = {}) {
     if (this.closed || !this.child.stdin.writable) return Promise.reject(Error("Claude MCP control channel stopped"));
     const id = randomUUID();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(Error(`Claude ${subtype} control timed out`)); }, this.timeoutMs);
+      const timer = setTimeout(() => { this.pending.delete(id); reject(Error(`Claude ${subtype} control timed out`)); }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, onSuccess });
       this.child.stdin.write(`${JSON.stringify({ type: "control_request", request_id: id, request: { subtype, ...fields } })}\n`, error => {
         if (!error || !this.pending.has(id)) return;

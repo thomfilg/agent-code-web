@@ -72,7 +72,7 @@ test("Claude reviews retain literal multiline arguments, native mode/model/effor
   assert.equal(flag("--model"), "sonnet"); assert.equal(flag("--effort"), "high");
   assert.equal(f.sessions[0], flag("--session-id"));
   assert(!JSON.stringify(f.launches).includes(f.config.claude.providerKey));
-  await f.adapter.send("/code-review low total.mjs");
+  await f.adapter.send("/code-review low total.mjs", { effort: "low", ultracode: false });
   assert.equal(f.launches[1].args[f.launches[1].args.indexOf("--resume") + 1], f.sessions[0]);
   assert.equal(f.sessions.length, 1); assert.equal(f.adapter.reviewInterruption, null);
 });

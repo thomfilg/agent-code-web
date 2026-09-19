@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { JsonRpcProcess } from "./json-rpc-process.mjs";
 import { claudeFastScope } from "./claude-fast.mjs";
+import { ultracodeForModel, ULTRACODE_UNAVAILABLE } from "./claude-ultracode.mjs";
 const exec = promisify(execFile);
 const fail = message => Object.assign(new Error(message), { statusCode: 400 });
 
@@ -18,7 +19,8 @@ export class ModelCatalog {
     const model = input.model || defaults.model;
     const selected = catalog.models.find(item => item.id === model);
     if (agent === "claude" && input.agentAccountId && !selected) throw fail("No enabled Claude models were reported for this account. Reload the model list before creating a chat.");
-    return this.validate(agent, { model, effort: input.effort || (selected?.efforts.includes(defaults.effort) ? defaults.effort : selected?.defaultEffort) || null }, input);
+    return this.validate(agent, { model, effort: input.effort || (input.ultracode === true ? "xhigh" : (selected?.efforts.includes(defaults.effort) ? defaults.effort : selected?.defaultEffort) || null),
+      ...(Object.hasOwn(input, "ultracode") ? { ultracode: input.ultracode } : {}) }, input);
   }
   async list(agent, context = {}) {
     if (agent === "mock") return { models: [], source: "mock", note: "Mock mode does not use a model or effort level." };
@@ -45,6 +47,7 @@ export class ModelCatalog {
         isDefault: model.value === "default", efforts: ["auto", ...new Set((Array.isArray(model.supportedEffortLevels) ? model.supportedEffortLevels : []).filter(e => ["low", "medium", "high", "xhigh", "max"].includes(e)))], defaultEffort: "auto",
       }));
       const enabled = models.filter(item => !item.disabled);
+      for (const model of models) model.ultracode = ultracodeForModel(model, native.ultracodeDiscovery);
       const model = enabled.find(item => item.id === this.defaults(agent).model) || enabled.find(item => item.isDefault) || enabled[0];
       const defaults = { model: model?.id || null, effort: model?.efforts.includes(this.defaults(agent).effort) ? this.defaults(agent).effort : "auto" };
       return { models, source: "claude-account", note: native.discoveryIncomplete ? "Claude's full model list could not be confirmed. Showing models reported by this account's CLI; additional models may be missing. Reload to retry." : "Models reported by Claude for this account; availability is enforced when you send.", configuredDefault: defaults.model, configuredDefaultEffort: defaults.effort, defaults };
@@ -88,10 +91,11 @@ export class ModelCatalog {
     return { models: aliases.map(id => ({ id, label: id === "default" ? "Claude account default" : id[0].toUpperCase() + id.slice(1), efforts: id === "haiku" ? ["auto"] : ["auto", ...efforts], defaultEffort: null })), source: "claude-cli-aliases", configuredDefault: this.config.claude.model || null, note: "CLI aliases; Claude checks account availability when you send and may use a different planning model in Plan mode. Auto effort uses Claude's native default; Fable may require usage credits." };
   }
   async validate(agent, input, context = input) {
-    const model = input.model || null; const effort = input.effort || null;
+    const model = input.model || null; let effort = input.effort || null;
+    if (Object.hasOwn(input, "ultracode") && (typeof input.ultracode !== "boolean" || agent !== "claude")) throw fail("Ultracode is a Claude-only boolean setting");
     if (model !== null && (typeof model !== "string" || model.length > 150 || !/^[a-zA-Z0-9_.\[\]-]+$/.test(model))) throw fail("Invalid model name");
     if (effort !== null && typeof effort !== "string") throw fail("Invalid effort level");
-    if (!model && !effort && !Object.hasOwn(input, "serviceTier") && !Object.hasOwn(input, "personality")) return { model: null, effort: null };
+    if (!model && !effort && !input.ultracode && !Object.hasOwn(input, "serviceTier") && !Object.hasOwn(input, "personality")) return { model: null, effort: null, ...(agent === "claude" && (context.ultracode || Object.hasOwn(input, "ultracode")) ? { ultracode: false } : {}) };
     const catalog = await this.list(agent, context);
     const selected = catalog.models.find(item => item.id === (model || catalog.configuredDefault)) || (!model ? catalog.models.find(item => item.isDefault) : null);
     if (agent === "mock" || (model && !selected)) throw fail("Choose a model from the available models list");
@@ -99,6 +103,13 @@ export class ModelCatalog {
     const allowed = selected?.efforts || (agent === "claude" ? catalog.models.find(item => item.id === "opus")?.efforts : []);
     if (effort && !(agent === "claude" && effort === "auto") && !allowed?.includes(effort)) throw fail("This effort level is not supported by the selected model");
     const extra = {};
+    if (agent === "claude" && (context.ultracode || Object.hasOwn(input, "ultracode"))) {
+      extra.ultracode = input.ultracode === true;
+      if (extra.ultracode) {
+        if (!selected?.ultracode?.supported || effort && effort !== "xhigh") throw fail(ULTRACODE_UNAVAILABLE);
+        effort = "xhigh";
+      }
+    }
     if (Object.hasOwn(input, "serviceTier")) {
       if (agent !== "codex" || (input.serviceTier !== null && !selected?.serviceTiers?.some(tier => tier.id === input.serviceTier))) throw fail("This service tier is not available for the selected model");
       extra.serviceTier = input.serviceTier;
@@ -128,8 +139,10 @@ export class ModelCatalog {
     if (chat.agent === "claude" && chat.agentAccountId && !selected) throw fail("No enabled Claude models were reported for this account. Reload the model list before sending a message.");
     if (target && !selected) throw fail(`Model ${target} is not available. Choose another model before sending a message.`);
     if (selected?.disabled) throw fail("This model is currently unavailable in the selected Claude account or CLI. Choose an enabled model before sending a message.");
+    if (chat.ultracode && (chat.agent !== "claude" || chat.effort !== "xhigh" || !selected?.ultracode?.supported)) throw fail(ULTRACODE_UNAVAILABLE);
     const effort = chat.agent === "claude" && chat.effort === "auto" ? null : chat.effort || (selected?.efforts.includes(catalog.configuredDefaultEffort) ? catalog.configuredDefaultEffort : selected?.defaultEffort) || null;
     return { model: chat.model || catalog.configuredDefault || selected?.id || (chat.agent === "claude" ? "default" : null), effort, resetEffort: !effort,
+      ...(chat.agent === "claude" ? { ultracode: chat.ultracode === true } : {}),
       ...(chat.agent === "claude" && typeof chat.claudeFastMode === "boolean" ? { fastMode: chat.claudeFastMode && chat.claudeFastScope === claudeFastScope(chat), fastCredential: chat.claudeFastCredential, fastCooldown: chat.claudeFastCooldown,
         ...(chat.claudeFastStatus?.selectionRevision === chat.modelSettingsRevision ? { fastState: chat.claudeFastStatus?.state } : {}) } : {}),
       ...(chat.agent === "codex" && Object.hasOwn(chat, "serviceTier") ? { serviceTier: selected?.serviceTiers?.some(tier => tier.id === chat.serviceTier) ? chat.serviceTier : null } : {}),

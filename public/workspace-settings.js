@@ -267,6 +267,7 @@ export class WorkspaceSettings {
     if (!$("#environment-select").value) return;
     const selection = this.draftReady ? { agent: $("#agent-select").value, ...this.modelPicker.value() } : { agent: this.preferences.agent || $("#agent-select").value, model: this.preferences.model || null, effort: this.preferences.effort || null };
     const body = { ...selection, ...modelSelection, environmentId: $("#environment-select").value, repositories: structuredClone(this.selected) };
+    delete body.ultracode; // Session mode is never inherited by another new chat.
     if (!body.agent) return;
     if (this.state.config.features?.agentAccounts && ["codex", "claude"].includes(body.agent)) {
       body.agentAccountId = this.draftReady ? $("#new-agent-account").value : this.preferences.agentAccountId;
