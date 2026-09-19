@@ -28,6 +28,7 @@ export class AgentAccounts {
         await this.records.put("agent-account", record.id, record);
       }
       this.metadata.set(record.id, { ownerId: record.ownerId, ...publicAccount(record) });
+      if (record.status === "disconnecting") this.disconnecting.set(record.id, {});
     }
     for (const intent of await this.records.list("agent-account-disconnection")) {
       if (this.metadata.get(intent.id)?.ownerId === intent.ownerId) this.disconnecting.set(intent.id, {});
@@ -242,7 +243,7 @@ export class AgentAccounts {
     this.commandCatalogs.delete(id); this.onChange(ownerId);
     // Independent durable intent survives a failed credential-row erase or
     // worker stop. Initialization restores the admission barrier before use.
-    const intent = Promise.resolve().then(() => this.records.put("agent-account-disconnection", id, { id, ownerId }));
+    const intent = disconnection.intent = Promise.resolve().then(() => this.records.put("agent-account-disconnection", id, { id, ownerId }));
     const cancelled = this.cancel(ownerId, id);
     const erase = cancelled.then(() => this.locked(id, async () => {
       const record = await this.get(ownerId, id);
@@ -254,7 +255,7 @@ export class AgentAccounts {
         this.flows.delete(id); clearTimeout(flow.timer);
         await flow.client.cancel().catch(() => {}); await flow.client.close().catch(() => {});
       }
-      await this.save({ ...record, status: "disconnected", auth: null, revision: record.revision + 1, error: null });
+      await this.save({ ...record, status: "disconnecting", auth: null, revision: record.revision + 1, error: null });
     }));
     const revoked = Promise.resolve().then(() => this.onRevoke(ownerId, id));
     disconnection.promise = Promise.allSettled([intent, erase, revoked]).then(async results => {
@@ -262,7 +263,13 @@ export class AgentAccounts {
         disconnection.promise = null; this.onChange(ownerId);
         throw fail("Account disconnection could not finish. Access is blocked; retry disconnecting this account.", 503);
       }
-      try { await this.records.delete("agent-account-disconnection", id); }
+      try {
+        await this.locked(id, async () => {
+          const record = await this.get(ownerId, id);
+          await this.save({ ...record, status: "disconnected", auth: null, error: null });
+          await this.records.delete("agent-account-disconnection", id);
+        });
+      }
       catch {
         disconnection.promise = null; this.onChange(ownerId);
         throw fail("Account disconnection could not finish. Access is blocked; retry disconnecting this account.", 503);
@@ -287,6 +294,9 @@ export class AgentAccounts {
       void flow.client.cancel().catch(() => {});
     }
     const erase = this.locked(id, async () => {
+      // Only wait for the independent intent write, not the disconnect task
+      // (which itself needs this lock). No delayed marker can outlive deletion.
+      await this.disconnecting.get(id)?.intent?.catch(() => {});
       const record = await this.records.get("agent-account", id);
       if (!record) {
         // Retry after credential erasure succeeded but intent cleanup failed.
