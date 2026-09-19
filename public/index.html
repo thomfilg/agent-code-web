@@ -119,6 +119,12 @@
               <p class="muted" id="environment-selection-hint" role="status" hidden></p>
               <div id="github-requirement" class="onboarding-hint" hidden><span>Connect GitHub to add repositories.</span><button type="button" class="secondary-button" id="connect-github-button">Connect GitHub</button></div>
               <div class="composer draft-composer">
+                <div id="new-slash-menu" hidden>
+                  <div class="slash-heading"><span class="slash-symbol" aria-hidden="true">/</span><div><strong>Commands &amp; skills</strong><span id="new-slash-caption"></span></div><span id="new-slash-count"></span></div>
+                  <div id="new-slash-options" role="listbox" aria-label="New chat commands and skills"></div>
+                  <p id="new-slash-status" role="status" hidden></p>
+                  <div class="slash-footer" aria-hidden="true"><span><kbd>↑</kbd> <kbd>↓</kbd> Navigate</span><span><kbd>↵</kbd> Insert</span><span><kbd>esc</kbd> Close</span></div>
+                </div>
                 <label class="sr-only" for="initial-prompt">New chat message</label><textarea id="initial-prompt" rows="1" maxlength="100000" required placeholder="Describe a task or ask a question…"></textarea>
                 <div class="composer-footer">
                   <div class="draft-agent-picker" id="new-agent-account-field"><select id="agent-select" aria-label="Agent" required></select><select id="new-agent-account" aria-label="Agent" hidden><option value="">Select an agent account</option></select><button type="button" class="small-icon" id="connect-codex-button" aria-label="Manage agent accounts" title="Manage agent accounts" hidden>⚙</button></div>
