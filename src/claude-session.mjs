@@ -182,6 +182,12 @@ export class ClaudeSession {
         return;
       }
       const workflow = this.workflows.get(event.task_id);
+      // Native housekeeping (for example auto-dream) emits terminal telemetry
+      // with skip_transcript:true but queues no report. Do not let an untracked
+      // ambient event consume a real task's FIFO report. A bound workflow still
+      // needs its matched terminal/report evidence; this flag alone cannot
+      // release it, and ordinary unknown report-bearing tasks remain queued.
+      if (!workflow && event.skip_transcript === true) return;
       const matches = workflow && workflow.toolUseId === event.tool_use_id;
       if (validId(event.task_id) && ["completed", "failed"].includes(event.status)
         && (!workflow || matches && !workflow.settled)) {
