@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from "node:events";
 import { connect } from "node:net";
 import WebSocket from "ws";
@@ -101,11 +102,17 @@ test("real Chrome: pipe-only sandboxed browser, live website, clicks, typing, di
 
 test("shared-browser gateway: authenticated WebSocket, real MCP, same live page, isolated chats and revocation", { skip: !available }, async t => {
   const root = await temporaryDirectory(t), site = await startBrowserSite(); t.after(() => site.close());
-  const app = await createAgentWebServer({ config: testConfig(root, { AGENT_WEB_AUTH_TOKEN: "browser-fixture", AGENT_IDLE_TIMEOUT_MS: "60000", AGENT_CHROME_BIN: executable }) });
+  const app = await createAgentWebServer({ config: testConfig(root, { AGENT_WEB_AUTH_TOKEN: "browser-fixture", AGENT_IDLE_TIMEOUT_MS: "60000", AGENT_CHROME_BIN: executable }),
+    adapterFactory:()=>{throw Error('No model in browser fixture');},browserOptions:{isActive:()=>true,acquire:async()=>({workspace:root,runtimeHome:root,spawn:(command,args,options)=>spawn(command,args,options)})} });
   const { url } = await app.start(); t.after(() => app.stop());
-  const chat = await app.manager.createChat({ agent: "mock", title: "Shared Chrome test" });
+  const ownerId=`user_${randomBytes(16).toString('hex')}`,services=await app.resources.forOwner(ownerId);
+  await services.companies.save({id:'shared-company',name:'Shared fixture'});
+  const environment=await services.environments.save({name:'Shared environment',backend:'local',companyId:'shared-company'}),accountId=`account_${randomUUID()}`;
+  await app.manager.agentAccounts.save({id:accountId,ownerId,provider:'codex',name:'Synthetic account',status:'connected',revision:1,auth:{synthetic:true}});
+  const chat = await app.store.create({ownerId,agent:'codex',agentAccountId:accountId,environmentId:environment.id,repositories:[{companyId:'shared-company',fullName:'fixture/shared'}],title:'Shared Chrome test'});
+  const identity=await app.browserUsers.startSession({id:ownerId,username:'synthetic-shared-user'});
   const other = await app.manager.createChat({ agent: "mock", title: "Other Chrome" });
-  const endpoint = `${url}/api/chats/${chat.id}/browser`, headers = { Authorization: "Bearer browser-fixture" };
+  const endpoint = `${url}/api/chats/${chat.id}/browser`, headers = { Authorization: "Bearer browser-fixture",Cookie:identity.cookie.split(';')[0] };
   assert.equal((await fetch(endpoint)).status, 401);
   assert.equal((await fetch(endpoint, { headers })).status, 200);
   assert.equal(app.manager.browsers.entries.size, 0, "reading browser state must not wake it");
@@ -118,7 +125,7 @@ test("shared-browser gateway: authenticated WebSocket, real MCP, same live page,
   const socket = new WebSocket(websocket, { headers: { ...headers, Origin: url } }); t.after(() => socket.terminate());
   const events = []; socket.on("message", data => events.push(JSON.parse(data))); await once(socket, "open");
   await waitFor(() => events.some(e => e.event === "status"), { timeoutMs: 10000 });
-  const tokenConfig = app.manager.browsers.runtime(chat.id, url).relay_browser;
+  const tokenConfig = app.manager.browsers.runtime(chat.id, url,{validWhile:()=>true}).relay_browser;
   const client = new Client({ name: "browser-test", version: "1" }); t.after(() => client.close());
   await client.connect(new StreamableHTTPClientTransport(new URL(tokenConfig.url), { requestInit: { headers: tokenConfig.headers } }));
   const tools = await client.listTools(); assert.ok(tools.tools.some(tool => tool.name === "browser_snapshot"));
@@ -127,16 +134,16 @@ test("shared-browser gateway: authenticated WebSocket, real MCP, same live page,
   socket.send(JSON.stringify({ id: 1, action: "mouse", params: { type: "mousePressed", x: 60, y: 120, button: "left", buttons: 1, clickCount: 1 } }));
   socket.send(JSON.stringify({ id: 2, action: "mouse", params: { type: "mouseReleased", x: 60, y: 120, button: "left", buttons: 0, clickCount: 1 } }));
   await waitFor(() => events.some(e => e.id === 2));
-  const result = await client.callTool({ name: "browser_evaluate", arguments: { expression: "document.querySelector('#click').textContent" } });
-  assert.equal(JSON.parse(result.content[0].text), "Clicks: 1", "agent sees the user's click");
-  await client.callTool({ name: "browser_fill", arguments: { selector: "#entry", text: "From the agent" } });
+  const result = await client.callTool({ name: "browser_evaluate", arguments: { function: "() => document.querySelector('#click').textContent" } });
+  assert.match(JSON.stringify(result), /Clicks: 1/, "agent sees the user's click");
+  await client.callTool({ name: "browser_type", arguments: { target: "#entry", text: "From the agent" } });
   await app.manager.browsers.command(chat.id, "evaluate", { expression: "document.querySelector('#entry').select()" });
   socket.send(JSON.stringify({ id: 3, action: "copy", params: { expression: "document.body.textContent='must not execute'" } }));
   await waitFor(() => events.some(e => e.id === 3));
   assert.deepEqual(events.find(e => e.id === 3).value, { text: "From the agent" }, "copy ignores caller-supplied expressions");
   assert.ok(events.find(e => e.event === "status").value.clipboard);
   await waitFor(() => events.some(e => e.event === "frame" && e.value.data.length > 5000));
-  const screenshot = await client.callTool({ name: "browser_screenshot", arguments: {} }); assert.equal(screenshot.content[0].type, "image");
+  const screenshot = await client.callTool({ name: "browser_take_screenshot", arguments: {} }); assert.ok(screenshot.content.some(item=>item.type==='image'));
   const second = app.manager.browsers.runtime(other.id, url).relay_browser;
   assert.notEqual(second.headers.Authorization, tokenConfig.headers.Authorization);
   assert.equal(app.manager.browsers.info(other.id).running, false);

@@ -18,6 +18,7 @@ const schemas = {
   browser_resize: z.strictObject({ width: z.number().int().min(320).max(2560), height: z.number().int().min(240).max(1600) }),
   browser_wait_for: z.strictObject({ time: z.number().positive().max(10).optional(), text: text.optional(), textGone: text.optional() }).refine(value => value.time || value.text || value.textGone),
   browser_evaluate: z.strictObject({ function: text, target: target.optional(), element: z.string().max(1000).optional() }),
+  browser_take_screenshot: z.strictObject({type:z.literal('png').optional(),fullPage:z.literal(false).optional(),scale:z.literal('css').optional()}),
   browser_tabs: z.strictObject({ action: z.enum(["list", "new", "close", "select"]), index: z.number().int().min(0).max(11).optional(), url: website.optional() })
     .refine(value => value.action !== "select" || value.index !== undefined)
     .refine(value => !value.url || value.action === "new"),
@@ -26,14 +27,14 @@ export const browserPolicyFailure = code => Object.assign(new Error(`Browser MCP
 
 export function allowedBrowserTools(mode) {
   if (!["guest", "personal"].includes(mode)) throw browserPolicyFailure("MODE_INVALID");
-  // Personal viewport remains owned by the shared UI/extension screencast.
-  // Do not advertise a tool whose emulation changes this projection cannot
-  // yet coordinate with that owner.
-  return Object.keys(schemas).filter(name => mode === "guest" || !["browser_evaluate", "browser_resize"].includes(name));
+  // Native clients may cache discovery across an explicit browser mode switch.
+  // Keep one contract; current-mode restrictions are enforced on every call.
+  return Object.keys(schemas);
 }
 
 export function authorizeBrowserTool(mode, name, args = {}) {
   if (!allowedBrowserTools(mode).includes(name)) throw browserPolicyFailure("TOOL_DENIED");
+  if (mode === 'personal' && ['browser_evaluate','browser_resize','browser_take_screenshot'].includes(name)) throw browserPolicyFailure('MODE_UNAVAILABLE');
   if (!args || typeof args !== "object" || Array.isArray(args) || ![Object.prototype, null].includes(Object.getPrototypeOf(args))) throw browserPolicyFailure("ARGUMENTS_DENIED");
   let encoded;
   try { encoded = JSON.stringify(args); } catch { throw browserPolicyFailure("ARGUMENTS_DENIED"); }
@@ -48,12 +49,9 @@ export function browserToolCatalog(mode, tools) {
   if (selected.length !== names.length || new Set(selected.map(tool => tool.name)).size !== names.length) throw browserPolicyFailure("OFFICIAL_CATALOG_CHANGED");
   return selected.map(tool => {
     const inputSchema = z.toJSONSchema(schemas[tool.name], { unrepresentable: "any" });
-    if (mode === "personal" && tool.name === "browser_tabs") {
-      inputSchema.properties = { action: { type: "string", enum: ["list"] } };
-      inputSchema.required = ["action"];
-    }
     // Keep official names/descriptions, with the actually enforced narrower
     // Relay argument contract. Unknown/new official tools are never admitted.
-    return { ...tool, inputSchema };
+    const restriction = tool.name === 'browser_tabs' ? ' Personal Chrome permits list only; new/select/close require guest mode.' : ['browser_evaluate','browser_resize','browser_take_screenshot'].includes(tool.name) ? ' Available only in guest Chrome; personal mode denies this operation.' : '';
+    return { ...tool, description:tool.description + restriction, inputSchema };
   });
 }

@@ -77,9 +77,14 @@ async function run() {
     await new Promise(resolve => gateway.listen(0, "127.0.0.1", resolve));
     const origin = `http://127.0.0.1:${gateway.address().port}`;
     for (const provider of ["codex", "claude"]) {
+      // Explicit immutable discovery-only authority fixture. This standalone
+      // harness does not claim real-user durable authorization or browser use;
+      // the normal-gateway browser tests exercise that separate boundary.
+      const scope=Object.freeze({ownerId:'synthetic-owner',chatId:chat.id,companyId:'acme',environmentId:environment.id,provider,accountId:`synthetic-${provider}-account`,accountRevision:1,companyRevision:1,environmentRevision:1});
+      const readFixtureScope=async()=>scope;browsers.personalScope=readFixtureScope;
       // The runtime must independently filter an injected foreign ID before
       // minting credentials, even though selection already excludes it.
-      const servers = { ...await mcps.runtime(chat.id, [...selection.mcpIds, connections.get("other").id], origin, chat), ...browsers.runtime(chat.id, origin) };
+      const servers = { ...await mcps.runtime(chat.id, [...selection.mcpIds, connections.get("other").id], origin, chat), ...browsers.runtime(chat.id, origin,{validWhile:()=>browsers.personalScope===readFixtureScope}) };
       const linearName = Object.keys(servers).find(name => name.startsWith("relay_linear_")), stdioName = Object.keys(servers).find(name => name.startsWith("relay_stdio_"));
       assert.equal(Object.keys(servers).length, 3);
       const linear = servers[linearName];

@@ -16,7 +16,8 @@ const denied = () => Error('Scoped browser projection unavailable');
 // context provider sees its capability; agent tool arguments cannot reach it.
 export async function acquirePersonalProjection({ personal, grant, playwright, validate, signal }) {
   const id = randomUUID(), token = randomBytes(32).toString('hex'), policy = new ProjectionPolicy();
-  let stopped = false, browser, socket, opened = false, opening, connecting, listening, pending = 0, eventPending = 0, subscribed = false, frame;
+  let stopped = false, browser, socket, opened = false, opening, connecting, listening, pending = 0, eventBytes = 0, draining = false, subscribed = false, frame;
+  const events=[],barriers=new Set();let queuedSequence=0,processedSequence=0;
   let eventQueue = Promise.resolve();
   const server = createServer((req,res) => { res.writeHead(404); res.end(); });
   const sockets = new WebSocketServer({ noServer:true, maxPayload:1024*1024 });
@@ -24,12 +25,28 @@ export async function acquirePersonalProjection({ personal, grant, playwright, v
     if (stopped || signal?.aborted || personal.currentGrant(grant.chatId) !== grant || !grant.active || await validate() !== true) throw denied();
     if (stopped || signal?.aborted || personal.currentGrant(grant.chatId) !== grant || !grant.active) throw denied();
   };
-  const send = value => { if (socket?.readyState === 1 && !stopped) { if (socket.bufferedAmount > 2*1024*1024) { void release(); return; } socket.send(JSON.stringify(value)); } };
+  const send = value => { if (socket?.readyState === 1 && !stopped) { if (socket.bufferedAmount + Buffer.byteLength(JSON.stringify(value)) > 2*1024*1024) { void release(); return; } socket.send(JSON.stringify(value)); } };
   const event = (eventGrant,value) => {
     if (eventGrant !== grant || value?.id !== id || !subscribed || stopped) return;
-    if (++eventPending > 64) { eventPending--; void release(); return; }
-    const operation = eventQueue.then(current).then(() => { const params = policy.event(value.method,value.params); if (params) send({sessionId:'page',method:value.method,params}); });
-    eventQueue = operation.catch(() => { void release(); }).finally(() => { eventPending--; });
+    const bytes=Buffer.byteLength(JSON.stringify(value));
+    if(events.length>=1024||eventBytes+bytes>2*1024*1024){void release();return;}
+    events.push({value,bytes,sequence:++queuedSequence});eventBytes+=bytes;
+    drain();
+  };
+  function drain() {
+    if(draining||stopped||!events.length)return;draining=true;
+    eventQueue=(async()=>{while(events.length&&!stopped){
+      await current();const batch=events.splice(0,64);
+      for(const {value,bytes,sequence} of batch){if(stopped)break;eventBytes-=bytes;const params=policy.event(value.method,value.params);if(params)send({sessionId:'page',method:value.method,params});processedSequence=sequence;
+        if(!stopped)for(const barrier of barriers)if(processedSequence>=barrier.until){barriers.delete(barrier);barrier.resolve();}
+      }
+    }})().catch(()=>{void release();}).finally(()=>{draining=false;drain();});
+  }
+  const drainEvents=()=>{
+    if(stopped)return Promise.reject(denied());
+    const until=queuedSequence;if(processedSequence>=until)return Promise.resolve();
+    if(barriers.size>=65){void release();return Promise.reject(denied());}
+    return new Promise((resolve,reject)=>barriers.add({until,resolve,reject}));
   };
   const revoked = eventGrant => { if (eventGrant === grant) void release(); };
   const target = () => ({targetId:frame.id,browserContextId:'relay-grant-context',type:'page',title:'Shared automation tab',url:frame.url || 'about:blank',attached:true,canAccessOpener:false});
@@ -50,7 +67,7 @@ export async function acquirePersonalProjection({ personal, grant, playwright, v
     // exposed, and cannot enable browser-wide access or disable Fetch ownership.
     if (method === 'Log.enable' && !Object.keys(params).length) return {};
     if (method === 'Target.setAutoAttach' && params.autoAttach === true && params.flatten === true && params.waitForDebuggerOnStart === true && Object.keys(params).length === 3) return {};
-    await eventQueue; await current();
+    await drainEvents(); await current();
     const input = policy.command(method,params);
     const result = await personal.request(grant.bridge,'project',{operation:'command',id,method,params:input},grant);
     await current(); return policy.result(method,result);
@@ -72,7 +89,8 @@ export async function acquirePersonalProjection({ personal, grant, playwright, v
   let releasing;
   function release() {
     if (releasing) return releasing;
-    stopped = true; personal.off('projection',event); personal.off('projectionClosed',revoked); signal?.removeEventListener('abort',abort);
+    stopped = true; events.length=0;eventBytes=0;personal.off('projection',event); personal.off('projectionClosed',revoked); signal?.removeEventListener('abort',abort);
+    for(const barrier of barriers)barrier.reject(denied());barriers.clear();
     releasing = (async () => {
       socket?.terminate(); sockets.close();
       await opening?.catch(() => {}); await listening?.catch(() => {}); await connecting?.catch(() => {});
@@ -95,6 +113,6 @@ export async function acquirePersonalProjection({ personal, grant, playwright, v
     await connecting;
     await current();
     const context = browser.contexts()[0]; if (!context || context.pages().length !== 1) throw denied();
-    const lease = {context,release}; leases.add(lease); return lease;
+    const lease = {context,release,isCurrent:()=>!stopped&&browser.isConnected()}; leases.add(lease); return lease;
   } catch { await release(); throw denied(); }
 }
