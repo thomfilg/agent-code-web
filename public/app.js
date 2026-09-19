@@ -47,6 +47,7 @@ import { RuntimeWake } from "./runtime-wake.js";
 import { agentAccountLabel } from "./agent-account-options.js";
 import { ChatRepositoryPicker } from "./chat-repository-picker.js";
 import { CompaniesPage } from "./companies.js";
+import { CompanySettings } from "./company-settings.js";
 import { workingStatus, canInterruptWithEscape } from "./working-status.js";
 import { StartupProgress } from "./startup-progress.js";
 
@@ -970,7 +971,7 @@ const agentAccountSettings = new AgentAccountSettings({ api, state, toast, chang
 } });
 const googleLogin = new GoogleLogin({ api, beforeSignOut: () => !(elements.input.value.trim() || chatControls.attachments().length) || confirm("Sign out? Your unsent draft and attachment selection will be cleared. Saved conversations and files will remain.") });
 const mcpSettings = new McpSettings({ api, toast, state });
-const companiesPage = new CompaniesPage({ api, toast, state, navigate: openCompanies });
+const companiesPage = new CompaniesPage({ api, toast, state, navigate: () => companySettings.open() });
 const toolActivity = new ToolActivity();
 const usagePanel = new UsagePanel({ state, api, toast });
 const chatPresence = new ChatPresence({ api });
@@ -1012,6 +1013,7 @@ const browserConnectionSettings = new BrowserConnectionSettings({ api, state, to
   },
   chatUpdated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = chat; renderActive(); } },
 });
+const companySettings = new CompanySettings({ api, state, workspace: workspaceSettings, mcps: mcpSettings, browsers: browserConnectionSettings });
 const chatControls = new ChatControls({ state, api, toast,
   preview: documentPreview,
   updated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = { ...state.active, ...chat }; renderActive(); } },

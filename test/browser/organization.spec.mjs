@@ -1,3 +1,4 @@
+import { openSettingsSection, switchSettingsCompany } from "./settings-navigation.mjs";
 import { test, expect } from "@playwright/test";
 
 test("chat rows stay single-line with accessible status and inline pin / organize actions", async ({ page }) => {
@@ -94,7 +95,7 @@ test("GitHub picker preserves repository order, branches, selection and inline e
   await page.goto("/"); await page.getByRole("button", { name: /New chat/ }).click();
   await expect(page.locator("#new-chat-title")).toHaveCount(0);
   await page.locator("#connect-github-button").click();
-  await page.locator("#github-company-filter").selectOption("acme");
+  await switchSettingsCompany(page, "GitHub", "acme");
   await page.locator("#github-new").click();
   await expect(page.locator("#github-account-list")).toContainText("Signed in as browser-fixture");
   await expect(page.locator("#github-companies")).toHaveCount(0);
@@ -146,14 +147,18 @@ test("mobile group menu and masked environment editor", async ({ page }) => {
   await page.getByRole("button", { name: "Organize Existing alpha", exact: true }).click();
   await page.getByRole("button", { name: "Unarchive chat", exact: true }).click();
   await expect(page.locator(".chat-row").filter({ hasText: "Existing alpha" }).getByRole("img", { name: "Idle", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Environments", exact: true }).click();
+  await openSettingsSection(page, "Environments");
   await page.getByRole("button", { name: "Add environment", exact: false }).click();
   await page.getByLabel("Environment name", { exact: true }).fill("Browser sandbox");
+  await page.locator('[data-environment-section="variables"]').click();
   await page.getByRole("button", { name: "Add variable", exact: false }).click();
   await page.getByLabel("Variable 1 name", { exact: true }).fill("SERVICE_TOKEN");
   await page.getByLabel("Variable 1 value", { exact: true }).fill("private-test-only");
   await page.getByRole("button", { name: "Save environment", exact: true }).click();
-  await expect(page.locator("#environment-save-status")).toHaveText("Saved securely");
+  await expect(page.locator("#environments-dialog")).toBeHidden();
+  await openSettingsSection(page, "Environments");
+  await page.locator("#environment-editor-select").selectOption({ label: "Browser sandbox" });
+  await page.locator('[data-environment-section="variables"]').click();
   await expect(page.getByLabel("Variable 1 value", { exact: true })).toHaveValue("");
   await page.getByRole("button", { name: "Show", exact: true }).click();
   await expect(page.getByLabel("Variable 1 value", { exact: true })).toHaveValue("private-test-only");

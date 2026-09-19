@@ -524,6 +524,22 @@ dialog { max-height: calc(100dvh - 28px); }
 @media (max-width: 540px) { .browser-heading > strong { display: none; } }
 .working-status { color: var(--muted); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 6px 0 10px; overflow-wrap: anywhere; }
 .working-status::before { content: "●"; color: var(--lime); margin-right: 8px; }
+.sidebar-user-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.sidebar-user-row .user-avatar { border: 1px solid var(--line-bright); border-radius: 50%; width: 34px; height: 34px; flex: 0 0 34px; padding: 0; background: var(--panel); color: var(--text); cursor: pointer; }
+#sidebar-user-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+#company-settings-dialog { width: min(800px, calc(100vw - 28px)); }
+.company-settings-card { width: 100%; min-width: 0; }
+.company-settings-tabs { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0 14px; }
+.company-settings-tabs button { white-space: nowrap; }
+.company-settings-tabs [aria-selected="true"] { border-color: var(--lime); color: var(--lime); }
+.company-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.company-settings-section { text-align: left; min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text); cursor: pointer; }
+.company-settings-section span { display: block; margin-top: 8px; font-size: 12px; overflow-wrap: anywhere; }
+.company-settings-section:hover { border-color: var(--lime); }
+.company-settings-context { color: var(--muted); font-size: 12px; }
+[data-company-scoped="true"] #mcp-company-filter, [data-company-scoped="true"] #mcp-manage-companies,
+[data-company-scoped="true"] #github-company-filter, [data-company-scoped="true"] #github-manage-companies { display: none; }
+@media (max-width: 540px) { .company-settings-grid { grid-template-columns: 1fr; } }
 .browser-options { flex-wrap: wrap; }
 .browser-options select { padding: 7px; font-size: 11px; }
 .browser-options button { padding: 7px 9px; font-size: 11px; }
