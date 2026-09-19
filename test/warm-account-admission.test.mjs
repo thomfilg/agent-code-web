@@ -25,6 +25,8 @@ async function fixture(t, provider = "codex") {
     workerBackend: { acquire: async () => ({ workspace: root }), sleep: async () => {} },
     adapterFactory: ({ chat, hooks: callbacks }) => {
       hooks.set(chat.id, callbacks);
+      // Native child operations return a root-bound snapshot, not a bare ACK.
+      const snapshot = () => ({ rootThreadId: chat.agentSessionId, threads: [] });
       return { start: async () => {}, stop: async () => { calls.push([chat.id, "stop"]); },
         send: async () => { calls.push([chat.id, "main-send"]); return { text: "fixture" }; },
         respond: async () => { calls.push([chat.id, "main-respond"]); },
@@ -32,9 +34,9 @@ async function fixture(t, provider = "codex") {
         compact: async () => { calls.push([chat.id, "compact"]); },
         goalAction: async () => { calls.push([chat.id, "goal"]); },
         forkSession: async () => { calls.push([chat.id, "fork"]); throw Error("fixture fork must not be called after revocation"); },
-        agents: { busy: () => false, refresh: async () => ({}),
-          send: async () => { calls.push([chat.id, "send"]); return {}; },
-          respond: async () => { calls.push([chat.id, "respond"]); return {}; } },
+        agents: { busy: () => false, refresh: async () => snapshot(),
+          send: async () => { calls.push([chat.id, "send"]); return snapshot(); },
+          respond: async () => { calls.push([chat.id, "respond"]); return snapshot(); } },
         forkSide: async () => ({ stop: async () => {}, send: async () => { calls.push([chat.id, "side-send"]); return { text: "fixture" }; } }),
       };
     } });
@@ -71,6 +73,10 @@ test("failed disconnect cannot reuse warmed native messages, approvals or side c
   await f.accounts.disconnect(owner, selected.agentAccountId);
   await f.accounts.begin(owner, { id: selected.agentAccountId, provider: "codex", name: "Selected" });
   f.native.clients.at(-1).approve(); await waitFor(() => f.accounts.list(owner).find(item => item.id === selected.agentAccountId)?.status === "connected");
+  // Account reconnection does not silently reconnect a child-agent process.
+  await assert.rejects(() => f.action(selected, "messages"), /Connect explicitly/);
+  assert.deepEqual(f.calls.slice(-1), [[selected.id, "stop"]]);
+  await f.manager.agentThreadAction(selected.id, "refresh");
   await f.action(selected, "messages");
   assert.equal(f.store.get(selected.id).agentSessionId, selected.agentSessionId);
   assert.deepEqual(f.calls.slice(-2), [[selected.id, "stop"], [selected.id, "send"]]);

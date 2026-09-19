@@ -102,9 +102,10 @@ test("a failed transcript checkpoint still tears down and reports the lost save 
 });
 
 test("failure fences late native events and cannot append the previous answer a second time", async t => {
-  const f = await fixture(t);
+  const f = await fixture(t, "codex");
   try {
     const { adapter, turn } = await f.start();
+    await adapter.hooks.onSessionId("same-thread");
     await adapter.hooks.onEvent({ type: "assistant_delta", delta: "Completed answer" });
     adapter.turn.resolve({ text: "Completed answer" }); await turn.completion;
     await adapter.hooks.onFatal(Error("idle worker exited"));
@@ -112,6 +113,9 @@ test("failure fences late native events and cannot append the previous answer a 
     let snapshots = 0;
     f.manager.agentThreads.update = () => { snapshots++; return Promise.resolve(); };
     adapter.hooks.onAgentThreads({ rootThreadId: "same-thread", threads: [] });
+    assert.equal(snapshots, 0, "a retired runtime cannot publish even with the correct native root");
+    resumed.adapter.hooks.onAgentThreads({ rootThreadId: "other-thread", threads: [] });
+    assert.equal(snapshots, 0, "the current runtime cannot publish a snapshot for a different native root");
     resumed.adapter.hooks.onAgentThreads({ rootThreadId: "same-thread", threads: [] });
     assert.equal(snapshots, 1, "only the new exact runtime may replace its native-agent snapshot");
     await adapter.hooks.onEvent({ type: "assistant_delta", delta: "OLD OUTPUT" });
