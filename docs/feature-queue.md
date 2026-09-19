@@ -1,5 +1,36 @@
 # Feature queue — original request order
 
+## Current integration — company settings and composer, 2026-09-19
+
+The company-tab Settings hub, compact Chrome header, company-bound browser
+connections, company/project selection memory, pre-chat slash commands, hidden
+title metadata and exactly-one-company environments are integrated in the
+current candidate. They are **not newly published or accepted in production**.
+See the [combined validation and remaining gates](validation-2026-09-19-company-ui-integration.md).
+Historical checkpoints below retain their original evidence scope.
+
+Candidate `007d620` passed **1,396/1,396 Node** cases with all optional checks
+enabled and **157/157 browser** cases without retries. Separate official MCP
+account/configuration and preview HTTP/WS/SSE fixture checks passed. Failed
+intermediate runs, the still-unconfirmed clipboard telemetry hypothesis and
+the distinction from real account/deployment acceptance remain in the receipt.
+
+Ambiguous legacy environments require an explicit owner assignment; no stored
+variables, credentials or chats are moved automatically. Only agent accounts
+remain multi-company. Environment variables still take effect on worker start;
+Protected values are not exposed to the agent.
+
+Claude Ultracode is now an explicit per-chat mode, with worker-side native
+readback and no inheritance through project/company preferences. Ordinary xhigh
+does not enable it. The native MCP mutation and `/code-review` combinations
+remain unsupported, and actual selected-account workflow acceptance is still
+open; local protocol fixtures do not prove those gates.
+
+Two-minute process-preserving hibernation remains open. Its integrated foundation
+rejects unavailable opt-in admission and avoids destructive idle fallback; it
+does not implement reconnectable transport, image acceptance or resume. The
+production idle policy and automatic-deployment restrictions remain unchanged.
+
 ## Settings UX — included in MVP, requested 2026-09-19
 
 - Implemented in source, pending publication: environment settings use the MCP
@@ -106,8 +137,9 @@ production model; their passing isolated checks do not prove deployed selection.
 The [current consent/execution checklist](mvp-consent-checklist.md)
 uses inline chat, the combined account selector and automatic company MCPs;
 it no longer asks for removed company checkboxes or empty-message chat creation.
-Company-tab Settings, compact browser header, hibernation and unfinished doctor
-changes remain excluded/uncommitted. No complete-MVP claim is made.
+Company-tab Settings and the compact browser header are now integrated in the
+candidate above. End-to-end hibernation and the unfinished doctor work remain
+undelivered. No complete-MVP claim is made.
 
 Environment selector correction (2026-09-18): remembered repositories must not
 hide another company's environment. Keep all active environments selectable;
@@ -890,9 +922,9 @@ References inspected for this request:
 | 29 | Sharp, non-opaque browser output at every viewport, including sm/md/lg/xlg, after resizing | Actual isolated AWS guest passed exact DPR-2 sharp pixels at all six sizes; md/xlg screenshots visually inspected. Authenticated deployed-product acceptance remains open |
 | 30 | Visible chat tabs and browser interaction pause idle sleep/countdown | Source/tests and actual isolated AWS guest viewer-presence checks passed; full deployed idle/countdown acceptance remains open |
 | 31 | Attachment images are clickable to inspect before and after sending | Existing source; pending ordered verification |
-| 32 | Direct native-browser app URLs per chat, preserving port/path; remote HTTP and WebSocket forwarding too | Local aliases implemented; remote forwarding pending |
+| 32 | Direct native-browser app URLs per chat, preserving port/path; remote HTTP and WebSocket forwarding too | Local aliases and remote forwarding implemented with isolated HTTP/WS lifecycle checks; authenticated deployed-product traffic remains pending |
 | 33 | Compact always available; send native `/compact`, queue while busy, retain draft, no misleading Claude/idle tooltip | Source, FIFO, browser and real-CLI/local-stub checks passed; provider runtime/deployed native acceptance pending |
-| 34 | Hide internal `<relay-title>` metadata from streamed/saved responses; no bogus HTML previews | Queued; cause inspected, fix not started |
+| 34 | Hide internal `<relay-title>` metadata from streamed/saved responses; no bogus HTML previews | Shared bounded live/final parser implemented, including manual names and tool-boundary cases; 54 focused Node cases passed. Integrated candidate, pending publication |
 | 35 | Notify the agent when PR checks fail; if the container is stopped when checks pass, wake it and deliver a GitHub event message | New report appended; not started |
 | 36 | Subscribe to GitHub PR/check/auto-merge events for prompt UI status updates, with polling as a reconciliation fallback | New report appended after clarification; not started |
 | 37 | Composer attachments use one row of image thumbnails and file cards above the text, matching the supplied screenshots. Every card is clickable: large image preview; scrollable text-file preview with filename, size and line count, for both draft and sent attachments | New report appended and clarified with image + file examples; not started |
