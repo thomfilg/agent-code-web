@@ -2,8 +2,10 @@ import base64
 import contextlib
 import importlib.util
 import io
+import http.client
 import json
 import pathlib
+import shlex
 import subprocess
 import types
 import unittest
@@ -16,11 +18,15 @@ spec.loader.exec_module(probe)
 
 
 class ControllerProbeTest(unittest.TestCase):
-    def run_probe(self, *, fail_ssh=False, resumed=False, missing_pin=False, mismatch_key=False, ssh_result=None, ssh_exception=None):
+    def run_probe(self, *, fail_ssh=False, resumed=False, missing_pin=False, mismatch_key=False, ssh_result=None, ssh_exception=None, hibernation=False):
         request = {'verificationId': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'phase': 'resumed' if resumed else 'fresh',
                    'workerId': 'i-aaaaaaaaaaaaaaaaa', 'host': '10.84.2.22', 'region': 'us-east-2', 'account': '123456789012',
                    'secretArn': 'arn:aws:secretsmanager:us-east-2:123456789012:secret:fixture',
                    'publicKey': 'ssh-ed25519 AAAAFixturePublicKey', 'sentinel': 'fixture-sentinel'}
+        if hibernation:
+            request.update({'hibernationSource': '// synthetic fixture only', 'challenge': 'c' * 64,
+                            'probeBinding': {'schema': 2, 'verificationId': request['verificationId'], 'workerId': request['workerId'],
+                                             'imageIdentityHash': 'a' * 64, 'continuityChallenge': 'b' * 64}})
         known = 'verify-i-aaaaaaaaaaaaaaaaa ssh-ed25519 AAAAFixturePublicKey\n'
         if resumed and not missing_pin:
             request['knownHosts'] = known
@@ -48,6 +54,12 @@ class ControllerProbeTest(unittest.TestCase):
             self.assertNotIn(private, ' '.join(args))
             self.assertIn('UpdateHostKeys=no', args)
             self.assertIn('StrictHostKeyChecking=' + ('yes' if resumed else 'accept-new'), args)
+            if hibernation:
+                worker_request = json.loads(shlex.split(args[-1])[-1])
+                self.assertEqual(worker_request['probeBinding'], request['probeBinding'])
+                self.assertEqual(worker_request['challenge'], request['challenge'])
+                self.assertEqual(worker_request['hibernationSource'], request['hibernationSource'])
+                self.assertNotIn('secretArn', worker_request)
             known_file = pathlib.Path(next(arg.split('=', 1)[1] for arg in args if arg.startswith('UserKnownHostsFile=')))
             if resumed:
                 self.assertEqual(known_file.read_text(), known)
@@ -79,6 +91,53 @@ class ControllerProbeTest(unittest.TestCase):
 
     def test_resume_pins_previous_public_host_key(self):
         self.run_probe(resumed=True)
+
+    def test_bound_hibernation_challenge_crosses_controller_without_private_key_material(self):
+        self.run_probe(hibernation=True)
+        self.run_probe(hibernation=True, resumed=True)
+
+    def test_mismatched_hibernation_binding_is_rejected_before_controller_secret_read(self):
+        request = {'verificationId': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'workerId': 'i-aaaaaaaaaaaaaaaaa', 'phase': 'fresh',
+                   'hibernationSource': '// fixture', 'challenge': 'c' * 64,
+                   'probeBinding': {'schema': 2, 'verificationId': 'foreign-run', 'workerId': 'i-bbbbbbbbbbbbbbbbb',
+                                    'imageIdentityHash': 'a' * 64, 'continuityChallenge': 'b' * 64}}
+        with patch.object(probe.os, 'geteuid', return_value=0), patch.object(probe.pathlib.Path, 'is_file', return_value=True), patch.object(probe.subprocess, 'run') as run, patch.object(probe.sys, 'argv', ['probe', base64.b64encode(json.dumps(request).encode()).decode()]):
+            with self.assertRaisesRegex(RuntimeError, 'Invalid hibernation probe binding'):
+                probe.main()
+            run.assert_not_called()
+
+    def test_embedded_worker_posts_bound_challenge_and_resume_never_relaunches(self):
+        binding = {'schema': 2, 'verificationId': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+                   'workerId': 'i-aaaaaaaaaaaaaaaaa', 'imageIdentityHash': 'a' * 64, 'continuityChallenge': 'b' * 64}
+        for phase in ('fresh', 'resumed'):
+            request = {'verificationId': binding['verificationId'], 'phase': phase, 'sentinel': 'fixture-sentinel',
+                       'probeBinding': binding, 'challenge': 'c' * 64, 'hibernationSource': '// synthetic fixture'}
+            posts, socket_checks = [], []
+            class LocalFixtureHTTP:
+                def __init__(self, *args, **kwargs): pass
+                def request(self, method, url, *, body, headers): posts.append((method, url, json.loads(body)))
+                def getresponse(self): return types.SimpleNamespace(status=200, read=lambda limit: b'{"schema":2,"requests":1}')
+                def close(self): pass
+            def run(args, **kwargs):
+                if args[0] == 'codex': return types.SimpleNamespace(returncode=0, stdout='codex-cli 0.154.0')
+                if args[0] == 'claude': return types.SimpleNamespace(returncode=0, stdout='2.1.222 (Claude Code)')
+                return types.SimpleNamespace(returncode=0, stdout='{"valid":true}')
+            def exists(target):
+                if str(target).endswith('.sock'):
+                    socket_checks.append(str(target))
+                    return phase == 'resumed' or len(socket_checks) > 1
+                return True
+            def read_text(target): return 'disk' if str(target) == '/sys/power/state' else 'fixture-sentinel'
+            output = io.StringIO()
+            with patch.object(probe.subprocess, 'check_output', return_value='agent'), patch.object(probe.subprocess, 'run', side_effect=run), patch.object(probe.subprocess, 'Popen') as launch, patch.object(probe.sys, 'argv', ['probe', json.dumps(request)]), patch.object(probe.pathlib.Path, 'stat', return_value=types.SimpleNamespace(st_mtime=probe.time.time())), patch.object(probe.pathlib.Path, 'is_file', return_value=True), patch.object(probe.pathlib.Path, 'exists', exists), patch.object(probe.pathlib.Path, 'read_text', read_text), patch.object(http.client, 'HTTPConnection', LocalFixtureHTTP), contextlib.redirect_stdout(output):
+                exec(probe.WORKER_PROBE, {})
+            self.assertEqual(posts, [('POST', '/state', {'verificationId': binding['verificationId'], 'workerId': binding['workerId'], 'imageIdentityHash': binding['imageIdentityHash'], 'challenge': request['challenge']})])
+            self.assertEqual(json.loads(output.getvalue())['hibernation'], {'schema': 2, 'requests': 1, 'configured': True, 'diskSupported': True})
+            self.assertEqual(launch.call_count, 1 if phase == 'fresh' else 0)
+            if phase == 'fresh':
+                self.assertTrue(launch.call_args.kwargs['start_new_session'])
+                self.assertEqual(launch.call_args.kwargs['stdin'], subprocess.DEVNULL)
+                self.assertEqual(json.loads(launch.call_args.args[0][-1]), binding)
 
     def test_remote_failure_suppresses_private_output_and_cleans_key(self):
         self.run_probe(fail_ssh=True)

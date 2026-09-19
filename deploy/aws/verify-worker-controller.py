@@ -26,7 +26,7 @@ CREDENTIAL_COUNTS = ('providerAuthFiles', 'sshPrivateKeyFiles', 'pemFiles', 'ssm
 METADATA_RESULTS = ('token-endpoint-accessible', 'http-403-denied', 'http-401-unauthorized',
                     'unexpected-http-response', 'network-unavailable', 'unexpected-network-error')
 PROBE_STAGES = ('request', 'identity', 'native-version', 'image-audit-run', 'image-audit-json',
-                'image-audit-validation', 'heartbeat', 'sentinel', 'receipt')
+                'image-audit-validation', 'heartbeat', 'sentinel', 'hibernation-processes', 'receipt')
 EXCEPTION_CLASSES = ('RuntimeError', 'JSONDecodeError', 'FileNotFoundError', 'PermissionError',
                      'TimeoutExpired', 'CalledProcessError', 'OSError', 'ValueError', 'TypeError',
                      'KeyError', 'IndexError', 'AttributeError', 'NameError', 'UnboundLocalError',
@@ -70,7 +70,10 @@ def probe_failure(result):
         reason = None
     known_checks = {'wrong worker user': 'worker-user', 'native version mismatch': 'native-version',
                     'image scrub audit failed': 'image-audit', 'boot heartbeat is stale': 'heartbeat',
-                    'worker sentinel mismatch': 'sentinel', 'invalid-worker-receipt': 'invalid-receipt'}
+                    'worker sentinel mismatch': 'sentinel', 'invalid-worker-receipt': 'invalid-receipt',
+                    'hibernation prerequisites missing': 'hibernation-prerequisite',
+                    'hibernation fixture already exists': 'hibernation-processes',
+                    'hibernation fixture unavailable': 'hibernation-processes'}
     if reason in known_checks:
         return ProbeFailure(known_checks[reason], result.returncode, worker_failure.get('auditChecks'), worker_failure.get('credentialFailureCounts'), worker_failure.get('metadataProbe'), worker_failure)
     stderr = (result.stderr or '').lower()
@@ -100,7 +103,7 @@ def failure_receipt(error):
 
 
 WORKER_PROBE = r'''
-import json, os, pathlib, re, subprocess, sys, time
+import http.client, json, os, pathlib, re, socket, subprocess, sys, time
 audit_checks = {}
 credential_counts = {}
 metadata_probe = None
@@ -146,10 +149,51 @@ try:
     persisted = sentinel.read_text() == request['sentinel']
     if not persisted:
         raise RuntimeError('worker sentinel mismatch')
+    hibernation = None
+    if request.get('hibernationSource'):
+        stage = 'hibernation-processes'
+        binding = request['probeBinding']
+        if binding.get('verificationId') != request['verificationId'] or not re.fullmatch(r'[a-f0-9]{64}', request['challenge']):
+            raise RuntimeError('hibernation fixture unavailable')
+        configured = pathlib.Path('/var/lib/hibinit-agent/hibernation-enabled').is_file()
+        disk_supported = 'disk' in pathlib.Path('/sys/power/state').read_text().split()
+        if not configured or not disk_supported:
+            raise RuntimeError('hibernation prerequisites missing')
+        socket_path = '/opt/agent-web/hibernate-probe-' + request['verificationId'] + '.sock'
+        child = None
+        if request['phase'] == 'fresh':
+            if pathlib.Path(socket_path).exists():
+                raise RuntimeError('hibernation fixture already exists')
+            child = subprocess.Popen(['/usr/bin/node', '--input-type=module', '-e', request['hibernationSource'], socket_path, '--hibernation-probe', json.dumps(binding)],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                     start_new_session=True, env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': '/home/agent', 'LANG': 'C.UTF-8'})
+        deadline = time.monotonic() + 40
+        while not pathlib.Path(socket_path).exists() and time.monotonic() < deadline:
+            if child is None or child.poll() is not None:
+                raise RuntimeError('hibernation fixture unavailable')
+            time.sleep(0.25)
+        class LocalHTTP(http.client.HTTPConnection):
+            def connect(self):
+                self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.sock.settimeout(25)
+                self.sock.connect(socket_path)
+        connection = LocalHTTP('localhost', timeout=25)
+        try:
+            body = json.dumps({key: binding[key] for key in ('verificationId', 'workerId', 'imageIdentityHash')} | {'challenge': request['challenge']})
+            connection.request('POST', '/state', body=body, headers={'Content-Type': 'application/json'})
+            response = connection.getresponse()
+            if response.status != 200:
+                raise RuntimeError('hibernation fixture unavailable')
+            hibernation = json.loads(response.read(4096))
+            hibernation.update({'configured': configured, 'diskSupported': disk_supported})
+        finally:
+            connection.close()
     stage = 'receipt'
-    print(json.dumps({'audit': receipt, 'versions': versions, 'heartbeatFresh': fresh, 'sentinelPresent': persisted}))
+    print(json.dumps({'audit': receipt, 'versions': versions, 'heartbeatFresh': fresh, 'sentinelPresent': persisted,
+                      **({'hibernation': hibernation} if hibernation else {})}))
 except Exception as error:
-    reasons = ('wrong worker user', 'native version mismatch', 'image scrub audit failed', 'boot heartbeat is stale', 'worker sentinel mismatch')
+    reasons = ('wrong worker user', 'native version mismatch', 'image scrub audit failed', 'boot heartbeat is stale', 'worker sentinel mismatch',
+               'hibernation prerequisites missing', 'hibernation fixture already exists', 'hibernation fixture unavailable')
     failure = {'error': 'Worker acceptance checks failed; no private diagnostics emitted', 'reason': str(error) if isinstance(error, RuntimeError) and str(error) in reasons else 'invalid-worker-receipt'}
     failure['probeStage'] = stage
     if type(error).__name__ in exception_classes:
@@ -186,6 +230,13 @@ def main():
         raise RuntimeError('Invalid verification request')
     if not re.fullmatch(r'i-[a-f0-9]{8,17}', request['workerId']):
         raise RuntimeError('Invalid worker ID')
+    if request.get('hibernationSource'):
+        binding = request.get('probeBinding', {})
+        if (not isinstance(binding, dict) or binding.get('schema') != 2 or
+                binding.get('verificationId') != request['verificationId'] or binding.get('workerId') != request['workerId'] or
+                not all(isinstance(binding.get(key), str) and re.fullmatch(r'[a-f0-9]{64}', binding[key]) for key in ('imageIdentityHash', 'continuityChallenge')) or
+                not isinstance(request.get('challenge'), str) or not re.fullmatch(r'[a-f0-9]{64}', request['challenge'])):
+            raise RuntimeError('Invalid hibernation probe binding')
     host = ipaddress.ip_address(request['host'])
     if not any(host in ipaddress.ip_network(network) for network in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')):
         raise RuntimeError('Worker SSH requires a private IPv4 address')
@@ -235,6 +286,12 @@ def main():
                '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=2',
                'ubuntu@' + request['host']]
         worker_request = {key: request[key] for key in ('verificationId', 'phase', 'sentinel')}
+        if request.get('hibernationSource'):
+            if not isinstance(request['hibernationSource'], str) or len(request['hibernationSource']) > 65536:
+                raise RuntimeError('Invalid hibernation fixture source')
+            worker_request['hibernationSource'] = request['hibernationSource']
+            worker_request['probeBinding'] = request['probeBinding']
+            worker_request['challenge'] = request['challenge']
         command = 'python3 -I -c ' + shlex.quote(WORKER_PROBE) + ' ' + shlex.quote(json.dumps(worker_request))
         deadline = time.monotonic() + 240
         audit_attempts = 0
