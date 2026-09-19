@@ -37,25 +37,71 @@ export class BrowserProcess extends EventEmitter {
     child.stderr.on("data", chunk => { this.diagnostics = ((this.diagnostics || "") + chunk).slice(-2000); });
     child.once("error", error => this.fail(error));
     child.once("exit", () => this.fail(new Error(this.diagnostics || "Shared Chrome disconnected")));
+    child.on("transportDetached", () => {
+      clearInterval(this.heartbeat);
+      this.state = { ...this.state, detached: true };
+      for (const item of this.pending.values()) { clearTimeout(item.timer); item.reject(new Error("Browser connection was lost; the action outcome may be unknown. It was not replayed.")); }
+      this.pending.clear(); this.emit("status", this.state);
+    });
+    this.startHeartbeat();
+  }
+  startHeartbeat() {
+    clearInterval(this.heartbeat);
+    if (!this.child.watchLeaseMs) return;
+    this.heartbeat = setInterval(() => {
+      if (!this.error && !this.stopping && !this.child.detached && !this.heartbeatPending) {
+        this.heartbeatPending = Promise.resolve().then(() => this.dispatch("transportHeartbeat")).catch(() => {}).finally(() => { this.heartbeatPending = null; });
+      }
+    }, Math.floor(this.child.watchLeaseMs / 3));
+    this.heartbeat.unref();
+  }
+  async ensureConnected() {
+    if (!this.child.reconnect || !this.child.detached) return;
+    if (this.reconnecting) return this.reconnecting;
+    this.reconnecting = (async () => {
+      if (this.stopping || this.error) throw new Error("Browser stopped");
+      await this.child.reconnect();
+      if (this.stopping || this.error) throw new Error("Browser stopped");
+      this.state = await this.dispatch("status");
+      if (this.watchingRequested) await this.dispatch("watch", { enabled: true });
+      this.startHeartbeat(); this.emit("status", this.state);
+    })();
+    try { return await this.reconnecting; } finally { this.reconnecting = null; }
   }
   fail(error) {
     if (this.error) return;
-    this.error = error; this.state = stopped(); clearTimeout(this.timer); this.rejectReady(error);
+    this.error = error; this.state = stopped(); clearTimeout(this.timer); clearInterval(this.heartbeat); this.rejectReady(error);
     for (const item of this.pending.values()) { clearTimeout(item.timer); item.reject(error); }
     this.pending.clear(); this.emit("closed", { message: error.message });
   }
   async command(action, params = {}) {
     await this.ready;
     if (this.error) throw this.error;
+    if (action === "watch") this.watchingRequested = params.enabled === true;
+    await this.ensureConnected();
+    if (this.stopping || this.error) throw new Error("Browser stopped");
+    return this.dispatch(action, params);
+  }
+  dispatch(action, params = {}) {
     if (this.pending.size >= 100) throw new Error("Browser is busy; wait for pending actions");
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error("Browser action timed out")); }, 25000);
       this.pending.set(id, { resolve, reject, timer });
-      this.child.stdin.write(JSON.stringify({ id, action, params }) + "\n");
+      if (this.child.sendCommand) {
+        void this.child.sendCommand({ id, action, params }).catch(error => {
+          const item = this.pending.get(id); if (!item) return;
+          this.pending.delete(id); clearTimeout(item.timer); item.reject(error);
+        });
+      } else this.child.stdin.write(JSON.stringify({ id, action, params }) + "\n");
     });
   }
-  async stop() { this.child.stdin.end(); await terminateWorker(this.child, 4000); this.fail(new Error("Browser stopped")); }
+  async stop() {
+    this.stopping = true; clearInterval(this.heartbeat);
+    if (this.child.terminateRemote) await this.child.terminateRemote();
+    else { this.child.stdin.end(); await terminateWorker(this.child, 4000); }
+    this.fail(new Error("Browser stopped"));
+  }
 }
 
 export class SharedBrowsers {
@@ -80,7 +126,16 @@ export class SharedBrowsers {
   hasViewers(chatId) { return Boolean(this.entries.get(chatId)?.viewers.size || this.personal?.grants.get(chatId)?.viewers.size); }
   async ensure(chatId) {
     this.requireChat(chatId);
-    if (this.entries.has(chatId)) return this.entries.get(chatId).ready;
+    if (this.entries.has(chatId)) {
+      const existing = this.entries.get(chatId), version = this.versions.get(chatId) || 0;
+      if (existing.stopping) throw new Error("Browser is stopping; retry Stop if cleanup failed");
+      await existing.ready;
+      if (existing.stopping) throw new Error("Browser is stopping; retry Stop if cleanup failed");
+      if (existing.browser?.child?.reconnect) existing.browser.watchingRequested = existing.viewers.size > 0;
+      await existing.browser?.ensureConnected();
+      if (this.entries.get(chatId) !== existing || (this.versions.get(chatId) || 0) !== version) throw new Error("Browser start cancelled");
+      return existing;
+    }
     if (this.entries.size >= 12) throw new Error("Close an unused shared browser first (12 browser limit)");
     const version = this.versions.get(chatId) || 0;
     const entry = { viewers: new Set(), browser: null };
@@ -92,7 +147,7 @@ export class SharedBrowsers {
       if ((this.versions.get(chatId) || 0) !== version) throw new Error("Browser start cancelled");
       const source = await readFile(new URL("./browser-worker.mjs", import.meta.url), "utf8");
       const env = { PATH: executor.environmentPath || process.env.PATH, HOME: executor.runtimeHome, LANG: "C.UTF-8", AGENT_CHROME_BIN: executable };
-      const child = (executor.spawnBrowser || executor.spawn).call(executor, "node", ["--input-type=module", "-e", source + "\nawait runBrowserWorker();"], { cwd: executor.workspace, env, stdio: ["pipe", "pipe", "pipe"] });
+      const child = await (executor.spawnBrowser || executor.spawn).call(executor, "node", ["--input-type=module", "-e", source + "\nawait runBrowserWorker();"], { cwd: executor.workspace, env, stdio: ["pipe", "pipe", "pipe"] });
       const browser = this.processFactory(child); entry.browser = browser;
       browser.on("frame", value => {
         entry.frame = value;
@@ -101,16 +156,29 @@ export class SharedBrowsers {
       for (const event of ["status", "dialog"]) browser.on(event, value => { for (const viewer of entry.viewers) this.send(viewer, { event, value: event === "status" ? { ...value, clipboard: true } : value }); });
       browser.on("closed", value => {
         clearTimeout(entry.idleTimer);
-        if (this.entries.get(chatId) === entry) { this.entries.delete(chatId); void this.onIdle(chatId).catch(() => {}); }
+        if (this.entries.get(chatId) === entry) {
+          if (browser.child?.terminateRemote) {
+            // The remote anchor outlives the helper. Keep its receipt reachable
+            // until confirmed cleanup, including natural helper failure.
+            if (!entry.stopping) void this.stop(chatId, false).then(() => this.onIdle(chatId)).catch(() => {});
+          } else { this.entries.delete(chatId); void this.onIdle(chatId).catch(() => {}); }
+        }
         for (const viewer of entry.viewers) { this.send(viewer, { event: "closed", value }); viewer.close(1000, "Browser stopped"); }
         void this.onViewers(chatId).catch(() => {});
       });
       await browser.ready;
-      if ((this.versions.get(chatId) || 0) !== version) { await browser.stop(); throw new Error("Browser start cancelled"); }
+      if ((this.versions.get(chatId) || 0) !== version) throw new Error("Browser start cancelled");
       this.touch(chatId); return entry;
     })().catch(async error => {
-      if (this.entries.get(chatId) === entry) this.entries.delete(chatId);
+      // An awaited spawn may already own a remote helper even before ready.
+      // Preserve that receipt if cleanup fails, and block replacement starts.
+      entry.stopping = true;
+      if (typeof error.retryBrowserCleanup === "function") {
+        entry.pendingCleanup = error.retryBrowserCleanup;
+        throw error;
+      }
       if (entry.browser) await entry.browser.stop();
+      if (this.entries.get(chatId) === entry) this.entries.delete(chatId);
       if ((this.versions.get(chatId) || 0) === version) await this.onIdle(chatId).catch(() => {});
       throw error;
     });
@@ -147,7 +215,11 @@ export class SharedBrowsers {
     socket.once("close", () => {
       entry.viewers.delete(socket);
       void this.onViewers(chatId).catch(() => {});
-      if (!entry.viewers.size) { void entry.browser.command("watch", { enabled: false }).catch(() => {}); this.touch(chatId); }
+      if (!entry.viewers.size) {
+        entry.browser.watchingRequested = false;
+        if (!entry.browser.child?.detached) void entry.browser.command("watch", { enabled: false }).catch(() => {});
+        this.touch(chatId);
+      }
     });
     await entry.browser.command("watch", { enabled: true });
   }
@@ -167,11 +239,20 @@ export class SharedBrowsers {
     await this.personal?.revokeChat(chatId);
     this.versions.set(chatId, (this.versions.get(chatId) || 0) + 1);
     if (revoke) this.grants.revokeChat(chatId);
-    const entry = this.entries.get(chatId); this.entries.delete(chatId);
+    const entry = this.entries.get(chatId);
     if (!entry) return;
+    const retainUntilClean = !entry.browser || Boolean(entry.browser.child?.terminateRemote);
+    if (!retainUntilClean) this.entries.delete(chatId);
+    if (entry.stopPromise) return entry.stopPromise;
+    entry.stopping = true;
     clearTimeout(entry.idleTimer);
-    await entry.ready.catch(() => {});
-    if (entry.browser) await entry.browser.stop();
+    entry.stopPromise = (async () => {
+      await entry.ready.catch(() => {});
+      if (entry.pendingCleanup) { await entry.pendingCleanup(); entry.pendingCleanup = null; }
+      if (entry.browser) await entry.browser.stop();
+      if (this.entries.get(chatId) === entry) this.entries.delete(chatId);
+    })();
+    try { await entry.stopPromise; } finally { entry.stopPromise = null; }
   }
   async shutdown() { await this.personal?.shutdown(); await Promise.allSettled([...this.entries.keys()].map(id => this.stop(id))); }
   runtime(chatId, origin) {

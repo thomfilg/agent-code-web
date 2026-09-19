@@ -91,7 +91,8 @@ export class ChromeBrowser extends EventEmitter {
     const { targetInfos } = await this.call("Target.getTargets");
     return targetInfos.filter(tab => tab.type === "page").map(tab => ({ id: tab.targetId, title: tab.title.slice(0, 300), url: tab.url.slice(0, 4000) }));
   }
-  async status() { return { running: !this.failed, tabId: this.tabId, tabs: await this.tabs(), viewport: this.viewport, mode: "guest", captureVersion: 3 }; }
+  async status() { return { running: !this.failed, tabId: this.tabId, tabs: await this.tabs(), viewport: this.viewport, mode: "guest", captureVersion: 3,
+    ...(this.transportValidation ? { processIdentity: { helperPid: process.pid, chromePid: this.child.pid } } : {}) }; }
   updateLayout(action) {
     const pending = this.layoutQueue.then(action);
     this.layoutQueue = pending.catch(() => {}); return pending;
@@ -275,6 +276,16 @@ export class ChromeBrowser extends EventEmitter {
 
 export async function runBrowserWorker() {
   const browser = new ChromeBrowser({ executable: process.env.AGENT_CHROME_BIN || "google-chrome" });
+  const watchLeaseMs = Number(process.env.RELAY_BROWSER_WATCH_LEASE_MS || 0);
+  if (watchLeaseMs && (!Number.isInteger(watchLeaseMs) || watchLeaseMs < 1000 || watchLeaseMs > 10000)) throw new Error("Invalid browser watch lease");
+  browser.transportValidation = watchLeaseMs > 0;
+  let lastControllerHeartbeat = Date.now(), watchExpired = false;
+  const watchTimer = watchLeaseMs ? setInterval(() => {
+    if (Date.now() - lastControllerHeartbeat < watchLeaseMs || watchExpired) return;
+    watchExpired = true; latestFrame = null;
+    void browser.watch(false).catch(() => {});
+  }, Math.floor(watchLeaseMs / 3)) : null;
+  watchTimer?.unref();
   const send = message => { if (!process.stdout.destroyed) process.stdout.write(JSON.stringify(message) + "\n"); };
   let latestFrame = null, writingFrame = false;
   const flushFrame = () => {
@@ -283,8 +294,8 @@ export async function runBrowserWorker() {
     process.stdout.write(JSON.stringify({ event: "frame", value }) + "\n", () => { writingFrame = false; flushFrame(); });
   };
   for (const type of ["status", "dialog", "closed"]) browser.on(type, value => send({ event: type, value }));
-  browser.on("frame", value => { latestFrame = value; flushFrame(); });
-  const close = async () => { await browser.stop(); process.exit(0); };
+  browser.on("frame", value => { if (!watchExpired) { latestFrame = value; flushFrame(); } });
+  const close = async () => { clearInterval(watchTimer); await browser.stop(); process.exit(0); };
   process.once("SIGTERM", close); process.once("SIGINT", close);
   try { send({ event: "ready", value: await browser.start() }); }
   catch (error) { send({ event: "fatal", value: { message: error.message } }); await close(); return; }
@@ -293,6 +304,12 @@ export async function runBrowserWorker() {
     if (line.length > 100000) return;
     let message; try { message = JSON.parse(line); } catch { return; }
     if (!Number.isInteger(message.id)) return;
+    if (message.action === "transportHeartbeat" && watchLeaseMs) {
+      lastControllerHeartbeat = Date.now(); send({ id: message.id, value: { watching: browser.watching, watchExpired } }); return;
+    }
+    if (message.action === "watch" && watchLeaseMs && message.params?.enabled) {
+      lastControllerHeartbeat = Date.now(); watchExpired = false;
+    }
     void browser.command(message.action, message.params).then(value => send({ id: message.id, value }), error => send({ id: message.id, error: error.message }));
   });
   input.once("close", close);
