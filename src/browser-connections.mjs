@@ -74,7 +74,8 @@ export class BrowserConnections extends EventEmitter {
   changed(chatId) { this.epochs.set(chatId, (this.epochs.get(chatId) || 0) + 1); this.emit("changed", chatId); }
   bindingCurrent(grant) {
     const chat = this.store.get(grant.chatId);
-    return Boolean(chat && !chat.archived && chat.ownerId === grant.ownerId && validCompanyId(grant.companyId) && companyForChat(chat) === grant.companyId && grant.bridge.connection.companyId === grant.companyId);
+    return Boolean(chat && !chat.archived && chat.ownerId === grant.ownerId && validCompanyId(grant.companyId) && companyForChat(chat) === grant.companyId && grant.bridge.connection.companyId === grant.companyId
+      && JSON.stringify([chat.agent,chat.agentAccountId || null,chat.environmentId || null]) === grant.agentBinding);
   }
   currentGrant(chatId) {
     const grant = this.grants.get(chatId);
@@ -88,6 +89,7 @@ export class BrowserConnections extends EventEmitter {
   }
   async enable(chatId, user, connectionId) {
     const chat = this.store.get(chatId);
+    const authorizationEpoch = this.epochs.get(chatId) || 0;
     if (!user || chat?.ownerId !== user.id) throw failure("Make this chat private to your account before sharing signed-in Chrome", 409);
     if (chat.archived) throw failure("Unarchive this chat before sharing Chrome", 409);
     const grant = await this.locked(connectionId, async () => {
@@ -100,7 +102,16 @@ export class BrowserConnections extends EventEmitter {
       if (!bridge?.ready || !bridge.tabSelected) throw failure("Open the Chrome extension and reconnect first", 409);
       if (bridge.active && bridge.active.chatId !== chatId) throw failure("This Chrome connection is shared with another chat. Turn that sharing off first.", 409);
       if (this.grants.has(chatId)) throw failure("Chrome is already shared or switching. Turn sharing off before choosing another connection.", 409);
-      const grant = { id: randomBytes(24).toString("base64url"), connectionId, companyId: connection.companyId, ownerId: user.id, chatId, bridge, active: false, viewers: new Set(), state: { running: true, mode: "personal", tabs: [] } };
+      const agentBinding = JSON.stringify([current.agent,current.agentAccountId || null,current.environmentId || null]);
+      // User viewing is independent of agent admission. A grant without a valid
+      // named-agent scope can serve the user but cannot later silently acquire
+      // agent privileges; sharing must be explicitly authorized again.
+      let officialScope = null; try { officialScope = await this.officialScope?.(chatId) || null; } catch {}
+      const afterScope = this.store.get(chatId);
+      if ((this.epochs.get(chatId) || 0) !== authorizationEpoch) throw failure('Chrome sharing was cancelled',409);
+      if (!afterScope || afterScope.archived || afterScope.ownerId !== user.id || companyForChat(afterScope) !== connection.companyId || JSON.stringify([afterScope.agent,afterScope.agentAccountId || null,afterScope.environmentId || null]) !== agentBinding) throw failure('The chat changed before Chrome sharing could start',409);
+      if (this.bridges.get(connectionId) !== bridge || !bridge.ready || bridge.socket.readyState !== 1 || this.grants.has(chatId) || bridge.active) throw failure('Chrome sharing changed before authorization finished',409);
+      const grant = { id: randomBytes(24).toString("base64url"), connectionId, companyId: connection.companyId, ownerId: user.id, chatId, bridge, agentBinding, officialScope, active: false, viewers: new Set(), state: { running: true, mode: "personal", tabs: [] } };
       this.grants.set(chatId, grant); bridge.active = grant; this.changed(chatId); return grant;
     });
     try {
@@ -114,8 +125,9 @@ export class BrowserConnections extends EventEmitter {
     } catch (error) { if (this.grants.get(chatId) === grant) await this.revokeChat(chatId); throw error; }
   }
   async revokeChat(chatId) {
-    const grant = this.grants.get(chatId); if (!grant) return;
+    const grant = this.grants.get(chatId); if (!grant) { this.changed(chatId); return; }
     this.grants.delete(chatId); grant.active = false; clearTimeout(grant.timer);
+    this.emit('projectionClosed', grant);
     if (grant.bridge.active === grant) grant.bridge.active = null;
     // Invalidate results and viewers before waiting for the extension to detach.
     for (const [id, pending] of grant.bridge.pending) if (pending.grantId === grant.id) { clearTimeout(pending.timer); pending.reject(failure("Signed-in browser access revoked")); grant.bridge.pending.delete(id); }
@@ -210,6 +222,10 @@ export class BrowserConnections extends EventEmitter {
         message.error ? pending.reject(failure(String(message.error).slice(0, 1000))) : pending.resolve(message.value); return;
       }
       const grant = bridge.active;
+      if (grant?.active && message.grantId === grant.id && ['projection','projectionClosed'].includes(message.event)) {
+        if (this.currentGrant(grant.chatId) === grant) this.emit(message.event, grant, message.value);
+        return;
+      }
       if (!grant?.active || message.grantId !== grant.id || !["status", "frame", "dialog"].includes(message.event)) return;
       if (this.currentGrant(grant.chatId) !== grant) return;
       if (message.event === "status") grant.state = { ...message.value, mode: "personal" };

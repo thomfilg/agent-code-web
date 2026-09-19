@@ -1,8 +1,10 @@
+import { ProjectionPolicy } from './projection-policy.js';
 // No content scripts, cookie API, profile export, or access to existing tabs.
 // Only an explicitly authorized, extension-created automation tab is debugged.
 let socket, saved, tabId = null, grantId = null, chatTitle = "", heartbeat, reconnectTimer, watching = false;
 let viewport = { width: 1280, height: 800 };
 let transition = 0, pendingAuthorization = null;
+let projection = null;
 let dialogOpen = false;
 let interactions = 0;
 let lastStreamData = null;
@@ -97,6 +99,7 @@ async function state(expected = grantId) {
   return { running: true, mode: "personal", tabId: String(tabId), tabs: [{ id: String(tabId), title: info.title || "Signed-in Chrome", url: info.url || "about:blank" }], viewport, captureVersion: 3 };
 }
 async function revoke(notify = true, invalidate = true) {
+  projection = null;
   const previousGrant = grantId || pendingAuthorization;
   if (invalidate) { transition++; pendingAuthorization = null; }
   const previous = tabId; grantId = null; tabId = null; watching = false; dialogOpen = false; chatTitle = "";
@@ -192,9 +195,41 @@ async function dispatchCommand(action, params, expected) {
     default: throw Error("Unsupported browser action");
   }
 }
+async function project(params, expected) {
+  if (!expected || grantId !== expected || tabId === null) throw Error('Browser projection revoked');
+  if (!params || Object.getPrototypeOf(params) !== Object.prototype || Object.keys(params).some(key => !(params.operation === 'command' ? ['operation','id','method','params'] : ['operation','id']).includes(key))) throw Error('Browser projection denied');
+  if (params.operation === 'open') {
+    if (projection || typeof params.id !== 'string' || !/^[a-f0-9-]{36}$/.test(params.id)) throw Error('Browser projection unavailable');
+    const current = { id:params.id, policy:new ProjectionPolicy() }; projection = current;
+    try {
+      const tree = await cdp('Page.getFrameTree', {}, expected); current.policy.result('Page.getFrameTree', tree);
+      await cdp('Runtime.disable', {}, expected);
+      if (projection !== current || grantId !== expected) throw Error('Browser projection revoked');
+      return { frame:tree.frameTree.frame };
+    } catch (error) { if (projection === current) projection = null; throw error; }
+  }
+  if (!projection || params.id !== projection.id) throw Error('Browser projection unavailable');
+  if (params.operation === 'close') { projection = null; return {}; }
+  if (params.operation !== 'command') throw Error('Browser projection denied');
+  const current = projection, method = params.method, input = current.policy.command(method, params.params);
+  if (method === 'Page.navigate') input.url = safeUrl(input.url);
+  if (method === 'Page.navigateToHistoryEntry') {
+    const history = await cdp('Page.getNavigationHistory',{},expected);
+    const entry = history.entries.find(entry => entry.id === input.entryId); if (!entry) throw Error('Unknown history entry'); safeUrl(entry.url);
+  }
+  const result = await cdp(method,input,expected);
+  if (projection !== current || grantId !== expected) throw Error('Browser projection revoked');
+  return current.policy.result(method,result);
+}
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId !== tabId || !grantId) return;
   const expected = grantId;
+  // No auto-attachment to child targets in this first slice. A foreign/debugger
+  // child session cannot be promoted by presenting its ID in a request.
+  if (projection && !source.sessionId) {
+    try { const value = projection.policy.event(method,params); if (value) send({event:'projection',grantId:expected,value:{id:projection.id,method,params:value}}); }
+    catch { projection = null; send({event:'projectionClosed',grantId:expected}); }
+  }
   if (method === "Fetch.requestPaused") {
     let allowed = false; try { safeUrl(params.request.url); allowed = true; } catch {}
     void cdp(allowed ? "Fetch.continueRequest" : "Fetch.failRequest", allowed ? { requestId: params.requestId } : { requestId: params.requestId, errorReason: "BlockedByClient" }).catch(() => {});
@@ -243,7 +278,7 @@ async function connect(pairing) {
         let value;
         if (message.action === "revoke") { if (grantId === message.grantId || pendingAuthorization === message.grantId) await revoke(false); value = {}; }
         else if (message.action === "authorize") value = await authorize(message.grantId, message.params);
-        else { if (!grantId || grantId !== message.grantId) throw Error("Agent access is off"); value = await command(message.action, message.params, message.grantId); if (grantId !== message.grantId) throw Error("Agent access revoked"); }
+        else { if (!grantId || grantId !== message.grantId) throw Error("Agent access is off"); value = message.action === 'project' ? await project(message.params,message.grantId) : await command(message.action, message.params, message.grantId); if (grantId !== message.grantId) throw Error("Agent access revoked"); }
         send({ id: message.id, grantId: message.grantId, value });
       } catch (error) { send({ id: message.id, grantId: message.grantId, error: error.message }); }
     };
