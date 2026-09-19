@@ -7,6 +7,7 @@ import { ClaudeAdapter } from "./adapters/claude.mjs";
 import { MockAdapter } from "./adapters/mock.mjs";
 import { runtimeWorkflowPatch, workflowPatch } from "../public/chat-organization.js";
 import { responsePrompt, extractResponse, ResponseStream } from "./response-protocol.mjs";
+import { provisionalTitlePatch } from "./title-protocol.mjs";
 import { PullRequestMonitor, inspectBranches, inspectWorkspaceStatus } from "./pull-requests.mjs";
 import { handoffPrompt } from "./agent-handoff.mjs";
 import { snapshotChanges } from "./workspace-changes.mjs";
@@ -1375,6 +1376,9 @@ export class RuntimeManager extends EventEmitter {
       await this.store.update(chatId, { awaitingUser: false, pendingRequest: null, ...(!chat.queuedMessages?.length ? { queuePaused: false, queueError: null } : {}) });
       const userMessage = await this.store.appendMessage(chatId, { role: "user", kind: "message", text, ...(files.length ? { attachments: files.map(file => this.attachments.public(file)) } : {}) });
       this.#emit(chatId, { type: "message", message: userMessage });
+      if (Object.keys(provisionalTitlePatch(this.store.get(chatId), text, { hasAttachments: files.length > 0 })).length) {
+        this.publishChat(await this.store.update(chatId, current => provisionalTitlePatch(current, text, { hasAttachments: files.length > 0 })));
+      }
       if (turn.cancelled || version !== (this.#lifecycleVersions.get(chatId) || 0)) { finish(); return { message: userMessage, completion: Promise.resolve() }; }
       const completion = this.#runTurn(chatId, text, files, userMessage.id, skill, turn, commandAction).finally(finish);
       return { message: userMessage, completion };
@@ -2010,6 +2014,7 @@ export class RuntimeManager extends EventEmitter {
     if (event.type === "background_response") {
       const chat = this.store.get(chatId); if (!chat) return;
       const output = extractResponse(event.text || "", chat.autoTitle);
+      if (output.title) await this.#agentEvent(chatId, { type: "title", title: output.title });
       const message = await this.store.appendMessage(chatId, { role: event.failed ? "system" : "assistant", agent: chat.agent, kind: event.failed ? "error" : "message", text: output.text });
       this.#emit(chatId, { type: "message", message }); return;
     }
