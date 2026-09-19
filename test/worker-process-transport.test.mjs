@@ -76,20 +76,26 @@ test("input conflicts, gaps and expired replay windows fail rather than replayin
   await until(() => lines(client).length === 3); assert.deepEqual(lines(client).map(row => row.count), [1, 2, 3]);
 });
 
-test("explicit termination bypasses a backpressured stdin write and cannot accept later input", async t => {
+test("explicit termination bypasses a held stdin acknowledgement and cannot accept later input", async t => {
   const f = await fixture(t), { client } = await f.start(`setInterval(()=>{},1000);`);
-  let seq = 0, write;
-  // Fill the OS pipe with a real process that deliberately never reads stdin.
-  for (let i = 0; i < 100; i++) {
-    let settled = false;
-    write = client.writeInput(++seq, Buffer.alloc(16384, 120)); write.finally(() => { settled = true; }).catch(() => {});
-    await delay(2);
-    if (!settled) break;
+  const entry = f.supervisor.processes.get("child");
+  const originalWrite = entry.child.stdin.write;
+  let release;
+  // Hold the pipe acknowledgement deterministically; socket scheduling latency
+  // and transient writableLength do not establish actual OS pipe saturation.
+  entry.child.stdin.write = (_data, callback) => { release = callback; return false; };
+  const write = client.writeInput(1, Buffer.alloc(16384, 120)); write.catch(() => {});
+  try {
+    await until(() => Boolean(release) && entry.inputPending);
+    const ended = await client.terminate(); assert.equal(ended.state, "exited");
+    assert.equal(entry.inputPending, true, "termination does not await the held acknowledgement");
+    release(Error("synthetic closed pipe")); release = null;
+    await assert.rejects(write, { code: "INPUT_OUTCOME_UNKNOWN" });
+    await assert.rejects(client.writeInput(2, Buffer.from("never")), { code: "INPUT_CLOSED" });
+  } finally {
+    release?.(Error("fixture cleanup"));
+    entry.child.stdin.write = originalWrite;
   }
-  assert.ok(f.supervisor.processes.get("child").child.stdin.writableLength > 0);
-  const ended = await client.terminate(); assert.equal(ended.state, "exited");
-  await assert.rejects(write, { code: "INPUT_OUTCOME_UNKNOWN" });
-  await assert.rejects(client.writeInput(seq + 1, Buffer.from("never")), { code: "INPUT_CLOSED" });
 });
 
 test("pipe-error input reservation never gets a false successful replay acknowledgement", async t => {
