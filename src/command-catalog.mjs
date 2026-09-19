@@ -5,6 +5,7 @@ import { JsonRpcProcess } from "./json-rpc-process.mjs";
 import { spawnWorker, terminateWorker } from "./worker-process.mjs";
 import readline from "node:readline";
 import { webCommands } from "../public/web-commands.js";
+import { newChatCommands } from "../public/new-chat-commands.js";
 
 const clean = item => ({ name: String(item.name || "").replace(/^\//, "").slice(0, 160), description: String(item.description || "").slice(0, 600), kind: item.kind || "CLI command", aliases: (item.aliases || []).filter(n => typeof n === "string"), ...(item.path ? { path: item.path } : {}) });
 
@@ -27,6 +28,17 @@ const reportedCommands = chat => Array.isArray(chat.commandCatalog) && chat.comm
   : (Array.isArray(chat.slashCommands) ? chat.slashCommands : []).filter(name => typeof name === "string").map(name => ({ name }));
 export class CommandCatalog {
   constructor(config, models = null) { this.config = config; this.models = models; this.cache = new Map(); this.pending = new Map(); }
+  async newChat(context) {
+    // Read existing selected-account metadata only. Never call discover(),
+    // models.selected(), or a host CLI for an unsaved draft.
+    let native = [];
+    if (context.agentAccountId) {
+      if (!this.models?.accounts) throw new Error("Selected account commands are unavailable");
+      if (context.agent === "claude") native = (await this.models.accounts.cachedCommands(context.ownerId, context.agentAccountId, context)).commands;
+      else await this.models.accounts.select(context.ownerId, context.agentAccountId, context);
+    } else if (this.config.google?.enabled && context.agent !== "mock") throw new Error("Choose an agent account first");
+    return newChatCommands(context.agent, native);
+  }
   async list(chat) {
     // Admission is repeated even on cache hits. Merely opening the menu never
     // launches a selected-account CLI, provider request or sleeping worker.

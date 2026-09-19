@@ -9,6 +9,7 @@ import { renderContent } from "./message-content.js";
 import { ToolActivity, groupTools } from "./tool-activity.js";
 import { UsagePanel } from "./usage-panel.js";
 import { SlashComposer } from "./slash-composer.js";
+import { firstChatCommand, newChatCommands } from "./new-chat-commands.js";
 import { McpSettings } from "./mcp-settings.js";
 import { MessageHistory } from "./message-history.js";
 import { MessageNavigator } from "./message-navigator.js";
@@ -368,9 +369,12 @@ async function selectChat(id, { closeSidebar = true } = {}) {
     const { chat } = await api(`/api/chats/${id}`);
     if (state.selection !== selection) return;
     vimComposer.beforeSelect();
-    if (state.active?.id !== id) { elements.input.value = state.chatDrafts?.get(id) || ""; resizeInput(); }
+    const switchingChat = state.active?.id !== id;
     state.page = null; state.active = chat;
     messageHistory.select(chat.id);
+    // History saves the previous chat's input before selecting its own entry.
+    // Restore externally retained first-message drafts only after that selection.
+    if (switchingChat && state.chatDrafts?.has(id)) { elements.input.value = state.chatDrafts.get(id); resizeInput(); }
     slashComposer.close();
     history.replaceState(null, "", `#chat=${id}`);
     renderChats();
@@ -461,7 +465,7 @@ async function resolveRequest(payload, target) {
   finally { controls.forEach(control => { control.disabled = false; }); }
 }
 
-async function openNewChat({ closeSidebar = true } = {}) {
+async function openNewChat({ closeSidebar = true, project } = {}) {
   if (!state.newChatReady) { toast("Relay is still loading. Try again in a moment."); return; }
   if (state.creatingChat || state.openingNewChat) return;
   const selection = state.selection = (state.selection || 0) + 1;
@@ -471,7 +475,7 @@ async function openNewChat({ closeSidebar = true } = {}) {
   if (closeSidebar) elements.sidebar.classList.remove("open");
   $("#create-chat-error").textContent = "";
   state.openingNewChat = true; $("#new-chat-fields").disabled = true; $("#new-chat-status").textContent = "Loading accounts and repositories…";
-  try { await workspaceSettings.openNew(); renderSecurityHint(); if (state.selection === selection) $("#initial-prompt").focus(); }
+  try { await workspaceSettings.openNew(project, { validWhile: () => state.selection === selection }); renderSecurityHint(); if (state.selection === selection) $("#initial-prompt").focus(); }
   catch (error) { $("#create-chat-error").textContent = error.message; }
   finally { state.openingNewChat = false; $("#new-chat-fields").disabled = false; $("#new-chat-status").textContent = ""; }
 }
@@ -506,6 +510,10 @@ async function createChat(event) {
   if (state.creatingChat || state.openingNewChat || state.active) return;
   const initialPrompt = $("#initial-prompt").value.trim();
   if (!initialPrompt) { $("#initial-prompt").focus(); return; }
+  let initialCommand;
+  try { initialCommand = firstChatCommand(initialPrompt, $("#agent-select").value); }
+  catch (error) { $("#create-chat-error").textContent = error.message; return; }
+  newSlashComposer.close();
   state.creatingChat = true;
   const selection = state.selection;
   $("#new-chat-fields").disabled = true; elements.newForm.setAttribute("aria-busy", "true");
@@ -517,6 +525,8 @@ async function createChat(event) {
   try {
     await workspaceSettings.modelPicker.saving;
     const payload = workspaceSettings.payload();
+    // Selection may have changed while model preferences were saving.
+    initialCommand = firstChatCommand(initialPrompt, payload.agent);
     const { chat } = await api("/api/chats", { method: "POST", body: JSON.stringify(payload) });
     updateChatSummary(chat);
     // Keep the saved chat and its draft if selection or the first send fails.
@@ -525,6 +535,19 @@ async function createChat(event) {
     state.initialMessageChat = chat.id;
     void workspaceSettings.remember();
     if (state.selection === selection) await selectChat(chat.id);
+    if (initialCommand) {
+      state.initialMessageChat = null;
+      if (state.active?.id === chat.id) {
+        renderActive();
+        elements.input.value = initialPrompt; resizeInput();
+        await sendMessage(event);
+        if (state.active?.id === chat.id) {
+          if (elements.input.value.trim()) state.chatDrafts.set(chat.id, elements.input.value);
+          else state.chatDrafts.delete(chat.id);
+        }
+      } else toast("Chat created. Your command is kept in its draft; open it to continue.");
+      return;
+    }
     const pendingId = `initial-${chat.id}`;
     if (state.active?.id === chat.id) {
       state.active.messages.push({ id: pendingId, role: "user", kind: "text", text: initialPrompt, createdAt: new Date().toISOString() });
@@ -810,6 +833,7 @@ $("#login-form").addEventListener("submit", async (event) => {
 $("#new-chat-button").addEventListener("click", openNewChat);
 elements.newForm.addEventListener("submit", createChat);
 $("#initial-prompt").addEventListener("keydown", event => {
+  if (newSlashComposer.keydown(event)) return;
   if (event.key === "Enter" && !event.repeat && !event.shiftKey && !event.isComposing && event.keyCode !== 229 && !event.ctrlKey && !event.metaKey && !event.altKey) {
     event.preventDefault(); if (!$("#create-chat-button").disabled) elements.newForm.requestSubmit($("#create-chat-button"));
   }
@@ -919,7 +943,7 @@ $("#delete-button").addEventListener("click", () => {
 });
 $("#open-sidebar").addEventListener("click", () => elements.sidebar.classList.add("open"));
 $("#close-sidebar").addEventListener("click", () => elements.sidebar.classList.remove("open"));
-const sidebar = new ChatSidebar({ state, api, select: selectChat, remove: deleteChat, toast, agentLabel,
+const sidebar = new ChatSidebar({ state, api, select: selectChat, remove: deleteChat, toast, agentLabel, newProject: project => openNewChat({ project }),
   updated: chat => {
     updateChatSummary(chat);
     if (state.active?.id === chat.id) { state.active = { ...state.active, ...chat }; renderActive(); }
@@ -1027,6 +1051,13 @@ const vimComposer = new VimComposer({ input: elements.input, getChatId: () => st
 });
 $("#keymap-button").addEventListener("click", () => void keymap.open().catch(error => toast(error.message)));
 const slashComposer = new SlashComposer({ state, api });
+const newSlashComposer = new SlashComposer({ state, api, input: $("#initial-prompt"), prefix: "new-slash", trigger: null,
+  context: () => state.active ? null : { id: "new", agent: $("#agent-select").value, agentAccountId: $("#new-agent-account").value },
+  caption: chat => `${{ codex: "Codex", claude: "Claude", mock: "Mock agent" }[chat.agent] || "Choose an agent"} · new chat · selected account`,
+  catalog: chat => chat.agent ? api(`/api/new-chat/commands?agent=${encodeURIComponent(chat.agent)}${chat.agentAccountId ? `&agentAccountId=${encodeURIComponent(chat.agentAccountId)}` : ""}`) : Promise.resolve(newChatCommands(null)),
+});
+for (const id of ["#agent-select", "#new-agent-account"]) $(id).addEventListener("change", () => newSlashComposer.refresh("new"));
+window.addEventListener("relay-new-chat-selection-changed", () => newSlashComposer.refresh("new"));
 const workspaceContext = new WorkspaceContext({ state, api, controls: chatControls, toast });
 const nativeApps = new NativeAppsPicker({ state, api, controls: chatControls, toast });
 const nativePlugins = new NativePluginsPicker({ state, api, controls: chatControls, changed: chatId => slashComposer.invalidate(chatId) });
