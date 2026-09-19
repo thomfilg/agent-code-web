@@ -49,3 +49,35 @@ MCP provider-internal `_meta` and unrelated reasoning fields are not displayed.
 No real model prompt, provider request, OAuth consent, credential copying, cloud
 operation, or deployment was performed. This verifies event presentation, not
 live Linear authorization or provider availability.
+
+## Release preparation (subsequent checkpoint)
+
+After the focused acceptance above, the parent prepared an immutable image from
+committed source `94860e7afe408475db3c6964fb6851c3e018446c` in the clean integration
+worktree. Runtime source remains `e8436d9`; uncommitted main-worktree changes and
+private credentials were excluded by the existing allowlisted Git archive.
+
+The complete Node suite on that exact source then passed **1,291/1,291**, with
+zero failures, skipped cases or cancellations, in 279,555.8 ms (terminal exit 0).
+The run enabled all three normally optional installed-CLI/Chrome checks:
+
+```sh
+AGENT_TEST_NATIVE_GITHUB=1 RELAY_GUEST_UI_TEST=1 \
+  taskset -c 0,1 nice -n 10 node --test --test-concurrency=1 test/*.test.mjs
+```
+
+This supersedes the earlier full-suite evidence for this candidate. The two
+renderer browser cases above were already verified on the same runtime and test
+source; the intervening commit changed documentation only. These remain local
+acceptance results, not a deployed selected-account/Linear success claim.
+
+- CodeBuild: `ImageBuild-t8BSbSkDsHYX:ca505b1f-187d-4d76-91ea-aca81dca18d0`.
+- Terminal result: `SUCCEEDED`, phase `COMPLETED`.
+- Immutable source object version: `fql_cc_xWGaYErVqtWIIz9AakiI0_24h`.
+- ECR repository: `456808212788.dkr.ecr.us-east-2.amazonaws.com/agent-relay-mvp-applicationrepository-sujdgarjwejp`.
+- Image digest: `sha256:26585b5eee18cbdfd7cef9150e3c5a5ecdfd9ab98aa4e03cc437e08d765ff46b`.
+
+This later checkpoint does perform AWS source upload/build/status operations,
+but **not a rollout**. No worker was stopped or restarted. The deployed build
+remains `d9c0ce6` (runtime `8db8247`); the new image is only a candidate until
+the user's ongoing Linear check is complete and a guarded rollout is coordinated.

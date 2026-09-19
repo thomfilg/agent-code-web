@@ -6,6 +6,9 @@
 arguments and error details, distinguish failed calls from missing results, and
 preserve those states in the saved activity timeline. The focused adapter and
 renderer checks are recorded in the [tool-result receipt](validation-2026-09-19-codex-tool-results.md).
+Candidate source `94860e7` subsequently passed the full **1,291-test Node suite**
+with no failures/skips and built successfully to immutable image digest
+`sha256:26585b5eee18cbdfd7cef9150e3c5a5ecdfd9ab98aa4e03cc437e08d765ff46b`.
 This correction is not deployed while the user tests Linear in the g2i chat;
 it does not establish that the live Linear read succeeded.
 
