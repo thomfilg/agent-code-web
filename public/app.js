@@ -242,6 +242,7 @@ function renderActive() {
     closeSidePanel("diff"); return;
   }
   if (!chat) {
+    chatControls.renderAttachments();
     closeSidePanel("diff"); toolActivity.update(null, new Map());
     elements.messages.replaceChildren();
     messageFollow.observe(); $("#message-jump-latest").hidden = true;
@@ -509,12 +510,13 @@ function renderSecurityHint() {
 async function createChat(event) {
   event.preventDefault();
   if (state.creatingChat || state.openingNewChat || state.active) return;
-  const initialPrompt = $("#initial-prompt").value.trim();
-  if (!initialPrompt) { $("#initial-prompt").focus(); return; }
+  let initialPrompt = $("#initial-prompt").value.trim();
+  if (!initialPrompt && !chatControls.attachments().length && !chatControls.uploads.has(chatControls.draftKey())) { $("#initial-prompt").focus(); return; }
   let initialCommand;
   try { initialCommand = firstChatCommand(initialPrompt, $("#agent-select").value); }
   catch (error) { $("#create-chat-error").textContent = error.message; return; }
   newSlashComposer.close();
+  const attachmentDraftKey = chatControls.draftKey();
   state.creatingChat = true;
   const selection = state.selection;
   $("#new-chat-fields").disabled = true; elements.newForm.setAttribute("aria-busy", "true");
@@ -524,7 +526,18 @@ async function createChat(event) {
   $("#new-chat-status").textContent = "Preparing your chat…";
   $("#create-chat-error").textContent = "";
   try {
+    await chatControls.waitForUploads(attachmentDraftKey);
+    if (!initialPrompt) {
+      if (!(chatControls.drafts.get(attachmentDraftKey) || []).length) throw new Error("Add a message or a valid file before sending.");
+      initialPrompt = "Please inspect the attached files.";
+    }
     await workspaceSettings.modelPicker.saving;
+    if (state.selection !== selection || state.active) {
+      if (!$("#initial-prompt").value) $("#initial-prompt").value = initialPrompt;
+      toast("Nothing was sent. Your message and files are kept in the new-chat draft.");
+      return;
+    }
+    if (attachmentDraftKey !== chatControls.newDraftKey()) throw new Error("The company changed. Your files are kept in their original company's draft.");
     const payload = workspaceSettings.payload();
     // Selection may have changed while model preferences were saving.
     initialCommand = firstChatCommand(initialPrompt, payload.agent);
@@ -534,8 +547,29 @@ async function createChat(event) {
     // Retrying must never create a second chat or silently lose the prompt.
     state.chatDrafts ||= new Map(); state.chatDrafts.set(chat.id, initialPrompt);
     state.initialMessageChat = chat.id;
+    chatControls.moveNewAttachments(attachmentDraftKey, chat.id);
     void workspaceSettings.remember();
-    if (state.selection === selection) await selectChat(chat.id);
+    if (state.selection !== selection) {
+      state.initialMessageChat = null;
+      toast(initialCommand ? "Chat created. Your command is kept in its draft; open it to continue." : "Chat created. Your message and files are kept in its draft; open it to send.");
+      return;
+    }
+    await selectChat(chat.id);
+    const firstSendSelection = state.selection;
+    if (state.active?.id !== chat.id) { state.initialMessageChat = null; return; }
+    let initialAttachments;
+    try { initialAttachments = await chatControls.prepareAttachments(chat.id); }
+    catch (error) {
+      state.initialMessageChat = null;
+      if (state.active?.id === chat.id) renderActive();
+      toast(`Files could not be uploaded. Your message and files are kept in the new chat; retry Send. ${error.message}`);
+      return;
+    }
+    if (state.active?.id !== chat.id || state.selection !== firstSendSelection) {
+      state.initialMessageChat = null;
+      toast("Your message and files are kept in the created chat's draft; open it to send.");
+      return;
+    }
     if (initialCommand) {
       state.initialMessageChat = null;
       if (state.active?.id === chat.id) {
@@ -551,11 +585,12 @@ async function createChat(event) {
     }
     const pendingId = `initial-${chat.id}`;
     if (state.active?.id === chat.id) {
-      state.active.messages.push({ id: pendingId, role: "user", kind: "text", text: initialPrompt, createdAt: new Date().toISOString() });
+      state.active.messages.push({ id: pendingId, role: "user", kind: "text", text: initialPrompt, attachments: initialAttachments, createdAt: new Date().toISOString() });
       elements.input.value = ""; renderMessages(); elements.detail.textContent = "Preparing workspace and sending your message…";
     }
     try {
-      await api(`/api/chats/${chat.id}/messages`, { method: "POST", body: JSON.stringify({ text: initialPrompt }) });
+      await api(`/api/chats/${chat.id}/messages`, { method: "POST", body: JSON.stringify({ text: initialPrompt, attachments: initialAttachments.map(file => file.id) }) });
+      chatControls.clearAttachments(chat.id, initialAttachments.map(file => file.id));
       state.chatDrafts.delete(chat.id);
     } catch (error) {
       if (state.active?.id === chat.id) { elements.input.value = initialPrompt + (elements.input.value ? `\n\n${elements.input.value}` : ""); state.chatDrafts.set(chat.id, elements.input.value); resizeInput(); }
@@ -571,6 +606,7 @@ async function createChat(event) {
     state.creatingChat = false; $("#new-chat-fields").disabled = false; elements.newForm.removeAttribute("aria-busy");
     $("#new-chat-progress").hidden = true; $("#new-chat-overview").hidden = false; $("#new-chat-status").textContent = "";
     workspaceSettings.updateCreateAvailability();
+    chatControls.renderAttachments();
   }
 }
 
@@ -607,6 +643,13 @@ async function sendMessage(event) {
     if (state.active?.id !== waitingChat) return;
   }
   let files = chatControls.attachments();
+  if (files.some(file => file.local)) {
+    state.waitingForUploads = true;
+    try { files = await chatControls.prepareAttachments(waitingChat); }
+    catch (error) { toast(error.message); return; }
+    finally { state.waitingForUploads = false; }
+    if (state.active?.id !== waitingChat) return;
+  }
   let text = elements.input.value.trim() || (files.length ? "Please inspect the attached files." : "");
   if (!text || !state.active) return;
   const chatId = state.active.id;
@@ -1015,6 +1058,7 @@ const browserConnectionSettings = new BrowserConnectionSettings({ api, state, to
 });
 const companySettings = new CompanySettings({ api, state, workspace: workspaceSettings, mcps: mcpSettings, browsers: browserConnectionSettings });
 const chatControls = new ChatControls({ state, api, toast,
+  newDraftScope: () => workspaceSettings.selectedEnvironment()?.companies?.[0] || workspaceSettings.selectionCompany || "unassigned",
   preview: documentPreview,
   updated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = { ...state.active, ...chat }; renderActive(); } },
   openEnvironment: () => workspaceSettings.openEnvironments(state.active?.environmentId),

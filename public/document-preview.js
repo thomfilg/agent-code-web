@@ -32,7 +32,7 @@ export class DocumentPreview {
   }
   setChat(chatId) { if (this.chatId !== chatId) { this.close(false); this.chatId = chatId; } }
   clear() { this.content.replaceChildren(); this.content.classList.remove("image-actual-size"); this.current = null; }
-  open({ source, format = "text", title = "Document preview", trigger = document.activeElement, messageId, index }) {
+  open({ source, format = "text", title = "Document preview", metadata = "", trigger = document.activeElement, messageId, index }) {
     document.querySelectorAll(".control-menu[open]").forEach(menu => { menu.open = false; });
     openSidePanel("preview"); this.panel.classList.remove("expanded");
     this.current = { source, format, trigger, messageId, index };
@@ -46,7 +46,7 @@ export class DocumentPreview {
       if (!/^data:image\/(?:png|jpeg|webp|gif|avif);base64,[A-Za-z0-9+/]*={0,2}$/.test(source)) { $("#preview-note").textContent = "Unsupported image format"; return; }
       const img = document.createElement("img"); img.className = "attachment-image-preview"; img.alt = title; img.decoding = "async";
       const current = this.current;
-      img.onload = () => { if (this.current === current) $("#preview-note").textContent = `${img.naturalWidth} × ${img.naturalHeight} pixels · image preview`; };
+      img.onload = () => { if (this.current === current) $("#preview-note").textContent = `${metadata ? metadata + " · " : ""}${img.naturalWidth} × ${img.naturalHeight} pixels · image preview`; };
       img.onerror = () => { if (this.current === current) $("#preview-note").textContent = "This image could not be decoded. The attachment has been kept."; };
       $("#preview-note").textContent = "Loading image…"; img.src = source; this.content.append(img); $("#close-preview").focus({ preventScroll: true }); return;
     }
@@ -63,7 +63,8 @@ export class DocumentPreview {
       $("#preview-note").textContent = `Isolated preview · scripts and network disabled.${clipped}`;
     } else {
       const pre = document.createElement("pre"); pre.className = "document-source"; pre.textContent = limited;
-      this.content.append(pre); $("#preview-note").textContent = `Plain-text preview · content is not executed.${clipped}`;
+      pre.tabIndex = 0; pre.setAttribute("aria-label", `${title} file content`);
+      this.content.append(pre); $("#preview-note").textContent = `${metadata ? metadata + " · " : ""}Plain-text preview · content is not executed.${clipped}`;
     }
     $("#close-preview").focus({ preventScroll: true });
   }
