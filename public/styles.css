@@ -453,11 +453,17 @@ dialog { max-height: calc(100dvh - 28px); }
 .signed-chrome-toggle input:checked + .toggle-track::after { transform: translateX(11px); background: #ffdd97; }
 .signed-chrome-toggle:has(input:focus-visible) { outline: 2px solid var(--lime); }
 .signed-chrome-toggle:has(input:disabled) { opacity: .5; cursor: wait; }
-.browser-connections-card { width: min(650px, calc(100vw - 36px)); }
+#browser-connections-dialog { width: min(660px, calc(100vw - 28px)); }
+.browser-connections-card { width: 100%; min-width: 0; overflow-wrap: anywhere; }
+.browser-connections-card > * { min-width: 0; max-width: 100%; }
+.browser-connections-card .dialog-heading .icon-button { flex: none; }
 .browser-account-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 #browser-account-logout { margin-left: auto; }
 .browser-connection-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; margin: 8px 0; border: 1px solid var(--line); border-radius: 8px; }
 .browser-connection-row small { display: block; }
+.browser-connection-row { flex-wrap: wrap; }
+.browser-connection-row > div { min-width: 0; flex: 1 1 200px; }
+.browser-connection-row > button { flex: none; max-width: 100%; }
 #browser-pair-instructions { margin-top: 18px; }
 #browser-pair-instructions summary { cursor: pointer; }
 #browser-pair-instructions li { margin-bottom: 10px; }
