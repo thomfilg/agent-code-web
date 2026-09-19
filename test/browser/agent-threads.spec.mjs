@@ -18,7 +18,7 @@ async function setup(page, offline = false, { agent = "codex", empty = false } =
   ] };
   if (agent === "claude") snapshot = { ...snapshot, provider: "claude", coverage: "Observed native children from this process only.", threads: snapshot.threads.map(thread => ({ ...thread, canAcceptDirectInput: false, canStop: !offline && thread.status === "active", nextCursor: null, pendingRequest: null })) };
   if (empty) snapshot.threads = [];
-  const calls = [], mainWrites = [];
+  const calls = [], mainWrites = []; let beforeReply = async () => {};
   page.on("request", request => { if (request.method() === "POST" && new RegExp(`/chats/${chat.id}/(messages|queue|stop|requests|wake|start)(/|$)`).test(request.url())) mainWrites.push(request.url()); });
   await page.route(`**/api/chats/${chat.id}/subagents**`, async route => {
     const method = route.request().method(), tail = new URL(route.request().url()).pathname.split("/subagents")[1], input = route.request().postDataJSON();
@@ -31,11 +31,67 @@ async function setup(page, offline = false, { agent = "codex", empty = false } =
     if (tail === "/respond") { thread.pendingRequest = null; }
     if (tail === "/stop") { thread.status = "idle"; thread.canStop = false; }
     const page = tail === "/select" && input.cursor ? { threadId: thread.id, messages: [{ id: "older", role: "assistant", text: "Older child response" }], nextCursor: null } : undefined;
-    return route.fulfill({ json: { ...snapshot, ...(page ? { page } : {}) } });
+    const reply = { ...snapshot, ...(page ? { page } : {}) };
+    await beforeReply(tail, input);
+    return route.fulfill({ json: reply });
   });
   await page.goto(`/#chat=${chat.id}`); await expect(page.locator("#chat-title")).toHaveText(main.title);
-  return { chat, calls, mainWrites };
+  return { chat, calls, mainWrites, holdReplies: callback => { beforeReply = callback; },
+    replaceEpoch: () => { snapshot = { ...snapshot, epoch: "replacement-native-fixture", revision: 1,
+      threads: snapshot.threads.map(thread => ({ ...thread, messages: [{ id: "fresh", role: "assistant", text: "Fresh observer history" }] })) }; },
+  };
 }
+
+test("a child send finishing after chat A to new to A preserves a newly retyped identical draft", async ({ page }) => {
+  const { chat, calls, mainWrites, holdReplies, replaceEpoch } = await setup(page);
+  await page.getByRole("button", { name: "Open agent threads", exact: true }).click();
+  await page.getByRole("button", { name: "Open agent Ada", exact: true }).click();
+  await expect(page.locator("#agents-messages")).toContainText("Native child answer");
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  holdReplies(tail => tail === "/messages" ? gate : undefined);
+  const text = "Same text, new draft";
+  await page.getByLabel("Message selected agent").fill(text);
+  await page.locator("#agents-form").evaluate(form => form.requestSubmit());
+  await expect.poll(() => calls.filter(call => call.tail === "/messages").length).toBe(1);
+  await page.getByRole("button", { name: "Back to agent list", exact: true }).click();
+  await page.locator("#new-chat-button").click();
+  await expect(page).toHaveURL(/#new$/);
+  replaceEpoch();
+  await page.locator(`[data-chat-id="${chat.id}"] .chat-item`).click();
+  await expect(page.locator("#chat-title")).toHaveText(chat.title);
+  await page.getByRole("button", { name: "Open agent threads", exact: true }).click();
+  await page.getByRole("button", { name: "Open agent Ada", exact: true }).click();
+  await expect(page.locator("#agents-messages")).toContainText("Fresh observer history");
+  await page.getByLabel("Message selected agent").fill("");
+  await page.getByLabel("Message selected agent").fill(text);
+  release();
+  await expect(page.locator("#agents-send")).toBeEnabled();
+  await expect(page.getByLabel("Message selected agent")).toHaveValue(text);
+  await expect(page.locator("#agents-messages")).toContainText("Fresh observer history");
+  expect(calls.filter(call => call.tail === "/messages")).toHaveLength(1);
+  expect(mainWrites).toEqual([]);
+});
+
+test("a retired observer's delayed history page cannot replace the current agent history", async ({ page }) => {
+  const { calls, holdReplies, replaceEpoch, mainWrites } = await setup(page);
+  await page.getByRole("button", { name: "Open agent threads", exact: true }).click();
+  await page.getByRole("button", { name: "Open agent Ada", exact: true }).click();
+  await expect(page.locator("#agents-messages")).toContainText("Native child answer");
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  holdReplies((tail, input) => tail === "/select" && input.cursor ? gate : undefined);
+  await page.getByRole("button", { name: "Earlier agent messages", exact: true }).click();
+  await expect.poll(() => calls.filter(call => call.input?.cursor === "older").length).toBe(1);
+  replaceEpoch();
+  await page.locator("#agents-refresh").evaluate(button => button.click());
+  await expect(page.locator("#agents-messages")).toContainText("Fresh observer history");
+  const receipt = page.waitForResponse(response => response.url().endsWith("/subagents/select") && response.request().postDataJSON()?.cursor === "older");
+  release(); await receipt;
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await expect(page.locator("#agents-messages")).toContainText("Fresh observer history");
+  await expect(page.locator("#agents-messages")).not.toContainText("Older child response");
+  await expect(page.getByRole("button", { name: "Latest agent messages", exact: true })).toBeHidden();
+  expect(mainWrites).toEqual([]);
+});
 
 test("agent picker routes replies and approvals only to selected descendants and preserves main drafts", async ({ page }) => {
   await page.setViewportSize({ width: 1500, height: 1000 });
