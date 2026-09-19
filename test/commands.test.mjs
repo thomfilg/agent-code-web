@@ -99,6 +99,8 @@ test("plan plus task uses read-only mode; goals persist and stream each native c
   await manager.send(chat.id, "/goal plan a todo app"); assert.equal(store.get(chat.id).goal.status, "paused");
   await manager.setMode(chat.id, "accept_edits"); await manager.send(chat.id, "/goal create a todo app");
   assert.equal(store.get(chat.id).goal.status, "complete");
+  assert.deepEqual(store.get(chat.id).messages.filter(m => m.kind === "notice" && m.text.startsWith("Goal set:")).map(m => m.text),
+    ["Goal set: plan a todo app", "Goal set: create a todo app"]);
   assert.equal(store.get(chat.id).messages.filter(m => m.role === "assistant").at(-1).text, "Goal verified complete");
   await manager.send(chat.id, "/review --base main");
   assert.equal(store.get(chat.id).messages.filter(m => m.role === "assistant").at(-1).text, "Native review completed without a normal prompt.");

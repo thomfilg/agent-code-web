@@ -14,7 +14,7 @@ and remain at the beginning of native stream-json input.
 
 | Commands | Dispatch / verification |
 | --- | --- |
-| `/goal`, objective, `edit`, `pause`, `resume`, `clear` | Persisted native thread goals; resume queues when busy; objective edits preserve multiline text. Real CLI protocol checks pass; new edit/queue browser check passes. |
+| `/goal`, objective, `edit`, `pause`, `resume`, `clear` | Persisted native thread goals; a confirmed set/edit emits an explicit durable `Goal set:` notice before work continues, resume queues when busy, and objective edits preserve multiline text. Real CLI protocol checks pass; new edit/queue browser check passes. |
 | `/goal [condition\|clear]` (Claude) | Actual native evaluator loop, status, native clear aliases and active-goal Stop/resume verified in private profiles. Literal commands retain FIFO ordering; evaluation failures are visible and streamed goal steps retain their boundaries. Uses Claude semantics, not fabricated Codex pause/resume/state APIs. Hook policies still apply; live activation pending. |
 | `/plan [task]` | Native Plan collaboration/read-only mode; busy requests queue. Claude's native Enter/ExitPlanMode transitions now update the selector and subsequent turns, without overwriting a newer web selection. Unit, browser and installed-CLI checks pass. |
 | `/compact` | Native compaction, FIFO while busy, wakes stopped worker. Real Codex/Claude adapters tested with local API fixtures. |

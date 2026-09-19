@@ -605,6 +605,7 @@ export class CodexAdapter {
       if (goalDirective) {
         if (goalDirective.action === "resume" && !this.goal) throw new Error("Set a goal before resuming it");
         await this.goalAction(goalDirective.action === "set" ? "set" : "pause", goalDirective.objective, "paused");
+        if (goalDirective.action === "set") await this.hooks.onEvent?.({ type: "notice", text: `Goal set: ${goalDirective.objective}` });
       }
       if (current.interruptRequested) throw new Error("Codex turn interrupted before startup");
       const turnSettings = {
