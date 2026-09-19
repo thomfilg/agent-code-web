@@ -348,7 +348,7 @@ export async function createAgentWebServer(options = {}) {
         await releaseIdentity(user);
         return json(response, 200, { user: null }, { "set-cookie": browserUsers.cookie() });
       }
-      if (url.pathname === "/api/browser-connections" && request.method === "GET") return json(response, 200, { connections: await manager.browsers.personal.list(user) });
+      if (url.pathname === "/api/browser-connections" && request.method === "GET") return json(response, 200, { connections: await manager.browsers.personal.list(user, { companyId: url.searchParams.has("companyId") ? url.searchParams.get("companyId") : undefined, includeLegacy: url.searchParams.get("includeLegacy") === "1" }) });
       if (url.pathname === "/api/browser-extension/download" && request.method === "GET") {
         const files = {};
         for (const name of ["manifest.json", "worker.js", "popup.html", "popup.css", "popup.js"]) files[`agent-relay-chrome/${name}`] = new Uint8Array(await readFile(new URL(`../chrome-extension/${name}`, import.meta.url)));
@@ -361,6 +361,7 @@ export async function createAgentWebServer(options = {}) {
         return json(response, 201, await manager.browsers.personal.pair(user, await bodyJson(request, 2000)));
       }
       const browserConnection = /^\/api\/browser-connections\/(browser_[a-f0-9-]{36})$/.exec(url.pathname);
+      if (browserConnection && request.method === "PATCH") { const input = await bodyJson(request, 2000); return json(response, 200, await manager.browsers.personal.assign(browserConnection[1], user, input.companyId)); }
       if (browserConnection && request.method === "DELETE") { await manager.browsers.personal.remove(browserConnection[1], user); return json(response, 200, { removed: true }); }
 
       if (url.pathname === "/api/health" && request.method === "GET") {
@@ -875,7 +876,7 @@ export async function createAgentWebServer(options = {}) {
       adapterFactory: options.adapterFactory || null,
     });
     manager.browsers = new SharedBrowsers({ store, config, acquire: chatId => manager.browserExecutor(chatId), onIdle: chatId => manager.browserIdle(chatId), isActive: chatId => manager.presence.has(chatId), onViewers: chatId => manager.refreshActivity(chatId), ...options.browserOptions });
-    manager.browsers.personal = new BrowserConnections({ records, store, ttlMs: config.sessionCapabilityTtlMs });
+    manager.browsers.personal = new BrowserConnections({ records, store, ttlMs: config.sessionCapabilityTtlMs, validateCompany: async (user, companyId) => (await resources.forOwner(user.id)).companies.get(companyId) });
     manager.browsers.personal.on("viewers", chatId => { void manager.refreshActivity(chatId).catch(() => {}); });
     manager.browsers.personal.on("changed", chatId => {
       manager.browsers.touch(chatId);
