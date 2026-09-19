@@ -4,6 +4,7 @@ import { RuntimeManager } from "../src/runtime-manager.mjs";
 import { CapabilityBroker } from "../src/capabilities.mjs";
 import { eventFixture, eventAccount, eventOwner, eventConnection } from "./fixtures/github-events.mjs";
 import { testConfig, waitFor } from "./helpers.mjs";
+import { searchMessages } from "../src/message-search.mjs";
 
 async function runtimeFixture(t, options = {}) {
   const f = await eventFixture(t); await f.configure(); await f.monitor.stop(); await f.events.stop();
@@ -31,6 +32,12 @@ test("failed checks stay pending while stopped; explicitly subscribed passing ch
   await f.update("passing"); await waitFor(async () => (await f.events.state(f.chat.id)).events.some(event => event.status === "delivered"), { timeoutMs: 5000 });
   assert.equal(f.starts(), 1); assert.deepEqual(f.calls, ["github"]);
   const messages = f.store.get(f.chat.id).messages.filter(message => message.meta?.source === "github"); assert.equal(messages.length, 1); assert.match(messages[0].text, /Checks: passing/);
+  assert.equal(messages[0].meta.authorship, undefined, "a generated event is not attributed to the user");
+  assert.deepEqual(searchMessages([f.store.get(f.chat.id)], { query: "Checks: passing", role: "user" }).results, [], "delivered GitHub messages must stay outside authored-message search");
+  await f.manager.send(f.chat.id, "Find this ordinary user message");
+  const authored = f.store.get(f.chat.id).messages.find(message => message.text === "Find this ordinary user message");
+  assert.equal(authored.meta.authorship, "user");
+  assert.deepEqual(searchMessages([f.store.get(f.chat.id)], { query: "Find this ordinary", role: "user" }).results.map(match => match.messageId), [authored.id]);
 });
 
 test("busy delivery joins user FIFO without interruption or unpausing independent messages", async t => {
