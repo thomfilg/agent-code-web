@@ -3,7 +3,7 @@
 import readline from "node:readline";
 import path from "node:path";
 import { mkdir, appendFile, readFile, readdir } from "node:fs/promises";
-import { nativeId, nativeBundle, nativeRow } from "./native-session.mjs";
+import { nativeId, nativeBundle, nativeRow } from "./native-session-data.mjs";
 const home = process.env.CODEX_HOME, calls = [], turnId = "22222222-2222-4222-8222-222222222222";
 const send = message => process.stdout.write(JSON.stringify(message) + "\n");
 let filename, goal = null;
