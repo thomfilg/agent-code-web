@@ -199,7 +199,10 @@ test("server → local executor → both native adapters persist only sanitized 
     const persisted = JSON.stringify([app.store.get(chat.id), app.manager.eventsSince(chat.id)]);
     for (const secret of executor.capabilitySecrets) assert.ok(!persisted.includes(secret));
     assert.ok(!persisted.includes("controller-private-fixture-not-for-worker"));
-    assert.match(app.store.get(chat.id).messages.at(-1).text, /\[redacted\]/);
+    // Commentary may be flushed ahead of a tool and followed by an empty
+    // segmented final marker; only visible assistant messages carry its text.
+    const assistantText = app.store.get(chat.id).messages.filter(message => message.role === "assistant").map(message => message.text || "").join("\n");
+    assert.match(assistantText, /\[redacted\]/);
     await app.manager.githubWorkers.listRepositories(token);
     await app.manager.stop(chat.id); await assert.rejects(app.manager.githubWorkers.listRepositories(token));
   }

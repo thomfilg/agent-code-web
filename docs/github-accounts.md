@@ -51,6 +51,11 @@ This isolated, explicitly authorized local-credential test does **not** prove
 browser consent, the selected AWS product connection, worker gateway access,
 push/PR creation, or native agent resume.
 
+The optional `--worker-gateway` mode additionally validates actual native Git
+through the local capability gateway and encrypted-database restart. Its
+[2026-09-19 receipt](validation-2026-09-19-github-worker-company-smoke.md) passed
+without remote writes. It is still not deployed AWS/CloudFront worker acceptance.
+
 ## Historical validation (2026-09-18, before provider-permissions refinement)
 
 These receipts describe the earlier implementation. Current validation and
