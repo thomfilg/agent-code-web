@@ -2,6 +2,14 @@
 
 ## Current MVP audit — 2026-09-19
 
+Follow-up source `28fed2d` fixes named-account disconnection/refresh races,
+durable retry state, sibling-worker revocation and safe deployment drain.
+The clean integrated check passed 142 distinct focused Node tests and all 19
+account browser cases without retries. Real read-only GitHub and installed
+Codex/Claude company-MCP discovery also passed within their isolated test scopes.
+This follow-up is **not deployed** while the AWS operator session is expired.
+See the [integrated receipt and remaining gates](validation-2026-09-19-mvp-followup.md).
+
 Runtime `4c45f16` was published and independently verified at 00:07 UTC; PR #4
 includes its receipt at `1047a95`. Stop/Escape, working elapsed time/tool count,
 native message paragraphs and chronological inline action groups are published.
@@ -24,9 +32,9 @@ authentication reset was attempted. Local implementation/testing continues;
 internal AWS verification/publication requires session renewal. This is not
 evidence that the application itself is unavailable.
 
-The GitHub and real-CLI MCP smoke harnesses are being re-audited against today's
-company-scoped production model: legacy unassigned fixtures cannot prove that
-boundary. The [current consent/execution checklist](mvp-consent-checklist.md)
+The GitHub and real-CLI MCP smoke harnesses now exercise today's company-scoped
+production model; their passing isolated checks do not prove deployed selection.
+The [current consent/execution checklist](mvp-consent-checklist.md)
 uses inline chat, the combined account selector and automatic company MCPs;
 it no longer asks for removed company checkboxes or empty-message chat creation.
 Company-tab Settings, compact browser header, hibernation and unfinished doctor
