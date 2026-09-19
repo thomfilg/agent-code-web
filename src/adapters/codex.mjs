@@ -95,7 +95,7 @@ function safeToolEvent(item, state) {
 }
 
 export class CodexAdapter {
-  constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, requireResume = Boolean(chat.nativeForkSessionId), restoreFork = null, savedAgentThreads = null }) {
+  constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, requireResume = Boolean(chat.nativeForkSessionId), restoreFork = null, savedAgentThreads = null, nativeSessions = null, checkpointGuard = () => {} }) {
     this.chat = chat;
     this.apps = new CodexApps((method, params) => {
       if (!this.rpc) throw new Error("The native app connection is stopped");
@@ -114,6 +114,10 @@ export class CodexAdapter {
     this.requireResume = requireResume;
     this.restoreFork = restoreFork;
     this.savedAgentThreads = savedAgentThreads;
+    this.nativeSessions = nativeSessions;
+    this.checkpointGuard = checkpointGuard;
+    this.nativeCapture = Promise.resolve();
+    this.nativePaths = new Map();
     this.createdForks = new Set();
     this.current = null;
     this.requests = new Map();
@@ -155,6 +159,16 @@ export class CodexAdapter {
     await ensureDirectory(env.CODEX_HOME);
     this.nativeHome = env.CODEX_HOME;
     this.nativeAuthMode = authMode;
+    if (authMode === "account" && this.nativeSessions?.available(this.chat) && this.threadId && !this.restoreFork) {
+      this.checkpointGuard();
+      const saved = await this.nativeSessions.read(this.store.get(this.chat.id), this.checkpointGuard);
+      this.checkpointGuard();
+      if (saved.value) {
+        const restored = await workerSessionIO(this.executor, { action: "restoreFresh", home: env.CODEX_HOME, bundle: saved.value.bundle });
+        this.checkpointGuard();
+        if (restored.restored) this.restoredNativeCheckpoint = saved.value;
+      }
+    }
     this.pluginCli = new CodexPluginCli({ command: this.config.codex.bin, workspace: this.workspace, env,
       ...(this.executor ? { spawn: this.executor.spawn.bind(this.executor) } : { isolation: this.config.processIsolation }) });
     this.plugins = new CodexPlugins({ run: args => this.pluginCli.run(args),
@@ -250,12 +264,68 @@ export class CodexAdapter {
       await this.hooks.onForkRestored?.();
       this.restoreFork = null;
     }
+    if (this.restoredNativeCheckpoint?.bundle.goal) {
+      const saved = this.restoredNativeCheckpoint.bundle.goal;
+      if (!this.goal) await this.goalAction("set", saved.objective, saved.status === "active" ? "paused" : saved.status, saved.tokenBudget);
+      if (this.goal?.objective !== saved.objective || this.goal?.tokenBudget !== saved.tokenBudget
+        || this.goal?.status !== (saved.status === "active" ? "paused" : saved.status)) throw new Error("Restored native goal could not be verified; no new task was started");
+    }
+    await this.checkpointNativeSession().catch(() => this.checkpointNotice());
     try { await this.refreshSkills(); } catch { /* Older workers can still run without skill discovery. */ }
   }
 
   async refreshSkills() {
     const result = await this.rpc.request("skills/list", { cwds: [this.workspace], forceReload: true }, 10000);
     await this.hooks.onEvent?.({ type: "command_catalog", commands: (result.data || []).flatMap(entry => (entry.skills || []).filter(skill => skill.enabled !== false).map(skill => ({ name: skill.name, description: skill.description, path: skill.path, kind: "Skill" }))) });
+  }
+
+  checkpointNotice() {
+    if (this.nativeCheckpointWarning) return;
+    this.nativeCheckpointWarning = true;
+    this.hooks.onEvent?.({ type: "notice", text: "The latest native history checkpoint could not be saved. The current session is retained; worker-loss recovery may use only an earlier verified checkpoint." });
+  }
+
+  checkpointNativeSession({ boundary = "complete-records", turnId = null, stopping = false, checkpointVersion } = {}) {
+    if (this.sharedParent || this.nativeAuthMode !== "account" || !this.nativeSessions?.available(this.chat)) return Promise.resolve(null);
+    const rpc = this.rpc, threadId = this.threadId;
+    const check = () => {
+      this.checkpointGuard({ stopping, checkpointVersion });
+      if (this.threadId !== threadId || this.rpc !== rpc || this.intentionalStop && !stopping) throw new Error("Native checkpoint cancelled");
+    };
+    const operation = this.nativeCapture.catch(() => {}).then(async () => {
+      check(); const chat = this.store.get(this.chat.id);
+      const previous = await this.nativeSessions.read(chat, check); check();
+      const bundle = await captureSessionBundle({ threadId, goal: this.goal ? structuredClone(this.goal) : null,
+        readThread: async id => {
+          check();
+          let thread = this.nativePaths.get(id);
+          if (!thread) {
+            if (!rpc) throw new Error("Native checkpoint source is unavailable");
+            thread = (await rpc.request("thread/read", { threadId: id, includeTurns: false }, 10000)).thread; check();
+            if (thread?.id !== id || thread.ephemeral || typeof thread.path !== "string") throw new Error("Native checkpoint source is unavailable");
+            this.nativePaths.set(id, thread);
+          }
+          return thread;
+        },
+        readBytes: async (filename, byteBoundary) => {
+          check(); const result = await workerSessionIO(this.executor, { action: "readScoped", home: this.nativeHome, path: filename, boundary: byteBoundary }); check();
+          return Buffer.from(result.data, "base64");
+        } });
+      check(); const saved = await this.nativeSessions.save(chat, bundle, previous.revision, { boundary, turnId }, check);
+      this.nativeCheckpointWarning = false;
+      return { savedAt: saved.value.savedAt, bytes: saved.value.bytes, threadId, boundary, turnId };
+    });
+    this.nativeCapture = operation.catch(() => {}); return operation;
+  }
+
+  scheduleNativeCheckpoint() {
+    if (this.nativeCheckpointTimer || this.nativeCaptureScheduled || this.intentionalStop || this.sharedParent || !this.nativeSessions?.available(this.chat)) return;
+    this.nativeCheckpointTimer = setTimeout(() => {
+      this.nativeCheckpointTimer = null;
+      this.nativeCaptureScheduled = true;
+      void this.checkpointNativeSession().catch(() => this.checkpointNotice()).finally(() => { this.nativeCaptureScheduled = false; });
+    }, 1000);
+    this.nativeCheckpointTimer.unref?.();
   }
 
   nativeSettingsBusy() { return Boolean(this.current || this.goal?.status === "active" || this.agents?.busy() || [...this.children].some(child => child.current)); }
@@ -274,11 +344,9 @@ export class CodexAdapter {
     if (this.threadId) {
       try {
         result = await this.rpc.request("thread/resume", { threadId: this.threadId, ...common, ...(this.requireResume ? { excludeTurns: true } : {}) }, 60_000);
-        if (this.requireResume && result?.thread?.id !== this.threadId) throw new Error("Codex returned a different native session ID");
+        if (result?.thread?.id !== this.threadId) throw new Error("Codex returned a different native session ID");
       } catch (error) {
-        if (this.requireResume) throw new Error(`The fork's native history could not be resumed. Its session ID was retained; no empty conversation was created. ${errorMessage(error)}`);
-        this.hooks.onEvent?.({ type: "notice", text: `Stored Codex thread could not be resumed; starting a new thread. ${errorMessage(error)}` });
-        this.threadId = null;
+        throw new Error(`The ${this.requireResume ? "fork's" : "chat's"} native history could not be resumed. Its session ID was retained; no empty conversation was created. ${errorMessage(error)}`);
       }
     }
     if (!this.threadId) {
@@ -292,6 +360,7 @@ export class CodexAdapter {
       await this.hooks.onSessionId?.(this.threadId);
     }
     this.settings = { model: result.model, serviceTier: result.serviceTier ?? null };
+    if (typeof result.thread?.path === "string") this.nativePaths.set(this.threadId, result.thread);
     await this.hooks.onEvent?.({ type: "session_details", details: safeSessionDetails("codex", { cwd: this.workspace, model: result.model, cliVersion: this.cliVersion }) });
   }
 
@@ -572,6 +641,7 @@ export class CodexAdapter {
         if (current.awaitingContinuation && this.goal?.status !== "active") this.#finishGoalRun();
       }
       const result = await completion;
+      await this.checkpointNativeSession({ boundary: "turn-completed", turnId: current.turnId || null }).catch(() => this.checkpointNotice());
       return result;
     } catch (error) {
       startReady.resolve(null);
@@ -658,8 +728,9 @@ export class CodexAdapter {
     catch (error) { this.#rejectCurrent(error); await complete.catch(() => {}); throw error; }
   }
 
-  async stop() {
+  async stop({ checkpointVersion } = {}) {
     this.intentionalStop = true;
+    clearTimeout(this.nativeCheckpointTimer); this.nativeCheckpointTimer = null;
     await this.pluginCli?.stop();
     if (this.sharedParent) {
       const rpc = this.rpc;
@@ -684,6 +755,8 @@ export class CodexAdapter {
     }
     this.requests.clear();
     this.#rejectCurrent(new Error("Turn interrupted because the worker was stopped"));
+    await this.checkpointNativeSession({ boundary: "stopping", stopping: true, checkpointVersion }).catch(() => {});
+    await this.nativeCapture;
     const rpc = this.rpc;
     if (rpc) await Promise.allSettled([...this.createdForks].map(threadId => rpc.request("thread/archive", { threadId }, 1000)));
     this.createdForks.clear();
@@ -700,6 +773,7 @@ export class CodexAdapter {
     const { method, params = {} } = message;
     if (method === "account/updated") { this.accountEpoch = (this.accountEpoch || 0) + 1; this.hooks.onEvent?.({ type: "native_account_updated" }); return; }
     if (params.threadId && this.threadId && params.threadId !== this.threadId) return;
+    if (["item/completed", "turn/completed"].includes(method) && params.threadId === this.threadId) this.scheduleNativeCheckpoint();
     if (method === "item/autoApprovalReview/completed" && params.threadId === this.threadId && params.review?.status === "denied") {
       this.hooks.onEvent?.({ type: "native_approval_denied", report: params }); return;
     }

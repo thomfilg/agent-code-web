@@ -3,6 +3,7 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import pg from "pg";
 import { admissionRecordKind, assertAttemptFence, canonical, leaseFailure, recordLockKey, revision, scopeRecords, synchronousTransition, workerTransportKey } from "./worker-lease-scope.mjs";
+import { nativeSessionRecords, sessionFailure } from "./native-session-scope.mjs";
 
 const admissionSnapshot = values => Object.fromEntries(["chat", "account", "disconnection", "company", "environment"].map((key, index) => [key, values[index]]));
 function expectedRevision(actual, expected) { if (!revision(expected) || actual !== expected) throw leaseFailure("CAS_CONFLICT"); }
@@ -56,13 +57,13 @@ export class EncryptedRecords {
   async put(kind, id, value) {
     const write = client => client.query(`INSERT INTO relay_records(kind,id,payload) VALUES($1,$2,$3)
       ON CONFLICT(kind,id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=now()`, [kind, id, this.cipher.seal(kind, id, value)]);
-    if (admissionRecordKind(kind)) await this.#transaction([recordLockKey(kind, id)], write);
+    if (admissionRecordKind(kind) || kind === "native-session") await this.#transaction([recordLockKey(kind, id)], write);
     else await write(this.pool);
     return structuredClone(value);
   }
   async delete(kind, id) {
     const remove = client => client.query("DELETE FROM relay_records WHERE kind=$1 AND id=$2", [kind, id]);
-    if (admissionRecordKind(kind)) await this.#transaction([recordLockKey(kind, id)], remove);
+    if (admissionRecordKind(kind) || kind === "native-session") await this.#transaction([recordLockKey(kind, id)], remove);
     else await remove(this.pool);
   }
   async #transaction(keys, action, requireCommit = false) {
@@ -100,6 +101,29 @@ export class EncryptedRecords {
     return { revision: next, value: structuredClone(value) };
   }
   async workerAttemptGet(id) { return this.#workerGet(this.pool, "attempt", attemptId(id)); }
+  async nativeSessionTransaction({ scope, expectedRevision: expected }, transition) {
+    const refs = nativeSessionRecords(scope), id = scope.chatId, kind = "native-session";
+    return this.#transaction([recordLockKey(kind, id), ...refs.map(([type, key]) => recordLockKey(type, key))], async client => {
+      const read = async (type, key) => {
+        const result = await client.query("SELECT payload FROM relay_records WHERE kind=$1 AND id=$2", [type, key]);
+        return result.rows[0] ? this.cipher.open(type, key, result.rows[0].payload) : null;
+      };
+      const previous = await read(kind, id), currentRevision = previous?.revision || 0;
+      if (expected !== undefined) expectedRevision(currentRevision, expected);
+      const values = [];
+      for (const [type, key] of refs) values.push(await read(type, key));
+      const now = Number((await client.query("SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now")).rows[0].now);
+      const row = { revision: currentRevision, value: previous };
+      const next = synchronousTransition(transition, { ...row, records: admissionSnapshot(values), now });
+      if (next === undefined) return row;
+      if (expected === undefined || !next || next.scope?.chatId !== id || canonical(next.scope) !== canonical(scope)
+        || !revision(currentRevision + 1)) throw sessionFailure("INVALID_TRANSITION");
+      const value = { ...next, revision: currentRevision + 1 };
+      await client.query(`INSERT INTO relay_records(kind,id,payload) VALUES($1,$2,$3)
+        ON CONFLICT(kind,id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=now()`, [kind, id, this.cipher.seal(kind, id, value)]);
+      return { revision: value.revision, value: structuredClone(value) };
+    }, true);
+  }
   async workerAttemptTransaction({ attemptId: id, expectedRevision: expected, scope }, transition) {
     attemptId(id); const refs = scopeRecords(scope);
     return this.#transaction([recordLockKey("worker-attempt", id), ...refs.map(([kind, key]) => recordLockKey(kind, key))], async client => {
@@ -143,11 +167,11 @@ export class MemoryRecords {
   async list(kind) { return [...this.rows.entries()].filter(([k]) => k.startsWith(`${kind}/`)).map(([, v]) => structuredClone(v)); }
   async put(kind, id, value) {
     const write = () => { this.rows.set(`${kind}/${id}`, structuredClone(value)); return structuredClone(value); };
-    return admissionRecordKind(kind) ? this.#locked([recordLockKey(kind, id)], write) : write();
+    return admissionRecordKind(kind) || kind === "native-session" ? this.#locked([recordLockKey(kind, id)], write) : write();
   }
   async delete(kind, id) {
     const remove = () => { this.rows.delete(`${kind}/${id}`); };
-    return admissionRecordKind(kind) ? this.#locked([recordLockKey(kind, id)], remove) : remove();
+    return admissionRecordKind(kind) || kind === "native-session" ? this.#locked([recordLockKey(kind, id)], remove) : remove();
   }
   async #locked(keys, action) {
     const releases = [];
@@ -167,6 +191,21 @@ export class MemoryRecords {
     const next = { revision: row.revision + 1, value: structuredClone(value) }; this.workerRows.set(`${kind}/${id}`, next); return structuredClone(next);
   }
   async workerAttemptGet(id) { return this.#workerGet("attempt", attemptId(id)); }
+  async nativeSessionTransaction({ scope, expectedRevision: expected }, transition) {
+    const refs = nativeSessionRecords(scope), id = scope.chatId, key = `native-session/${id}`;
+    return this.#locked([recordLockKey("native-session", id), ...refs.map(([type, value]) => recordLockKey(type, value))], () => {
+      const previous = structuredClone(this.rows.get(key) || null), currentRevision = previous?.revision || 0;
+      if (expected !== undefined) expectedRevision(currentRevision, expected);
+      const row = { revision: currentRevision, value: previous };
+      const values = refs.map(([type, value]) => structuredClone(this.rows.get(`${type}/${value}`) || null));
+      const next = synchronousTransition(transition, { ...row, records: admissionSnapshot(values), now: Date.now() });
+      if (next === undefined) return row;
+      if (expected === undefined || !next || next.scope?.chatId !== id || canonical(next.scope) !== canonical(scope)
+        || !revision(currentRevision + 1)) throw sessionFailure("INVALID_TRANSITION");
+      const value = { ...next, revision: currentRevision + 1 };
+      this.rows.set(key, structuredClone(value)); return { revision: value.revision, value: structuredClone(value) };
+    });
+  }
   async workerAttemptTransaction({ attemptId: id, expectedRevision: expected, scope }, transition) {
     attemptId(id); const refs = scopeRecords(scope);
     return this.#locked([recordLockKey("worker-attempt", id), ...refs.map(([kind, key]) => recordLockKey(kind, key))], () => {

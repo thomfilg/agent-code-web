@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { open, mkdir, lstat, writeFile, link, unlink } from "node:fs/promises";
+import { open, mkdir, lstat, writeFile, link, unlink, realpath, readdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import * as zlib from "node:zlib";
@@ -28,6 +28,20 @@ export async function readSessionBytes(filename, boundary = null) {
     if (boundary !== null && bytes.length < boundary) throw new Error("Native session source is shorter than its boundary");
     return boundary === null ? bytes : bytes.subarray(0, boundary);
   } finally { await file.close(); }
+}
+
+export async function readScopedSessionBytes(home, filename, boundary = null) {
+  if (typeof home !== "string" || !path.isAbsolute(home) || path.resolve(home) === path.parse(home).root
+    || await realpath(home) !== path.resolve(home)) throw new Error("Native checkpoint requires a private profile");
+  const actual = await realpath(filename);
+  if (actual !== path.resolve(filename) || !["sessions", "archived"].some(folder => actual.startsWith(`${path.resolve(home)}/${folder}/`))) throw new Error("Native history is outside the selected private profile");
+  const bytes = await readSessionBytes(filename, boundary);
+  // A writer may be appending its next JSON record. Only a complete native
+  // prefix is eligible; its incomplete suffix is not a durable checkpoint.
+  if (boundary !== null) return bytes;
+  const end = bytes.lastIndexOf(10);
+  if (end < 0) throw new Error("Native history has no complete records");
+  return bytes.subarray(0, end + 1);
 }
 
 function inspectFile(bytes, id) {
@@ -144,34 +158,56 @@ export async function installSessionBundle(codexHome, bundle) {
   return rootPath;
 }
 
+export async function restoreSessionBundleIfFresh(home, bundle) {
+  validateSessionBundle(bundle);
+  if (typeof home !== "string" || !path.isAbsolute(home) || path.resolve(home) === path.parse(home).root
+    || await realpath(home) !== path.resolve(home)) throw new Error("Native restore requires a private profile");
+  const stat = await lstat(home);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("Native restore requires a private profile");
+  // Never seed alongside an original/continued rollout with the same UUID.
+  // A surviving profile resumes its native file; only an empty replacement
+  // profile is eligible for restoration from the controller checkpoint.
+  if ((await readdir(home)).length) return { restored: false };
+  return { restored: true, path: await installSessionBundle(home, bundle) };
+}
+
 // The same validated file operations run in an EC2 worker without SSHing its
 // credentials or an entire home directory back to the controller.
 const workerScript = `
 import { constants } from "node:fs";
-import { open, mkdir, lstat, writeFile, link, unlink } from "node:fs/promises";
+import { open, mkdir, lstat, writeFile, link, unlink, realpath, readdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import * as zlib from "node:zlib";
 const MAX_SESSION_BYTES = ${MAX_SESSION_BYTES}, MAX_LINEAGE = ${MAX_LINEAGE};
 const UUID = ${UUID}; const validId = ${validId};
 ${readSessionBytes}
+${readScopedSessionBytes}
 ${inspectFile}
 ${validateSessionBundle}
 ${installSessionBundle}
+${restoreSessionBundleIfFresh}
 try {
   const chunks = []; let length = 0;
   for await (const chunk of process.stdin) { length += chunk.length; if (length > MAX_SESSION_BYTES * 1.4 + 65536) throw new Error("Native transfer input exceeds its limit"); chunks.push(chunk); }
   const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   if (input.action === "read") process.stdout.write(JSON.stringify({ data: (await readSessionBytes(input.path, input.boundary ?? null)).toString("base64") }));
+  else if (input.action === "readScoped") process.stdout.write(JSON.stringify({ data: (await readScopedSessionBytes(input.home, input.path, input.boundary ?? null)).toString("base64") }));
   else if (input.action === "install") process.stdout.write(JSON.stringify({ path: await installSessionBundle(input.home, input.bundle) }));
+  else if (input.action === "restoreFresh") process.stdout.write(JSON.stringify(await restoreSessionBundleIfFresh(input.home, input.bundle)));
   else throw new Error("Unknown native transfer operation");
 } catch (error) { process.stderr.write(String(error.message).slice(0, 2000)); process.exitCode = 1; }
 `;
 
 export async function workerSessionIO(executor, input) {
-  if (!["read", "install"].includes(input?.action)) throw new Error("Unknown native transfer operation");
-  if (input.action === "install") validateSessionBundle(input.bundle);
-  if (!executor) return input.action === "read" ? { data: (await readSessionBytes(input.path, input.boundary ?? null)).toString("base64") } : { path: await installSessionBundle(input.home, input.bundle) };
+  if (!["read", "readScoped", "install", "restoreFresh"].includes(input?.action)) throw new Error("Unknown native transfer operation");
+  if (["install", "restoreFresh"].includes(input.action)) validateSessionBundle(input.bundle);
+  if (!executor) {
+    if (input.action === "restoreFresh") return restoreSessionBundleIfFresh(input.home, input.bundle);
+    if (input.action === "install") return { path: await installSessionBundle(input.home, input.bundle) };
+    return { data: (input.action === "readScoped" ? await readScopedSessionBytes(input.home, input.path, input.boundary ?? null)
+      : await readSessionBytes(input.path, input.boundary ?? null)).toString("base64") };
+  }
   return new Promise((resolve, reject) => {
     const child = executor.spawn("node", ["--input-type=module", "-e", workerScript], {
       cwd: executor.runtimeHome, env: { HOME: executor.runtimeHome, PATH: executor.environmentPath || process.env.PATH, LANG: "C.UTF-8" }, stdio: ["pipe", "pipe", "pipe"],

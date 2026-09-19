@@ -20,6 +20,7 @@ import { PreviewActivity } from "./preview-activity.mjs";
 import { publicRequest, responseFor } from "./agent-requests.mjs";
 import { SideChats } from "./side-chats.mjs";
 import { NativeAgentSnapshots } from "./native-agent-snapshots.mjs";
+import { NativeSessionCheckpoints } from "./native-session-checkpoints.mjs";
 import { companyForChat, scopeAllows } from "../public/company-scope.js";
 import { snapshotWorkspace } from "./workspace-snapshot.mjs";
 import { validateSessionBundle } from "./codex-session-bundle.mjs";
@@ -259,6 +260,7 @@ export class RuntimeManager extends EventEmitter {
     this.attachments = attachments;
     this.mcps = mcps;
     this.resources = resources;
+    this.nativeSessions = new NativeSessionCheckpoints({ records: store.records, isLegacy: ownerId => resources?.isLegacy(ownerId) ?? !config.google?.enabled });
     if (this.environments) this.environments.onSaved = async environment => {
       for (const chat of this.store.list()) if (chat.environmentId === environment.id) {
         const company = companyForChat(chat);
@@ -1755,7 +1757,7 @@ export class RuntimeManager extends EventEmitter {
       if (runtime.idleTimer) clearTimeout(runtime.idleTimer);
       this.#runtimes.delete(chatId);
       await this.sideChats.close(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Side stop warning: ${errorMessage(error)}` }));
-      await runtime.adapter.stop().catch((error) => this.#emit(chatId, { type: "runtime_log", text: `Adapter stop warning: ${errorMessage(error)}` }));
+      await runtime.adapter.stop({ checkpointVersion: stopVersion }).catch((error) => this.#emit(chatId, { type: "runtime_log", text: `Adapter stop warning: ${errorMessage(error)}` }));
       await this.#checkpointStoppedAgentThreads(chatId, runtime, stopVersion).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
       await runtime.eventQueue; // Flush final context/usage before worker storage disappears.
       await this.agentThreads.flush(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
@@ -2005,7 +2007,13 @@ export class RuntimeManager extends EventEmitter {
     try {
       adapter = this.adapterFactory
         ? this.adapterFactory({ chat, hooks, executor, restoreFork: forkRecord && !forkRecord.initialized ? forkRecord.bundle : null, savedAgentThreads })
-        : new Adapter({ chat, store: this.store, config: this.config, broker: this.broker, gatewayOrigin: this.gatewayOrigin, executor, hooks, restoreFork: forkRecord && !forkRecord.initialized ? forkRecord.bundle : null, savedAgentThreads });
+        : new Adapter({ chat, store: this.store, config: this.config, broker: this.broker, gatewayOrigin: this.gatewayOrigin, executor, hooks, restoreFork: forkRecord && !forkRecord.initialized ? forkRecord.bundle : null, savedAgentThreads,
+          nativeSessions: this.nativeSessions, checkpointGuard: ({ stopping = false, checkpointVersion } = {}) => {
+            if (!stopping) return checkCancelled();
+            const current = this.store.get(chatId), active = this.#runtimes.get(chatId);
+            if (!Number.isSafeInteger(checkpointVersion) || checkpointVersion !== (this.#lifecycleVersions.get(chatId) || 0)
+              || !current || current.archived || runtimeAccountBinding(current) !== runtimeAccountBinding(chat) || active && active !== runtime) throw new Error("Native checkpoint owner changed");
+          } });
       runtime = { adapter, executor, forkContext, accountBinding: runtimeAccountBinding(chat), busy: false, idleTimer: null, generation: 0, eventQueue: Promise.resolve() };
       this.#runtimes.set(chatId, runtime);
       await this.#startupTask(chatId, "agent", version, () => { checkCancelled(); return adapter.start(); });
@@ -2272,7 +2280,7 @@ export class RuntimeManager extends EventEmitter {
       try {
         const cleanupErrors = [];
         await this.sideChats.close(chatId).catch(() => {});
-        await runtime.adapter.stop().catch(error => cleanupErrors.push(error));
+        await runtime.adapter.stop({ checkpointVersion: failureVersion }).catch(error => cleanupErrors.push(error));
         await this.#checkpointStoppedAgentThreads(chatId, runtime, failureVersion).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
         await this.agentThreads.flush(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
         try { await this.browsers?.stop(chatId); } catch (error) { cleanupErrors.push(error); }
