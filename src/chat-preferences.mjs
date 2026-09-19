@@ -1,4 +1,5 @@
-import { companyForChat, scopeAllows } from "../public/company-scope.js";
+import { companyForChat } from "../public/company-scope.js";
+import { environmentAllows, environmentCompany } from "../public/environment-scope.js";
 
 const fail = message => Object.assign(new Error(message), { statusCode: 400 });
 const companyName = value => typeof value === "string" && /^[a-z0-9][a-z0-9-]{0,38}$/.test(value);
@@ -23,10 +24,11 @@ export function chatSelection(value = {}) {
 }
 
 export async function rememberChatSelection(records, value, environment, now = new Date().toISOString()) {
+  if (environment.scopeNeedsReview || !environmentCompany(environment)) throw fail("Choose an environment assigned to one company before remembering this selection");
   const selection = chatSelection(value);
   const company = companyForChat(selection) || (environment.companies?.length === 1 ? environment.companies[0] : null);
   if (!companyName(company)) return;
-  if (selection.repositories.some(repo => companyForChat({ repositories: [repo] }) !== company) || !scopeAllows(environment, company)) throw fail("Keep remembered repositories and environment within one company");
+  if (selection.repositories.some(repo => companyForChat({ repositories: [repo] }) !== company) || !environmentAllows(environment, company)) throw fail("Keep remembered repositories and environment within one company");
   const record = { companyId: company, updatedAt: now, selection };
   // Separate keys avoid lost updates between different companies/projects.
   await records.put("new-chat-company", company, record);
@@ -49,7 +51,7 @@ export async function restoreChatSelection({ records, companies, environments, g
   const selection = chatSelection(source), warnings = [];
   if (!source && !namedAccounts) selection.agent = availableAgents.find(agent => agent.enabled)?.id || null;
   const environmentList = await environments.list();
-  const allowed = environmentList.filter(env => !env.archived && scopeAllows(env, companyId));
+  const allowed = environmentList.filter(env => !env.archived && environmentAllows(env, companyId));
   selection.environmentId = allowed.find(env => env.id === selection.environmentId)?.id || (!source?.environmentId ? allowed[0]?.id : null) || null;
   if (source?.repositories?.length) {
     try {

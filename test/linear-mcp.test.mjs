@@ -199,12 +199,13 @@ test("independent same-name workspace OAuth reaches both selected provider envir
   await assert.rejects(otherUser.runtime("foreign-chat", ids, "http://localhost"), /not found/);
   await assert.rejects(otherUser.oauth.begin(ids[0], "http://localhost:8787/oauth/mcp/callback"), /not found/);
   await assert.rejects(otherUser.oauth.cancel(ids[0]), /not found/);
-  const environment = await app.manager.environments.save({ name: "Scoped Linear", backend: "local", companies: ["12-apps", "g2i"], allowUnassigned: true, mcpIds: ids });
+  const environments = new Map();
+  for (const company of fixtures.keys()) environments.set(company, await app.manager.environments.save({ name: `Scoped Linear ${company}`, backend: "local", companies: [company], mcpIds: ids }));
   for (const agent of ["codex", "claude"]) for (const company of fixtures.keys()) {
-    const chat = await app.manager.createChat({ agent, title: "Fixture scoped runtime", environmentId: environment.id });
+    const chat = await app.manager.createChat({ agent, title: "Fixture scoped runtime" });
     // Complete synthetic selections preserve real GitHub admission while the
     // fixture exercises Linear; no clone or upstream GitHub call is involved.
-    await app.store.update(chat.id, { repositories: [{ id: 31, githubConnectionId: githubIds.get(company), fullName: `${company}/fixture` }, { id: 32, githubConnectionId: githubIds.get(company), fullName: `${company === "g2i" ? "12-apps" : "g2i"}/secondary` }] });
+    await app.store.update(chat.id, { environmentId: environments.get(company).id, repositories: [{ id: 31, githubConnectionId: githubIds.get(company), fullName: `${company}/fixture` }, { id: 32, githubConnectionId: githubIds.get(company), fullName: `${company === "g2i" ? "12-apps" : "g2i"}/secondary` }] });
     await app.manager.send(chat.id, "fixture read");
     assert.equal(seen.at(-1).agent, agent); assert.equal(seen.at(-1).workspace, company);
     const token = seen.at(-1).server.headers.Authorization.slice(7);

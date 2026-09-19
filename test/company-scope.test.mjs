@@ -39,12 +39,13 @@ test("MCP multi-company connections grant only explicitly selected primary compa
 });
 test("environments reject excluded companies before returning worker variables, including after restart and migration", async () => {
   const records = new MemoryRecords(), envs = new Environments(records);
-  const env = await envs.save({ name: "Future", backend: "local", companies: ["12-apps", "thomfilg"], variables: [{ key: "REGION", value: "allowed", secret: false }, { key: "SECRET", value: "protected" }] });
+  for (const id of ["12-apps", "thomfilg"]) await envs.companies.save({ id, name: id });
+  const env = await envs.save({ name: "Future", backend: "local", companies: ["12-apps"], variables: [{ key: "REGION", value: "allowed", secret: false }, { key: "SECRET", value: "protected" }] });
   assert.ok(!JSON.stringify(await envs.list()).includes("protected"));
   assert.deepEqual((await envs.runtime(env.id, chat("12-apps"))).variables, { REGION: "allowed" });
   for (const company of ["g2i", "umg"]) await assert.rejects(envs.runtime(env.id, chat(company)), { statusCode: 403 });
   await assert.rejects(envs.runtime(env.id), { statusCode: 403 });
-  await envs.save({ ...env, companies: ["thomfilg"] }, env.id);
+  await envs.save({ ...env, companies: ["thomfilg"], companyId: "thomfilg" }, env.id);
   await assert.rejects(new Environments(records).runtime(env.id, chat("12-apps")), { statusCode: 403 });
   await records.put("environment", "legacy", { id: "legacy", name: "Legacy", variables: [], backend: "local" });
   await assert.rejects(envs.runtime("legacy", chat("g2i")), { statusCode: 403 });
@@ -121,6 +122,7 @@ test("secondary repositories retain their selected GitHub connection; provider d
 test("environment scope edits revoke existing MCP grants and block the next turn without losing real messages", async t => {
   const root = await temporaryDirectory(t), records = new MemoryRecords(), store = new ChatStore(root, records); await store.initialize();
   const mcps = new McpConnections(records), environments = new Environments(records, "local", mcps);
+  for (const id of ["12-apps", "g2i"]) await environments.companies.save({ id, name: id });
   const first = await mcps.save({ name: "first", companies: ["12-apps"], type: "http", url: "https://tools.example/mcp" });
   const second = await mcps.save({ name: "second", companies: ["12-apps"], type: "http", url: "https://tools.example/mcp" });
   let environment = await environments.save({ name: "Future", backend: "local", companies: ["12-apps"], mcpIds: [first.id, second.id] });
@@ -131,14 +133,16 @@ test("environment scope edits revoke existing MCP grants and block the next turn
   const revoked = new AbortController(); mcps.grants.get(created.id).get(first.id).streams.add(revoked);
   environment = await environments.save({ ...environment, mcpIds: [second.id] }, environment.id);
   assert.equal(revoked.signal.aborted, true); assert.deepEqual([...mcps.grants.get(created.id).keys()], [second.id]);
-  await environments.save({ ...environment, companies: ["g2i"] }, environment.id);
+  await environments.save({ ...environment, companies: ["g2i"], companyId: "g2i" }, environment.id);
   assert.equal(mcps.grants.get(created.id).size, 0);
   await assert.rejects(manager.submit(created.id, "This must not reach an agent"), { statusCode: 403 });
   assert.deepEqual(store.get(created.id).messages.map(message => message.text), ["Keep this actual message"]);
 });
 test("the configured default source is company-checked before cloning, even if omitted from the request", async t => {
   const root = await temporaryDirectory(t), records = new MemoryRecords(), store = new ChatStore(root, records); await store.initialize();
-  const environments = new Environments(records), environment = await environments.save({ name: "Unassigned only", backend: "local", allowUnassigned: true });
+  const environments = new Environments(records);
+  await environments.companies.save({ id: "other", name: "Other" });
+  const environment = await environments.save({ name: "Other company only", backend: "local", companies: ["other"] });
   const manager = new RuntimeManager({ store, config: testConfig(root, { AGENT_WORKSPACE_SOURCE: "https://github.com/g2i/project.git" }), broker: new CapabilityBroker({ ttlMs: 10000 }), environments });
   t.after(() => manager.shutdown());
   await assert.rejects(manager.createChat({ agent: "mock", environmentId: environment.id }), { statusCode: 403 });

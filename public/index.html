@@ -354,6 +354,9 @@
           <div class="environment-scroll">
           <section id="environment-overview">
           <label><span>Environment name</span><input id="environment-name" required maxlength="80" placeholder="e.g. Acme staging"></label>
+          <label><span>Assigned company</span><select id="environment-company" required></select></label>
+          <p class="muted">One company per environment. Changing this assignment does not move chats or grant access to chats from another company. Running workers are not restarted.</p>
+          <p class="muted" id="environment-company-review" hidden>This environment needs a company assignment before it can start a worker. Saved variables remain unchanged. Choose one registered company explicitly.</p>
           <p class="muted" id="environment-backend"></p>
           <div id="environment-summary-cards" class="environment-summary-cards">
             <button type="button" class="environment-summary-card" data-environment-section="software"><strong>Installed software</strong><span id="environment-software-summary"></span><small>Choose installed tools →</small></button>
@@ -361,7 +364,6 @@
             <button type="button" class="environment-summary-card" data-environment-section="setup"><strong>Setup script</strong><span id="environment-setup-summary"></span><small>Configure startup →</small></button>
           </div>
           <details id="environment-advanced"><summary>Access and advanced settings</summary>
-            <div id="environment-companies"></div>
             <section class="environment-mcps"><h3>Company tools</h3><div id="environment-mcp-options"></div><p class="muted">Tools follow the chat’s company automatically.</p></section>
             <p class="muted">Network access uses the worker infrastructure default. Custom egress restrictions are not enforced here.</p>
             <label class="checkbox-label"><input type="checkbox" id="environment-archived"><span>Archive environment · hide from new chats</span></label>
