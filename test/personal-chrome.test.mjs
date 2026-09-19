@@ -20,6 +20,7 @@ test("real Chrome extension keeps logins private until the per-chat toggle, and 
   const models = new ModelCatalog(config); models.codex = models.claude = async () => ({ models: [], source: "fixture" });
   const options = { config, records, models, github: { status: async () => ({ connected: false }) }, commands: { list: async () => ({ commands: [] }) } };
   let app = await createAgentWebServer(options); const { url, port } = await app.start();
+  await (await app.resources.forOwner(null)).companies.save({ id: "fixture-company", name: "Fixture company" });
   t.after(async () => { await profile?.close(); await app.stop(); await site.close(); await rm(root, { recursive: true, force: true }); });
   const request = async (route, cookie, method = "GET", value) => {
     const response = await fetch(url + route, { method, headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) }, ...(value ? { body: JSON.stringify(value) } : {}) });
@@ -57,6 +58,7 @@ test("real Chrome extension keeps logins private until the per-chat toggle, and 
   const paired = { code: await relay.locator("#browser-pair-code").inputValue(), id: (await request("/api/browser-connections", cookie)).body.connections[0].id };
   // This pre-existing shared chat is claimed privately only after explicit consent.
   const chat = (await request("/api/chats", null, "POST", { agent: "mock", title: "Private browser fixture" })).body.chat;
+  await app.store.update(chat.id, { repositories: [{ fullName: "fixture/project", companyId: "fixture-company" }] });
   const worker = profile.serviceWorkers()[0] || await profile.waitForEvent("serviceworker"), extensionId = new URL(worker.url()).host;
   const personalTab = await profile.newPage(), fixtureUrl = site.url.replace("127.0.0.1", "localhost");
   await personalTab.goto(fixtureUrl); await personalTab.getByRole("button", { name: "Fixture sign in" }).click();

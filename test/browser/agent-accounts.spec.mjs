@@ -26,7 +26,8 @@ async function login(page, relay) {
   });
   await page.goto(relay.url); await page.getByRole("button", { name: "Continue with Google" }).click();
   await page.getByRole("link", { name: "Continue fixture sign-in" }).click();
-  await expect(page.locator("#relay-account-button")).toHaveText("owner@example.com");
+  await expect(page.locator("#relay-account-button")).toHaveAttribute("title", "owner@example.com");
+  await expect(page.locator("#sidebar-user-name")).toContainText("Relay Owner");
   await expect(page.locator("#isolation-label")).toHaveText("Process isolation disabled");
   await expect(page.locator("#agent-accounts-button")).toBeAttached();
   await expect(page.locator("#new-chat-page")).toBeVisible();

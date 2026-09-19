@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-async function fixture(page, { empty = false, shared = false } = {}) {
+async function fixture(page, { empty = false, shared = false, secrets = false } = {}) {
   const repository = (fullName, companyId) => ({ fullName, companyId, githubConnectionId: `github-${companyId}`, defaultBranch: "main", branch: "dev" });
   const repositories = [repository("12-apps/future-pay", "personal"), repository("thomfilg/tools", "personal"), repository("g2i-ai/clickdown", "g2i")];
   const environment = (id, name, companies, extra = {}) => ({ id, name, companies, allowUnassigned: false, archived: false, backend: "local", revision: 1, software: [], variables: [], variablesEnabled: true, ...extra });
@@ -10,7 +10,8 @@ async function fixture(page, { empty = false, shared = false } = {}) {
     preferences: { agent: "mock", environmentId: empty ? "env-g2i" : "env-personal", repositories: empty ? [] : repositories.slice(0, 2) },
     creates: [], writes: [],
   };
-  if (shared) Object.assign(f.environments[0], { companies: ["personal", "g2i"], allowUnassigned: true, variables: [{ key: "PRIVATE_TOKEN", secret: true, enabled: true, hasValue: true }], setupScript: "echo ready" });
+  if (shared) Object.assign(f.environments[0], { companies: ["personal", "g2i"], allowUnassigned: true, scopeNeedsReview: true, variables: [{ key: "PRIVATE_TOKEN", secret: true, enabled: true, hasValue: true }], setupScript: "echo ready" });
+  if (secrets) Object.assign(f.environments[0], { variables: [{ key: "PRIVATE_TOKEN", secret: true, enabled: true, hasValue: true }], setupScript: "echo ready" });
   await page.route("**/api/companies", route => route.fulfill({ json: { companies: [{ id: "personal", name: "thomfilg + 12-apps" }, { id: "g2i", name: "g2i" }] } }));
   await page.route("**/api/github", route => route.fulfill({ json: { connected: true, login: "fixture", connections: ["personal", "g2i"].map(companyId => ({ id: `github-${companyId}`, companyId, connected: true })) } }));
   await page.route("**/api/github/repositories*", route => route.fulfill({ json: { repositories } }));
@@ -119,7 +120,7 @@ test("saving a different company environment selects it with the same draft isol
 });
 
 test("environment cards retain edits across editors, protect switches and close only after a successful save", async ({ page }) => {
-  const f = await fixture(page, { shared: true });
+  const f = await fixture(page, { secrets: true });
   await page.locator("#environment-settings").click();
   const save = page.locator("#save-environment");
   await expect(save).toBeDisabled();
@@ -161,10 +162,32 @@ test("environment cards retain edits across editors, protect switches and close 
   f.failSave = false; await save.click();
   await expect(page.locator("#environments-dialog")).not.toBeVisible();
   expect(f.writes).toHaveLength(2);
-  expect(f.writes[1].companies).toEqual(["personal", "g2i"]);
-  expect(f.writes[1].allowUnassigned).toBe(true);
+  expect(f.writes[1].companies).toEqual(["personal"]);
+  expect(f.writes[1].allowUnassigned).toBe(false);
   expect(f.writes[1].variables[0]).toEqual({ key: "PRIVATE_TOKEN", secret: true, enabled: true, hasValue: true });
   expect(f.writes[1].variables[1].value).toBe("fixture-value");
+});
+
+test("legacy multi-company environment requires explicit single-company review without exposing saved values", async ({ page }) => {
+  const f = await fixture(page, { shared: true });
+  await expect(page.locator('#environment-select option[value="env-personal"]')).toHaveCount(0);
+  await page.locator("#environment-settings").click();
+  await page.locator("#environment-company-filter").selectOption("__review__");
+  await expect(page.locator("#environment-editor-select")).toHaveValue("env-personal");
+  await expect(page.locator("#environment-company")).toHaveValue("");
+  await expect(page.locator("#environment-company-review")).toBeVisible();
+  await expect(page.locator("#environment-company option")).toHaveText(["Choose one company", "thomfilg + 12-apps", "g2i"]);
+  await page.locator("#environment-name").fill("Legacy reviewed");
+  await page.locator("#save-environment").click();
+  await expect(page.locator("#environment-error")).toContainText("Choose one registered company");
+  expect(f.writes).toEqual([]);
+  await page.locator("#environment-company").selectOption("personal");
+  await page.locator("#save-environment").click();
+  await expect(page.locator("#environments-dialog")).not.toBeVisible();
+  expect(f.writes).toHaveLength(1);
+  expect(f.writes[0]).toMatchObject({ companyId: "personal", companies: ["personal"], allowUnassigned: false, revision: 1, variables: [{ key: "PRIVATE_TOKEN", secret: true, enabled: true, hasValue: true }] });
+  expect(f.writes[0].variables[0]).not.toHaveProperty("value");
+  expect(f.creates).toEqual([]);
 });
 
 test("unchanged and reverted environment edits never save; narrow editors keep Save in view", async ({ page }) => {

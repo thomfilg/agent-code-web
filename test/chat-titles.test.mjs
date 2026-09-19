@@ -104,8 +104,31 @@ test("model title replaces provisional title; manual names survive both later tu
   assert.equal(f.store.get(chat.id).messages.at(-1).text, "Done");
   await f.store.update(chat.id, { title: "My chosen name", autoTitle: false });
   await f.manager.send(chat.id, "another request");
+  assert.equal(f.store.get(chat.id).messages.at(-1).text, "Done");
   await f.hooks().onEvent({ type: "background_response", text: "<relay-title>Must not replace</relay-title>\nBackground done" });
   assert.equal(f.store.get(chat.id).title, "My chosen name");
+  assert.equal(f.store.get(chat.id).messages.at(-1).text, "Background done");
+});
+
+test("late title after commentary/tool stays hidden live and persisted while a concurrent manual rename wins", async t => {
+  let f;
+  const events = [];
+  f = await fixture(t, { send: async (_text, hooks) => {
+    await hooks.onEvent({ type: "assistant_delta", delta: "Checking the code.\n\n" });
+    await hooks.onEvent({ type: "tool", itemId: "title-check", title: "Read implementation", status: "completed", output: "checked" });
+    await f.store.update(chat.id, { title: "My manual title", autoTitle: false });
+    for (const delta of ["<relay-ti", "tle>Automatic correction</relay-title>", "\nVerified."]) await hooks.onEvent({ type: "assistant_delta", delta });
+    return { text: "Checking the code.\n\n<relay-title>Automatic correction</relay-title>\nVerified." };
+  } });
+  const chat = await f.manager.createChat({ agent: "codex" });
+  f.manager.on("event", event => events.push(event));
+  await f.manager.send(chat.id, "Check the implementation");
+  assert.equal(f.store.get(chat.id).title, "My manual title");
+  assert.doesNotMatch(events.filter(event => event.type === "assistant_delta").map(event => event.delta).join(""), /relay-title/);
+  const messages = f.store.get(chat.id).messages.filter(message => message.role === "assistant");
+  assert.doesNotMatch(messages.map(message => message.text).join("\n"), /relay-title/);
+  assert.match(messages.map(message => message.text).join("\n"), /Checking the code/);
+  assert.match(messages.at(-1).text, /Verified/);
 });
 
 test("completed-only background metadata updates an automatic title without leaking the tag", async t => {
@@ -115,6 +138,21 @@ test("completed-only background metadata updates an automatic title without leak
   await f.hooks().onEvent({ type: "background_response", text: "<relay-title>Build verified</relay-title>\nChecks passed" });
   assert.equal(f.store.get(chat.id).title, "Build verified");
   assert.equal(f.store.get(chat.id).messages.at(-1).text, "Checks passed");
+});
+
+test("completed-only late metadata is hidden for automatic and manual chats, but literal examples cannot rename", async t => {
+  for (const manual of [false, true]) {
+    let response = "Checking.\n<relay-title>Completed result title</relay-title>\nDone.";
+    const f = await fixture(t, { send: async () => ({ text: response }) });
+    const chat = await f.manager.createChat({ agent: "claude", ...(manual ? { title: "Manually named" } : {}) });
+    await f.manager.send(chat.id, "Check the build");
+    assert.equal(f.store.get(chat.id).title, manual ? "Manually named" : "Completed result title");
+    assert.equal(f.store.get(chat.id).messages.at(-1).text, "Checking.\nDone.");
+    response = "```xml\n<relay-title>Quoted code is not authority</relay-title>\n```";
+    await f.manager.send(chat.id, "Explain this format");
+    assert.equal(f.store.get(chat.id).title, manual ? "Manually named" : "Completed result title");
+    assert.equal(f.store.get(chat.id).messages.at(-1).text, response);
+  }
 });
 
 test("existing placeholder recovers its original request on next admitted turn, never the latest continue", async t => {

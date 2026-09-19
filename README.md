@@ -144,6 +144,7 @@ implemented; Google login alone does not authorize either provider.
 | `AUTH_SECRET` | generated and encrypted in PostgreSQL | Optional explicit session encryption secret, at least 32 characters |
 | `AGENT_COOKIE_SECURE` | `0` | mark the browser session cookie Secure when served over HTTPS |
 | `AGENT_IDLE_TIMEOUT_MS` | `300000` | inactivity-to-worker-stop delay, paused while a chat tab or browser viewer is active |
+| `AGENT_IDLE_POLICY` | `stop` | `hibernate` is a fail-closed EC2-only foundation (120000 ms default), not available process-preserving hibernation; [implementation boundary](docs/hibernation-lifecycle-foundation.md) |
 | `AGENT_DATA_DIR` | `./data` | persisted chats, workspaces, and CLI state |
 | `AGENT_WORKSPACE_SOURCE` | empty | optional local repo/path cloned into every new chat |
 | `AGENT_ENABLE_MOCK` | `0` | expose the deterministic Mock agent |

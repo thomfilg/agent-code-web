@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { parseVerificationOptions, verifyReceipt, verifyWorkerImage } from "../deploy/aws/verify-worker-ami.mjs";
 
 const options = parseVerificationOptions(["--region", "us-east-2", "--expected-account", "123456789012", "--deployment", "relay-fixture", "--image-id", "ami-aaaaaaaaaaaaaaaaa"]);
@@ -10,11 +11,16 @@ const outputs = { DeploymentName: "relay-fixture", ControllerInstanceId: control
 const resources = [["Controller", "AWS::EC2::Instance", controllerId], ["ApplicationSecret", "AWS::SecretsManager::Secret", outputs.SecretArn], ["WorkerSubnet", "AWS::EC2::Subnet", outputs.WorkerSubnetId], ["WorkerGroup", "AWS::EC2::SecurityGroup", outputs.WorkerSecurityGroupId], ["WorkerKey", "AWS::EC2::KeyPair", outputs.WorkerKeyName], ["ControllerGroup", "AWS::EC2::SecurityGroup", "sg-ccccccccccccccccc"], ["ControllerSubnet", "AWS::EC2::Subnet", "subnet-ccccccccccccccccc"], ["ControllerProfile", "AWS::IAM::InstanceProfile", "fixture-controller"]].map(([LogicalResourceId, ResourceType, PhysicalResourceId]) => ({ LogicalResourceId, ResourceType, PhysicalResourceId }));
 
 function receipt(payload) {
+  const hash = value => createHash("sha256").update(value).digest("hex");
   return { schema: 1, verificationId: payload.verificationId, workerId, phase: payload.phase, heartbeatFresh: true, sentinelPresent: true, versions: { codex: "codex-cli 0.154.0", claude: "2.1.222 (Claude Code)" }, knownHosts: `verify-${workerId} ssh-ed25519 AAAAFixturePublicKey\n`,
+    ...(payload.hibernationSource ? { hibernation: { schema: 2, verificationId: payload.verificationId, workerId, imageIdentityHash: payload.probeBinding.imageIdentityHash,
+      configured: true, diskSupported: true, nodePid: 100, chromePid: 101, nodeStartTicks: "1234", chromeStartTicks: "1250", requests: payload.phase === "fresh" ? 1 : 2,
+      memoryHash: "1".repeat(64), browserMemoryHash: "2".repeat(64), bootHash: "3".repeat(64), instanceHash: "4".repeat(64),
+      challengeHash: hash(payload.challenge), challengeProof: hash(`node:${payload.challenge}`), browserChallengeProof: hash(`browser:${payload.challenge}`), continuityProof: "5".repeat(64), browserContinuityProof: "6".repeat(64) } } : {}),
     audit: { schema: 1, valid: true, finalized: true, cloudInitDisabled: true, ssmDisabled: true, credentialsAbsent: true, transportKeyMatches: true, freshIdentity: true, heartbeatEnabled: true, watchdogActive: true, metadataReachable: false, machine: "a".repeat(64), hostKeys: { "ssh_host_ed25519_key.pub": "b".repeat(64) } } };
 }
 
-function fixture({ account = "123456789012", stackOutputs = outputs, controllerOverride = {}, imageOverride = {}, networkOverride = {}, workerOverride = {}, mutateReceipt = r => r, commandFailed = false, driftAfterLaunch = false, noCleanup = false, detachedShutdown = false, shutdownBeforeCleanup = false, driftDuringCleanup = false, markerFailure = false, markerReadbackFailure = false, imageDrift = {}, volumeStuck = false, volumeDrift = false } = {}) {
+function fixture({ account = "123456789012", stackOutputs = outputs, controllerOverride = {}, imageOverride = {}, networkOverride = {}, workerOverride = {}, mutateReceipt = r => r, commandFailed = false, driftAfterLaunch = false, noCleanup = false, detachedShutdown = false, shutdownBeforeCleanup = false, driftDuringCleanup = false, markerFailure = false, markerReadbackFailure = false, imageDrift = {}, volumeStuck = false, volumeDrift = false, hibernation = false } = {}) {
   const calls = [], requests = [];
   let workerTags, state = "running", result, acceptanceTags = [], imageReads = 0;
   const run = async args => {
@@ -25,7 +31,7 @@ function fixture({ account = "123456789012", stackOutputs = outputs, controllerO
     if (args.includes("list-stack-resources")) return reply(resources);
     if (args.includes("describe-subnets")) return reply([{ SubnetId: outputs.WorkerSubnetId, OwnerId: account, Tags: infrastructureTags, MapPublicIpOnLaunch: false, VpcId: "vpc-fixture", ...networkOverride }]);
     if (args.includes("describe-security-groups")) return reply([{ GroupId: outputs.WorkerSecurityGroupId, OwnerId: account, Tags: infrastructureTags, VpcId: "vpc-fixture", IpPermissions: [{ IpProtocol: "tcp", FromPort: 22, ToPort: 22, UserIdGroupPairs: [{ GroupId: "sg-ccccccccccccccccc" }] }] }]);
-    if (args.includes("describe-images")) return reply([{ ImageId: options.imageId, OwnerId: account, State: "available", Architecture: "x86_64", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true, VolumeSize: 20 } }], Tags: [...Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: "relay-fixture", AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" }).map(([Key, Value]) => ({ Key, Value })), ...acceptanceTags], ...imageOverride, ...(imageReads++ > 0 ? imageDrift : {}) }]);
+    if (args.includes("describe-images")) return reply([{ ImageId: options.imageId, OwnerId: account, State: "available", Architecture: "x86_64", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true, VolumeSize: 20 } }], Tags: [...Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: "relay-fixture", AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222", ...(hibernation ? { AgentRelayHibernation: "candidate-v1" } : {}) }).map(([Key, Value]) => ({ Key, Value })), ...acceptanceTags], ...imageOverride, ...(imageReads++ > 0 ? imageDrift : {}) }]);
     if (args.includes("create-tags")) {
       assert.equal(state, "terminated");
       assert.equal(args[args.indexOf("--resources") + 1], options.imageId);
@@ -33,11 +39,11 @@ function fixture({ account = "123456789012", stackOutputs = outputs, controllerO
       if (!markerReadbackFailure) acceptanceTags = JSON.parse(args[args.indexOf("--tags") + 1]);
       return "";
     }
-    if (args.includes("describe-volumes")) return reply(state === "terminated" && !volumeStuck ? [] : [{ VolumeId: "vol-aaaaaaaaaaaaaaaaa", Encrypted: true, Tags: volumeDrift ? [] : workerTags, Attachments: [{ InstanceId: workerId }] }]);
+    if (args.includes("describe-volumes")) return reply(state === "terminated" && !volumeStuck ? [] : [{ VolumeId: args[args.indexOf("--filters") + 1].split("Values=")[1], Encrypted: true, Tags: volumeDrift ? [] : workerTags, Attachments: [{ InstanceId: workerId }] }]);
     if (args.includes("describe-key-pairs")) return reply([{ KeyName: outputs.WorkerKeyName, Tags: infrastructureTags, PublicKey: "ssh-ed25519 AAAAFixturePublicKey comment\n" }]);
     if (args.includes("describe-instances")) {
       if (args.includes(controllerId)) return reply([{ InstanceId: controllerId, State: { Name: "running" }, Tags: infrastructureTags, SubnetId: "subnet-ccccccccccccccccc", SecurityGroups: [{ GroupId: "sg-ccccccccccccccccc" }], IamInstanceProfile: { Arn: "arn:aws:iam::123456789012:instance-profile/fixture-controller" }, ...controllerOverride }]);
-      const base = { InstanceId: workerId, ImageId: options.imageId, State: { Name: state }, Tags: driftAfterLaunch || driftDuringCleanup && state === "shutting-down" ? [] : workerTags, ...workerOverride };
+      const base = { InstanceId: workerId, ImageId: options.imageId, State: { Name: state }, HibernationOptions: { Configured: hibernation }, Tags: driftAfterLaunch || driftDuringCleanup && state === "shutting-down" ? [] : workerTags, ...workerOverride };
       if (["shutting-down", "terminated"].includes(state)) { if (state === "shutting-down") state = "terminated"; return reply([base]); }
       return reply([{ ...base, SubnetId: outputs.WorkerSubnetId, SecurityGroups: [{ GroupId: outputs.WorkerSecurityGroupId }], KeyName: outputs.WorkerKeyName, MetadataOptions: { HttpEndpoint: "disabled" }, PrivateIpAddress: "10.84.2.22", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { VolumeId: "vol-aaaaaaaaaaaaaaaaa", DeleteOnTermination: true } }], ...workerOverride }]);
     }
@@ -63,6 +69,9 @@ test("worker acceptance dry-run makes zero AWS calls and requires explicit accou
   const result = await verifyWorkerImage({ ...options, dryRun: true }, { run: () => { throw new Error("must not run"); } });
   assert.equal(result.dryRun, true);
   assert.equal(result.promptsSent, false);
+  const diagnostic = await verifyWorkerImage({ ...options, dryRun: true, hibernationProbe: true }, { run: () => { throw new Error("must not run"); } });
+  assert.ok(diagnostic.actions.includes("hibernate-resume-Node-Chrome-memory"));
+  assert.ok(!diagnostic.actions.includes("mark-exact-accepted-image"));
   for (const args of [[], ["--expected-account", "123456789012"], ["--image-id", "ami-*"], ["--secret", "private"]]) assert.throws(() => parseVerificationOptions(args));
 });
 
@@ -115,6 +124,77 @@ test("ordinary acceptance cannot mark a hibernation candidate", async () => {
   const f = fixture({ imageOverride: { Tags: [{ Key: "AgentRelayHibernation", Value: "candidate-v1" }] } });
   await assert.rejects(verifyWorkerImage(options, { run: f.run }), /requires process-resume acceptance/);
   assert.equal(f.calls.some(c => c.includes("run-instances") || c.includes("create-tags")), false);
+});
+
+test("hibernation image probe proves memory identity and cleans up without promoting the image", async () => {
+  const f = fixture({ hibernation: true, mutateReceipt: receipt => { receipt.hibernation.unexpectedPrivatePayload = "PRIVATE-NOT-FOR-RECEIPT"; return receipt; } });
+  const result = await verifyWorkerImage({ ...options, hibernationProbe: true }, { run: f.run, sleep: async () => {} });
+  assert.equal(result.hibernationImageProbePassed, true);
+  assert.equal(result.productionReady, false);
+  assert.equal(result.accepted, false);
+  assert.equal(result.cleanedUp, true);
+  assert.equal(result.volumesRemoved, 1);
+  const launch = f.calls.find(c => c.includes("run-instances"));
+  assert.equal(launch[launch.indexOf("--hibernation-options") + 1], "Configured=true");
+  assert.ok(f.calls.find(c => c.includes("stop-instances")).includes("--hibernate"));
+  assert.equal(f.calls.some(c => c.includes("create-tags")), false);
+  assert.equal(result.evidence.freshProcesses.memoryHash, result.evidence.resumedProcesses.memoryHash);
+  assert.equal(result.applicationContinuity.protocol, "relay-worker-process/1");
+  assert.equal(result.applicationContinuity.accepted, false);
+  assert.deepEqual(result.cleanup, { workerId, verificationId: result.verificationId, volumeIds: ["vol-aaaaaaaaaaaaaaaaa"], state: "terminated-and-volumes-absent" });
+  assert.equal(f.requests[0].probeBinding.imageIdentityHash, result.imageIdentityHash);
+  assert.equal(f.requests[0].probeBinding.continuityChallenge, f.requests[1].probeBinding.continuityChallenge);
+  assert.notEqual(f.requests[0].challenge, f.requests[1].challenge);
+  assert.ok(!JSON.stringify(result).includes(f.requests[0].probeBinding.continuityChallenge));
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE-NOT-FOR-RECEIPT/);
+});
+
+test("hibernation probe refuses a restart, missing memory or capability and still cleans the fixture", async () => {
+  for (const patch of [{ nodePid: 999 }, { chromePid: 999 }, { nodeStartTicks: "999" }, { chromeStartTicks: "999" }, { instanceHash: "f".repeat(64) }, { memoryHash: "f".repeat(64) }, { browserMemoryHash: "f".repeat(64) }, { bootHash: "f".repeat(64) }, { continuityProof: "f".repeat(64) }, { browserContinuityProof: "f".repeat(64) }, { challengeHash: "f".repeat(64) }, { imageIdentityHash: "f".repeat(64) }, { workerId: "i-bbbbbbbbbbbbbbbbb" }, { verificationId: "b".repeat(36) }, { requests: 1 }, { requests: 3 }, { configured: false }, { diskSupported: false }]) {
+    const f = fixture({ hibernation: true, mutateReceipt: r => r.phase === "resumed" ? { ...r, hibernation: { ...r.hibernation, ...patch } } : r });
+    await assert.rejects(verifyWorkerImage({ ...options, hibernationProbe: true }, { run: f.run, sleep: async () => {} }), /receipt failed validation/);
+    assert.equal(f.calls.some(c => c.includes("create-tags")), false);
+    assert.equal(f.calls.filter(c => c.includes("terminate-instances")).length, 1);
+  }
+});
+
+test("hibernation probe cannot publish replayed receipt, drifted image or unconfirmed disposable cleanup", async () => {
+  let fresh;
+  const replayed = fixture({ hibernation: true, mutateReceipt: receipt => {
+    if (receipt.phase === "fresh") fresh = receipt.hibernation;
+    else receipt.hibernation = fresh;
+    return receipt;
+  } });
+  await assert.rejects(verifyWorkerImage({ ...options, hibernationProbe: true }, { run: replayed.run, sleep: async () => {} }), /receipt failed validation/);
+  for (const change of [{ volumeStuck: true }, { noCleanup: true }, { imageDrift: { CreationDate: "changed" } }, { imageDrift: { Public: true } }]) {
+    const f = fixture({ hibernation: true, ...change });
+    await assert.rejects(verifyWorkerImage({ ...options, hibernationProbe: true }, { run: f.run, sleep: async () => {}, pollLimit: 2 }));
+    assert.equal(f.calls.some(call => call.includes("create-tags")), false);
+  }
+});
+
+test("hibernation receipt hashes are strings, never coercible arrays", async () => {
+  for (const key of ["memoryHash", "browserMemoryHash", "bootHash", "instanceHash", "challengeProof", "browserChallengeProof", "continuityProof", "browserContinuityProof"]) {
+    const f = fixture({ hibernation: true, mutateReceipt: r => ({ ...r, hibernation: { ...r.hibernation, [key]: [r.hibernation[key]] } }) });
+    await assert.rejects(verifyWorkerImage({ ...options, hibernationProbe: true }, { run: f.run, sleep: async () => {} }), /receipt failed validation/);
+    assert.equal(f.calls.some(c => c.includes("create-tags")), false);
+  }
+});
+
+test("missing launch hibernation capability retains exact disposable-worker cleanup ownership", async () => {
+  const volumes = ["vol-aaaaaaaaaaaaaaaaa", "vol-bbbbbbbbbbbbbbbbb"];
+  const workerOverride = { HibernationOptions: { Configured: false }, BlockDeviceMappings: volumes.map(VolumeId => ({ Ebs: { VolumeId, DeleteOnTermination: true } })) };
+  const f = fixture({ hibernation: true, workerOverride });
+  await assert.rejects(verifyWorkerImage({ ...options, hibernationProbe: true }, { run: f.run, sleep: async () => {} }), /not launched with hibernation/);
+  const terminated = f.calls.findIndex(call => call.includes("terminate-instances"));
+  for (const volume of volumes) assert.ok(f.calls.slice(terminated + 1).some(call => call.includes("describe-volumes") && call.includes(`Name=volume-id,Values=${volume}`)));
+  for (const failure of [{ volumeStuck: true }, { workerOverride: { ...workerOverride, BlockDeviceMappings: [] } }]) {
+    const failed = fixture({ hibernation: true, workerOverride, ...failure });
+    await assert.rejects(verifyWorkerImage({ ...options, hibernationProbe: true }, { run: failed.run, sleep: async () => {}, pollLimit: 2 }), /not launched with hibernation.*cleanup unconfirmed/);
+    assert.equal(failed.calls.filter(call => call.includes("terminate-instances")).length, 1);
+  }
+  assert.equal(f.calls.filter(call => call.includes("terminate-instances")).length, 1);
+  assert.equal(f.calls.some(call => call.includes("create-tags")), false);
 });
 
 test("acceptance refuses foreign identity/network/image/controller/secret before creating resources", async () => {

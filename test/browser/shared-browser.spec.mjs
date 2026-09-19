@@ -3,6 +3,9 @@ const created = [];
 test.setTimeout(60000);
 test.use({ deviceScaleFactor: 2 });
 test.afterEach(async ({ request }) => { for (const id of created.splice(0)) await request.delete(`/api/chats/${id}`); });
+async function openTools(page) {
+  if (!await page.locator("#browser-tools").evaluate(node => node.open)) await page.getByLabel("Browser tools", { exact: true }).click();
+}
 
 test("shared Chrome renders in the third column and accepts mouse and keyboard input with live updates", async ({ page, request }) => {
   await page.setViewportSize({ width: 1600, height: 1000 });
@@ -14,7 +17,7 @@ test("shared Chrome renders in the third column and accepts mouse and keyboard i
   await page.getByLabel("Browser address", { exact: true }).fill("http://localhost:8883");
   await page.locator("#browser-address-form").getByRole("button", { name: "Go", exact: true }).click();
   await expect(page.getByLabel("Browser tabs", { exact: true })).toContainText("Live development fixture");
-  await expect(page.getByRole("link", { name: "Open directly ↗", exact: true })).toHaveAttribute("href", `http://${chat.id}.localhost:8883/`);
+  await expect(page.locator("#browser-open-direct")).toHaveAttribute("href", `http://${chat.id}.localhost:8883/`);
   const canvas = page.locator("#browser-canvas"); await expect(canvas).toBeVisible();
   const box = await canvas.boundingBox();
   const geometry = await page.evaluate(() => Object.fromEntries(["sidebar", "conversation", "browser-panel"].map(id => { const b = document.getElementById(id).getBoundingClientRect(); return [id, { left: b.left, right: b.right }]; })));
@@ -33,7 +36,7 @@ test("shared Chrome renders in the third column and accepts mouse and keyboard i
   await expect.poll(async () => (await (await request.get("http://127.0.0.1:8883/observed")).json()).text).toBe("Typed from my Chrome");
   await canvas.click({ position: { x: box.width * 500 / 1280, y: box.height * 500 / 800 } });
   await page.keyboard.press("Escape"); await expect(page.getByLabel("Browser address", { exact: true })).toBeFocused();
-  await page.locator("#browser-viewport").selectOption("390x844");
+  await openTools(page); await page.locator("#browser-viewport").selectOption("390x844");
   await expect(canvas).toHaveAttribute("width", "780"); await expect(canvas).toHaveAttribute("height", "1688");
   await expect(canvas).toHaveAttribute("data-viewport-width", "390");
   await expect(canvas).toHaveAttribute("data-frame-format", "image/png");
@@ -44,6 +47,7 @@ test("shared Chrome renders in the third column and accepts mouse and keyboard i
   await page.screenshot({ path: "test-results/shared-browser-xs-sharp.png", fullPage: true });
   await page.getByLabel("Expand browser", { exact: true }).click();
   for (const [width, height] of [[320, 640], [640, 960], [834, 1112], [1920, 1080], [1280, 800]]) {
+    await openTools(page);
     await page.locator("#browser-viewport").selectOption(`${width}x${height}`);
     await expect(canvas).toHaveAttribute("data-viewport-width", String(width));
     await expect(canvas).toHaveAttribute("width", String(width * 2));
@@ -54,6 +58,7 @@ test("shared Chrome renders in the third column and accepts mouse and keyboard i
   await page.getByRole("button", { name: "Apply size", exact: true }).click();
   await expect(canvas).toHaveAttribute("width", "960"); await expect(canvas).toHaveAttribute("height", "1280");
   await page.locator("#browser-viewport").selectOption("1280x800"); await expect(canvas).toHaveAttribute("width", "2560");
+  await page.getByLabel("Browser tools", { exact: true }).press("Escape");
   await request.post("http://127.0.0.1:8883/refresh");
   await expect.poll(async () => (await (await request.get("http://127.0.0.1:8883/observed")).json()).live).toBe("Updated live");
   await page.screenshot({ path: "test-results/shared-browser-desktop.png", fullPage: true });
@@ -65,7 +70,7 @@ test("shared Chrome renders in the third column and accepts mouse and keyboard i
   await page.getByLabel("Open shared Chrome", { exact: true }).click(); await expect(page.locator("#browser-status")).toContainText("Live ·");
   expect(await page.locator("#browser-panel").evaluate(node => node.getBoundingClientRect().right)).toBeLessThanOrEqual(390);
   await page.screenshot({ path: "test-results/shared-browser-mobile.png", fullPage: true });
-  await page.getByRole("button", { name: "Stop Chrome", exact: true }).click(); await expect(page.locator("#browser-status")).toContainText("Chrome stopped");
+  await openTools(page); await page.getByRole("button", { name: "Stop Chrome", exact: true }).click(); await expect(page.locator("#browser-status")).toContainText("Chrome stopped");
   expect(errors).toEqual([]);
 });
 
@@ -74,6 +79,7 @@ test("the direct preview opens the app in a separate native browser tab with a c
   await page.goto(`/#chat=${chat.id}`); await page.getByLabel("Open shared Chrome", { exact: true }).click();
   await expect(page.locator("#browser-status")).toContainText("Live ·", { timeout: 20000 });
   await page.getByLabel("Browser address", { exact: true }).fill("http://localhost:8883/example/path?fixture=1#section");
+  await openTools(page);
   const link = page.getByRole("link", { name: "Open directly ↗", exact: true });
   await expect(link).toHaveAttribute("href", `http://${chat.id}.localhost:8883/example/path?fixture=1#section`);
   const [direct] = await Promise.all([context.waitForEvent("page"), link.click()]);
@@ -127,6 +133,7 @@ test("remote plain-text clipboard supports native shortcuts and toolbar without 
   await page.keyboard.press("Control+v");
   await expect.poll(async () => (await observed()).text).toBe("Pasted from this browser");
   await page.keyboard.press("Control+a");
+  await openTools(page);
   await page.getByRole("button", { name: "Copy text", exact: true }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("Pasted from this browser");
   await page.evaluate(() => navigator.clipboard.writeText("Toolbar paste fixture"));
@@ -142,6 +149,7 @@ test("clipboard denial and oversized paste are visible failures, not silent trun
   await page.evaluate(() => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { readText: () => Promise.reject(new DOMException("denied", "NotAllowedError")), write: () => Promise.reject(new DOMException("denied", "NotAllowedError")) } });
   });
+  await openTools(page);
   await page.getByRole("button", { name: "Paste text", exact: true }).click();
   await expect(page.locator("#browser-status")).toContainText("Clipboard access denied");
   const previous = (await observed()).text;
@@ -151,4 +159,43 @@ test("clipboard denial and oversized paste are visible failures, not silent trun
   });
   await expect(page.locator("#browser-status")).toContainText("Nothing was pasted");
   expect((await observed()).text).toBe(previous);
+});
+
+test("compact Chrome header keeps navigation visible and tools accessible on desktop and mobile", async ({ page, request }, testInfo) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  const { canvas, observed } = await openFixture(page, request, "Compact Chrome header fixture");
+  const tools = page.locator("#browser-tools"), summary = page.getByLabel("Browser tools", { exact: true });
+  const headerHeight = () => page.evaluate(() => document.querySelector("#browser-surface").getBoundingClientRect().top - document.querySelector("#browser-panel").getBoundingClientRect().top);
+  await expect(tools).not.toHaveAttribute("open", "");
+  expect(await headerHeight()).toBeLessThan(150);
+  await expect(page.locator("#browser-viewport")).toBeHidden();
+  await expect(page.getByLabel("Browser tabs", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Browser address", { exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("chrome-desktop-compact.png"), animations: "disabled" });
+  await summary.focus(); await page.keyboard.press("Enter");
+  await expect(page.locator("#browser-viewport")).toBeVisible();
+  await expect(page.locator("#browser-copy-text")).toBeVisible();
+  await expect(page.locator("#browser-paste-text")).toBeVisible();
+  await expect(page.locator("#browser-open-direct")).toBeVisible();
+  await page.locator("#browser-viewport").focus(); await page.keyboard.press("Escape");
+  await expect(tools).not.toHaveAttribute("open", ""); await expect(summary).toBeFocused();
+  await openTools(page); await page.getByLabel("Browser address", { exact: true }).click();
+  await expect(tools).not.toHaveAttribute("open", "");
+  const loads = (await observed()).loads;
+  await page.getByLabel("Reload browser page", { exact: true }).click();
+  await expect.poll(async () => (await observed()).loads).toBeGreaterThan(loads);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await headerHeight()).toBeLessThan(165);
+  await expect(canvas).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("chrome-mobile-compact.png"), animations: "disabled" });
+  await openTools(page); await page.locator("#browser-viewport").selectOption("custom");
+  await expect(page.locator("#browser-width")).toBeFocused();
+  await expect(page.locator("#browser-size-form")).toBeVisible();
+  const popover = await page.locator(".browser-tools-popover").boundingBox();
+  expect(popover.x).toBeGreaterThanOrEqual(0); expect(popover.x + popover.width).toBeLessThanOrEqual(390);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("chrome-mobile-tools.png"), animations: "disabled" });
+  await page.getByLabel("Close browser panel", { exact: true }).click();
+  await page.getByLabel("Open shared Chrome", { exact: true }).click();
+  await expect(tools).not.toHaveAttribute("open", "");
 });
