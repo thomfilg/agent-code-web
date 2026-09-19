@@ -79,7 +79,7 @@ export async function officialGuestUi({ origin, chat, token, site, browsers, out
       // All interaction and canvas inspection goes through official MCP. The
       // guest itself reports CSS metrics through its own HTTP page, not a
       // second hidden automation browser or a parallel CDP session.
-      await code(`await page.locator('#browser-viewport').selectOption('${width}x${height}'); await page.waitForFunction(({w,h})=>{const c=document.querySelector('#browser-canvas');return !c.hidden&&c.width===w*2&&c.height===h*2&&c.dataset.viewportWidth===String(w)&&c.dataset.viewportHeight===String(h)},{w:${width},h:${height}});`);
+      await code(`const tools=page.locator('#browser-tools'); if(!await tools.evaluate(node=>node.open))await page.getByLabel('Browser tools',{exact:true}).click(); await page.locator('#browser-viewport').selectOption('${width}x${height}'); if(await tools.evaluate(node=>node.open))await page.getByLabel('Browser tools',{exact:true}).click(); await page.waitForFunction(({w,h})=>{const c=document.querySelector('#browser-canvas');return !c.hidden&&c.width===w*2&&c.height===h*2&&c.dataset.viewportWidth===String(w)&&c.dataset.viewportHeight===String(h)},{w:${width},h:${height}});`);
       await pollGuest(async () => { const value = await site.command("status"); return value.width === width && value.height === height && value.dpr === 2; }, { signal });
       await code(`await page.waitForFunction(()=>{const c=document.querySelector('#browser-canvas'),ctx=c.getContext('2d');const p=[...ctx.getImageData(10,10,1,1).data];if(p.join()!=='237,244,255,255')return false;const data=ctx.getImageData(40,620,80,1).data;return Array.from({length:80},(_,i)=>{const expected=Math.floor(i/2)%2?255:0;return data[i*4]===expected&&data[i*4+1]===expected&&data[i*4+2]===expected&&data[i*4+3]===255}).every(Boolean)});`);
       const observed = await site.command("status"); assert.equal(observed.documentId, original.documentId); assert.equal(browsers.info(chat.id).tabId, tabId); assert.equal(browsers.info(chat.id).tabs.length, 1);
@@ -99,7 +99,7 @@ export async function officialGuestUi({ origin, chat, token, site, browsers, out
     requireSandbox(await site.command("sandbox"));
     assert.ok(browsers.hasViewers(chat.id));
     phase = "stop-chrome";
-    await code(`if(page.__relayGuestErrors.length)throw Error('Browser page error');await page.locator('#browser-stop').click();await page.locator('#browser-status').filter({hasText:'Chrome stopped'}).waitFor();`);
+    await code(`if(page.__relayGuestErrors.length)throw Error('Browser page error');if(!await page.locator('#browser-tools').evaluate(node=>node.open))await page.getByLabel('Browser tools',{exact:true}).click();await page.locator('#browser-stop').click();await page.locator('#browser-status').filter({hasText:'Chrome stopped'}).waitFor();`);
     await pollGuest(async () => { const value = await site.command("sandbox"); return value.scanComplete === true && value.processes === 0 && !browsers.hasViewers(chat.id); }, { signal });
     return { presets: guestPresets.map(([width, height]) => ({ width, height, dpr: 2 })), sharpPixels: true, sameTabAndDocument: true, mouseAndKeyboard: true, liveUpdate: true, viewerPresence: true, rendererSandbox: true, browserStopped: true };
   } catch (error) {

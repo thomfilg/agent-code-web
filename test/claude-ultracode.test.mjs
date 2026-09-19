@@ -115,7 +115,7 @@ test("new-chat preference saving strips Ultracode from picker and explicit overr
   const writes = [], workspace = Object.assign(Object.create(WorkspaceSettings.prototype), {
     draftReady: true, selected: [{ fullName: "company/repo", branch: "main" }], state: { config: { features: { agentAccounts: true } } },
     modelPicker: { value: () => ({ model: "default", effort: "xhigh", ultracode: true }) },
-    api: async (route, input) => { writes.push(JSON.parse(input.body)); }, toast: message => assert.fail(message),
+    api: async (route, input) => { writes.push(JSON.parse(input.body)); }, toast: message => assert.fail(message), updateCreateAvailability() {},
   });
   await workspace.remember(); await workspace.remember({ ultracode: true });
   for (const saved of [...writes, workspace.preferences]) { assert.equal(saved.effort, "xhigh"); assert.equal(Object.hasOwn(saved, "ultracode"), false); }

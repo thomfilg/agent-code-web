@@ -1,6 +1,20 @@
 import { test, expect } from "@playwright/test";
 import { openSettingsSection } from "./settings-navigation.mjs";
 
+test("company cards never advertise legacy multi-company environments as available", async ({ page }) => {
+  await page.route("**/api/environments", route => route.fulfill({ json: { software: [], environments: [
+    { id: "env-acme", name: "Acme Dev", companies: ["acme"], allowUnassigned: false },
+    { id: "env-g2i", name: "G2i Dev", companies: ["g2i"], allowUnassigned: false },
+    { id: "env-legacy", name: "Unresolved legacy", companies: ["acme", "g2i"], scopeNeedsReview: true },
+  ] } }));
+  await page.goto("/"); await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const hub = page.locator("#company-settings-dialog"), card = hub.getByRole("button", { name: "Environments", exact: true });
+  await hub.getByRole("tab", { name: "acme", exact: true }).click();
+  await expect(card).toContainText("Acme Dev"); await expect(card).not.toContainText("G2i Dev"); await expect(card).not.toContainText("Unresolved legacy");
+  await hub.getByRole("tab", { name: "g2i", exact: true }).click();
+  await expect(card).toContainText("G2i Dev"); await expect(card).not.toContainText("Acme Dev"); await expect(card).not.toContainText("Unresolved legacy");
+});
+
 test("Settings uses company tabs and scoped cards; adding a company creates a durable tab without losing the draft", async ({ page }) => {
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   await page.goto("/"); await expect(page.locator("#new-chat-fields")).toBeEnabled();

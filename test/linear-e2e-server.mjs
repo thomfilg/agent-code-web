@@ -7,6 +7,9 @@ const fixture = await startMcpFixture({ port: 8895, advertisedOrigin: "https://m
 const app = await createAgentWebServer({ config: testConfig(root, { AGENT_WEB_PORT: "8894" }) });
 await app.start();
 await (await app.resources.forOwner(null)).companies.save({ id: "12-apps", name: "12 Apps" });
+const environments = (await app.resources.forOwner(null)).environments;
+const [initialEnvironment] = await environments.list();
+await environments.save({ ...initialEnvironment, companies: ["12-apps"], allowUnassigned: false, confirmCompanyAssignment: true }, initialEnvironment.id);
 const originalFetch = app.manager.mcps.fetch;
 app.manager.mcps.fetch = (url, options) => {
   const parsed = new URL(url);

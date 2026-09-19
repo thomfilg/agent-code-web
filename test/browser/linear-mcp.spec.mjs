@@ -41,9 +41,9 @@ test("Linear consent shows its company, defaults to read and verifies without a 
   await expect(popup.getByRole("heading", { name: "MCP connected" })).toBeVisible();
   await expect(page.locator("#mcp-connection-status")).toContainText("Connected · 1 tools");
   await page.getByLabel("Close MCP connections").click();
-  await openSettingsSection(page, "Environments");
+  await openSettingsSection(page, "Environments", "12-apps");
   await page.locator("#environment-advanced summary").click();
-  await page.locator("#environment-companies").getByRole("checkbox", { name: "12-apps", exact: true }).check();
+  await expect(page.locator("#environment-company")).toHaveValue("12-apps");
   await expect(page.locator("#environment-mcp-options")).toContainText("linear-browser-read · 12-apps");
   await expect(page.locator("#environment-mcp-options input")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Save environment", exact: true })).toBeDisabled();

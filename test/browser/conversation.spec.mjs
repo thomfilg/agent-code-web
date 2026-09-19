@@ -1,7 +1,12 @@
 import { openSettingsSection, switchSettingsCompany } from "./settings-navigation.mjs";
 import { test, expect } from "@playwright/test";
 const created = [];
-test.afterEach(async ({ request }) => { for (const id of created.splice(0)) await request.delete(`/api/chats/${id}`); });
+test.afterEach(async ({ page, request }) => {
+  // Polling responses may still be inside route.fetch/json when assertions
+  // finish. Drain those handlers before Playwright disposes their context.
+  await page.unrouteAll({ behavior: "wait" });
+  for (const id of created.splice(0)) await request.delete(`/api/chats/${id}`);
+});
 
 async function openFixture(page, messages = [], extra = {}) {
   await page.route("**/api/chats/chat_*/commands", route => route.fulfill({ json: { commands: [{ name: "usage" }, { name: "work", description: "Installed skill" }, { name: "workflow", description: "Plugin workflow" }] } }));
@@ -10,9 +15,9 @@ async function openFixture(page, messages = [], extra = {}) {
   await page.route("**/api/sidebar", async route => { const response = await route.fetch(), data = await response.json(); data.chats = data.chats.map(item => item.id === chat.id ? { ...item, ...extra } : item); await route.fulfill({ json: data }); });
   await page.route(`**/api/chats/${chat.id}/events*`, route => route.fulfill({ contentType: "text/event-stream", body: ": fixture\n\n" }));
   await page.route(`**/api/chats/${chat.id}`, route => route.request().method() === "GET" ? route.fulfill({ json: { chat: { ...chat, ...extra, messages } } }) : route.continue());
-  // Use the supported saved-chat route so bootstrap cannot select #new after
-  // a sidebar click that races the initial settings load.
-  await page.goto(`/#chat=${chat.id}`);
+  // Use the saved-chat route and force a document load when a test opens
+  // multiple fixtures: changing only the hash does not rerun bootstrap.
+  await page.goto(`/?fixture=${chat.id}#chat=${chat.id}`);
   await expect(page.locator("#chat-title")).toHaveText(chat.title);
   return chat;
 }
@@ -178,8 +183,12 @@ test("Markdown renders tables and bubbles; HTML preview cannot leak styles, exec
     { id: "a", role: "assistant", text: "## Result\n\n| Name | State |\n| --- | --- |\n| Test | Passed |\n\n```html\n<style>body { background: rgb(255, 0, 0) } .message {display:none}</style><h1>Preview works</h1><script>parent.document.body.innerHTML='hacked'</script><img src='https://evil.example/tracker'><div>Unclosed\n```\n\n**Still here** [unsafe](javascript:alert(1))" },
   ]);
   await expect(page.locator(".message.assistant h2")).toHaveText("Result"); await expect(page.locator(".message.assistant table td").last()).toHaveText("Passed");
-  const bounds = await page.locator(".message.user").evaluate(n => ({ width: n.getBoundingClientRect().width, parent: n.parentElement.clientWidth, marginLeft: getComputedStyle(n).marginLeft, display: getComputedStyle(n).display }));
-  expect(bounds.width).toBeLessThan(bounds.parent * .8); expect(parseFloat(bounds.marginLeft)).toBeGreaterThan(0);
+  // The sidebar refresh can replace message nodes between locator resolution
+  // and evaluate. Measure the currently attached bubble in one page task.
+  await expect.poll(() => page.evaluate(() => {
+    const n = document.querySelector(".message.user");
+    return { compact: Boolean(n?.parentElement && n.getBoundingClientRect().width < n.parentElement.clientWidth * .8), aligned: Boolean(n && parseFloat(getComputedStyle(n).marginLeft) > 0) };
+  })).toEqual({ compact: true, aligned: true });
   const background = await page.locator("body").evaluate(n => getComputedStyle(n).backgroundColor);
   await page.getByRole("button", { name: "Open HTML preview ↗" }).click();
   await expect(page.locator("#messages iframe")).toHaveCount(0);
@@ -431,8 +440,8 @@ test("MCP connection is saved masked and assigned once to its company", async ({
   const { environments } = await (await page.request.get("/api/environments")).json(); expect(environments.every(e => !e.mcpIds?.length)).toBe(true);
 });
 
-test("same-name MCP connections can have independent organization scopes in one environment", async ({ page }) => {
-  const ids = []; let env;
+test("same-name MCP connections stay isolated in each company's environment", async ({ page }) => {
+  const ids = [], environmentsCreated = [];
   try {
     await page.goto("/"); await openSettingsSection(page, "MCP connections");
     for (const org of ["12-apps", "g2i"]) {
@@ -444,15 +453,22 @@ test("same-name MCP connections can have independent organization scopes in one 
     }
     const { connections } = await (await page.request.get("/api/mcps")).json(); ids.push(...connections.filter(c => c.name === "linear-scoped").map(c => c.id)); expect(ids.length).toBe(2);
     await switchSettingsCompany(page, "MCP connections", "12-apps"); await page.locator('[data-preset="linear"]').click(); await expect(page.locator("#mcp-company")).toHaveValue("12-apps");
-    await page.getByLabel("Close MCP connections").click(); await openSettingsSection(page, "Environments");
-    await page.getByRole("button", { name: "Add environment", exact: false }).click(); await page.getByLabel("Environment name", { exact: true }).fill("Scoped MCP test");
-    await page.locator("#environment-advanced summary").click();
-    for (const org of ["12-apps", "g2i"]) await page.locator("#environment-companies").getByRole("checkbox", { name: org, exact: true }).check();
-    await expect(page.locator("#environment-mcp-options input")).toHaveCount(0);
-    await page.getByRole("button", { name: "Save environment" }).click(); await expect(page.locator("#environments-dialog")).toBeHidden();
-    const { environments } = await (await page.request.get("/api/environments")).json(); env = environments.find(e => e.name === "Scoped MCP test"); expect(env.mcpIds).toEqual([]);
+    await page.getByLabel("Close MCP connections").click();
+    for (const org of ["12-apps", "g2i"]) {
+      await openSettingsSection(page, "Environments", org);
+      await page.getByRole("button", { name: "Add environment", exact: false }).click(); await page.getByLabel("Environment name", { exact: true }).fill(`Scoped MCP test ${org}`);
+      await expect(page.locator("#environment-company")).toHaveValue(org);
+      await expect(page.locator("#environment-company")).toBeDisabled();
+      await page.locator("#environment-advanced summary").click();
+      await expect(page.locator("#environment-mcp-options")).toContainText(`linear-scoped · ${org}`);
+      await expect(page.locator("#environment-mcp-options")).not.toContainText(`linear-scoped · ${org === "g2i" ? "12-apps" : "g2i"}`);
+      await expect(page.locator("#environment-mcp-options input")).toHaveCount(0);
+      await page.getByRole("button", { name: "Save environment" }).click(); await expect(page.locator("#environments-dialog")).toBeHidden();
+      const { environments } = await (await page.request.get("/api/environments")).json(); const env = environments.find(e => e.name === `Scoped MCP test ${org}`);
+      environmentsCreated.push(env.id); expect(env.mcpIds).toEqual([]); expect(env.companies).toEqual([org]);
+    }
   } finally {
-    if (env) await page.request.delete(`/api/environments/${env.id}`);
+    for (const id of environmentsCreated) await page.request.delete(`/api/environments/${id}`);
     for (const id of ids) await page.request.delete(`/api/mcps/${id}`);
   }
 });

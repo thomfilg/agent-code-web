@@ -907,13 +907,16 @@ state.
   Rich previews use an opaque-origin iframe: generated scripts, forms,
   navigation and network resources are disabled; styles and malformed markup
   cannot escape into the chat UI.
-- Each user turn has one **Tools used: N** row. Open it to inspect actual tool
-  names, inputs, output, running state, failures and permission denials in a
-  side panel. Missing results are not reported as successful execution.
+- Assistant updates and expandable tool groups appear in execution order.
+  Open a group, then an action, to inspect its inputs, output, running state,
+  failures and permission denials inline. Missing results are not reported as
+  successful execution.
 - Type while an agent works and press Enter or **Queue**. The square **Stop**
-  button interrupts the worker and pauses pending messages. Remove pending
-  items or choose **Resume queue**. Queues persist through controller restarts
-  and stay paused until explicitly resumed.
+  button (or Escape outside another active control) interrupts the current
+  turn and sends the next queued message, if any. Without a queued message it
+  just interrupts the turn; conversation context, worker, Chrome and application
+  processes are retained. Full environment Stop is a separate action. Explicitly
+  paused queues remain persisted and can be resumed with **Resume queue**.
 - `/` opens command/skill completion; type to filter, use Up/Down to select,
   and Enter or Tab to insert without sending. Claude reports installed commands,
   plugin aliases and native commands through its initialize response. Codex

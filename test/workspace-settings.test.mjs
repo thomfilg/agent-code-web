@@ -8,7 +8,7 @@ function documentFixture(t) {
   t.after(() => { if (previousOption === undefined) delete globalThis.Option; else globalThis.Option = previousOption; });
   const previous = globalThis.document, nodes = new Map();
   globalThis.document = { querySelector: selector => {
-    if (!nodes.has(selector)) nodes.set(selector, { value: "", textContent: "", open: false, replaceChildren() {}, append() {} });
+    if (!nodes.has(selector)) nodes.set(selector, { value: "", textContent: "", open: false, dataset: {}, querySelector: child => globalThis.document.querySelector(`${selector} ${child}`), replaceChildren() {}, append() {}, after() {} });
     return nodes.get(selector);
   } };
   t.after(() => { if (previous === undefined) delete globalThis.document; else globalThis.document = previous; });
@@ -67,7 +67,7 @@ test("GitHub refresh does not reload repositories after a superseded workspace l
     api: async route => snapshot("new")[route],
     settings: { state: {}, branchCache: new Map(), load: async ({ validWhile }) => { assert.equal(validWhile(), true); checks++; return false; }, loadRepositories: async () => { repositoryLoads++; } },
   });
-  await accounts.refresh(); assert.equal(checks, 1); assert.equal(repositoryLoads, 0);
+  await accounts.refresh(); assert.equal(document.querySelector("#github-error").textContent, ""); assert.equal(checks, 1); assert.equal(repositoryLoads, 0);
 });
 
 test("environment company choices come only from the registered companies, never agent or repository scopes", t => {

@@ -1,4 +1,5 @@
-import { companyForChat, scopeAllows } from "./company-scope.js";
+import { companyForChat } from "./company-scope.js";
+import { environmentAllows } from "./environment-scope.js";
 const $ = selector => document.querySelector(selector);
 const node = (tag, text, className) => { const result = document.createElement(tag); result.textContent = text; if (className) result.className = className; return result; };
 
@@ -71,7 +72,7 @@ export class CompanySettings {
     const add = node("button", "+ Add company", "secondary-button"); add.type = "button"; add.onclick = () => this.edit(); this.tabs.append(add);
     this.panel.hidden = !this.companyId || !this.form.hidden;
     this.panel.setAttribute("aria-labelledby", `settings-tab-${this.companyId}`);
-    const github = this.github.find(item => item.companyId === this.companyId), mcps = this.connections.filter(item => item.companyId === this.companyId), environments = this.environments.filter(item => scopeAllows(item, this.companyId)), browsers = this.connectionsBrowser.filter(item => item.companyId === this.companyId);
+    const github = this.github.find(item => item.companyId === this.companyId), mcps = this.connections.filter(item => item.companyId === this.companyId), environments = this.environments.filter(item => environmentAllows(item, this.companyId)), browsers = this.connectionsBrowser.filter(item => item.companyId === this.companyId);
     const cards = [
       ["GitHub", github?.connected ? `Connected · ${github.login}` : "Connect one GitHub account", () => this.workspace.githubAccounts.open(this.companyId)],
       ["MCP connections", mcps.length ? mcps.map(item => item.name).join(" · ") : "Connect your company's tools", () => { const revision = this.navigationRevision = (this.navigationRevision || 0) + 1; return this.mcps.open(this.companyId, { validWhile: () => this.dialog.open && this.navigationRevision === revision }); }],

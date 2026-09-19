@@ -97,6 +97,7 @@ async function openFixture(page, request, title) {
   const { chat } = await (await request.post("/api/chats", { data: { agent: "mock", title } })).json(); created.push(chat.id);
   await page.goto(`/#chat=${chat.id}`);
   await expect(page.locator("#new-chat-button")).toBeEnabled({ timeout: 15000 });
+  await expect(page.locator("#chat-title")).toHaveText(title);
   await page.getByLabel("Open shared Chrome", { exact: true }).click();
   await expect(page.locator("#browser-status")).toContainText("Live ·", { timeout: 20000 });
   await page.getByLabel("Browser address", { exact: true }).fill("http://localhost:8883");
@@ -125,10 +126,10 @@ test("remote plain-text clipboard supports native shortcuts and toolbar without 
   const box = await canvas.boundingBox();
   await canvas.click({ position: { x: box.width * 80 / 1280, y: box.height * 180 / 800 } });
   await page.keyboard.type("Selected remote fixture");
-  await expect.poll(async () => (await observed()).text).toBe("Selected remote fixture");
   await page.keyboard.press("Control+a"); await page.keyboard.press("Control+c");
   await expect(page.locator("#browser-status")).toHaveText("Selected text copied.");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("Selected remote fixture");
+  await expect.poll(async () => (await observed()).text).toBe("Selected remote fixture");
   await page.evaluate(() => navigator.clipboard.writeText("Pasted from this browser"));
   await page.keyboard.press("Control+v");
   await expect.poll(async () => (await observed()).text).toBe("Pasted from this browser");

@@ -1,16 +1,18 @@
 import { test, expect } from "@playwright/test";
 import { newChatCommands } from "../../public/new-chat-commands.js";
 
-async function fixture(page) {
+async function fixture(page, { withoutRepository = false } = {}) {
   const f = { creates: [], messages: [], catalogs: [], effects: [], gate: null, catalogGate: null };
-  let preferences = { agent: "codex", agentAccountId: "account-codex", environmentId: "env-command", repositories: [] };
+  const repositories = withoutRepository ? [] : [{ fullName: "acme/commands", companyId: "acme", githubConnectionId: "github-command", branch: "main", defaultBranch: "main" }];
+  let preferences = { agent: "codex", agentAccountId: "account-codex", environmentId: "env-command", repositories };
   const chat = { id: "chat_command-fixture", title: "Command fixture", agent: "codex", status: "stopped", workspace: "/fixture", repositories: [], environmentId: "env-command", messages: [], revision: 1, updatedAt: new Date().toISOString() };
   await page.route("**/api/config", async route => { const body = await (await route.fetch()).json(); body.features.agentAccounts = true; await route.fulfill({ json: body }); });
   await page.route("**/api/agent-accounts", route => route.fulfill({ json: { accounts: ["codex", "claude"].map(provider => ({ id: `account-${provider}`, provider, name: "Fixture", status: "connected", email: "fixture@example.test" })) } }));
   await page.route("**/api/models?*", route => route.fulfill({ json: { models: [{ id: "fixture-model", label: "Fixture model", isDefault: true, efforts: ["low"] }], source: "fixture" } }));
-  await page.route("**/api/github", route => route.fulfill({ json: { connected: true, connections: [] } }));
-  await page.route("**/api/github/repositories*", route => route.fulfill({ json: { repositories: [] } }));
-  await page.route("**/api/environments", route => route.fulfill({ json: { environments: [{ id: "env-command", name: "Fixture", companies: [], allowUnassigned: true }], software: [] } }));
+  await page.route("**/api/github", route => route.fulfill({ json: { connected: true, connections: [{ id: "github-command", companyId: "acme", connected: true }] } }));
+  await page.route("**/api/github/repositories*", route => route.fulfill({ json: { repositories } }));
+  await page.route("**/api/github/branches?*", route => route.fulfill({ json: { branches: ["main"] } }));
+  await page.route("**/api/environments", route => route.fulfill({ json: { environments: [{ id: "env-command", name: "Fixture", companies: ["acme"], allowUnassigned: false }], software: [] } }));
   await page.route("**/api/preferences", route => { if (route.request().method() === "PATCH") preferences = route.request().postDataJSON(); return route.fulfill({ json: { preferences } }); });
   await page.route("**/api/new-chat/commands?*", async route => {
     const query = new URL(route.request().url()).searchParams, agent = query.get("agent"), account = query.get("agentAccountId");
@@ -30,6 +32,19 @@ async function fixture(page) {
   await expect(page.locator("#new-agent-account")).toHaveValue("account-codex");
   return { f, chat };
 }
+
+test("a draft without repositories retains its saved agent but cannot send into a company without selecting a repository", async ({ page }) => {
+  const { f } = await fixture(page, { withoutRepository: true });
+  await expect(page.locator("#new-agent-account")).toHaveValue("account-codex");
+  await page.locator("#initial-prompt").fill("Inspect this project's test setup");
+  await expect(page.locator("#create-chat-button")).toBeDisabled();
+  await page.locator("#initial-prompt").press("Enter");
+  await expect(page.locator("#initial-prompt")).toHaveValue("Inspect this project's test setup");
+  expect(f.creates).toEqual([]); expect(f.messages).toEqual([]); expect(f.effects).toEqual([]);
+  await page.locator("#initial-prompt").fill("/go");
+  await expect(page.locator("#new-slash-options")).toContainText("/goal");
+  expect(f.creates).toEqual([]); expect(f.messages).toEqual([]); expect(f.effects).toEqual([]);
+});
 
 test("draft slash autocomplete handles arrows, Tab, Escape and provider/account changes without creating anything", async ({ page }) => {
   const { f } = await fixture(page), input = page.locator("#initial-prompt");

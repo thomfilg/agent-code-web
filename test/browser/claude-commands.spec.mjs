@@ -267,7 +267,7 @@ for (const width of [1280, 320]) test(`Claude effort changes at ${width}px prese
   await expect(page.locator("#messages")).toContainText("/effort status");
   await expect(page.locator("#messages")).toContainText("its running applications have not been stopped");
   await expect(input).toHaveValue("Keep my next task unsent"); await expect(page.locator("#attachment-chips")).toContainText("effort-context.txt");
-  expect(changes).toEqual(["high", "low", "auto"].map(effort => ({ model: "sonnet", effort })));
+  expect(changes).toEqual(["high", "low", "auto"].map(effort => ({ model: "sonnet", effort, ultracode: false })));
   expect(stops).toEqual([]); expect(f.calls).toEqual([]); expect(f.errors).toEqual([]);
 });
 

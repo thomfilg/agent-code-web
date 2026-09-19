@@ -8,8 +8,8 @@ test("environment boundaries remain independent; company MCPs need no second sel
     await page.goto("/"); await openSettingsSection(page, "Environments", "acme"); await page.locator("#add-environment").click();
     await page.getByLabel("Environment name", { exact: true }).fill("Registered company environment");
     await page.locator("#environment-advanced summary").click();
-    await page.locator("#environment-companies").getByRole("checkbox", { name: "acme", exact: true }).check();
-    await expect(page.locator("#environment-companies").getByLabel("Add companies", { exact: true })).toHaveCount(0);
+    await expect(page.locator("#environment-company")).toHaveValue("acme");
+    await expect(page.locator("#environment-company")).toBeDisabled();
     await expect(page.locator("#environment-mcp-options")).toContainText("company-boundary · acme");
     await expect(page.locator("#environment-mcp-options input")).toHaveCount(0);
     await page.getByRole("button", { name: "Save environment", exact: true }).click();
