@@ -58,6 +58,8 @@ test("draft slash autocomplete handles arrows, Tab, Escape and provider/account 
   await input.press("Enter"); await expect(page.locator("#new-slash-status")).toContainText("existing chat");
   await input.press("Escape"); await expect(page.locator("#new-slash-menu")).toBeHidden();
   await page.locator("#create-chat-button").click(); await expect(page.locator("#create-chat-error")).toContainText("existing chat");
+  await input.fill("/qualquerporra"); await page.locator("#create-chat-button").click();
+  await expect(page.locator("#create-chat-error")).toContainText("Unknown command /qualquerporra");
   await page.locator("#new-agent-account").selectOption("account-claude");
   await input.fill("/goal"); await expect(page.locator("#new-slash-status")).toContainText("No matches");
   await input.fill("/fixture"); await expect(page.locator("#new-slash-options")).toContainText("/fixture-native");

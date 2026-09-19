@@ -86,6 +86,20 @@ test("installed Claude namespaces keep same-name commands and aliases distinct f
   assert.equal(commandCatalog.length, names.length, "Web/SDK controls must not mutate the worker-reported native inventory");
 });
 
+test("an admitted Codex skill keeps structured dispatch while unknown names never reach the adapter", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const calls = [], commands = { list: async () => ({ commands: [{ name: "work", kind: "Skill", path: "/fixture/work/SKILL.md" }] }) };
+  const manager = new RuntimeManager({ store, config: testConfig(root), commands, broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => ({
+    start: async () => {}, stop: async () => {}, send: async (text, settings) => { calls.push({ text, settings }); return { text: "Skill completed" }; },
+  }) });
+  t.after(() => manager.shutdown()); const chat = await manager.createChat({ agent: "codex", title: "Skill admission" });
+  await manager.send(chat.id, "/work inspect this repository");
+  assert.match(calls[0].text, /\$work inspect this repository/);
+  assert.deepEqual(calls[0].settings.skills, [{ name: "work", path: "/fixture/work/SKILL.md" }]);
+  await assert.rejects(manager.submit(chat.id, "/not-installed"), /Unknown command \/not-installed/);
+  assert.equal(calls.length, 1);
+});
+
 test("plan plus task uses read-only mode; goals persist and stream each native continuation separately", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const config = testConfig(root, { CODEX_BIN: fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url)), AGENT_IDLE_TIMEOUT_MS: "10000" });
@@ -104,6 +118,13 @@ test("plan plus task uses read-only mode; goals persist and stream each native c
   assert.equal(store.get(chat.id).messages.filter(m => m.role === "assistant").at(-1).text, "Goal verified complete");
   await manager.send(chat.id, "/review --base main");
   assert.equal(store.get(chat.id).messages.filter(m => m.role === "assistant").at(-1).text, "Native review completed without a normal prompt.");
+  const beforeUnknown = store.get(chat.id).messages.length;
+  await assert.rejects(manager.submit(chat.id, "/qualquerporra"), error => error.statusCode === 400 && /Unknown command \/qualquerporra/.test(error.message));
+  await assert.rejects(manager.enqueue(chat.id, "/qualquerporra later"), error => error.statusCode === 400 && /Unknown command \/qualquerporra/.test(error.message));
+  assert.equal(store.get(chat.id).messages.length, beforeUnknown, "Unknown commands must not become model turns");
+  assert.deepEqual(store.get(chat.id).queuedMessages || [], [], "Unknown commands must not enter the queue");
+  await manager.send(chat.id, "/tmp/project is the folder to inspect");
+  assert.equal(store.get(chat.id).messages.filter(m => m.role === "user").at(-1).text, "/tmp/project is the folder to inspect", "Absolute paths remain ordinary prompts");
   const beforeInspection = store.get(chat.id).messages.length;
   const terminals = await manager.inspectCommand(chat.id, "ps");
   assert.equal(terminals.awake, true); assert.equal(terminals.items.length, 2); assert.ok(!JSON.stringify(terminals).includes("fixture-secret"));

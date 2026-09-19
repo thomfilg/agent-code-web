@@ -25,7 +25,7 @@ async function setup(page, { busy = false, items = DEFAULT_TITLE_ITEMS } = {}) {
 }
 async function open(page, command = false, busy = false) {
   if (command) { await page.locator("#message-input").fill("/title"); await page.getByRole("button", { name: busy ? "Queue" : "Send message", exact: true }).click(); }
-  else { await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#tab-title-button").click(); }
+  else { await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#tab-title-button").click(); }
   await expect(page.locator("#controls-title")).toHaveText("Browser tab title"); await expect(page.locator("#controls-content [role=status]")).toContainText("Saved tab title loaded");
 }
 const close = page => page.locator("#controls-dialog").evaluate(dialog => dialog.close());
@@ -107,7 +107,7 @@ test("failed settings retain the slash command; a late discovery cannot replace 
   const entered = Promise.withResolvers(), release = Promise.withResolvers(); let delay = true;
   await page.route("**/api/tab-title", async route => { if (delay) { delay = false; entered.resolve(); await release.promise; } return route.fallback(); });
   await page.getByRole("button", { name: "Send message", exact: true }).click(); await entered.promise; await close(page);
-  await page.locator("#message-input").fill("New draft"); await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#keymap-button").click(); release.resolve();
+  await page.locator("#message-input").fill("New draft"); await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#keymap-button").click(); release.resolve();
   await expect(page.locator("#controls-title")).toHaveText("Keyboard shortcuts"); await expect(page.locator("#message-input")).toHaveValue("New draft"); expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
 });
 

@@ -76,7 +76,11 @@ test("native chat header keeps its title and every action inside phone widths", 
   for (const width of [320, 390, 430, 480]) {
     await page.setViewportSize({ width, height: 844 });
     await expect(page.locator("#chat-title")).toBeInViewport({ ratio: 1 });
-    for (const label of ["Open chats", "Open shared Chrome", "Open app preview", "Open side chat", "Open agent threads", "View changes", "Copy chat link"]) await expect(page.getByRole("button", { name: label, exact: true })).toBeInViewport({ ratio: 1 });
+    for (const label of ["Open chats", "Open shared Chrome", "Open app preview", "Open side chat", "Open agent threads"]) await expect(page.getByRole("button", { name: label, exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(page.getByLabel("Chat settings", { exact: true })).toBeInViewport({ ratio: 1 });
+    await page.getByLabel("Chat settings", { exact: true }).click();
+    for (const label of ["View changes", "Copy private chat link"]) await expect(page.getByRole("button", { name: label, exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     const title = await page.locator("#chat-title").boundingBox(); expect(title.width).toBeGreaterThan(100);
     if ([320, 390].includes(width)) await page.screenshot({ path: testInfo.outputPath(`native-chat-header-${width}.png`) });

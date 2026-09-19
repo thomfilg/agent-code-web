@@ -55,6 +55,7 @@ function remainingAssistantText(runtime, text) {
 }
 const runtimeAccountBinding = chat => JSON.stringify([chat.ownerId || null, chat.agent, chat.agentAccountId || null]);
 const agentScopeBinding = chat => JSON.stringify([runtimeAccountBinding(chat), chat.environmentId || null, chat.workspace || null, companyForChat(chat)]);
+const slashCommandName = text => /^\/([\w:.-]+)(?:\s|$)/.exec(text)?.[1] || null;
 
 export class RuntimeManager extends EventEmitter {
   #runtimes = new Map();
@@ -98,8 +99,10 @@ export class RuntimeManager extends EventEmitter {
 
   async enqueue(chatId, rawText, attachmentIds = []) {
     const text = clampText(rawText, 100_000, "message");
-    if (!this.store.get(chatId)) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
-    this.#checkClaudeConfiguration(this.store.get(chatId), text, attachmentIds);
+    const current = this.store.get(chatId);
+    if (!current) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    this.#checkClaudeConfiguration(current, text, attachmentIds);
+    await this.#resolveMessageCommand(current, text);
     if (this.attachments) await this.attachments.resolve(chatId, attachmentIds);
     const item = { id: newId("queued"), text, attachmentIds, createdAt: nowIso() };
     const chat = await this.store.update(chatId, current => {
@@ -1076,6 +1079,34 @@ export class RuntimeManager extends EventEmitter {
     if (request.mutate && !privateProfile) throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
   }
 
+  #resolveMessageCommand(chat, text) {
+    const commandAction = messageCommand(chat.agent, text);
+    const name = slashCommandName(text);
+    if (commandAction || !name || !this.commands) return { commandAction, skill: null };
+
+    return this.#resolveCatalogCommand(chat, name);
+  }
+
+  async #resolveCatalogCommand(chat, name) {
+    const command = (await this.commands.list(chat)).commands.find(item => item.name === name);
+    if (chat.agent === "codex" && command?.kind === "Skill" && command.path) {
+      return { commandAction: null, skill: { name: command.name, path: command.path } };
+    }
+
+    // Claude can report a native command with the same name as a Relay web
+    // control (notably /mcp). The browser owns the argument-free control, but
+    // arguments must still reach the exact native command that the worker
+    // reported. Never infer arbitrary commands from prompt text.
+    const reported = [...(Array.isArray(chat.commandCatalog) ? chat.commandCatalog : []),
+      ...(Array.isArray(chat.slashCommands) ? chat.slashCommands : [])].some(item => {
+      const entry = typeof item === "string" ? { name: item } : item;
+      return [entry?.name, ...(Array.isArray(entry?.aliases) ? entry.aliases : [])].includes(name);
+    });
+    if (chat.agent === "claude" && (command && !command.web || reported)) return { commandAction: null, skill: null };
+    if (command?.web) throw Object.assign(new Error(`/${name} opens a web control. Run it without arguments, or choose it from the / menu.`), { statusCode: 400 });
+    throw Object.assign(new Error(`Unknown command /${name}. Choose a command from the / menu.`), { statusCode: 400 });
+  }
+
   async #syncClaudeConfiguration(chatId, native, original, guard) {
     if (!native || !Object.keys(native).length) return;
     const catalog = Object.hasOwn(native, "model") && this.models ? await this.models.list("claude") : null;
@@ -1460,8 +1491,13 @@ export class RuntimeManager extends EventEmitter {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("chat not found"), { statusCode: 404 });
     this.#checkClaudeConfiguration(chat, text, attachmentIds);
-    const commandAction = approval ? { type: "approvalRetry", approval,
-      prompt: "I confirmed the specific denied action recorded by the native approval immediately before this message. Retry that exact action once in the same context, using the current permission policy. Do not broaden the operation, change permissions, or treat this as permission for other actions. If the action is no longer appropriate or still denied, explain and stop this retry." } : messageCommand(chat.agent, text);
+    const resolution = approval ? { commandAction: { type: "approvalRetry", approval,
+      prompt: "I confirmed the specific denied action recorded by the native approval immediately before this message. Retry that exact action once in the same context, using the current permission policy. Do not broaden the operation, change permissions, or treat this as permission for other actions. If the action is no longer appropriate or still denied, explain and stop this retry." }, skill: null } : this.#resolveMessageCommand(chat, text);
+    // Preserve synchronous admission for ordinary text and built-in commands.
+    // Existing callers use the queued marker as the same-tick fork/start fence;
+    // only slash names that require catalog lookup may yield here.
+    const resolvedCommand = typeof resolution?.then === "function" ? await resolution : resolution;
+    const { commandAction, skill } = resolvedCommand;
     if (chat.workflowState === "archived") throw Object.assign(new Error("Unarchive this chat before sending a message"), { statusCode: 409 });
     if (this.#modeChanges.has(chatId) || this.#interruptions.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || this.#runtimes.get(chatId)?.busy || this.#runtimes.get(chatId)?.adapter.isBackgroundBusy?.() || (this.#sendingNow.has(chatId) && this.#sendingNow.get(chatId) !== queueAction)) {
       throw Object.assign(new Error("this chat already has a running turn"), { statusCode: 409 });
@@ -1484,13 +1520,6 @@ export class RuntimeManager extends EventEmitter {
       appReferencesForTurn(chat, files, companyForChat(chat));
       if (files.length && commandAction && !commandAction.prompt) throw new Error(`/${text.slice(1).split(/\s/)[0]} does not accept attachments. Remove them or send them in a separate message.`);
       if (chat.environmentId) await (await this.servicesFor(chat)).environments.runtime(chat.environmentId, chat);
-      let skill = null;
-      const slash = /^\/([\w:.-]+)(?:\s|$)/.exec(text);
-      if (chat.agent === "codex" && slash && this.commands && !commandAction) {
-        const command = (await this.commands.list(chat)).commands.find(item => item.name === slash[1]);
-        if (command?.kind === "Skill" && command.path) skill = { name: command.name, path: command.path };
-        else if (command?.web) throw new Error(`/${slash[1]} opens a web control. Run it without arguments, or choose it from the / menu.`);
-      }
       if (turn.cancelled || version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(new Error("Turn cancelled"), { name: "AbortError" });
       if (githubEvent) await this.githubEvents.assertDispatch(chatId, githubEvent, () => {
         if (turn.cancelled || version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(new Error("GitHub event cancelled"), { name: "AbortError" });

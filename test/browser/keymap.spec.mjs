@@ -17,7 +17,7 @@ async function setup(page) {
   return { chat, calls, get saved() { return saved; }, set saved(value) { saved = value; } };
 }
 async function open(page, menu = false) {
-  if (menu) { await page.getByLabel("Chat actions", { exact: true }).click(); await page.getByRole("button", { name: "Keyboard shortcuts", exact: true }).click(); }
+  if (menu) { await page.getByLabel("Chat settings", { exact: true }).click(); await page.getByRole("button", { name: "Keyboard shortcuts", exact: true }).click(); }
   else { await page.locator("#message-input").fill("/keymap"); await page.getByRole("button", { name: "Send message", exact: true }).click(); }
   await expect(page.locator("#controls-title")).toHaveText("Keyboard shortcuts"); await expect(page.locator("#controls-content [role=status]")).toContainText("Saved shortcuts loaded");
 }

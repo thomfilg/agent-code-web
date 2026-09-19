@@ -51,6 +51,27 @@ test("command controls edit goals, queue native commands and retain drafts on de
   expect(queued).toHaveLength(5);
 });
 
+test("status stays in the web UI and unknown slash commands never become agent messages", async ({ page }) => {
+  const chat = await openFixture(page);
+  const input = page.getByLabel("Message", { exact: true });
+  const messagePosts = [];
+  page.on("request", request => {
+    if (request.method() === "POST" && request.url().endsWith(`/api/chats/${chat.id}/messages`)) messagePosts.push(request.postDataJSON());
+  });
+  await input.fill("/status"); await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator("#usage-dialog")).toBeVisible();
+  await expect(input).toHaveValue(""); expect(messagePosts).toEqual([]);
+  await page.getByLabel("Close usage", { exact: true }).click();
+
+  const before = (await (await page.request.get(`/api/chats/${chat.id}`)).json()).chat.messages.length;
+  await input.fill("/qualquerporra"); await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator("#toasts")).toContainText("Unknown command /qualquerporra");
+  await expect(input).toHaveValue("/qualquerporra");
+  expect(messagePosts).toEqual([{ text: "/qualquerporra", attachments: [] }]);
+  const after = (await (await page.request.get(`/api/chats/${chat.id}`)).json()).chat;
+  expect(after.messages).toHaveLength(before); expect(after.queuedMessages || []).toEqual([]);
+});
+
 test("native terminal controls inspect without prompts, confirm one task and retain the draft", async ({ page }) => {
   const chat = await openFixture(page, [], { agent: "codex", status: "idle" });
   let items = [{ id: "100", title: "npm run dev", detail: "/fixture" }, { id: "200", title: "npm test", detail: "/fixture" }];
@@ -128,7 +149,8 @@ test("document previews use the desktop column, styled defaults, and mutually ex
   await tool.locator(":scope > summary").click(); await tool.locator(".tool-details > summary").click();
   await expect(tool.locator(".tool-output")).toHaveText("Real result");
   await expect(panel).toBeVisible(); await expect(page.locator("#tools-panel")).not.toBeVisible();
-  await page.locator("#view-changes").click(); await expect(page.locator("#diff-panel")).toBeVisible();
+  await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#view-changes").click(); await expect(page.locator("#diff-panel")).toBeVisible();
+  await expect(page.locator(".chat-settings-menu")).not.toHaveAttribute("open", "");
   await expect(panel).not.toBeVisible(); await expect(panel.locator("iframe")).toHaveCount(0);
   await open.click(); await expect(page.locator("#diff-panel")).not.toBeVisible(); await expect(panel).toBeVisible();
   await expect(input).toHaveValue("Keep my draft");

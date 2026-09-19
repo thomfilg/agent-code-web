@@ -3,6 +3,12 @@
 This is an implementation checklist, not a claim that all commands are complete.
 Commands typed into the composer must perform their real action; sending a
 terminal command as ordinary model text is not an implementation of that action.
+The same admission rule now applies before chat creation, on an idle chat and at
+queue insertion: an exact slash prefix must resolve to a Relay control, native
+command or installed Codex skill. Unknown names such as `/qualquerporra` fail
+before a user message, queue item, worker start or model turn is created. Absolute
+paths such as `/tmp/project` remain ordinary text because they are not slash
+command names.
 
 Native behavior is checked against the installed Codex 0.154.0 app-server schema,
 the official [command reference](https://learn.chatgpt.com/docs/developer-commands)
@@ -58,7 +64,7 @@ and remain at the beginning of native stream-json input.
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
 | `/fast [on/off]`, `/personality [friendly/pragmatic/none]` (Codex) | Catalog-driven, persisted per-chat settings, applied in FIFO order to later turns. Stop/model-change guards, retryable personality picker and draft/attachment protection. Controller/browser checks and actual installed-CLI parameter/resume verification pass; live activation remains pending. |
 | `/fast [on/off]` (Claude) | Per-chat private-gateway opt-in, fresh authenticated account checks, structured native status, FIFO and same-session Stop/resume. First opt-in and later toggles preserve a running app. Native Fast/standard requests, credits, API denials, persisted cooldowns, configuration/model interop and managed-policy enforcement verified. No provider key in workers. Host profiles, custom upstreams, native managed-policy limitations and live activation remain gated below. |
-| `/usage`, `/status`, `/context` | Existing session/usage inspection. |
+| `/usage`, `/status`, `/context` | Existing session/usage inspection. These are handled entirely by the web UI, including while a worker is busy; they do not create a message, queue item or model turn. |
 | `/diff`, `/mcp`, `/skills`, `/help` | Workspace diff, connection manager, installed-command picker. |
 | `/mcp reconnect/enable/disable [server\|all]` (Claude) | Actual native SDK controls with post-action status verification, per-chat native persistence, FIFO, error/Stop recovery and no model call. Bare `/mcp` keeps the saved-connection manager; `/mcp verbose` shows worker-reported status. Private-file preflight and host-profile mutation gates apply; live activation pending. |
 | `/new`, `/clear`, `/resume` | New-chat flow or searchable saved-chat picker; never implicitly delete the old conversation. |

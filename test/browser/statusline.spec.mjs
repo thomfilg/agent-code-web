@@ -26,7 +26,7 @@ async function setup(page, { busy = false } = {}) {
 }
 async function open(page, command = false, busy = false) {
   if (command) { await page.locator("#message-input").fill("/statusline"); await page.getByRole("button", { name: busy ? "Queue" : "Send message", exact: true }).click(); }
-  else { await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#statusline-button").click(); }
+  else { await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#statusline-button").click(); }
   await expect(page.locator("#controls-title")).toHaveText("Status line"); await expect(page.locator("#controls-content [role=status]")).toContainText("Saved status line loaded");
 }
 const close = page => page.locator("#controls-dialog").evaluate(dialog => dialog.close());
@@ -167,7 +167,7 @@ test("late discovery cannot erase a newer draft or replace a newer dialog", asyn
   const f = await setup(page), entered = Promise.withResolvers(), release = Promise.withResolvers(); let delay = true;
   await page.route("**/api/statusline", async route => { if (delay) { delay = false; entered.resolve(); await release.promise; } return route.fallback(); });
   await page.locator("#message-input").fill("/statusline"); await page.getByRole("button", { name: "Send message", exact: true }).click(); await entered.promise;
-  await close(page); await page.locator("#message-input").fill("Newer draft"); await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#keymap-button").click();
+  await close(page); await page.locator("#message-input").fill("Newer draft"); await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#keymap-button").click();
   release.resolve(); await expect(page.locator("#controls-title")).toHaveText("Keyboard shortcuts"); await expect(page.locator("#message-input")).toHaveValue("Newer draft");
   expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
 });

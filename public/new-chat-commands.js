@@ -27,7 +27,7 @@ export function firstChatCommand(text, agent) {
   if (!match) return null;
   const name = WEB_COMMAND_ALIASES[match[1]] || match[1], argument = (match[2] || "").trim();
   const item = newChatCommands(agent).commands.find(item => item.name === name);
-  if (!item) throw new Error(`/${match[1]} is not available before this agent has a chat. Start with a task, then use the chat's / menu.`);
+  if (!item) throw new Error(`Unknown command /${match[1]}. Choose a command from the / menu. Native session commands appear after you start a chat with a task.`);
   if (item.disabled) throw new Error(`/${match[1]}: ${item.disabledReason}`);
   if (name === "goal" && ["pause", "resume", "clear"].includes(argument)) throw new Error(`/goal ${argument} needs an existing goal. Use /goal followed by an objective to start one.`);
   if (["mcp", "help", "skills", "keymap", "statusline", "title", "theme"].includes(name) && argument) throw new Error(`Use /${name} without arguments to open its control. Other forms require an existing chat.`);

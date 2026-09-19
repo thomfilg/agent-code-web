@@ -18,7 +18,7 @@ async function setup(page, { busy = false, bindings = {} } = {}) {
 }
 const input = page => page.locator("#message-input");
 const editor = page => page.getByLabel("Message (Vim editor)", { exact: true });
-async function menuToggle(page) { await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#vim-button").click(); await expect(page.locator("#vim-mode")).toHaveText("VIM · NORMAL"); }
+async function menuToggle(page) { await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#vim-button").click(); await expect(page.locator("#vim-mode")).toHaveText("VIM · NORMAL"); }
 async function value(page, text) { await expect.poll(() => input(page).inputValue()).toBe(text); }
 async function keys(page, text) { for (const key of text) await editor(page).press(key); }
 

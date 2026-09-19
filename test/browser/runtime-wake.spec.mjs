@@ -72,7 +72,7 @@ test("delete immediately shows progress, prevents repeats and keeps a failed del
     deletes++; await release.promise; await route.fulfill({ status: 503, json: { error: "Worker stop failed; chat retained" } });
   });
   page.on("dialog", dialog => dialog.accept());
-  await page.getByLabel("Chat actions", { exact: true }).click();
+  await page.getByLabel("Chat settings", { exact: true }).click();
   await page.locator("#delete-button").click();
   await expect(page.locator("#runtime-detail")).toContainText("Deleting chat");
   await expect(page.locator("#delete-button")).toBeDisabled(); await expect(page.locator("#wake-worker")).toBeDisabled();
@@ -82,7 +82,7 @@ test("delete immediately shows progress, prevents repeats and keeps a failed del
   release.resolve(); await expect(page.getByText("Worker stop failed; chat retained", { exact: true })).toBeVisible();
   await expect(page.locator("#delete-button")).toBeEnabled(); await expect(row).toHaveAttribute("aria-busy", "false");
   expect((await request.get(`/api/chats/${chat.id}`)).status()).toBe(200);
-  await page.unroute(`**/api/chats/${chat.id}`); await page.locator("#delete-button").click();
+  await page.unroute(`**/api/chats/${chat.id}`); await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#delete-button").click();
   await expect(page.locator(`.chat-row[data-chat-id="${chat.id}"]`)).toHaveCount(0);
   expect((await request.get(`/api/chats/${chat.id}`)).status()).toBe(404);
 });

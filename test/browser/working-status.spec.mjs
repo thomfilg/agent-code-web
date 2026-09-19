@@ -38,7 +38,7 @@ test("Escape closes an open menu without interrupting; Stop failure leaves contr
   const f = await runningChat(page, request);
   try {
     f.fail();
-    await page.getByLabel("Chat actions", { exact: true }).click(); await page.keyboard.press("Escape");
+    await page.getByLabel("Chat settings", { exact: true }).click(); await page.keyboard.press("Escape");
     expect(f.calls).toEqual([]);
     await page.locator(".control-menu[open]").evaluateAll(menus => menus.forEach(menu => { menu.open = false; }));
     await page.locator("#send-button").click();

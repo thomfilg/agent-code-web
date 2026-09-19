@@ -13,7 +13,7 @@ test("draft controls distinguish providers and never turn session-only commands 
   assert.equal(firstChatCommand("ordinary message", "codex"), null);
   assert.equal(firstChatCommand("/tmp/project is the folder", "codex"), null);
   for (const command of ["/", "/goal pause", "/goal resume", "/goal clear", "/compact", "/copy", "/approve", "/unknown-native", "/help arguments"]) assert.throws(() => firstChatCommand(command, "codex"));
-  assert.throws(() => firstChatCommand("/goal build", "claude"), /not available/);
+  assert.throws(() => firstChatCommand("/goal build", "claude"), /Unknown command \/goal/);
   assert.equal(newChatCommands("codex").commands.find(c => c.name === "compact").disabled, true);
   assert.equal(newChatCommands(null).commands.length, 0);
 });

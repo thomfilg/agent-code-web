@@ -64,25 +64,30 @@
             <button type="button" class="secondary-button" id="open-app-preview" title="Open an app on this chat’s worker in a separate tab" aria-label="Open app preview">↗ <span>Open app</span></button>
             <button type="button" class="secondary-button" id="open-side" aria-label="Open side chat" title="Ask a side question without interrupting the main chat" hidden>Side chat</button>
             <button type="button" class="secondary-button" id="open-agents" aria-label="Open agent threads" title="Inspect or continue this chat's native child agents" hidden>Agents</button>
-            <details class="control-menu" id="repositories-menu"><summary aria-label="Repositories" title="Repositories">▱</summary><div class="control-popover" id="chat-repositories"></div></details>
-            <button class="icon-button" id="view-changes" title="View changes" aria-label="View changes">▣</button>
-            <button class="icon-button" id="copy-chat-link" title="Copy private chat link" aria-label="Copy chat link">↥</button>
-            <details class="control-menu"><summary aria-label="Chat actions" title="Chat actions">⋮</summary><div class="control-popover">
+            <details class="control-menu chat-settings-menu"><summary aria-label="Chat settings" title="Chat settings">Chat settings</summary><div class="control-popover">
+              <p class="control-group-label">Workspace</p>
+              <details class="chat-settings-disclosure" id="repositories-menu"><summary aria-label="Repositories">Repositories</summary><div class="chat-settings-submenu" id="chat-repositories"></div></details>
+              <button type="button" id="view-changes">View changes</button>
+              <button type="button" id="open-workspace">Open in…</button>
+              <button type="button" id="edit-chat-environment">Edit environment</button>
+              <button type="button" id="workspace-trust-button" hidden>Workspace trust</button>
+              <p class="control-group-label">Conversation</p>
               <button type="button" id="background-tasks">Background tasks</button>
+              <button type="button" id="copy-chat-link">Copy private chat link</button>
+              <button type="button" id="organize-chat-button" aria-label="Organize current chat">Rename / organize</button>
+              <button type="button" id="transcript-view">Transcript view</button>
+              <button type="button" id="archive-current-chat">Archive</button>
+              <p class="control-group-label">Appearance &amp; input</p>
               <button type="button" id="keymap-button">Keyboard shortcuts</button>
               <button type="button" id="statusline-button">Status line</button>
               <button type="button" id="tab-title-button">Browser tab title</button>
               <button type="button" id="syntax-theme-button">Syntax theme</button>
               <button type="button" id="pets-button">Pets</button>
-              <button type="button" id="desktop-app-button" hidden>Open in desktop app</button>
-              <button type="button" id="workspace-trust-button" hidden>Workspace trust</button>
               <button type="button" id="vim-button" aria-pressed="false">Enable Vim editing</button>
-              <button type="button" id="open-workspace">Open in…</button>
-              <button type="button" id="organize-chat-button" aria-label="Organize current chat">Rename / organize</button>
-              <button type="button" id="transcript-view">Transcript view</button>
-              <button type="button" id="edit-chat-environment">Edit environment</button>
-              <button type="button" id="archive-current-chat">Archive</button>
+              <p class="control-group-label">Worker</p>
+              <button type="button" id="desktop-app-button" hidden>Open in desktop app</button>
               <button type="button" id="stop-button">Stop worker</button>
+              <p class="control-group-label danger-label">Danger zone</p>
               <button type="button" class="danger" id="delete-button" aria-label="Delete chat">Delete</button>
             </div></details>
           </div>

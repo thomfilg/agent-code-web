@@ -72,7 +72,7 @@ test("pending deletion takes priority over startup progress, including timer tic
   try {
     await expect(page.locator("#startup-progress")).toBeVisible();
     page.on("dialog", dialog => dialog.accept());
-    await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#delete-button").click();
+    await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#delete-button").click();
     await expect(page.locator("#runtime-detail")).toBeVisible();
     await expect(page.locator("#runtime-detail")).toContainText("Deleting chat");
     await expect(page.locator("#startup-progress")).toBeHidden();

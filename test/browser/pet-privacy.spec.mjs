@@ -13,7 +13,7 @@ test("switching account clears private pet names, labels, files and decoded prev
     await page.route("**/api/pets", route => route.fulfill({ json: saved }));
     await page.route("**/api/pets/assets/**", route => { assets.push(route.request().url()); return route.fulfill({ contentType: "image/png", body: petSheet() }); });
     await page.goto(`/#chat=${chat.id}`); await expect(page.locator("#chat-title")).toHaveText(chat.title); await expect(page.locator("#chat-pet .pet-art")).toHaveAttribute("data-art", "ready");
-    await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#pets-button").click(); await expect(page.locator(".pet-preview")).toHaveAttribute("data-art", "ready");
+    await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#pets-button").click(); await expect(page.locator(".pet-preview")).toHaveAttribute("data-art", "ready");
     await page.getByLabel("Custom pet name", { exact: true }).fill("Private unsaved name"); await page.getByLabel("Pet sprite sheet", { exact: true }).setInputFiles({ name: "private-sheet.png", mimeType: "image/png", buffer: petSheet() });
     saved = { scope: "new-owner", revision: 0, selected: "fireball", pets: BUILTIN_PETS.map(pet => builtinPet(pet.id)), account: { id: "new-owner", username: "New owner" } };
     await page.evaluate(() => dispatchEvent(new Event("focus"))); await expect(page.locator("#controls-content [role=status]")).toContainText("account changed");

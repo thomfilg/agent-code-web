@@ -17,7 +17,7 @@ async function setup(page) {
   return { chat, snapshot, info, calls, errors };
 }
 async function open(page, menu = false) {
-  if (menu) { await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#desktop-app-button").click(); }
+  if (menu) { await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#desktop-app-button").click(); }
   else { await page.locator("#message-input").fill("/app"); await page.getByRole("button", { name: "Queue", exact: true }).click(); }
   await expect(page.locator("#controls-title")).toHaveText("Open in desktop app");
 }

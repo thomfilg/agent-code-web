@@ -38,6 +38,9 @@ export class ChatControls {
     $("#background-tasks").addEventListener("click", () => this.tasks());
     $("#open-workspace").addEventListener("click", () => this.workspace());
     $("#show-connectors").addEventListener("click", () => this.connectors());
+    $(".chat-settings-menu").addEventListener("click", event => {
+      if (event.target.closest("button, a")) event.currentTarget.open = false;
+    });
     document.querySelectorAll("[data-agent-mode]").forEach(node => node.addEventListener("click", async () => {
       if (this.modeChanging) return;
       const chatId = this.state.active.id;

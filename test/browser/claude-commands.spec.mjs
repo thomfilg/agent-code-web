@@ -232,7 +232,7 @@ for (const width of [1280, 320]) test(`expired Claude access at ${width}px offer
   await expect(page.locator("#messages")).toContainText("Stop the worker and retry");
   await expect(page.locator("#messages")).toContainText("the running application has not been restarted");
   expect(stops).toEqual([]); expect(f.calls).toEqual([]);
-  await page.locator('summary[aria-label="Chat actions"]').click();
+  await page.locator('summary[aria-label="Chat settings"]').click();
   await page.getByRole("button", { name: "Stop worker", exact: true }).click();
   await expect.poll(() => stops).toEqual(["POST"]);
   f.snapshot = { ...f.snapshot, status: "stopped" }; await f.emit();
