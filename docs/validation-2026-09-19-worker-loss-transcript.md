@@ -46,6 +46,35 @@ generated shared-auth and expected `error` after initialize (which intentionally
 normalizes disconnected chats to `stopped`); a later cleanup fixture omitted
 `hasViewers`. The build prerequisite and fixture expectations were corrected.
 
+## Integrated offline-agent snapshot follow-up
+
+The first combined candidate (`e916e3f`) full run finished **1,457/1,459**
+with two failures. One exposed a regression here: fencing retired adapter
+callbacks also discarded the intentionally closed child-agent display snapshot.
+The other was a browser-stream test double missing the reconnect interface,
+fixed separately in the integration worktree. This was not a green full run.
+
+Normal Stop and fatal cleanup now explicitly pull the stopped observer's
+sanitized snapshot, only while lifecycle, account, native thread and exact
+runtime ownership still match. Generic retired callbacks remain blocked. A
+snapshot persistence failure is logged without skipping browser/worker cleanup.
+Five added cases cover both stop paths, changed account/lifecycle, stale
+callbacks and failed snapshot storage. Independent source review accepted the
+final catch-and-continue fix; the reviewer ran no tests.
+
+Revalidation on the final follow-up source:
+
+```sh
+taskset -c 0,1 nice -n 10 node --test --test-concurrency=1 \
+  test/worker-loss-transcript.test.mjs test/agent-threads.test.mjs
+```
+
+Session `3726`: **27/27 passed**, zero failed/skipped/cancelled, 5.54 seconds;
+log `/tmp/relay-worker-loss-snapshot-final.log`. An earlier follow-up fixture
+omitted `agents.busy()` and failed two cases; that mock contract was corrected.
+Full integrated-suite revalidation is still a separate gate. No live worker,
+Chrome profile, queue or production service was changed.
+
 ## Remaining acceptance
 
 - No actual container deletion was tested. The local Docker Desktop CLI target
