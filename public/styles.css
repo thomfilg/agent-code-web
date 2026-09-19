@@ -502,6 +502,23 @@ dialog { max-height: calc(100dvh - 28px); }
 .browser-panel input:focus-visible, .browser-panel select:focus-visible { outline: 2px solid var(--lime); outline-offset: 1px; }
 .browser-toolbar input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; padding: 9px; }
 .browser-tabbar select { padding: 8px; font-size: 12px; }
+.browser-heading { gap: 6px; }
+.browser-panel .browser-heading > strong { flex: none; font-size: 12px; }
+.browser-heading .browser-tabbar { flex: 1; min-width: 0; }
+.browser-heading .icon-button, .browser-toolbar .icon-button { flex: none; }
+.browser-navigation { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.browser-navigation .browser-toolbar { flex: 1; min-width: 0; }
+.browser-navigation .browser-toolbar .secondary-button { padding-inline: 9px; }
+.browser-tools { position: relative; flex: none; }
+.browser-tools > summary { cursor: pointer; list-style: none; width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 7px; }
+.browser-tools > summary::-webkit-details-marker { display: none; }
+.browser-tools > summary:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
+.browser-tools[open] > summary { border-color: var(--lime); color: var(--lime); }
+.browser-tools-popover { position: absolute; top: calc(100% + 8px); right: 0; z-index: 5; width: min(360px, calc(100vw - 52px)); padding: 14px; border: 1px solid var(--line-bright); border-radius: 10px; background: var(--panel); box-shadow: 0 12px 35px #0009; display: grid; gap: 14px; max-height: min(65dvh, 520px); overflow: auto; }
+.browser-tools-popover .browser-profile-label { margin-left: 0; }
+.browser-tools-popover .browser-options > label { min-width: 0; max-width: 100%; }
+.browser-tools-popover select { max-width: 100%; }
+@media (max-width: 540px) { .browser-heading > strong { display: none; } }
 .working-status { color: var(--muted); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 6px 0 10px; overflow-wrap: anywhere; }
 .working-status::before { content: "●"; color: var(--lime); margin-right: 8px; }
 .browser-options { flex-wrap: wrap; }
