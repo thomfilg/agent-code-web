@@ -625,7 +625,7 @@ export class RuntimeManager extends EventEmitter {
     const workspace = runtime.executor?.workspace || chat.workspace;
     const attached = attachmentPrompt(materialized, workspace);
     const prompt = first ? handoffPrompt({ ...chat, messages: [...chat.messages, {}] }, text + attached) : text + attached;
-    return { prompt, settings: { ...settings, ...contextForTurn(files, workspace), appReferences: appReferencesForTurn(chat, files, companyForChat(chat)), mode: chat.mode || "accept_edits", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) } };
+    return { prompt, settings: { ...settings, ...(chat.agent === "claude" ? { ultracode: false } : {}), ...contextForTurn(files, workspace), appReferences: appReferencesForTurn(chat, files, companyForChat(chat)), mode: chat.mode || "accept_edits", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) } };
   }
 
   async servicesFor(chat) { return this.resources ? this.resources.forOwner(chat?.ownerId) : { environments: this.environments, github: this.github, mcps: this.mcps }; }
@@ -910,7 +910,7 @@ export class RuntimeManager extends EventEmitter {
       await this.stop(chatId, "agent-switch");
       const updated = await this.store.update(chatId, current => ({ agent, agentAccountId, ...settings, modelSelectionSet: true,
         ...(agent !== "claude" && ["default", "dont_ask"].includes(current.mode) ? { mode: "plan" } : {}),
-        agentSessionId: null, needsAgentHandoff: true, pendingRequest: null, awaitingUser: false, claudeFastMode: false, claudeFastStatus: null,
+        agentSessionId: null, needsAgentHandoff: true, pendingRequest: null, awaitingUser: false, claudeFastMode: false, claudeFastStatus: null, ultracode: false,
         nativeForkSessionId: null, forkGoalPending: false, forkContextPending: false, goal: null,
         usage: null, usageAccount: null, rateLimits: null, sessionDetails: null, taskProgress: null, connectors: null, slashCommands: [], commandCatalog: [],
         messages: current.messages.map(message => ["assistant", "tool"].includes(message.role) ? { ...message, agent: message.agent || current.agent } : message),
@@ -927,10 +927,18 @@ export class RuntimeManager extends EventEmitter {
     if (this.#switching.has(chatId)) throw Object.assign(new Error("Wait for the agent switch to finish"), { statusCode: 409 });
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    const selectionVersion = this.#lifecycleVersions.get(chatId) || 0;
     const settings = await this.models.validate(chat.agent, input, chat);
-    guard();
-    if (this.#switching.has(chatId) || this.store.get(chatId)?.agent !== chat.agent) throw Object.assign(new Error("The agent changed; select its model again"), { statusCode: 409 });
-    const updated = await this.store.update(chatId, current => { guard(); return { ...settings, modelSelectionSet: true, modelSettingsRevision: (current.modelSettingsRevision || 0) + 1 }; });
+    const check = selected => {
+      guard();
+      if (this.#switching.has(chatId) || !selected || runtimeAccountBinding(selected) !== runtimeAccountBinding(chat)
+        || selected.modelSettingsRevision !== chat.modelSettingsRevision || (this.#lifecycleVersions.get(chatId) || 0) !== selectionVersion) throw Object.assign(new Error("The agent or settings changed; select its model again"), { statusCode: 409 });
+    };
+    check(this.store.get(chatId));
+    const updated = await this.store.update(chatId, current => {
+      check(current);
+      return { ...settings, modelSelectionSet: true, modelSettingsRevision: (current.modelSettingsRevision || 0) + 1 };
+    });
     this.publishChat(updated); return updated;
   }
 
@@ -1013,7 +1021,7 @@ export class RuntimeManager extends EventEmitter {
       if (Object.hasOwn(native, "model")) {
         if (current.model === original.model && current.effort === original.effort && current.modelSettingsRevision === original.modelSettingsRevision) {
           const selected = catalog?.models.find(item => item.id === native.model);
-          patch.model = native.model; patch.modelSelectionSet = true;
+          patch.model = native.model; patch.modelSelectionSet = true; patch.ultracode = false;
           patch.modelSettingsRevision = (current.modelSettingsRevision || 0) + 1;
           patch.effort = current.effort === "auto" || selected?.efforts.includes(current.effort) ? current.effort : "auto";
         } else conflicts.push("model/effort");
@@ -1099,7 +1107,7 @@ export class RuntimeManager extends EventEmitter {
         patch.modelSettingsRevision = (current.modelSettingsRevision || 0) + 1;
         // Native /fast on promotes unsupported aliases to Opus. Keep that
         // choice on the next print-mode process, without lowering effort.
-        if (result.fastPreference && /^opus(?:\[1m\])?$/.test(result.fastModel || "")) { patch.model = result.fastModel; patch.modelSelectionSet = true; }
+        if (result.fastPreference && /^opus(?:\[1m\])?$/.test(result.fastModel || "")) { patch.model = result.fastModel; patch.modelSelectionSet = true; if (patch.model !== current.model) patch.ultracode = false; }
       }
       patch.claudeFastStatus.selectionRevision = patch.modelSettingsRevision ?? current.modelSettingsRevision ?? 0;
       return patch;
@@ -1538,6 +1546,11 @@ export class RuntimeManager extends EventEmitter {
         this.#assertNativeAccount(chatId, runtime);
         return runtime.adapter.send(claude ? raw : metadata ? responsePrompt(prompt, automaticTitle) : prompt, {
         ...settings, ...explicitContext, appReferences: appReferencesForTurn(currentChat, files, companyForChat(currentChat)), ...(skill ? { skills: [skill] } : {}),
+        ...(claude ? { selectionCurrent: () => {
+          const selected = this.store.get(chatId);
+          return modeActive() && selected && runtimeAccountBinding(selected) === runtimeAccountBinding(settingsChat)
+            && selected.modelSettingsRevision === settingsChat.modelSettingsRevision;
+        } } : {}),
         ...(commandAction?.type === "review" ? { reviewTarget: commandAction.target } : {}),
         ...(commandAction?.type === "goal" ? { goalDirective: commandAction } : currentChat.forkGoalPending && currentChat.mode !== "plan" && commandAction?.type !== "review" ? { goalDirective: { action: "resume", fork: true } } : {}),
         ...(claude ? { systemPrompt: responsePrompt("", automaticTitle) + (currentChat.needsAgentHandoff ? handoffPrompt(currentChat, "") : "") + browserPrompt,

@@ -146,7 +146,7 @@ export class ClaudeAdapter {
     }
   }
 
-  async send(text, { model, effort, resetEffort, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, onPermissionMode, mode = "accept_edits", systemPrompt } = {}) {
+  async send(text, { model, effort, resetEffort, ultracode, selectionCurrent, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, onPermissionMode, mode = "accept_edits", systemPrompt } = {}) {
     const version = this.sendVersion;
     const configuration = claudeConfigRequest(text);
     const settingsPrompt = configuration?.kind === "prompt";
@@ -160,6 +160,12 @@ export class ClaudeAdapter {
     const reviewRequest = /^\/code-review(?:\s|$)/.test(text.trimStart());
     const applicationRequest = /^\/(?:run|verify)(?:\s|$)/.test(text.trimStart());
     const interactive = this.privateProfile && Boolean(this.hooks.onRequest || this.hooks.accountCredentials);
+    if (ultracode === true && (!this.privateProfile || effort !== "xhigh")) throw new Error("Ultracode requires a private Claude session with xhigh effort.");
+    if (ultracode === true && (mcpRequest?.action || reviewRequest)) throw new Error("Ultracode confirmation is not supported for this native command yet. Select ordinary effort before running it; this chat's saved mode has not changed.");
+    // Normal private turns need false readback too, even without interactive
+    // permission hooks. Control-only MCP and native review retain their separate
+    // transports, never a second control channel over a managed logical turn.
+    const ultracodeSession = this.privateProfile && typeof ultracode === "boolean" && !mcpRequest?.action && !reviewRequest;
     if (mcpRequest?.action && !this.privateProfile) throw new Error(CLAUDE_MCP_PRIVATE_ERROR);
     if (pluginReload && !this.privateProfile) throw Error(CLAUDE_PLUGIN_PRIVATE_ERROR);
     if (debugRequest && !this.privateProfile) throw Error(CLAUDE_DEBUG_PRIVATE_ERROR);
@@ -215,7 +221,7 @@ export class ClaudeAdapter {
     // These native handlers create a resumable journal only on completion.
     // Preflight, startup and forced-stop failures must not retain a missing ID.
     const provisionalSession = isNew && (mcpRequest?.action || reviewRequest || applicationRequest || pluginReload || debugRequest);
-    if (isNew && !provisionalSession && !interactive && !settingsPrompt) {
+    if (isNew && !provisionalSession && !interactive && !settingsPrompt && !ultracodeSession) {
       this.sessionId = sessionId;
       await this.hooks.onSessionId?.(sessionId);
     }
@@ -242,7 +248,7 @@ export class ClaudeAdapter {
     await ensureDirectory(uploads);
     // SDK sessions can clear effort natively. A startup environment override
     // would otherwise pin Auto and silently defeat all later picker changes.
-    const usesSession = interactive || applicationRequest || pluginReload || settingsPrompt || debugRequest || this.applicationSession && !this.applicationSession.ended;
+    const usesSession = interactive || ultracodeSession || applicationRequest || pluginReload || settingsPrompt || debugRequest || this.applicationSession && !this.applicationSession.ended;
     if (resetEffort && !usesSession) env.CLAUDE_CODE_EFFORT_LEVEL = "auto";
     if (usesSession && env.CLAUDE_CODE_EFFORT_LEVEL && !this.effortEnvironmentNotified) {
       this.hooks.onEvent?.({ type: "notice", text: "Claude's worker environment sets CLAUDE_CODE_EFFORT_LEVEL. It may override the web effort selection; use /effort status to check the effective native level." });
@@ -290,7 +296,7 @@ export class ClaudeAdapter {
       "--print",
       "--verbose",
       "--output-format", "stream-json",
-      ...(mcpRequest?.action || reviewRequest || interactive || pluginReload || settingsPrompt || debugRequest ? ["--input-format", "stream-json"] : []),
+      ...(mcpRequest?.action || reviewRequest || interactive || ultracodeSession || pluginReload || settingsPrompt || debugRequest ? ["--input-format", "stream-json"] : []),
       ...(interactive ? ["--permission-prompt-tool", "stdio"] : []),
       ...(this.privateProfile && usesSession ? CLAUDE_SCHEDULE_DIAGNOSTICS : []),
       "--include-partial-messages",
@@ -302,7 +308,10 @@ export class ClaudeAdapter {
       ...(isNew ? ["--session-id", sessionId] : ["--resume", sessionId]),
       ...(launchModel ? ["--model", launchModel] : []),
       ...(effort ? ["--effort", effort] : []),
-      ...(enableFast || typeof fastMode === "boolean" ? ["--settings", JSON.stringify({ fastMode: enableFast || fastMode && !heldCooldown })] : []),
+      ...(enableFast || typeof fastMode === "boolean" || typeof ultracode === "boolean" ? ["--settings", JSON.stringify({
+        ...(enableFast || typeof fastMode === "boolean" ? { fastMode: enableFast || fastMode && !heldCooldown } : {}),
+        ...(typeof ultracode === "boolean" ? { ultracode } : {}),
+      })] : []),
     ];
 
     if (version !== this.sendVersion) throw new Error("Claude turn interrupted");
@@ -364,9 +373,9 @@ export class ClaudeAdapter {
         const launchArgs = args.includes("--input-format") ? args : [...args, "--input-format", "stream-json"];
         this.applicationSession = manage(launchArgs);
       }
-      managed = this.applicationSession || (interactive || pluginReload || settingsPrompt || debugRequest ? manage(args) : null);
+      managed = this.applicationSession || (interactive || ultracodeSession || pluginReload || settingsPrompt || debugRequest ? manage(args) : null);
       this.turnSession = managed;
-      child = managed ? await managed.open(args, env, { resetEffort }) : spawn(args);
+      child = managed ? await managed.open(args, env, { resetEffort, ultracode, selectionCurrent }) : spawn(args);
       if (version !== this.sendVersion) throw Error("Claude turn interrupted");
       this.assertCapability();
       if (settingsPrompt) beforeNativeSettings = await inspectNative(managed);
@@ -387,7 +396,7 @@ export class ClaudeAdapter {
       }
       // No user input exists during SDK initialization/reset. Do not publish
       // a resume ID for a first turn that fails before those controls finish.
-      if (isNew && !provisionalSession && (interactive || settingsPrompt)) {
+      if (isNew && !provisionalSession && (interactive || settingsPrompt || ultracodeSession)) {
         await this.hooks.onSessionId?.(sessionId);
         this.sessionId = sessionId;
         if (version !== this.sendVersion) throw Error("Claude turn interrupted");
@@ -443,7 +452,7 @@ export class ClaudeAdapter {
     let mcpOutcome = null, mcpError = null;
     if (!mcpControl && !reviewControl) {
       const input = fastRequest ? "/fast on" : text;
-      child.stdin.end(interactive || settingsPrompt || debugRequest ? `${JSON.stringify({ type: "user", message: { role: "user", content: input } })}\n` : input);
+      child.stdin.end(interactive || ultracodeSession || settingsPrompt || debugRequest ? `${JSON.stringify({ type: "user", message: { role: "user", content: input } })}\n` : input);
     }
 
     const output = new ClaudeTextStream(delta => this.hooks.onEvent?.({ type: "assistant_delta", delta }), this.nativeAuthMode === "account" || this.accountSecrets.size ? { secrets: this.accountSecrets } : {});
