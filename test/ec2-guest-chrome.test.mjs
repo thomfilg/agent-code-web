@@ -32,12 +32,20 @@ test("SSH browser transport uses pinned host and private framed input, not arbit
   assert.equal(JSON.parse(header).env.PRIVATE_FIXTURE, "not-in-argv"); assert.equal(JSON.parse(header).heartbeat, "/opt/agent-web/.heartbeat");
 });
 test("executor permits only baked Chrome check and exact product browser source", () => {
-  const calls = [], root = "/opt/agent-web/guest-acceptance-fixture", source = "public-browser-source";
-  const executor = guestExecutor(root, input => calls.push(input), source), options = { cwd: `${root}/workspace`, env: { AWS_SECRET_ACCESS_KEY: "never-inherit", HOME: "/other" } };
+  const calls = [], root = "/opt/agent-web/guest-acceptance-fixture", source = "public-browser-source", policy = "public-projection-policy";
+  const launcher = projection => source + `\nconst {ProjectionPolicy}=await import(${JSON.stringify('data:text/javascript;base64,'+Buffer.from(projection).toString('base64'))}); await runBrowserWorker({ProjectionPolicy});`;
+  const executor = guestExecutor(root, input => calls.push(input), source, policy), options = { cwd: `${root}/workspace`, env: { AWS_SECRET_ACCESS_KEY: "never-inherit", HOME: "/other" } };
   executor.spawn("/usr/bin/google-chrome", ["--version"], options);
-  executor.spawn("node", ["--input-type=module", "-e", source + "\nawait runBrowserWorker();"], options);
+  executor.spawn("node", ["--input-type=module", "-e", launcher(policy)], options);
   assert.equal(calls.length, 2); assert.equal(calls[1].env.AWS_SECRET_ACCESS_KEY, undefined); assert.equal(calls[1].env.TMPDIR, `${root}/tmp`);
   for (const [command, args] of [["npm", ["install"]], ["claude", ["--print", "OK"]], ["/bin/sh", ["-c", "false"]], ["node", ["--input-type=module", "-e", "malicious\nawait runBrowserWorker();"]]]) assert.throws(() => executor.spawn(command, args, options));
+  for (const changed of [source + "\nawait runBrowserWorker();", launcher(policy + "tampered"), launcher(policy) + "\nprocess.exit();", launcher(policy).replace(source, source + "tampered")]) {
+    assert.throws(() => executor.spawn("node", ["--input-type=module", "-e", changed], options), /Unexpected command/);
+  }
+  assert.throws(() => executor.spawn("node", ["--input-type=module", "-e", launcher(policy)], { ...options, cwd: root }), /Unexpected command/);
+  const missingPolicy = guestExecutor(root, () => assert.fail("Missing trusted policy must not spawn"), source);
+  assert.throws(() => missingPolicy.spawn("node", ["--input-type=module", "-e", launcher(policy)], options), /Unexpected command/);
+  assert.equal(calls.length, 2, "Rejected launchers must not invoke the transport");
 });
 test("guest control rejects further commands after malformed/oversized output or stream closure", async () => {
   for (const failure of ["malformed", "oversized", "closed"]) {
@@ -114,7 +122,8 @@ test("official MCP drives real disposable local UI/Chrome before EC2 execution",
   const directory = await temp(t), token = "isolated-fixture-token-not-a-user-account";
   const fixture = await startGuestSite(id, { rootBase: directory });
   const source = await readFile(new URL("../src/browser-worker.mjs", import.meta.url), "utf8");
-  const executor = guestExecutor(fixture.root, input => spawn(input.command === "/usr/bin/node" ? process.execPath : input.command, input.args, { cwd: input.cwd, env: input.env, stdio: input.stdio, detached: true }), source);
+  const policy = await readFile(new URL("../chrome-extension/projection-policy.js", import.meta.url), "utf8");
+  const executor = guestExecutor(fixture.root, input => spawn(input.command === "/usr/bin/node" ? process.execPath : input.command, input.args, { cwd: input.cwd, env: input.env, stdio: input.stdio, detached: true }), source, policy);
   const config = loadConfig({ AGENT_WEB_HOST: "127.0.0.1", AGENT_WEB_PORT: "0", AGENT_DATA_DIR: path.join(directory, "data"), AGENT_DATABASE_MODE: "memory", AGENT_ENABLE_MOCK: "1", AGENT_PROCESS_ISOLATION: "none", AGENT_WEB_AUTH_TOKEN: token, AGENT_IDLE_TIMEOUT_MS: "60000", AGENT_CHROME_BIN: "/usr/bin/google-chrome", AGENT_WORKER_BACKEND: "ec2", AGENT_EC2_GATEWAY_ORIGIN: "https://fixture.invalid", PATH: process.env.PATH });
   const app = await createAgentWebServer({ config, workerBackend: { acquire: async () => executor, sleep: async () => {}, destroy: async () => { throw Error("No EC2 mutation"); } } });
   const { url } = await app.start(), chat = await app.manager.createChat({ agent: "mock", title: "Guest Chrome local fixture" });

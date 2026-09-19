@@ -147,7 +147,9 @@ export async function smokeEc2Guest(options, { run = runPrivate, guard = guardNa
     const info = await site.ready;
     assert.equal(info.root, `/opt/agent-web/guest-acceptance-${options.acceptanceId}`); assert.match(info.url, /^http:\/\/127\.0\.0\.1:\d+\/$/);
     site.url = info.url; diagnostics.siteStarted = true;
-    const executor = guestExecutor(info.root, spawnRemote, await readFile(new URL("../src/browser-worker.mjs", import.meta.url), "utf8"));
+    const executor = guestExecutor(info.root, spawnRemote,
+      await readFile(new URL("../src/browser-worker.mjs", import.meta.url), "utf8"),
+      await readFile(new URL("../chrome-extension/projection-policy.js", import.meta.url), "utf8"));
     const token = randomBytes(32).toString("hex");
     const config = loadConfig({ AGENT_WEB_HOST: "127.0.0.1", AGENT_WEB_PORT: "0", AGENT_DATA_DIR: path.join(directory, "data"), AGENT_DATABASE_MODE: "memory", AGENT_ENABLE_MOCK: "1", AGENT_PROCESS_ISOLATION: "none", AGENT_WEB_AUTH_TOKEN: token, AGENT_IDLE_TIMEOUT_MS: "60000", AGENT_CHROME_BIN: "/usr/bin/google-chrome", AGENT_WORKER_BACKEND: "ec2", AGENT_EC2_GATEWAY_ORIGIN: "https://fixture.invalid", PATH: process.env.PATH });
     phase = "app-start";

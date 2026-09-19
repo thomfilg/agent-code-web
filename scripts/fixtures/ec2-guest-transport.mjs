@@ -68,16 +68,21 @@ export class GuestSiteControl {
   }
 }
 
-export function guestExecutor(root, spawnRemote, browserSource) {
+export function guestExecutor(root, spawnRemote, browserSource, projectionSource) {
   const safePath = "/usr/local/bin:/usr/bin:/bin";
+  // Both inputs come from the operator's versioned repository, never the
+  // requested command. Match the complete product launcher, including policy.
+  const expectedBrowser = typeof browserSource === "string" && typeof projectionSource === "string"
+    ? browserSource + `\nconst {ProjectionPolicy}=await import(${JSON.stringify('data:text/javascript;base64,'+Buffer.from(projectionSource).toString('base64'))}); await runBrowserWorker({ProjectionPolicy});`
+    : null;
   return { workspace: `${root}/workspace`, runtimeHome: `${root}/runtime-home`, environmentPath: safePath,
     metadata: { backend: "ec2", fixture: true },
     spawn(command, args, options = {}) {
       // The fixture does not expose arbitrary model, shell, installer or AWS
       // commands. SharedBrowsers uses the explicit baked Chrome --version and
-      // the unchanged built-in-only browser-worker source.
+      // the exact browser-worker source plus its pinned projection policy.
       const version = command === "/usr/bin/google-chrome" && args.length === 1 && args[0] === "--version";
-      const browser = typeof browserSource === "string" && command === "node" && args.length === 3 && args[0] === "--input-type=module" && args[1] === "-e" && args[2] === browserSource + "\nawait runBrowserWorker();";
+      const browser = expectedBrowser !== null && command === "node" && args.length === 3 && args[0] === "--input-type=module" && args[1] === "-e" && args[2] === expectedBrowser;
       if (!version && !browser || options.cwd !== `${root}/workspace`) throw Error("Unexpected command in guest Chrome acceptance");
       return spawnRemote({ command: version ? command : "/usr/bin/node", args, cwd: options.cwd,
         env: { PATH: safePath, HOME: `${root}/runtime-home`, TMPDIR: `${root}/tmp`, LANG: "C.UTF-8", AGENT_CHROME_BIN: "/usr/bin/google-chrome" }, stdio: options.stdio });
