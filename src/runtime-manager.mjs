@@ -649,7 +649,7 @@ export class RuntimeManager extends EventEmitter {
     ];
   }
 
-  isBusy(chatId) { const runtime = this.#runtimes.get(chatId); return this.#modeChanges.has(chatId) || this.#workerWakes.has(chatId) || this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.busy || runtime?.adapter.isBackgroundBusy?.()) || this.#importPending(chatId); }
+  isBusy(chatId) { const runtime = this.#runtimes.get(chatId); return this.#modeChanges.has(chatId) || this.#workerWakes.has(chatId) || this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.failing || runtime?.busy || runtime?.adapter.isBackgroundBusy?.()) || this.#importPending(chatId); }
   publishChat(chat) { if (chat) this.#emit(chat.id, { type: "chat_updated", chat }); }
 
   // Admit quickly: a cold EC2 start can outlast the public HTTP timeout. This
@@ -744,6 +744,8 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async browserExecutor(chatId) {
+    const runtime = this.#runtimes.get(chatId);
+    if (runtime?.failing || runtime?.cleanupFailed) throw Object.assign(new Error("Worker cleanup is incomplete. Retry stopping the environment before resuming."), { statusCode: 409 });
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     if (chat.archived || this.#previewStops.has(chatId)) throw Object.assign(new Error("This environment is archived or stopping"), { statusCode: 409 });
@@ -1385,6 +1387,8 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async #submit(chatId, rawText, attachmentIds = [], queueAction = null, approval = null) {
+    if (this.#runtimes.get(chatId)?.cleanupFailed) throw Object.assign(new Error("Worker cleanup is incomplete. Retry stopping the environment before resuming."), { statusCode: 409 });
+    if (this.#runtimes.get(chatId)?.failing) throw Object.assign(new Error("The failed worker is being disconnected. Wait before resuming this chat."), { statusCode: 409 });
     if (this.#workerWakes.has(chatId)) throw Object.assign(new Error("The environment is waking up. Wait until it is ready before sending a message."), { statusCode: 409 });
     const text = clampText(rawText, 100_000, "message");
     const chat = this.store.get(chatId);
@@ -1600,13 +1604,17 @@ export class RuntimeManager extends EventEmitter {
       if (turn.cancelled || runtime.generation !== generation) return;
       runtime.titleStream?.flush();
       await runtime.eventQueue;
+      if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
       if (commandAction?.type === "claudeConfig") await syncConfiguration(result.nativeSettings);
       if (claude) await this.#syncClaudeFast(chatId, result, settingsChat, checkConfiguration);
       if (claude && /^\/reload-(?:skills|plugins)(?:\s|$)/.test(text)) await this.#refreshCommandCatalog(chatId);
+      if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
       if (!result.turnsHandled) {
       const output = metadata ? extractResponse(result.text || "", automaticTitle) : { text: result.text || "", title: null, awaitingUser: false };
       if (output.title) await this.#agentEvent(chatId, { type: "title", title: output.title });
+      if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
       await this.store.update(chatId, { awaitingUser: output.awaitingUser, needsAgentHandoff: false });
+      if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
       const message = await this.store.appendMessage(chatId, {
         id: assistantMessageId,
         role: "assistant",
@@ -1615,6 +1623,7 @@ export class RuntimeManager extends EventEmitter {
         text: remainingAssistantText(runtime, output.text),
         ...(runtime.assistantPublishedLength ? { meta: { segmentedTurn: true } } : {}),
       });
+      if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
       this.#emit(chatId, { type: "turn_completed", message });
       }
       // Inspect only a worker that is already awake. Later GitHub polling uses
@@ -1695,6 +1704,19 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async stop(chatId, reason = "manual") {
+    // A fatal exit owns the old runtime until its queued events and visible
+    // response have been checkpointed. Do not race its teardown with Stop.
+    const failure = this.#runtimes.get(chatId)?.failure;
+    if (failure) await failure.catch(() => {});
+    const failedRuntime = this.#runtimes.get(chatId);
+    if (failedRuntime?.cleanupFailed) {
+      if (!failedRuntime.failing) {
+        failedRuntime.failure = null;
+        void this.#fatal(chatId, failedRuntime.failureCause);
+      }
+      await failedRuntime.failure;
+      if (failedRuntime.cleanupFailed) throw failedRuntime.cleanupError;
+    }
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("chat not found"), { statusCode: 404 });
     // An idle request must never enter destructive Stop, even when suspension
@@ -1847,10 +1869,12 @@ export class RuntimeManager extends EventEmitter {
     let forkContext = "";
     const hooks = {
       onAgentThreads: snapshot => {
+        if (!runtime || runtime.failing || runtime.failed || this.#runtimes.get(chatId) !== runtime) return;
         void this.agentThreads.update(chatId, snapshot)?.catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot: ${errorMessage(error)}` }));
         void this.refreshActivity(chatId);
       },
       onEvent: (event) => {
+        if (runtime?.failing || runtime?.failed) return Promise.resolve();
         if (event.type === "native_approval_denied") {
           if (this.#runtimes.get(chatId) !== runtime) return runtime.eventQueue;
           const observed = { ...chat, agentSessionId: runtime.adapter.threadId }, binding = this.approvals.binding(observed);
@@ -1865,6 +1889,7 @@ export class RuntimeManager extends EventEmitter {
         return runtime.eventQueue;
       },
       onRequest: (request) => {
+        if (runtime?.failing || runtime?.failed) return Promise.resolve();
         runtime.eventQueue = runtime.eventQueue.then(() => this.#agentRequest(chatId, request));
         return runtime.eventQueue;
       },
@@ -2016,7 +2041,7 @@ export class RuntimeManager extends EventEmitter {
 
   async #scheduleIdleStop(chatId, runtime) {
     clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
-    if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.trustReviewing || runtime.adapter.isBackgroundBusy?.()) return;
+    if (this.#runtimes.get(chatId) !== runtime || runtime.failing || runtime.busy || runtime.trustReviewing || runtime.adapter.isBackgroundBusy?.()) return;
     const reason = this.#importPending(chatId) ? "import" : this.#forking.has(chatId) ? "fork" : runtime.adapter.hasScheduledWork?.() ? "schedule" : runtime.adapter.agents?.busy() ? "agents" : this.sideChats.busy(chatId) ? "side" : this.browsers?.hasViewers(chatId) ? "browser" : this.previewActivity.has(chatId) ? "preview" : this.workspacePresence.has(chatId) ? "workspace" : this.presence.has(chatId) ? "tab" : null;
     const chat = this.store.get(chatId);
     if (reason) {
@@ -2067,7 +2092,7 @@ export class RuntimeManager extends EventEmitter {
   async #agentEvent(chatId, event) {
     if (event.type === "assistant_delta") {
       const runtime = this.#runtimes.get(chatId);
-      if (runtime?.busy) runtime.assistantText = (runtime.assistantText || "") + (event.delta || "");
+      if (runtime?.busy || runtime?.goalTurnActive) runtime.assistantText = (runtime.assistantText || "") + (event.delta || "");
     }
     if (event.type === "task_progress") {
       const chat = this.store.get(chatId);
@@ -2100,12 +2125,14 @@ export class RuntimeManager extends EventEmitter {
     }
     if (event.type === "goal_turn_started") {
       const runtime = this.#runtimes.get(chatId); if (!runtime) return;
+      runtime.goalTurnActive = true;
       runtime.assistantMessageId = newId("msg");
       runtime.assistantText = ""; runtime.assistantPublishedLength = 0; runtime.toolMessages = new Map();
       this.#emit(chatId, { type: "turn_started", messageId: runtime.assistantMessageId }); return;
     }
     if (event.type === "goal_turn_completed") {
       const chat = this.store.get(chatId), runtime = this.#runtimes.get(chatId); if (!chat || !runtime) return;
+      runtime.goalTurnActive = false;
       const output = extractResponse(event.text || "", chat.autoTitle);
       if (output.title) await this.#agentEvent(chatId, { type: "title", title: output.title });
       await this.store.update(chatId, { awaitingUser: output.awaitingUser, needsAgentHandoff: false });
@@ -2177,7 +2204,20 @@ export class RuntimeManager extends EventEmitter {
     this.#emit(chatId, { type: "request", request: pendingRequest });
   }
 
-  async #fatal(chatId, error) {
+  #fatal(chatId, error) {
+    const runtime = this.#runtimes.get(chatId);
+    if (!runtime) return Promise.resolve();
+    if (runtime.failure) return runtime.failure;
+    const completion = Promise.withResolvers();
+    runtime.failure = completion.promise;
+    void this.#failRuntime(chatId, runtime, error).then(completion.resolve, completion.reject);
+    return completion.promise;
+  }
+
+  async #failRuntime(chatId, runtime, error) {
+    runtime.failing = true;
+    runtime.revoked = true;
+    runtime.failureCause = error;
     this.#previewBlocked.add(chatId);
     this.previewActivity.revokeChat(chatId);
     this.emit("preview-revoke", { chatId, reason: "error" });
@@ -2185,23 +2225,60 @@ export class RuntimeManager extends EventEmitter {
     this.#forking.get(chatId)?.controller.abort(error);
     this.workspacePresence.remove(chatId);
     clearTimeout(this.#workspaceIdleTimers.get(chatId)); this.#workspaceIdleTimers.delete(chatId);
-    const runtime = this.#runtimes.get(chatId);
-    if (!runtime) return;
     this.#lifecycleVersions.set(chatId, (this.#lifecycleVersions.get(chatId) || 0) + 1);
     runtime.generation += 1;
     if (runtime.idleTimer) clearTimeout(runtime.idleTimer);
-    this.#runtimes.delete(chatId);
-    await this.sideChats.close(chatId).catch(() => {});
     this.broker.revokeChat(chatId);
     this.revokeChatMcps(chatId);
-    await runtime.adapter.stop().catch(() => {});
-    await this.agentThreads.flush(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
-    await this.browsers?.stop(chatId);
-    this.#executors.delete(chatId);
-    const chat = this.store.get(chatId);
-    if (chat && chat.agent !== "mock") await this.workerBackend.sleep(chat).then(observed => this.config.workerBackend === "ec2" && runtime.adapter.confirmImportWorkerStopped?.(observed)).catch(() => {});
-    await this.#setStatus(chatId, "error", errorMessage(error), null);
-    this.#emit(chatId, { type: "runtime_error", text: errorMessage(error) });
+    let checkpointFailed = false;
+    try {
+      // Keep the exact runtime available to events accepted before its exit.
+      // New native events are fenced above; a late send result is generation-
+      // fenced by #runTurn. In particular, do not lose the last visible delta
+      // when send's normal completion/finally is skipped on worker failure.
+      runtime.titleStream?.flush();
+      await runtime.eventQueue;
+      this.publishChat(await this.store.update(chatId, { queuePaused: true, queueError: errorMessage(error), pendingRequest: null }));
+      const chat = this.store.get(chatId);
+      const remaining = remainingAssistantText(runtime, runtime.assistantText || "");
+      if (chat && remaining && runtime.assistantMessageId && !chat.messages.some(message => message.id === runtime.assistantMessageId)) {
+        const message = await this.store.appendMessage(chatId, { id: runtime.assistantMessageId, role: "assistant", agent: chat.agent, kind: "message", text: remaining, meta: { interrupted: true } });
+        this.#emit(chatId, { type: "message", message });
+      }
+    } catch {
+      checkpointFailed = true;
+      this.#emit(chatId, { type: "runtime_log", text: "The interrupted response could not be saved. Keep the visible transcript before reloading." });
+      // A storage failure must not cause an automatic replay of queued work.
+      await this.store.update(chatId, { queuePaused: true, pendingRequest: null }).catch(() => {});
+    } finally {
+      // Cleanup must still revoke the dead runtime if checkpoint storage fails.
+      // Keep admission fenced until all old-worker cleanup finishes.
+      runtime.cleanupFailed = true;
+      try {
+        const cleanupErrors = [];
+        await this.sideChats.close(chatId).catch(() => {});
+        await runtime.adapter.stop().catch(error => cleanupErrors.push(error));
+        await this.agentThreads.flush(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
+        try { await this.browsers?.stop(chatId); } catch (error) { cleanupErrors.push(error); }
+        const chat = this.store.get(chatId);
+        if (chat && chat.agent !== "mock") await this.workerBackend.sleep(chat).then(observed => this.config.workerBackend === "ec2" && runtime.adapter.confirmImportWorkerStopped?.(observed)).catch(error => cleanupErrors.push(error));
+        if (cleanupErrors.length) {
+          runtime.cleanupError = Object.assign(new Error("Worker cleanup is incomplete. Retry stopping the environment before resuming."), { statusCode: 409 });
+          await this.#setStatus(chatId, "error", runtime.cleanupError.message, null);
+          this.#emit(chatId, { type: "runtime_error", text: runtime.cleanupError.message });
+          return;
+        }
+        runtime.cleanupFailed = false;
+        this.#executors.delete(chatId);
+        const detail = errorMessage(error) + (checkpointFailed ? " · Interrupted response could not be saved." : "");
+        await this.#setStatus(chatId, "error", detail, null);
+        this.#emit(chatId, { type: "runtime_error", text: detail });
+      } finally {
+        runtime.failed = true;
+        runtime.failing = false;
+        if (!runtime.cleanupFailed && this.#runtimes.get(chatId) === runtime) this.#runtimes.delete(chatId);
+      }
+    }
   }
 
   async #refreshCommandCatalog(chatId, patch = null) {
