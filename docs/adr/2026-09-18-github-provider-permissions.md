@@ -1,5 +1,12 @@
 # GitHub permissions come from GitHub, not a second Relay company list
 
+Historical decision: the later explicit one-GitHub-account-per-company and
+single-company-chat requirements supersede the all-company connection/UI
+parts below. See the [2026-09-19 reconciliation](2026-09-19-company-github-supersession.md).
+GitHub remains the authority for repository permissions; the old repository-owner
+allowlist stays removed. This document is not a pending instruction to remove
+the current exact connection/company binding.
+
 ## Decision
 
 The user explicitly rejected the redundant GitHub company-access step on

@@ -98,7 +98,8 @@ suites still need rerunning after integration.
 
 ## Open gates
 
-- Full combined suite reruns after the two fixture-readiness corrections.
+- Full combined browser rerun after the file-readiness correction and saved
+  prompts integration. The Node rerun is now complete as recorded below.
 - Guest official MCP integration and stable schemas when switching browser
   modes; real selected-native-agent acceptance. The personal partition's
   documented restrictions remain in effect.
@@ -108,3 +109,24 @@ suites still need rerunning after integration.
   servers. User authorization remains pending. Existing stuck workflow state
   is not automatically repaired by changing the code, and no live queued
   message was deleted or replayed.
+
+## Full Node revalidation and dedicated resize acceptance
+
+Application candidate `457ccc7` completed the full Node suite in session
+`12078`: **1,506/1,506 passed**, zero failed/skipped/cancelled, exit 0,
+537.36 seconds. Log: `/tmp/relay-mvp-saved-prompts-full-node.log`. The command
+was the same full-suite invocation above with `CODEX_NATIVE_COMPAT_BIN`,
+`AGENT_TEST_NATIVE_GITHUB=1` and `RELAY_GUEST_UI_TEST=1` enabled. This supersedes
+the open Node rerun gate, not the factual record of the earlier failed run.
+Application and Node-test sources stayed unchanged throughout the run;
+documentation reconciliation and a new browser-only test were authored while
+it ran. Unintegrated GitHub event, guest MCP and message-search branches are
+not covered by this result.
+
+New `test/browser/panel-resizers.spec.mjs` passed **2/2**, no retries, session
+`1379`, exit 0, 15.9 seconds. Log: `/tmp/relay-panel-resizers-browser.log`.
+This directly checks pointer resizing, keyboard arrows/Home/End, real panel
+and conversation geometry, persisted sidebar width after reload, double-click
+reset, desktop/mobile containment, preserved unsent draft and no message or
+worker-control requests. Presence heartbeats remain expected. It is local
+fixture acceptance for item 22, not a production interaction receipt.
