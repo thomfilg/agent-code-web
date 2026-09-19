@@ -144,7 +144,8 @@ test("account disconnection still invalidates a replacement queued during cancel
   client.snapshot = async () => { entered.resolve(); await gate.promise; return snapshot(); };
   client.approve(); await entered.promise;
   const replacing = accounts.begin(alice, { ...input, id }); await new Promise(resolve => setImmediate(resolve));
-  const disconnecting = accounts.disconnect(alice, id); gate.resolve(); await Promise.all([replacing, disconnecting]);
+  const rejectedReplacement = assert.rejects(replacing, { statusCode: 409 });
+  const disconnecting = accounts.disconnect(alice, id); gate.resolve(); await Promise.all([rejectedReplacement, disconnecting]);
   claude.clients.at(-1).approve(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(accounts.list(alice)[0].status, "disconnected"); assert.equal(accounts.flows.has(id), false);
   assert.equal((await records.get("agent-account", id)).auth, null);

@@ -39,6 +39,31 @@ async function addAccount(page, name) {
   await page.getByRole("button", { name: "Sign in to Codex", exact: true }).click();
 }
 
+test("failed disconnect exposes retry instead of unusable reconnect and survives dialog reopen", async ({ page, relay }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page, relay); await page.locator("#connect-codex-button").click();
+  await addAccount(page, "Retry account"); relay.codex.clients.find(client => client.approve).approve();
+  const accountCard = card(page, "Retry account"); await expect(accountCard).toContainText("codex@example.test · Connected");
+  const onRevoke = relay.app.agentAccounts.onRevoke;
+  relay.app.agentAccounts.onRevoke = async () => { throw Error("private-worker-error"); };
+  page.once("dialog", dialog => dialog.accept());
+  await accountCard.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await expect(accountCard.getByRole("button", { name: "Retry disconnect", exact: true })).toBeVisible();
+  await expect(accountCard.getByRole("button", { name: "Reconnect", exact: true })).toHaveCount(0);
+  await expect(accountCard).not.toContainText("private-worker-error");
+  await page.screenshot({ path: test.info().outputPath("account-disconnect-retry-mobile.png") });
+  await page.getByRole("button", { name: "Close agent accounts" }).click();
+  await page.locator("#connect-codex-button").click();
+  await expect(accountCard.getByRole("button", { name: "Retry disconnect", exact: true })).toBeVisible();
+  relay.app.agentAccounts.onRevoke = onRevoke;
+  page.once("dialog", dialog => dialog.accept());
+  await accountCard.getByRole("button", { name: "Retry disconnect", exact: true }).click();
+  await expect(accountCard.getByRole("button", { name: "Reconnect", exact: true })).toBeVisible();
+  await expect(accountCard.getByRole("button", { name: "Retry disconnect", exact: true })).toHaveCount(0);
+  await accountCard.getByRole("button", { name: "Reconnect", exact: true }).click();
+  await expect(accountCard.getByRole("link", { name: "Open Codex sign-in for Retry account" })).toBeVisible();
+});
+
 test("Claude account card owns its link and returned code, enables account models and reconnects without a megazord", async ({ page, relay }) => {
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   await page.setViewportSize({ width: 390, height: 844 }); await login(page, relay);

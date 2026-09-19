@@ -17,7 +17,7 @@ const reconnectError = provider => provider === "claude" ? new ClaudeAccountErro
 export class AgentAccounts {
   constructor({ records, config, clientFactory = provider => provider === "claude" ? new ClaudeAccountClient(config) : new CodexAccountClient(config), now = Date.now, loginTimeoutMs = 600000, onChange = () => {}, onRevoke = async () => {} }) {
     Object.assign(this, { records, config, clientFactory, now, loginTimeoutMs, onChange, onRevoke });
-    this.metadata = new Map(); this.flows = new Map(); this.locks = new Map(); this.removing = new Map(); this.closed = false;
+    this.metadata = new Map(); this.flows = new Map(); this.locks = new Map(); this.removing = new Map(); this.disconnecting = new Map(); this.closed = false;
     this.commandCatalogs = new Map(); this.commandGeneration = 0;
   }
   async initialize() {
@@ -29,8 +29,17 @@ export class AgentAccounts {
       }
       this.metadata.set(record.id, { ownerId: record.ownerId, ...publicAccount(record) });
     }
+    for (const intent of await this.records.list("agent-account-disconnection")) {
+      if (this.metadata.get(intent.id)?.ownerId === intent.ownerId) this.disconnecting.set(intent.id, {});
+    }
   }
-  list(ownerId) { return [...this.metadata.values()].filter(item => item.ownerId === ownerId).map(item => publicAccount(this.removing.has(item.id) ? { ...item, status: "disconnected", error: "Account deletion is in progress. Retry deletion if it did not finish." } : item)); }
+  visible(record) {
+    if (this.removing.has(record.id)) return { ...record, status: "disconnected", error: "Account deletion is in progress. Retry deletion if it did not finish." };
+    if (this.disconnecting.has(record.id)) return { ...record, status: "disconnecting", error: "Account disconnection is in progress. Retry disconnection if it did not finish." };
+    return record;
+  }
+  list(ownerId) { return [...this.metadata.values()].filter(item => item.ownerId === ownerId).map(item => publicAccount(this.visible(item))); }
+  checkDisconnect(id, provider) { if (this.disconnecting.has(id)) throw fail(reconnectError(provider), 409); }
   hasConnected(ownerId, provider) { return this.list(ownerId).some(item => item.provider === provider && item.status === "connected"); }
   async locked(id, action) {
     const prior = this.locks.get(id) || Promise.resolve();
@@ -46,11 +55,13 @@ export class AgentAccounts {
   }
   async save(record, { guard = null, rollback = null } = {}) {
     if (this.removing.has(record.id)) throw fail("Agent account not found", 404);
+    if (record.auth) this.checkDisconnect(record.id, record.provider);
     guard?.();
     await this.records.put("agent-account", record.id, record);
     // Deletion invalidates in-flight refresh/verification before it can
     // publish credentials. Its ID lock removes this provisional write next.
     if (this.removing.has(record.id)) throw fail("Agent account not found", 404);
+    if (record.auth) this.checkDisconnect(record.id, record.provider);
     try { guard?.(); } catch (error) {
       // The native ceremony may be cancelled while an asynchronous encrypted
       // write is committing. Undo that provisional write before publishing it.
@@ -69,7 +80,7 @@ export class AgentAccounts {
     const record = await this.get(ownerId, id);
     if (this.removing.has(id)) throw fail("Agent account not found", 404);
     if (record.provider !== chat.agent) throw fail("Choose an account for the selected agent");
-    if (connected && (this.flows.has(id) || record.status !== "connected" || !record.auth)) throw fail(reconnectError(record.provider), 409);
+    if (connected && (this.disconnecting.has(id) || this.flows.has(id) || record.status !== "connected" || !record.auth)) throw fail(reconnectError(record.provider), 409);
     return record;
   }
   async projectPreferences(ownerId) {
@@ -102,11 +113,11 @@ export class AgentAccounts {
   }
   async cacheCommands(record, initialized) {
     const commands = claudeCommandMetadata(initialized?.commands);
-    if (!commands || this.closed || this.removing.has(record.id) || this.flows.has(record.id)) return;
+    if (!commands || this.closed || this.removing.has(record.id) || this.disconnecting.has(record.id) || this.flows.has(record.id)) return;
     const current = await this.records.get("agent-account", record.id);
     // Verification and persistence are asynchronous. Do not attach late native
     // metadata to a replacement/revoked account, even if a storage write races.
-    if (this.closed || this.removing.has(record.id) || this.flows.has(record.id) || !current || !this.commandRecordMatches(record, current)
+    if (this.closed || this.removing.has(record.id) || this.disconnecting.has(record.id) || this.flows.has(record.id) || !current || !this.commandRecordMatches(record, current)
       || current.status !== "connected" || !current.auth) return;
     this.commandCatalogs.set(record.id, { ownerId: record.ownerId, revision: record.revision, accountIdentity: record.accountIdentity,
       subject: record.subject, commands, generation: ++this.commandGeneration });
@@ -119,6 +130,7 @@ export class AgentAccounts {
     return this.locked(`owner:${ownerId}`, () => this.locked(id, async () => {
       if (this.closed) throw fail("Agent accounts are shutting down", 503);
       const previous = input.id ? await this.get(ownerId, id) : null;
+      this.checkDisconnect(id, input.provider);
       if (previous && previous.provider !== input.provider) throw fail("An existing account cannot change providers");
       if (this.flows.has(id)) throw fail("This account already has a pending sign-in", 409);
       if (previous?.status === "connected") throw fail("Disconnect this account before replacing its identity", 409);
@@ -160,7 +172,7 @@ export class AgentAccounts {
     // Never publish provisional database state from an unfinished guarded
     // commit. Admission is separately blocked while the flow owns this ID.
     const visible = flow ? this.metadata.get(id) || record : record;
-    return { account: publicAccount(visible), ...(flow?.ownerId === ownerId && !flow.cancelled && flow.verificationUrl ? {
+    return { account: publicAccount(this.visible(visible)), ...(flow?.ownerId === ownerId && !flow.cancelled && flow.verificationUrl ? {
       login: { verificationUrl: flow.verificationUrl, ...(flow.inputRequired ? { inputRequired: true, codeSubmitted: flow.codeSubmitted === true } : { userCode: flow.userCode }), expiresAt: flow.expiresAt } } : {}) };
   }
   async submitCode(ownerId, id, input = {}) {
@@ -220,8 +232,19 @@ export class AgentAccounts {
     });
   }
   async disconnect(ownerId, id) {
-    await this.cancel(ownerId, id);
-    await this.locked(id, async () => {
+    owner(ownerId);
+    if (this.metadata.get(id)?.ownerId !== ownerId || this.removing.has(id)) throw fail("Agent account not found", 404);
+    const existing = this.disconnecting.get(id);
+    if (existing?.promise) return existing.promise;
+    // Admission and in-flight credential publication must stop before waiting
+    // behind native refresh, model discovery or encrypted storage writes.
+    const disconnection = {}; this.disconnecting.set(id, disconnection);
+    this.commandCatalogs.delete(id); this.onChange(ownerId);
+    // Independent durable intent survives a failed credential-row erase or
+    // worker stop. Initialization restores the admission barrier before use.
+    const intent = Promise.resolve().then(() => this.records.put("agent-account-disconnection", id, { id, ownerId }));
+    const cancelled = this.cancel(ownerId, id);
+    const erase = cancelled.then(() => this.locked(id, async () => {
       const record = await this.get(ownerId, id);
       // Disconnect targets the whole saved account, unlike attempt-scoped
       // cancellation. Invalidate a replacement queued before this lock too.
@@ -232,11 +255,22 @@ export class AgentAccounts {
         await flow.client.cancel().catch(() => {}); await flow.client.close().catch(() => {});
       }
       await this.save({ ...record, status: "disconnected", auth: null, revision: record.revision + 1, error: null });
+    }));
+    const revoked = Promise.resolve().then(() => this.onRevoke(ownerId, id));
+    disconnection.promise = Promise.allSettled([intent, erase, revoked]).then(async results => {
+      if (results.some(result => result.status === "rejected")) {
+        disconnection.promise = null; this.onChange(ownerId);
+        throw fail("Account disconnection could not finish. Access is blocked; retry disconnecting this account.", 503);
+      }
+      try { await this.records.delete("agent-account-disconnection", id); }
+      catch {
+        disconnection.promise = null; this.onChange(ownerId);
+        throw fail("Account disconnection could not finish. Access is blocked; retry disconnecting this account.", 503);
+      }
+      this.disconnecting.delete(id); this.onChange(ownerId);
+      return this.status(ownerId, id);
     });
-    // Invalidate admission before stopping workers; refresh callbacks can no
-    // longer obtain credentials while those processes shut down.
-    await this.onRevoke(ownerId, id);
-    return this.status(ownerId, id);
+    return disconnection.promise;
   }
   async remove(ownerId, id) {
     owner(ownerId);
@@ -254,7 +288,10 @@ export class AgentAccounts {
     }
     const erase = this.locked(id, async () => {
       const record = await this.records.get("agent-account", id);
-      if (!record) return; // Retry after erasure succeeded but worker stop failed.
+      if (!record) {
+        // Retry after credential erasure succeeded but intent cleanup failed.
+        await this.records.delete("agent-account-disconnection", id); return;
+      }
       if (record.ownerId !== ownerId) throw fail("Agent account not found", 404);
       const pending = this.flows.get(id);
       if (pending) {
@@ -267,6 +304,7 @@ export class AgentAccounts {
       await this.records.put("agent-account", id, disconnected);
       this.metadata.set(id, { ownerId, ...publicAccount(disconnected) });
       await this.records.delete("agent-account", id);
+      await this.records.delete("agent-account-disconnection", id);
     });
     // Stop workers in parallel with lock drainage. Admission and refresh are
     // already unavailable, so no worker can obtain replacement credentials.
@@ -276,7 +314,7 @@ export class AgentAccounts {
         removal.promise = null; this.onChange(ownerId);
         throw fail("Account deletion could not finish. Access is blocked; retry deleting this account.", 503);
       }
-      this.metadata.delete(id); this.removing.delete(id); this.onChange(ownerId);
+      this.metadata.delete(id); this.removing.delete(id); this.disconnecting.delete(id); this.onChange(ownerId);
       return { deleted: true, id };
     });
     return removal.promise;
@@ -297,16 +335,22 @@ export class AgentAccounts {
         if (record.provider === "claude") return { accessToken: snapshot.auth.claudeAiOauth.accessToken, accountId: record.subject, organizationId: record.accountIdentity, email: snapshot.email, expiresAt: snapshot.auth.claudeAiOauth.expiresAt };
         return { accessToken: snapshot.auth.tokens.access_token, chatgptAccountId: record.accountIdentity, chatgptPlanType: snapshot.plan };
       } catch (error) {
+        this.checkDisconnect(id, record.provider);
         const temporary = record.provider === "claude" && error instanceof ClaudeAccountError && error.code === "temporary";
         const message = temporary ? new ClaudeAccountError("temporary").message : reconnectError(record.provider);
         await this.save({ ...record, status: temporary ? "connected" : "reconnect", error: message });
         throw fail(message, temporary ? 503 : 409);
-      } finally { await client.close().catch(() => {}); }
+      } finally {
+        await client.close().catch(() => {});
+        if (this.removing.has(id)) throw fail("Agent account not found", 404);
+        this.checkDisconnect(id, record.provider);
+      }
     });
   }
   async models(ownerId, id, provider = null) {
     return this.locked(id, async () => {
       let record = await this.get(ownerId, id);
+      this.checkDisconnect(id, record.provider);
       if (provider && record.provider !== provider) throw fail("Choose an account for the selected agent");
       if (record.status !== "connected" || !record.auth) throw fail(reconnectError(record.provider), 409);
       const client = this.clientFactory(record.provider);
@@ -335,6 +379,7 @@ export class AgentAccounts {
         return models;
       } catch (error) {
         if (this.removing.has(id)) throw fail("Agent account not found", 404);
+        this.checkDisconnect(id, record.provider);
         if (record.provider === "claude") {
           const temporary = error instanceof ClaudeAccountError && error.code === "temporary";
           const message = temporary ? new ClaudeAccountError("temporary").message : reconnectError(record.provider);
@@ -343,7 +388,11 @@ export class AgentAccounts {
         }
         throw fail(`Could not load models for this ${providerLabel(record.provider)} account. Reconnect and retry.`, 502);
       }
-      finally { await client.close().catch(() => {}); }
+      finally {
+        await client.close().catch(() => {});
+        if (this.removing.has(id)) throw fail("Agent account not found", 404);
+        this.checkDisconnect(id, record.provider);
+      }
     });
   }
   async close() {
@@ -353,6 +402,7 @@ export class AgentAccounts {
     // Drain starts first so shutdown cannot leave an untracked login process.
     await Promise.allSettled([...this.locks.values()]);
     await Promise.allSettled([...this.removing.values()].map(removal => removal.promise).filter(Boolean));
+    await Promise.allSettled([...this.disconnecting.values()].map(disconnection => disconnection.promise).filter(Boolean));
     await Promise.all([...this.flows.values()].map(flow => this.cancel(flow.ownerId, flow.id).catch(() => {})));
     await Promise.allSettled([...this.locks.values()]);
   }

@@ -107,7 +107,10 @@ test("Claude stored messages and SSE reconnect history contain only sanitized na
   const { chat } = await (await post("/api/chats", { agent: "claude", agentAccountId: account.id, title: "Stream fixture" })).json();
   const turn = await app.manager.submit(chat.id, "all-splits"); await turn.completion;
   const saved = app.store.get(chat.id), replay = app.manager.eventsSince(chat.id);
-  assert.match(saved.messages.at(-1).text, /^\[redacted\] /);
+  // Commentary may have been persisted before the tool, followed by an empty
+  // segmented-turn marker. Check actual visible text, not that final marker.
+  const assistantText = saved.messages.filter(message => message.role === "assistant" && message.text).map(message => message.text).join("\n\n");
+  assert.match(assistantText, /^\[redacted\] /);
   assert.doesNotMatch(JSON.stringify([saved.messages, saved.pendingRequest, replay]), /fixture-claude-access-value/);
   await app.manager.stop(chat.id, "test"); const resumed = await app.manager.submit(chat.id, "all-splits"); await resumed.completion;
   assert.doesNotMatch(JSON.stringify([app.store.get(chat.id).messages, app.manager.eventsSince(chat.id)]), /fixture-claude-access-value/);
