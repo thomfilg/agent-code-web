@@ -1,6 +1,6 @@
 # Turn interruption and working indicator
 
-Implemented locally; not yet published to AWS.
+Published in runtime `4c45f16`; see the [verified AWS publication](validation-2026-09-19-chat-activity-publication.md). The verification below records the earlier local checkpoint.
 
 ## Requested behavior
 

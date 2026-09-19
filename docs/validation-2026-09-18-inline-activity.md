@@ -1,6 +1,6 @@
 # Inline commentary and actions
 
-Local implementation; not deployed to AWS.
+Published in runtime `4c45f16`; see the [verified AWS publication](validation-2026-09-19-chat-activity-publication.md). The verification below records the earlier local checkpoint.
 
 User-visible agent updates now alternate with their actions in chronological order. Consecutive tools form one collapsed inline group. Expanding a group shows its actions; expanding an action shows its input/command, output and exit status. No side-panel navigation is needed. Tool output is inserted as text, never executable HTML.
 

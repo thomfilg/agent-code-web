@@ -1,6 +1,6 @@
 # Codex message boundaries
 
-Implemented and verified locally; not published to AWS.
+Published in runtime `4c45f16`; see the [verified AWS publication](validation-2026-09-19-chat-activity-publication.md). The verification below records the earlier local checkpoint.
 
 The adapter previously appended every `item/agentMessage/delta` in a turn to one string, ignoring `itemId`. Consecutive commentary messages therefore appeared as `verification.Shared Chrome` in both streamed and saved text.
 
