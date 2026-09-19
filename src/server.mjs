@@ -205,6 +205,10 @@ export async function createAgentWebServer(options = {}) {
           return json(response, 200, { ok: true });
         }
         if (url.pathname !== "/internal/deploy/drain") return json(response, 404, { error: "Not found" });
+        // A failed account action may have ended its HTTP request while its
+        // revocation barrier still needs retry. Do not roll back to a runtime
+        // that cannot restore the durable disconnection intent.
+        if (agentAccounts.disconnecting.size || agentAccounts.removing.size) return json(response, 409, { ok: false, error: "Finish pending account cleanup before deploying. Retry the account disconnection or deletion." });
         const providerLogin = resources.all().some(service => service.github.pending?.size ||
           [...service.mcps.oauth.flows.values()].some(flow => flow.expiresAt > Date.now()));
         const busy = activeMutations || githubWorkers.active || previews?.active || browserAttachments || agentAccounts.flows.size || providerLogin || store.list().some(chat =>

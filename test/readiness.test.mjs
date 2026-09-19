@@ -91,6 +91,20 @@ test("deployment drain rejects browser requests, busy work and pauses new admiss
   assert.equal((await fetch(url + "/readyz")).status, 200);
 });
 
+for (const pending of ["disconnecting", "removing"]) test(`deployment drain rejects incomplete account ${pending} cleanup after the request has failed`, async t => {
+  const root = await temporaryDirectory(t), app = await createAgentWebServer({ config: testConfig(root) });
+  const { url } = await app.start(); t.after(() => app.stop());
+  // No active HTTP mutation or running chat remains: the retryable account
+  // barrier must itself prevent rollback to an image unaware of that barrier.
+  app.agentAccounts[pending].set("account_fixture", {});
+  const response = await fetch(url + "/internal/deploy/drain", { method: "POST" });
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /account.*cleanup/i);
+  assert.equal((await fetch(url + "/readyz")).status, 200, "rejected drain must leave the current deployment serving");
+  app.agentAccounts[pending].delete("account_fixture");
+  assert.equal((await fetch(url + "/internal/deploy/drain", { method: "POST" })).status, 200);
+});
+
 test("deployment drain keeps disconnected mutations counted until the action ends", async t => {
   const root = await temporaryDirectory(t);
   const app = await createAgentWebServer({ config: testConfig(root) });
