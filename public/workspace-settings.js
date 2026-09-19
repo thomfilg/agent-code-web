@@ -1,6 +1,6 @@
 import { ModelPicker } from "./model-picker.js";
 import { companyForChat, scopeAllows, scopeLabel, scopesOverlap } from "./company-scope.js";
-import { CompanyPicker, knownCompanies } from "./company-picker.js";
+import { environmentAllows, environmentCompany } from "./environment-scope.js";
 import { GitHubAccounts } from "./github-accounts.js";
 import { agentAccountLabel, agentProjectKey } from "./agent-account-options.js";
 const $ = selector => document.querySelector(selector);
@@ -11,7 +11,12 @@ const button = (text, action, cls = "secondary-button") => { const e = el("butto
 export class WorkspaceSettings {
   constructor({ api, state, toast }) {
     Object.assign(this, { api, state, toast }); this.selected = []; this.environments = []; this.repositories = []; this.branchCache = new Map(); this.repositoryRequest = 0;
-    this.environmentCompanies = new CompanyPicker($("#environment-companies"), scope => { Object.assign(this.draft, scope); this.renderEnvironmentMcps(); this.updateEnvironmentDirty(); }, { registeredOnly: true });
+    $("#environment-company").addEventListener("change", event => {
+      const companyId = event.target.value;
+      if (this.environmentScopedCompanyId && companyId !== this.environmentScopedCompanyId) { event.target.value = this.environmentScopedCompanyId; return; }
+      Object.assign(this.draft, { companyId, companies: companyId ? [companyId] : [], allowUnassigned: false, scopeNeedsReview: !companyId, confirmCompanyAssignment: true });
+      this.renderEnvironmentMcps(); this.updateEnvironmentDirty();
+    });
     this.githubAccounts = new GitHubAccounts(this);
     this.modelPicker = new ModelPicker({ root: $("#new-model-controls"), api, onChange: () => this.remember() });
     $("#github-button").addEventListener("click", () => this.openGitHub());
@@ -105,14 +110,14 @@ export class WorkspaceSettings {
     const company = companyForChat({ repositories: this.selected });
     // Repository defaults must not hide the environment needed to switch companies.
     // Availability is checked when sending; an explicit switch scopes the draft.
-    const available = this.environments.filter(env => !env.archived);
+    const available = this.environments.filter(env => !env.archived && !env.scopeNeedsReview && environmentCompany(env));
     const chosen = available.find(env => env.id === selected) || available.find(env => scopeAllows(env, company)) || available[0];
     $("#environment-select").replaceChildren(...available.map(env => option(env.id, env.name)));
     if (chosen) $("#environment-select").value = chosen.id;
     else $("#environment-select").append(option("", "No active environments · manage environments"));
     this.renderAccounts();
   }
-  selectedEnvironment() { return this.environments.find(env => env.id === $("#environment-select").value && !env.archived); }
+  selectedEnvironment() { return this.environments.find(env => env.id === $("#environment-select").value && !env.archived && !env.scopeNeedsReview && environmentCompany(env)); }
   async changeEnvironment() {
     const environment = this.selectedEnvironment();
     if (!environment) { this.updateCreateAvailability(); return; }
@@ -160,7 +165,7 @@ export class WorkspaceSettings {
     provider.setAttribute("aria-label", supported ? "Agent type" : "Agent");
     select.hidden = !supported; select.required = Boolean(supported);
     const project = agentProjectKey({ repositories: this.selected });
-    const company = companyForChat({ repositories: this.selected }) || this.selectionCompany;
+    const company = companyForChat({ repositories: this.selected }) || this.selectionCompany || null;
     const explicit = this.restoredAccount?.key === JSON.stringify([company, project]);
     const sameProject = this.accountProject === project;
     const sameCompany = company === companyForChat(this.preferences);
@@ -387,17 +392,20 @@ export class WorkspaceSettings {
   async openGitHub() {
     await this.githubAccounts.open();
   }
-  companyEnvironments() { return this.environments.filter(env => this.settingsCompanyId === "__review__" ? !env.companies?.length && !env.allowUnassigned : scopeAllows(env, this.settingsCompanyId || null)); }
-  async openEnvironments(id, companyId = null) {
+  companyEnvironments() { return this.environments.filter(env => this.settingsCompanyId === "__review__" ? env.scopeNeedsReview || !environmentCompany(env) : environmentAllows(env, this.settingsCompanyId)); }
+  async openEnvironments(id, companyId = null, { validWhile = () => true } = {}) {
+    const revision = this.environmentOpenRevision = (this.environmentOpenRevision || 0) + 1;
     try {
       await this.loadCurrent();
+      if (revision !== this.environmentOpenRevision || !validWhile()) return;
+      this.environmentScopedCompanyId = companyId;
       const requested = this.environments.find(env => env.id === id);
       this.settingsCompanyId = companyId ?? requested?.companies?.[0] ?? this.state.companies?.[0]?.id ?? this.environments[0]?.companies?.[0] ?? "";
-      if (requested && !companyId && !requested.companies?.length) this.settingsCompanyId = requested.allowUnassigned ? "" : "__review__";
+      if (!companyId && (requested?.scopeNeedsReview || requested && !environmentCompany(requested) || !this.settingsCompanyId)) this.settingsCompanyId = "__review__";
       this.editEnvironment(this.companyEnvironments().find(env => env.id === id) || this.companyEnvironments()[0]);
       $("#environments-dialog").showModal();
     }
-    catch (error) { this.toast(error.message); }
+    catch (error) { if (revision === this.environmentOpenRevision && validWhile()) this.toast(error.message); }
   }
   discardEnvironmentEdits() { return !this.environmentSaving && (!this.environmentDirty() || confirm("Discard unsaved environment changes?")); }
   captureEnvironmentFields() {
@@ -424,11 +432,10 @@ export class WorkspaceSettings {
     this.draft = structuredClone(environment || { name: "", backend: this.state.config.workerBackend, variablesEnabled: true, variables: [], software: [], ...(this.settingsCompanyId && this.settingsCompanyId !== "__review__" ? { companies: [this.settingsCompanyId], allowUnassigned: false } : {}) });
     $("#environment-error").textContent = "";
     $("#environment-save-status").textContent = "";
-    const companies = [...new Set([...(this.state.companies || []).map(company => company.id), ...this.environments.flatMap(env => env.companies || [])])];
+    const companies = (this.state.companies || []).map(company => company.id);
     const filter = $("#environment-company-filter");
     filter.replaceChildren(...companies.map(id => option(id, this.state.companies?.find(company => company.id === id)?.name || id)));
-    if (!companies.length || this.settingsCompanyId === "" || this.environments.some(env => env.allowUnassigned)) filter.append(option("", "Unassigned chats"));
-    if (this.settingsCompanyId === "__review__" || this.environments.some(env => !env.companies?.length && !env.allowUnassigned)) filter.append(option("__review__", "Needs company assignment"));
+    if (!companies.length || this.settingsCompanyId === "__review__" || this.environments.some(env => env.scopeNeedsReview || !environmentCompany(env))) filter.append(option("__review__", "Needs company assignment"));
     filter.value = this.settingsCompanyId || "";
     const select = $("#environment-editor-select");
     select.replaceChildren(...this.companyEnvironments().map(env => option(env.id, `${env.name}${env.archived ? " · Archived" : ""}`)));
@@ -436,12 +443,15 @@ export class WorkspaceSettings {
     select.value = environment?.id || "";
     $("#environment-advanced").open = false;
     $("#environment-name").value = this.draft.name;
-    const companyState = { ...this.state, chats: [...(this.state.chats || []), ...this.selected.map(repository => ({ repositories: [repository] }))] };
-    this.environmentCompanies.set(this.draft, knownCompanies(companyState, [...this.environments, ...this.mcps, ...(this.accounts || [])]));
+    const companySelect = $("#environment-company");
+    companySelect.replaceChildren(option("", "Choose one company"), ...(this.state.companies || []).map(company => option(company.id, company.name || company.id)));
+    companySelect.value = this.draft.scopeNeedsReview ? "" : environmentCompany(this.draft) || "";
+    companySelect.disabled = Boolean(this.environmentScopedCompanyId);
+    $("#environment-company-review").hidden = !this.draft.scopeNeedsReview;
     this.renderEnvironmentMcps();
     $("#environment-setup-script").value = this.draft.setupScript || "";
     $("#environment-archived").checked = Boolean(this.draft.archived);
-    $("#environment-backend").textContent = `Worker: ${this.draft.backend} · changes apply on the next worker start${this.draft.scopeNeedsReview ? " · select companies to replace the old global scope" : ""}`;
+    $("#environment-backend").textContent = `Worker: ${this.draft.backend} · changes apply on the next worker start`;
     $("#variables-enabled").checked = this.draft.variablesEnabled;
     $("#delete-environment").hidden = !this.draft.id;
     $("#software-options").replaceChildren();
@@ -456,7 +466,7 @@ export class WorkspaceSettings {
   }
   renderEnvironmentMcps() {
     if (this.state.config?.features?.companyMcpConnections) {
-      const allowed = this.mcps.filter(connection => connection.companyId && scopeAllows(this.draft, connection.companyId));
+      const allowed = this.mcps.filter(connection => connection.companyId && environmentAllows(this.draft, connection.companyId));
       $("#environment-mcp-options").replaceChildren(...allowed.map(connection => el("p", "muted", `${connection.name} · ${connection.companyId}`)));
       return;
     }
@@ -501,6 +511,8 @@ export class WorkspaceSettings {
     const disabled = fields.map(field => field.disabled); fields.forEach(field => { field.disabled = true; });
     try {
       this.requireCompanyScopes();
+      if (!environmentCompany(this.draft) || !this.state.companies?.some(company => company.id === environmentCompany(this.draft))) throw new Error("Choose one registered company before saving this environment.");
+      if (this.environmentScopedCompanyId && environmentCompany(this.draft) !== this.environmentScopedCompanyId) throw new Error("This editor belongs to another company. Reopen the environment in its company settings.");
       const { environment } = await this.api(this.draft.id ? `/api/environments/${this.draft.id}` : "/api/environments", { method: this.draft.id ? "PATCH" : "POST", body: JSON.stringify(this.draft) });
       await this.load();
       if (!environment.archived) { $("#environment-select").value = environment.id; await this.changeEnvironment(); }

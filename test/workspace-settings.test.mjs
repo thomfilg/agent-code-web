@@ -70,20 +70,35 @@ test("GitHub refresh does not reload repositories after a superseded workspace l
   await accounts.refresh(); assert.equal(checks, 1); assert.equal(repositoryLoads, 0);
 });
 
-test("environment suggestions include agent scopes and selected repo companies without granting them", t => {
-  documentFixture(t); let offered;
+test("environment company choices come only from the registered companies, never agent or repository scopes", t => {
+  const document = documentFixture(t); let offered;
   const workspace = Object.assign(Object.create(WorkspaceSettings.prototype), {
-    state: { config: { workerBackend: "local" }, chats: [] },
+    state: { config: { workerBackend: "local" }, chats: [], companies: [{ id: "registered", name: "Registered" }] },
     environments: [], mcps: [], software: [], accounts: [{ companies: ["agent-company"], allowUnassigned: false }],
     selected: [{ fullName: "Repo-Company/project" }], github: { connections: [{ repositoryAccess: "github", login: "not-an-access-scope" }] },
-    environmentCompanies: { set: (record, known) => { offered = { record: structuredClone(record), known }; } },
     renderEnvironmentMcps() {}, renderVariables() {}, showEnvironmentSection() {},
   });
   globalThis.document.createElement = () => ({ value: "", textContent: "" });
+  document.querySelector("#environment-company").replaceChildren = (...options) => { offered = options; };
   workspace.editEnvironment(null);
-  assert.deepEqual(offered.known, ["agent-company", "repo-company"]);
+  assert.deepEqual(offered.map(option => option.value), ["", "registered"]);
   assert.equal(workspace.draft.companies, undefined); assert.equal(workspace.draft.allowUnassigned, undefined);
-  assert.deepEqual(offered.record, { name: "", backend: "local", variablesEnabled: true, variables: [], software: [] });
+  assert.equal(document.querySelector("#environment-company").value, "");
+  workspace.environmentScopedCompanyId = "registered"; workspace.settingsCompanyId = "registered";
+  workspace.editEnvironment(null);
+  assert.equal(document.querySelector("#environment-company").disabled, true);
+  assert.equal(document.querySelector("#environment-company").value, "registered");
+  assert.deepEqual(workspace.draft.companies, ["registered"]);
+});
+
+test("company editor lists ambiguous environments only in the review bucket", () => {
+  const workspace = Object.assign(Object.create(WorkspaceSettings.prototype), { settingsCompanyId: "first", environments: [
+    { id: "valid", companies: ["first"] }, { id: "shared", companies: ["first", "second"] },
+    { id: "unassigned", companies: ["first"], allowUnassigned: true }, { id: "unknown", companies: ["first"], scopeNeedsReview: true },
+  ] });
+  assert.deepEqual(workspace.companyEnvironments().map(env => env.id), ["valid"]);
+  workspace.settingsCompanyId = "__review__";
+  assert.deepEqual(workspace.companyEnvironments().map(env => env.id), ["shared", "unassigned", "unknown"]);
 });
 
 test("opening a conversation waits for a newer startup load instead of using missing preferences", async t => {
@@ -157,8 +172,8 @@ test("draft admission and payload reject incompatible, unassigned and archived e
   workspace.selected = [{ fullName: "g2i-ai/clickdown", companyId: "g2i" }]; checkBlocked(/not available/);
   assert.deepEqual(environment.companies, ["personal"]); assert.equal(environment.allowUnassigned, false);
   workspace.selected = []; environment.allowUnassigned = true;
-  workspace.updateCreateAvailability(); assert.equal(document.querySelector("#create-chat-button").disabled, false);
-  assert.deepEqual(workspace.payload().repositories, []);
+  checkBlocked(/active environment/);
+  assert.equal(environment.allowUnassigned, true, "Admission does not silently repair an old grant");
   environment.archived = true; checkBlocked(/active environment/);
   document.querySelector("#environment-select").value = "missing"; checkBlocked(/active environment/);
 });
