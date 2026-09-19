@@ -92,6 +92,37 @@ test("account selection is explicit for old chats, remains user-owned after cont
   assert.equal(restarted.codex.clients.some(client => client.approve), false, "restart does not open a new consent ceremony");
 });
 
+test("disconnect stops an active selected-account turn before gated refresh finishes and reconnect resumes its saved session", { timeout: 20000 }, async t => {
+  const ctx = await setup(t), { app, browser, user } = ctx, id = await connect(ctx);
+  const { chat } = await (await post(browser, "/api/chats", { agent: "codex", agentAccountId: id, title: "Active revocation" })).json();
+  await app.manager.setMode(chat.id, "auto");
+  const turn = await app.manager.submit(chat.id, "fixture turn awaiting approval"); turn.completion.catch(() => {});
+  await waitFor(() => app.store.get(chat.id).pendingRequest);
+  const session = app.store.get(chat.id).agentSessionId;
+  const factory = app.agentAccounts.clientFactory, entered = Promise.withResolvers(), gate = Promise.withResolvers();
+  app.agentAccounts.clientFactory = () => {
+    const client = factory(), start = client.start.bind(client);
+    client.start = async (...args) => { entered.resolve(); await gate.promise; return start(...args); }; return client;
+  };
+  const refresh = app.agentAccounts.credentials(user.id, id, chat, { refresh: true }); refresh.catch(() => {}); await entered.promise;
+  const disconnecting = post(browser, `/api/agent-accounts/${id}/disconnect`);
+  try {
+    await waitFor(() => app.store.get(chat.id).status === "stopped");
+    assert.equal(app.store.get(chat.id).pendingRequest, null);
+    assert.equal(app.store.get(chat.id).agentSessionId, session);
+    assert.equal(app.agentAccounts.hasConnected(user.id, "codex"), false);
+  } finally { gate.resolve(); }
+  assert.equal((await disconnecting).status, 200); await assert.rejects(refresh, { statusCode: 409 });
+  app.agentAccounts.clientFactory = factory;
+  const reconnected = await post(browser, "/api/agent-accounts", { id, provider: "codex", name: "Personal" }); assert.equal(reconnected.status, 201);
+  ctx.codex.clients.at(-1).approve(); await waitFor(() => app.agentAccounts.hasConnected(user.id, "codex"));
+  const resumed = await app.manager.submit(chat.id, "fixture resumed after account reconnect"); resumed.completion.catch(() => {});
+  const request = await waitFor(() => app.store.get(chat.id).pendingRequest);
+  await app.manager.respond(chat.id, request.requestId, { decision: "accept" }); await resumed.completion;
+  assert.equal(app.store.get(chat.id).agentSessionId, session); assert.equal(app.store.get(chat.id).agentAccountId, id);
+  assert.ok(app.store.get(chat.id).messages.some(message => message.text === "fixture turn awaiting approval"));
+});
+
 test("account deletion enforces owner and Origin, stops its worker, keeps messages/binding and never falls back to another account", { timeout: 20000 }, async t => {
   const ctx = await setup(t), { app, browser, user } = ctx, id = await connect(ctx);
   const created = await post(browser, "/api/chats", { agent: "codex", agentAccountId: id, title: "Keep my conversation" });

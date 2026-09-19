@@ -47,7 +47,7 @@ export class AgentAccountSettings {
     for (const account of this.accounts) {
       const row = node("section", "", "agent-account-card"), heading = node("h3", `${account.name} · ${providerLabel(account.provider)}`);
       row.dataset.accountId = account.id; heading.id = `heading-${account.id}`; row.setAttribute("aria-labelledby", heading.id);
-      const status = account.status === "pending" ? this.logins.has(account.id) ? "Waiting for authorization" : "Connecting…" : account.status === "connected" ? "Connected" : "Not connected";
+      const status = account.status === "pending" ? this.logins.has(account.id) ? "Waiting for authorization" : "Connecting…" : account.status === "connected" ? "Connected" : account.status === "disconnecting" ? "Access blocked · disconnection incomplete" : "Not connected";
       row.append(heading);
       if (!this.actions.has(account.id)) row.append(node("p", account.email ? `${account.email} · ${status}` : status, "muted"));
       else if (account.email) row.append(node("p", account.email, "muted"));
@@ -67,9 +67,12 @@ export class AgentAccountSettings {
             });
           }));
         }
-        if (account.status === "connected") row.append(button("Disconnect", () => {
+        if (["connected", "disconnecting"].includes(account.status)) row.append(button(account.status === "disconnecting" ? "Retry disconnect" : "Disconnect", () => {
           if (!confirm(`Disconnect “${account.name}”? Its running ${providerLabel(account.provider)} chats will stop; conversations stay saved.`)) return;
-          return this.act(account, "Disconnecting…", async () => this.accept(await this.api(`/api/agent-accounts/${account.id}/disconnect`, { method: "POST" })));
+          return this.act(account, "Disconnecting…", async () => {
+            try { this.accept(await this.api(`/api/agent-accounts/${account.id}/disconnect`, { method: "POST" })); }
+            catch (error) { await this.refresh(); throw error; }
+          });
         }));
         else if (account.status === "pending") this.renderLogin(row, account);
         else row.append(button("Reconnect", () => this.reconnect(account)));
