@@ -129,7 +129,12 @@ export async function createAgentWebServer(options = {}) {
   const agentAccounts = new AgentAccounts({ records, config, ...options.agentAccountsOptions,
     onChange: ownerId => { for (const response of sidebarClients) if (response.ownerId === ownerId) response.write('data: {"type":"agent_accounts_changed"}\n\n'); },
     onRevoke: async (ownerId, id) => {
-      for (const chat of store.list()) if (chat.ownerId === ownerId && chat.agentAccountId === id) await manager?.stop(chat.id, "account-disconnected");
+      const chats = store.list().filter(chat => chat.ownerId === ownerId && chat.agentAccountId === id);
+      // One failed worker shutdown must not leave the remaining account-bound
+      // workers running. Await every attempt, but never expose private errors.
+      const results = await Promise.allSettled(chats.map(async chat => manager?.stop(chat.id, "account-disconnected")));
+      const failed = results.filter(result => result.status === "rejected").length;
+      if (failed) throw Object.assign(new Error(`Account access is blocked, but ${failed} of ${chats.length} chat workers could not be stopped. Retry this account action.`), { statusCode: 503 });
     } });
   await agentAccounts.initialize();
   const organization = new ChatOrganization({ records, store, changed: sidebarChanged });
