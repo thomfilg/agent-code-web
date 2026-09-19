@@ -1,5 +1,6 @@
 import { companyOptions } from "./companies.js";
 import { companyForChat } from "./company-scope.js";
+import { companyContext } from "./company-context.js";
 const $ = selector => document.querySelector(selector);
 const element = (tag, text, cls) => { const node = document.createElement(tag); if (text) node.textContent = text; if (cls) node.className = cls; return node; };
 const button = (text, action, cls = "secondary-button") => { const node = element("button", text, cls); node.type = "button"; node.onclick = action; return node; };
@@ -9,15 +10,22 @@ export class GitHubAccounts {
   constructor(settings) {
     this.settings = settings; this.api = settings.api; this.busy = new Set(); this.connections = []; this.refreshRequest = 0;
     $("#github-new").onclick = () => this.start();
-    window.addEventListener("relay-open-github", event => { this.companyId = event.detail?.companyId; void this.open(); });
+    window.addEventListener("relay-open-github", event => { void this.open(event.detail?.companyId); });
     $("#github-company-filter").onchange = () => { this.companyId = $("#github-company-filter").value; $("#github-rename-form").hidden = true; this.render(); };
     $("#github-manage-companies").onclick = () => { $("#github-dialog").close(); window.dispatchEvent(new Event("relay-open-companies")); };
     $("#github-rename-cancel").onclick = () => { this.editing = null; $("#github-rename-form").hidden = true; };
     $("#github-rename-form").onsubmit = event => { event.preventDefault(); void this.save(); };
-    $("#github-dialog").addEventListener("close", () => clearTimeout(this.timer));
+    $("#github-dialog").addEventListener("close", () => { clearTimeout(this.timer); this.refreshRequest++; this.editing = null; $("#github-rename-form").hidden = true; });
+    const discard = event => { if (this.editing && ($("#github-connection-name").value !== this.editing.name || $("#github-connection-company").value !== (this.editing.companyId || "")) && !confirm("Discard unsaved GitHub connection changes?")) { event.preventDefault(); event.stopImmediatePropagation(); } };
+    $("#github-dialog").addEventListener("cancel", discard);
+    $("#github-dialog [data-close-dialog]").addEventListener("click", discard, true);
   }
-  async open() {
+  async open(companyId = null) {
+    this.editing = null; $("#github-rename-form").hidden = true;
+    if (companyId) this.companyId = companyId;
+    $("#github-dialog").dataset.companyScoped = String(Boolean(companyId));
     $("#github-error").textContent = "";
+    $("#github-account-list").replaceChildren(element("p", "Loading GitHub connection…", "muted")); $("#github-new").disabled = true;
     if (!$("#github-dialog").open) $("#github-dialog").showModal();
     await this.refresh();
   }
@@ -27,8 +35,10 @@ export class GitHubAccounts {
       const [data, { companies }] = await Promise.all([this.api("/api/github"), this.api("/api/companies")]);
       if (request !== this.refreshRequest) return;
       this.companies = companies; this.settings.state.companies = companies;
+      if ($("#github-dialog").dataset.companyScoped === "true" && !companies.some(company => company.id === this.companyId)) throw new Error("This company is no longer available. Return to Settings and choose a company.");
       if (!companies.some(company => company.id === this.companyId)) this.companyId = companies.find(company => company.id === companyForChat(this.settings.state.active || {}))?.id || companies[0]?.id || "";
       companyOptions($("#github-company-filter"), companies, this.companyId);
+      companyContext($("#github-dialog"), companies, this.companyId);
       const previous = this.connections;
       this.connections = data.connections; this.settings.github = data;
       this.render();

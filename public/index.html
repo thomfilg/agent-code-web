@@ -37,8 +37,9 @@
         <nav class="chat-list" id="chat-list" aria-label="Conversations"></nav>
 
         <div class="sidebar-footer">
-          <button type="button" class="secondary-button relay-account-button" id="relay-account-button" aria-label="Your Relay account" hidden></button>
-          <div class="settings-buttons"><button class="secondary-button" id="companies-button">Companies</button><button class="secondary-button" id="agent-accounts-button" hidden>Agent accounts</button><button class="secondary-button" id="github-button">Connect GitHub</button><button class="secondary-button" id="environments-button">Environments</button><button class="secondary-button" id="mcps-button">MCP connections</button><button class="secondary-button" id="browser-connections-button">Browser connections</button></div>
+          <div class="sidebar-user-row"><button type="button" class="relay-account-button user-avatar" id="relay-account-button" aria-label="Your Relay account" hidden></button><span id="sidebar-user-name">Your workspace</span><button type="button" class="icon-button" id="company-settings-button" aria-label="Settings" title="Settings">⚙</button></div>
+          <div class="settings-buttons"><button class="secondary-button" id="agent-accounts-button" hidden>Agent accounts</button></div>
+          <div hidden><button id="companies-button">Companies</button><button id="github-button">Connect GitHub</button><button id="environments-button">Environments</button><button id="mcps-button">MCP connections</button><button id="browser-connections-button">Browser connections</button></div>
           <div class="system-state">
             <span class="live-dot"></span>
             <div>

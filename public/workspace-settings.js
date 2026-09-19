@@ -1,5 +1,6 @@
 import { ModelPicker } from "./model-picker.js";
 import { companyForChat, scopeAllows, scopeLabel, scopesOverlap } from "./company-scope.js";
+import { companyContext } from "./company-context.js";
 import { CompanyPicker, knownCompanies } from "./company-picker.js";
 import { GitHubAccounts } from "./github-accounts.js";
 import { agentAccountLabel, agentProjectKey } from "./agent-account-options.js";
@@ -288,16 +289,21 @@ export class WorkspaceSettings {
     await this.githubAccounts.open();
   }
   companyEnvironments() { return this.environments.filter(env => this.settingsCompanyId === "__review__" ? !env.companies?.length && !env.allowUnassigned : scopeAllows(env, this.settingsCompanyId || null)); }
-  async openEnvironments(id, companyId = null) {
+  async openEnvironments(id, companyId = null, { validWhile = () => true } = {}) {
+    const revision = this.environmentOpenRevision = (this.environmentOpenRevision || 0) + 1;
     try {
       await this.loadCurrent();
+      if (revision !== this.environmentOpenRevision || !validWhile()) return;
       const requested = this.environments.find(env => env.id === id);
       this.settingsCompanyId = companyId ?? requested?.companies?.[0] ?? this.state.companies?.[0]?.id ?? this.environments[0]?.companies?.[0] ?? "";
       if (requested && !companyId && !requested.companies?.length) this.settingsCompanyId = requested.allowUnassigned ? "" : "__review__";
       this.editEnvironment(this.companyEnvironments().find(env => env.id === id) || this.companyEnvironments()[0]);
+      $("#environments-dialog").dataset.companyScoped = String(Boolean(companyId));
+      companyContext($("#environments-dialog"), this.state.companies || [], this.settingsCompanyId);
+      $("#environment-company-filter").closest("label").hidden = Boolean(companyId);
       $("#environments-dialog").showModal();
     }
-    catch (error) { this.toast(error.message); }
+    catch (error) { if (revision === this.environmentOpenRevision && validWhile()) this.toast(error.message); }
   }
   discardEnvironmentEdits() { return !this.environmentSaving && (!this.environmentDirty() || confirm("Discard unsaved environment changes?")); }
   captureEnvironmentFields() {

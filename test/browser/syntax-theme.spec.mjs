@@ -1,3 +1,4 @@
+import { openSettingsSection, switchSettingsCompany } from "./settings-navigation.mjs";
 import { test, expect } from "@playwright/test";
 
 const created = new WeakMap();
@@ -185,9 +186,9 @@ test("account changes reset colors immediately and discard another account's lat
   await page.route("**/api/browser-connections", route => route.fulfill({ json: { connections: [] } }));
   await page.locator("#message-input").fill("Account-change draft"); await open(page); await page.getByRole("radio", { name: "High contrast", exact: true }).check();
   await page.getByRole("button", { name: "Save syntax theme", exact: true }).click(); await entered.promise; await close(page);
-  await page.getByRole("button", { name: "Browser connections", exact: true }).click(); await page.getByLabel("Username", { exact: true }).fill("theme-user"); await page.getByLabel("Account password", { exact: true }).fill("fixture-only-password");
+  await openSettingsSection(page, "Browser connections"); await page.getByLabel("Username", { exact: true }).fill("theme-user"); await page.getByLabel("Account password", { exact: true }).fill("fixture-only-password");
   await page.locator("#browser-account-form button[value=login]").click(); await nextLoad.promise; await expect(page.locator("html")).toHaveAttribute("data-syntax-theme", "relay-dark");
-  releaseLoad.resolve(); await expect(page.locator("#browser-account-name")).toHaveText("Signed in as theme-user"); await page.locator("#browser-connections-close").click(); await expect(page.locator("html")).toHaveAttribute("data-syntax-theme", "plain");
+  releaseLoad.resolve(); await expect(page.locator("#browser-account-name")).toHaveText("Signed in as theme-user"); await page.locator("#browser-connections-close").click(); await page.getByLabel("Close settings", { exact: true }).click(); await expect(page.locator("html")).toHaveAttribute("data-syntax-theme", "plain");
   release.resolve(); await expect(page.locator("#toasts")).toContainText("original panel"); await expect(page.locator("html")).toHaveAttribute("data-syntax-theme", "plain");
   await expect(page.locator("#message-input")).toHaveValue("Account-change draft"); expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
 });
