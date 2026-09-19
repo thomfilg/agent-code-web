@@ -15,11 +15,13 @@
 5. Relay discovers tools and performs `list_teams` with `limit: 1` to verify an
    authenticated, non-mutating workspace read. Only a successful read shows
    **Authenticated workspace read verified**. It does not save the team response.
-6. In **Environments**, select that connection and allow the matching company.
-   Select the environment for the chat and start/restart its worker. Both Codex
+6. Select the company's environment for the chat and start/restart its agent.
+   Connected MCPs load automatically from the chat's company; there is no second
+   MCP selector in Environments. Both Codex
    and Claude receive only revocable controller gateway capabilities, not Linear
-   tokens. The chat's primary repository controls company matching; a secondary
-   repository or display group cannot expand access.
+   tokens. The primary repository's stored company ID controls matching (legacy
+   chats fall back to its GitHub owner). Repositories in a chat must belong to that
+   same Relay company; a display group cannot expand access.
 
 Each Relay user owns independent connection records. There is no host-credential
 import or fallback to another user, company, or connection. OAuth tokens and
@@ -82,15 +84,28 @@ Commands (keep one browser worker and the machine's two-CPU limit):
 ```sh
 taskset -c 0,1 nice -n 10 node --test --test-concurrency=1 test/linear-mcp.test.mjs test/mcp-oauth.test.mjs test/mcp-connections.test.mjs test/company-scope.test.mjs test/google-auth.test.mjs
 taskset -c 0,1 nice -n 10 node node_modules/@playwright/test/cli.js test --config playwright.linear.config.mjs
+taskset -c 0,1 nice -n 10 node scripts/smoke-real-mcps.mjs
 ```
 
-**Still required for live MVP acceptance:** the user must approve real Linear
-OAuth independently for `g2i` and `12-apps` after this version is activated. For
-each, verify the authenticated workspace read, select its environment, and make
-an authorized read through both real provider runtimes; confirm scope isolation
-and persistence after a controlled controller/worker restart. No real Linear
-credentials were copied, no real OAuth consent was given, and no real workspace
-read has been counted as passed by these fixtures.
+The no-model CLI smoke uses a loopback-only network namespace, disposable native
+profiles, synthetic OAuth consent and two separately authenticated fixture
+workspaces. It checks company selection from an environment with no manual MCP
+list, actual Codex tool discovery and Claude connection status, controller-only
+upstream tokens, private environment-based worker capabilities, foreign-company
+denial and capability revocation. Its `list_teams` calls use the SDK and the same
+gateway capability supplied to the CLI; they are not model-driven tool calls or
+proof of a deployed worker's network access.
+
+**Live MVP acceptance remains separate:** the existing `linear` connection was
+explicitly assigned to **g2i only**. Do not require or create another Linear
+connection for `thomfilg + 12-apps`. The September 18 [company deployment
+receipt](validation-2026-09-18-company-chat.md) records a successful controller
+workspace read, but a selected deployed worker still needs its own authenticated
+`tools/list` and read-only `list_teams` check, scope isolation and controlled
+restart verification. A current AWS session and running selected worker are
+required to inspect that worker path; if OAuth has expired, the user must renew
+consent for the same g2i connection. No local fixture result replaces that gate,
+and no real Linear credentials are copied by the smoke.
 
 References: [Linear MCP documentation](https://linear.app/docs/mcp),
 [Linear's current list_teams tool changelog](https://linear.app/changelog/2026-09-14-loops-for-product-management),

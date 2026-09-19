@@ -133,7 +133,7 @@ export class McpOAuth {
         if (this.attempts.get(flow.id)?.state !== flow.state) throw invalid("Sign-in was cancelled or replaced. No new credentials were saved.");
         return { ...current, oauth: flow.data, authGeneration: nonce(), revision: current.revision + 1, health: { status: "unverified", message: "Signed in. Test connection to verify access and discover tools." } };
       }, { guard: () => this.attempts.get(flow.id)?.state === flow.state });
-      if (this.attempts.get(flow.id)?.state === flow.state) this.attempts.set(flow.id, { id: flow.attemptId, status: "complete", message: "Signed in. Verify access before selecting the connection in an environment." });
+      if (this.attempts.get(flow.id)?.state === flow.state) this.attempts.set(flow.id, { id: flow.attemptId, status: "complete", message: this.connections.companies ? "Signed in. Verify access; this company's chats load the connection on the next agent start." : "Signed in. Verify access before selecting the connection in an environment." });
       return saved;
     } catch (error) {
       if (this.attempts.get(flow.id)?.state === flow.state) this.attempts.set(flow.id, { id: flow.attemptId, status: "failed", message: error.statusCode ? error.message : "OAuth sign-in failed. Start again from MCP connections." });
