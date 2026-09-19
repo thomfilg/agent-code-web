@@ -2,6 +2,14 @@
 
 ## Current MVP audit — 2026-09-19
 
+**Publication update:** after the user renewed AWS access, build source `d9c0ce6`
+(runtime `8db8247`) was manually published at 13:03 UTC. Independent image/source
+hashes, readiness 200, anonymous chats 401 and all 13 deployed denial checks
+passed. The single worker was stopped before and after publication; none was
+interrupted or deleted. See the [publication receipt](validation-2026-09-19-mvp-publication.md).
+Authenticated selected-worker/provider acceptance remains open; the MVP is not
+complete and automatic deployment remains disabled.
+
 Latest integrated source `8db8247` closes warmed-runtime admission after failed
 account revocation and rechecks delayed native actions after Stop/Escape.
 Clean full verification passed **1,286 Node tests with zero failures/skips**,
@@ -16,7 +24,8 @@ durable retry state, sibling-worker revocation and safe deployment drain.
 The clean integrated check passed 142 distinct focused Node tests and all 19
 account browser cases without retries. Real read-only GitHub and installed
 Codex/Claude company-MCP discovery also passed within their isolated test scopes.
-This follow-up is **not deployed** while the AWS operator session is expired.
+This follow-up is now included in the publication recorded above; its earlier
+receipt describes the prepublication expired-session checkpoint.
 See the [integrated receipt and remaining gates](validation-2026-09-19-mvp-followup.md).
 
 Runtime `4c45f16` was published and independently verified at 00:07 UTC; PR #4
@@ -35,11 +44,11 @@ This checkpoint supersedes stale status language in the historical entries below
 | Linear | g2i-only product binding; live controller tools/read verification succeeded | Authenticated selected-agent/worker read, not just the verification button |
 | AWS | Repeatable immutable deployment and recovery evidence; latest health/assets/denials matched | Combined authenticated product flows and authenticated remote-app HTTP/WS |
 
-On resumption, public readiness returns 200 while the operator's `code-web`
-session reports expired credentials. No restart, production data change or
-authentication reset was attempted. Local implementation/testing continues;
-internal AWS verification/publication requires session renewal. This is not
-evidence that the application itself is unavailable.
+The previous audit found expired `code-web` credentials while public readiness
+remained 200. The user subsequently renewed that session, enabling the guarded
+publication above. No authentication reset or company/connection migration was
+needed. Remaining authenticated product-flow checks are separate from readiness
+and the now-completed immutable rollout.
 
 The GitHub and real-CLI MCP smoke harnesses now exercise today's company-scoped
 production model; their passing isolated checks do not prove deployed selection.

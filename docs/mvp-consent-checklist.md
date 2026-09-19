@@ -1,6 +1,6 @@
 # MVP consent and execution handoff
 
-Current UI instructions checked against published runtime `4c45f16` on September
+Current UI instructions checked against published build `d9c0ce6` on September
 19, 2026. The pending company-tab Settings redesign is not assumed published.
 No item below is marked complete by fixture tests, an operator's CLI login or
 an isolated copied-credential test.
@@ -63,6 +63,9 @@ Repeat separately for each intended personal/company identity:
   On expiry/failure use that card's **Reconnect**; use a new named account to
   switch identities. Do not substitute another account or repeat model prompts
   to diagnose sign-in.
+- [ ] If Disconnect reports incomplete cleanup, use **Retry disconnect** on
+  that account. Do not start another login until cleanup succeeds. The current
+  published runtime denies warmed native actions during that blocked state.
 
 ## 3. GitHub identity and exact repository
 
