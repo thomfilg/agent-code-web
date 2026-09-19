@@ -32,7 +32,7 @@ The PostgreSQL suite covers encrypted persistence/reopen, competing service inst
 
 Still required before item 41 can be called complete:
 
-1. Establish installed-native writer flush/ordering and validate the complete terminal record boundary using a real native session lifecycle without consuming a production account or fabricated journal-as-flush evidence.
+1. Extend the installed-native writer observation below to the actual worker lifecycle and failure timings. One observed terminal-record ordering is not a flush/fsync contract or a zero-loss guarantee.
 2. Demonstrate recovery after deletion of a disposable, actually isolated worker/container, including original instructions/native tool history and exact native ID; no silent transcript-only reconstruction.
 3. Define and communicate the recovery point for abrupt mid-turn loss. Bytes not yet flushed by Codex or not yet committed on the controller cannot be recovered by this checkpoint mechanism. A one-second coalescing interval is not a zero-loss guarantee.
 4. Validate full native child-thread/workflow storage and pending native goal/tool state. Root rollout ancestry alone does not certify every independent child session or remote side effect. Never automatically replay ambiguous actions.
@@ -50,3 +50,19 @@ CODEX_NATIVE_COMPAT_BIN=/absolute/path/to/codex taskset -c 0,1 nice -n 10 node -
 Validation receipt (2026-09-19): final serial eight-file run passed **44/44**, zero skipped/cancelled, in 15.86 seconds. This includes the suites above plus named-account runtime and worker-loss transcript compatibility. Installed Codex **0.155.0** read/resume compatibility passed with no new turn; PostgreSQL tests used a real disposable embedded server. Independent source review covered durable scope, exact terminal markers, fresh-only restore and lifecycle fencing.
 
 The first native compatibility attempt lacked native turn events in its synthetic journal, so the visible-history assertion correctly failed; adding those synthetic events preserved the assertion. A second attempt reached read/resume assertions but exposed fixture cleanup ordering (directory removal before CLI shutdown). The final fixture stops the exact spawned process and waits for its pipes to close before directory cleanup; the final complete run passed. These were test-fixture corrections, not evidence of real model flush durability or a production incident.
+
+## Actual installed native-writer observation
+
+`scripts/smoke-real-native-checkpoint.mjs` uses installed Codex 0.155.0 with a new private home, a network/PID namespace containing only loopback and no routes, and a deterministic local Responses server. Unlike the read/resume compatibility fixture, **the installed CLI writes every journal byte during a genuine native turn**. Its advertised native shell tool executes only a harmless `printf` sentinel, followed by a scripted assistant answer. Synthetic named-account metadata supplies the production checkpoint service's required scope; no credentials or personal profiles are loaded.
+
+The test observes the exact `task_complete` record synchronously when `turn/completed` arrives, then captures and saves with the production bundle/service code. It SIGKILLs only the owned process group, deletes only the fixture's private Codex home, restores into a fresh private home, and resumes the identical native ID. Read/resume must generate zero provider requests. One explicitly requested continuation must contain the original user instruction, developer policy, paired native tool call/output, and previous assistant answer, with no duplicated original message. The harmless shell command has no independent execution counter, so this receipt proves retained context and zero implicit provider requests, not an independently instrumented exactly-once shell-execution guarantee. This is a process/profile-loss proof, **not container deletion, cloud-worker acceptance, or a PostgreSQL restart proof**; the earlier PostgreSQL suite covers storage separately.
+
+```sh
+CODEX_WRITER_BIN=/absolute/path/to/codex taskset -c 0,1 nice -n 10 node scripts/smoke-real-native-checkpoint.mjs
+```
+
+Receipt (2026-09-19): terminal exit 0; **three loopback Responses requests** (tool request, initial answer, explicit continuation). The exact terminal marker was present at notification receipt; capture needed **zero retries** and completed **7 ms** after receipt. No production adapter retry change was warranted by this observation. The fixture permits a bounded terminal-marker observation retry and reports its count; such a retry is not evidence that the production adapter waited or that all native versions flush before notification.
+
+The initial run failed because the fixture assumed Code Mode would be enabled in a clean native profile. The corrected fixture consumes an actually advertised Code Mode or native shell tool; it does not copy host configuration or relax the actual tool-output/history assertions. No model service, OAuth, production worker, or cloud resource was used.
+
+The [official app-server lifecycle documentation](https://learn.chatgpt.com/docs/app-server#lifecycle-overview) establishes the completion event, not a filesystem durability barrier. The observed 0.155.0 result must not be generalized to abrupt mid-turn loss, power loss, other versions, independent child workflows, or a guaranteed recovery point.
