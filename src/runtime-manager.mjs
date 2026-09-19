@@ -54,6 +54,7 @@ function remainingAssistantText(runtime, text) {
   return published && text.startsWith(published.trimEnd()) ? text.slice(published.length).replace(/^\n+/, "") : text;
 }
 const runtimeAccountBinding = chat => JSON.stringify([chat.ownerId || null, chat.agent, chat.agentAccountId || null]);
+const agentScopeBinding = chat => JSON.stringify([runtimeAccountBinding(chat), chat.environmentId || null, chat.workspace || null, companyForChat(chat)]);
 
 export class RuntimeManager extends EventEmitter {
   #runtimes = new Map();
@@ -355,7 +356,8 @@ export class RuntimeManager extends EventEmitter {
   async agentThreadAction(chatId, action, input = {}) {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
-    if (chat.agent !== "codex") throw new Error("Native agent threads require Codex");
+    if (!["codex", "claude"].includes(chat.agent)) throw new Error("Native child agents require Codex or Claude");
+    if (chat.agent === "claude" && ["messages", "respond"].includes(action)) throw Object.assign(new Error("Direct child messaging is not supported by this Claude interface; use the main conversation for approvals"), { statusCode: 409 });
     if (chat.archived) throw new Error("Unarchive this chat before connecting to its agents");
     if (!["refresh", "select", "messages", "stop", "respond"].includes(action)) throw new Error("Unknown agent action");
     if (action !== "refresh" && (!input.rootThreadId || input.rootThreadId !== chat.agentSessionId)) throw Object.assign(new Error("The chat's native session changed; reopen the agent picker"), { statusCode: 409 });
@@ -363,23 +365,32 @@ export class RuntimeManager extends EventEmitter {
     this.#switching.add(chatId);
     const version = this.#lifecycleVersions.get(chatId) || 0;
     try {
-      const runtime = await this.#nativeRuntime(chatId);
+      const runtime = action === "refresh" ? await this.#nativeRuntime(chatId) : this.#runtimes.get(chatId);
+      if (!runtime) throw Object.assign(new Error("Connect explicitly before controlling a native child agent"), { statusCode: 409 });
       if (version !== (this.#lifecycleVersions.get(chatId) || 0)) throw new Error("Agent action cancelled because the worker stopped");
       const agents = runtime.adapter.agents;
-      if (!agents) throw new Error("This worker does not support native agent navigation");
+      if (!agents) throw new Error(chat.agent === "claude" ? "No observable private Claude process is running. Send a main-chat message to start native work; opening this panel never sends one." : "This worker does not support native agent navigation");
       if (action === "messages" && (runtime.adapter.plugins?.changing || runtime.adapter.plugins?.needsRefresh)) throw Object.assign(new Error("Refresh /plugins to finish reconciling the plugin change before sending to an agent"), { statusCode: 409 });
       if (action === "messages" && (runtime.adapter.hookControls?.changing || runtime.adapter.hookControls?.needsRefresh)) throw Object.assign(new Error("Refresh /hooks to finish reconciling the hook change before sending to an agent"), { statusCode: 409 });
       if (action === "messages" && (runtime.adapter.featureControls?.changing || runtime.adapter.featureControls?.needsRefresh)) throw Object.assign(new Error("Refresh /experimental to finish reconciling the feature change before sending to an agent"), { statusCode: 409 });
       if (action === "messages" && (runtime.adapter.memoryControls?.changing || runtime.adapter.memoryControls?.needsRefresh)) throw Object.assign(new Error("Refresh /memories to finish reconciling the memory change before sending to an agent"), { statusCode: 409 });
       if (action === "messages") await this.#assertImportReady(chatId);
       this.#assertNativeAccount(chatId, runtime);
+      const selected = this.store.get(chatId);
+      if (agentScopeBinding(selected) !== agentScopeBinding(chat) || runtime.agentScopeBinding !== agentScopeBinding(selected)) throw Object.assign(new Error("Native child-agent scope changed before dispatch"), { statusCode: 409 });
       if (action !== "refresh" && input.rootThreadId !== this.store.get(chatId)?.agentSessionId) throw Object.assign(new Error("The native session changed; reopen the agent picker"), { statusCode: 409 });
       clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
-      if (action === "refresh") return await agents.refresh();
-      if (action === "select") return await agents.select(input.threadId, input.cursor);
-      if (action === "messages") return await agents.send(input.threadId, input, chat.mode || "accept_edits");
-      if (action === "stop") return await agents.interrupt(input.threadId);
-      return await agents.respond(input.threadId, input.requestId, input);
+      const result = action === "refresh" ? await agents.refresh()
+        : action === "select" ? await agents.select(input.threadId, input.cursor)
+        : action === "messages" ? await agents.send(input.threadId, input, chat.mode || "accept_edits")
+        : action === "stop" ? await agents.interrupt(input.threadId)
+        : await agents.respond(input.threadId, input.requestId, input);
+      this.#assertNativeAccount(chatId, runtime);
+      const current = this.store.get(chatId);
+      if (version !== (this.#lifecycleVersions.get(chatId) || 0) || current.ownerId !== chat.ownerId || companyForChat(current) !== companyForChat(chat)
+        || current.environmentId !== chat.environmentId || current.workspace !== chat.workspace
+        || current.agentSessionId !== result.rootThreadId) throw Object.assign(new Error("Native child-agent scope changed before completion"), { statusCode: 409 });
+      return result;
     } finally { this.#switching.delete(chatId); await this.refreshActivity(chatId); void this.#drainQueue(chatId); }
   }
 
@@ -1941,8 +1952,16 @@ export class RuntimeManager extends EventEmitter {
     let savedAgentThreads;
     let forkContext = "";
     const hooks = {
+      assertAgentCurrent: rootId => {
+        if (!runtime || runtime.failing || runtime.failed || (this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Native child-agent runtime changed"), { statusCode: 409 });
+        this.#assertNativeAccount(chatId, runtime);
+        const current = this.store.get(chatId);
+        if (current.archived || current.ownerId !== chat.ownerId || companyForChat(current) !== companyForChat(chat)
+          || current.environmentId !== chat.environmentId || current.workspace !== chat.workspace || current.agentSessionId !== rootId) throw Object.assign(new Error("Native child-agent scope changed"), { statusCode: 409 });
+      },
       onAgentThreads: snapshot => {
         if (!runtime || runtime.failing || runtime.failed || this.#runtimes.get(chatId) !== runtime) return;
+        try { hooks.assertAgentCurrent(snapshot.rootThreadId); } catch { return; }
         void this.agentThreads.update(chatId, snapshot)?.catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot: ${errorMessage(error)}` }));
         void this.refreshActivity(chatId);
       },
@@ -2086,7 +2105,7 @@ export class RuntimeManager extends EventEmitter {
             if (!Number.isSafeInteger(checkpointVersion) || checkpointVersion !== (this.#lifecycleVersions.get(chatId) || 0)
               || !current || current.archived || runtimeAccountBinding(current) !== runtimeAccountBinding(chat) || active && active !== runtime) throw new Error("Native checkpoint owner changed");
           } });
-      runtime = { adapter, executor, forkContext, accountBinding: runtimeAccountBinding(chat), busy: false, idleTimer: null, generation: 0, eventQueue: Promise.resolve() };
+      runtime = { adapter, executor, forkContext, accountBinding: runtimeAccountBinding(chat), agentScopeBinding: agentScopeBinding(chat), busy: false, idleTimer: null, generation: 0, eventQueue: Promise.resolve() };
       this.#runtimes.set(chatId, runtime);
       await this.#startupTask(chatId, "agent", version, () => { checkCancelled(); return adapter.start(); });
       checkCancelled();
@@ -2292,7 +2311,7 @@ export class RuntimeManager extends EventEmitter {
     // the same lifecycle and account still own cleanup.
     const chat = this.store.get(chatId), current = this.#runtimes.get(chatId);
     if (!chat || (this.#lifecycleVersions.get(chatId) || 0) !== version
-      || runtime.accountBinding !== runtimeAccountBinding(chat) || current && current !== runtime) return;
+      || runtime.accountBinding !== runtimeAccountBinding(chat) || runtime.agentScopeBinding !== agentScopeBinding(chat) || current && current !== runtime) return;
     const snapshot = runtime.adapter.agents?.snapshot?.();
     if (snapshot?.awake !== false || snapshot.rootThreadId !== chat.agentSessionId) return;
     await this.agentThreads.update(chatId, snapshot);

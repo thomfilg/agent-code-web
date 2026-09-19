@@ -247,15 +247,22 @@
         </aside>
         <aside class="side-panel" id="agents-panel" aria-labelledby="agents-title" hidden>
           <div class="preview-heading"><strong id="agents-title">Agent threads</strong><button type="button" class="secondary-button" id="agents-refresh">Connect to agents</button><button type="button" class="icon-button" id="hide-agents" aria-label="Return to main chat">×</button></div>
-          <label class="sr-only" for="agents-picker">Choose agent thread</label><select id="agents-picker"></select>
           <p id="agents-status" class="muted" role="status"></p>
-          <p id="agents-limit" class="muted" hidden>Showing up to 200 native agents.</p>
+          <p id="agents-limit" class="muted" hidden>Preview limited to 200 native agents and bounded conversation history. Some older content is omitted.</p>
+          <ul id="agents-list" aria-label="Native child agents"></ul>
+        </aside>
+        <dialog id="agent-conversation-dialog" aria-labelledby="agent-conversation-title">
+          <div class="preview-heading"><strong id="agent-conversation-title">Agent conversation</strong><button type="button" class="icon-button" id="close-agent-conversation" aria-label="Back to agent list">×</button></div>
+          <label class="sr-only" for="agents-picker">Choose agent thread</label><select id="agents-picker"></select>
+          <p id="agent-conversation-status" class="muted" role="status"></p>
+          <p id="agent-conversation-capability" class="muted" hidden></p>
           <div class="side-form-actions"><button type="button" class="secondary-button" id="agents-older" hidden>Earlier agent messages</button><button type="button" class="secondary-button" id="agents-latest" hidden>Latest agent messages</button></div>
           <div id="agents-messages" aria-label="Selected agent conversation"></div>
           <div id="agents-approval" class="approval-card" hidden></div>
           <p id="agents-error" role="alert"></p>
-          <form id="agents-form" hidden><textarea id="agents-input" rows="3" maxlength="100000" placeholder="Message this agent…" aria-label="Message selected agent"></textarea><div class="side-form-actions"><span class="muted">Sent only to the selected agent</span><button type="button" class="secondary-button" id="agents-stop" hidden>Stop agent reply</button><button type="submit" class="primary-button" id="agents-send">Send to agent</button></div></form>
-        </aside>
+          <form id="agents-form" hidden><textarea id="agents-input" rows="3" maxlength="100000" placeholder="Message this agent…" aria-label="Message selected agent"></textarea><div class="side-form-actions"><span class="muted">Sent only to the selected agent</span><button type="submit" class="primary-button" id="agents-send">Send to agent</button></div></form>
+          <div class="side-form-actions"><button type="button" class="secondary-button" id="agents-stop" hidden>Stop agent reply</button></div>
+        </dialog>
         <aside class="side-panel" id="side-panel" aria-labelledby="side-title" hidden>
           <div class="preview-heading"><strong id="side-title">Side chat</strong><button type="button" class="secondary-button" id="end-side">End side chat</button><button type="button" class="icon-button" id="hide-side" aria-label="Hide side chat">×</button></div>
           <p class="muted">Temporary conversation, branched from the main chat. Both agents share the workspace and selected permissions. Ending this side chat or stopping the worker discards this conversation.</p>

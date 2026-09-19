@@ -24,7 +24,7 @@ export const CLAUDE_SCHEDULE_DIAGNOSTICS = ["--debug-to-stderr"];
 // the same stream contract as the one-shot adapter, but a result closes only
 // that logical turn, not the CLI which owns its background application tasks.
 export class ClaudeSession {
-  constructor(child, args, env, onBackgroundEvent = () => {}, { controlTimeoutMs = 30000, requestHooks, cwd, onSchedulesChanged = () => {}, onWorkflowsChanged = () => {} } = {}) {
+  constructor(child, args, env, onBackgroundEvent = () => {}, { controlTimeoutMs = 30000, requestHooks, cwd, onSchedulesChanged = () => {}, onWorkflowsChanged = () => {}, onNativeAgentEvent = null, onNativeAgentClose = null } = {}) {
     this.child = child; this.args = args; this.env = env; this.active = null; this.pending = false;
     this.sessionId = flag(args, "--session-id") || flag(args, "--resume");
     this.controlTimeoutMs = controlTimeoutMs;
@@ -35,6 +35,7 @@ export class ClaudeSession {
     this.workflowNotifications = [];
     this.foregroundAgents = new Map();
     this.onBackgroundEvent = onBackgroundEvent;
+    this.onNativeAgentEvent = onNativeAgentEvent;
     this.control = new ClaudeControlChannel(child, controlTimeoutMs);
     this.requests = requestHooks ? new ClaudeRequests(child, requestHooks, cwd) : null;
     this.closed = new Promise(resolve => { this.resolveClosed = resolve; });
@@ -44,6 +45,10 @@ export class ClaudeSession {
       if (event.type === "result") event.relayWorkflowInterrupted = false;
       this.control.accept(event);
       if (this.requests?.accept(event)) return;
+      this.onNativeAgentEvent?.(event);
+      // Opted-in descendant output belongs to its own popup, not the parent's
+      // tool timeline, usage samples, result boundary or background report.
+      if (this.onNativeAgentEvent && event.parent_tool_use_id) return;
       this.trackSchedules(event);
       const workflowsCompleted = this.trackWorkflows(event);
       if (event.type === "result") {
@@ -101,6 +106,7 @@ export class ClaudeSession {
     child.once("close", (code, signal) => {
       if (diagnostics && stderr && !dropping) stderrLine(stderr + decoder.end());
       this.ended = true; this.control.close(); this.lines.close();
+      onNativeAgentClose?.();
       this.finishBackground();
       this.workflowCalls.clear();
       const workflows = this.workflows.size;
@@ -393,7 +399,7 @@ export class ClaudeSession {
     try {
       checkSelection();
       if (!this.initialized) {
-        const initialized = await this.control.request("initialize");
+        const initialized = await this.control.request("initialize", this.onNativeAgentEvent ? { forwardSubagentText: true } : {});
         const commands = claudeCommandMetadata(initialized?.commands);
         if (commands && !this.stopping && !this.ended) await this.onBackgroundEvent({ type: "command_catalog", commands });
         if (resetEffort) await this.control.request("apply_flag_settings", { settings: { effortLevel: null } });

@@ -17,6 +17,7 @@ import { claudeDebugRequest, CLAUDE_DEBUG_PRIVATE_ERROR } from "../claude-debug.
 import { ClaudeWorkspaceTrust, claudeTrustProbe } from "../claude-workspace-trust.mjs";
 import { claudeCommandMetadata } from "../command-catalog.mjs";
 import { claudeFinalAnswer } from "../message-search.mjs";
+import { ClaudeAgentThreads } from "../claude-agent-threads.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch, now = Date.now }) {
@@ -356,6 +357,10 @@ export class ClaudeAdapter {
           if (this.stopped || ![this.turnSession, this.applicationSession].includes(session)) return;
           return this.backgroundEvent(event);
         }, {
+          ...(this.privateProfile ? {
+            onNativeAgentEvent: event => session.agents?.observe(event),
+            onNativeAgentClose: () => session.agents?.close(),
+          } : {}),
           ...(interactive ? { requestHooks: this.hooks, cwd: this.workspace } : {}),
           onSchedulesChanged: () => {
             if (this.stopped || ![this.turnSession, this.applicationSession].includes(session)) return;
@@ -368,6 +373,16 @@ export class ClaudeAdapter {
             this.hooks.onEvent?.({ type: "background_turn", active: this.isBackgroundBusy() });
           },
         });
+        if (this.privateProfile) {
+          session.agents = new ClaudeAgentThreads({ root: () => session.sessionId, control: session.control, secrets: this.accountSecrets,
+            current: () => {
+              if (this.stopped || session.ended || session.stopping || this.agents !== session.agents || ![this.turnSession, this.applicationSession].includes(session)) return false;
+              this.assertCapability(); this.hooks.assertAgentCurrent?.(session.sessionId); return true;
+            },
+            publish: snapshot => this.hooks.onAgentThreads?.(snapshot),
+          });
+          this.agents = session.agents;
+        }
         return session;
       };
       if (!this.applicationSession && applicationRequest) {
@@ -804,6 +819,7 @@ export class ClaudeAdapter {
     const trustStopped = this.trustControls?.close();
     this.providerObservation?.(); this.providerObservation = null;
     this.stopped = true;
+    this.agents?.close();
     // Revoke synchronously, before any slow process/SDK shutdown. A stale
     // adapter must never revoke a replacement runtime's newer capability.
     this.broker.revoke(this.capability);

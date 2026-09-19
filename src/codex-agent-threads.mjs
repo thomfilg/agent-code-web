@@ -28,8 +28,8 @@ function visibleItem(item, turnId) {
 // IDs, never a shared CODEX_HOME, cwd, sessionId or forkedFromId. Side forks and
 // other Relay chats therefore cannot enter this picker or receive its input.
 export class CodexAgentThreads {
-  constructor({ rpc, root, workspace, model, publish, saved = null, log = () => {}, secrets = null }) {
-    Object.assign(this, { rpc, root, workspace, model, publish, saved, log, secrets });
+  constructor({ rpc, root, workspace, model, publish, saved = null, log = () => {}, secrets = null, assertCurrent = null }) {
+    Object.assign(this, { rpc, root, workspace, model, publish, saved, log, secrets, assertCurrent });
     this.entries = new Map(); this.revision = 0; this.epoch = randomUUID(); this.closed = false; this.pending = new Set(); this.queues = new Map();
     this.listeners = {
       notification: message => this.#enqueue(message, false),
@@ -45,7 +45,8 @@ export class CodexAgentThreads {
     this.queues.set(id, task); this.#track(task);
     void task.finally(() => { if (this.queues.get(id) === task) this.queues.delete(id); }).catch(() => {});
   }
-  #check() { if (this.closed || !this.root()) throw conflict("The agent worker is no longer available"); }
+  #check() { if (this.closed || !this.root()) throw conflict("The agent worker is no longer available"); this.assertCurrent?.(this.root()); }
+  #nativeRequest(...args) { this.#check(); return this.rpc.request(...args); }
   #emit() {
     if (this.closed) return;
     clearTimeout(this.timer); this.timer = null; this.revision++;
@@ -107,7 +108,7 @@ export class CodexAgentThreads {
       visited.add(next);
       let thread = supplied?.id === next ? supplied : null;
       if (!thread) {
-        try { thread = (await this.rpc.request("thread/read", { threadId: next, includeTurns: false }, 10000)).thread; }
+        try { thread = (await this.#nativeRequest("thread/read", { threadId: next, includeTurns: false }, 10000)).thread; }
         catch { throw denied(); }
       }
       this.#check();
@@ -121,7 +122,7 @@ export class CodexAgentThreads {
     this.#check();
     let cursor = null; const seen = new Set();
     do {
-      const result = await this.rpc.request("thread/list", { ancestorThreadId: this.root(), sourceKinds: ["subAgentThreadSpawn"], limit: 100, ...(cursor ? { cursor } : {}) }, 10000);
+      const result = await this.#nativeRequest("thread/list", { ancestorThreadId: this.root(), sourceKinds: ["subAgentThreadSpawn"], limit: 100, ...(cursor ? { cursor } : {}) }, 10000);
       this.#check();
       for (const thread of result.data || []) {
         try { await this.#authorize(thread.id, thread); const entry = this.#remember(thread); if (["active", "idle"].includes(entry.status)) await this.#subscribe(entry); } catch (error) { if (error.statusCode !== 404) throw error; }
@@ -146,7 +147,7 @@ export class CodexAgentThreads {
   async #subscribe(entry) {
     if (entry.subscribed) return;
     entry.subscribing ||= (async () => {
-      const result = await this.rpc.request("thread/resume", { threadId: entry.id, excludeTurns: true }, 10000);
+      const result = await this.#nativeRequest("thread/resume", { threadId: entry.id, excludeTurns: true }, 10000);
       this.#check(); if (result.thread?.id !== entry.id || parentId(result.thread) !== entry.parentThreadId) throw denied();
       this.#remember(result.thread); entry.subscribed = true;
     })().finally(() => { entry.subscribing = null; });
@@ -154,7 +155,7 @@ export class CodexAgentThreads {
   }
   async #history(entry, cursor = null) {
     const generation = entry.version || 0;
-    const result = await this.rpc.request("thread/items/list", { threadId: entry.id, limit: 20, sortDirection: "desc", ...(cursor ? { cursor } : {}) }, 10000);
+    const result = await this.#nativeRequest("thread/items/list", { threadId: entry.id, limit: 20, sortDirection: "desc", ...(cursor ? { cursor } : {}) }, 10000);
     this.#check();
     const messages = (result.data || []).map(row => visibleItem(row.item, row.turnId)).filter(Boolean).reverse();
     if (!cursor) {
@@ -181,16 +182,16 @@ export class CodexAgentThreads {
     action.promise = (async () => {
       await this.select(id);
       if (entry.canAcceptDirectInput === false) throw conflict("This native agent cannot accept direct input");
-      const current = await this.rpc.request("thread/turns/list", { threadId: id, limit: 1, sortDirection: "desc", itemsView: "notLoaded" }, 10000);
+      const current = await this.#nativeRequest("thread/turns/list", { threadId: id, limit: 1, sortDirection: "desc", itemsView: "notLoaded" }, 10000);
       this.#check();
       const active = current.data?.find(turn => turn.status === "inProgress");
-      const start = () => this.rpc.request("turn/start", { threadId: id, clientUserMessageId: requestId, input: [{ type: "text", text }],
+      const start = () => this.#nativeRequest("turn/start", { threadId: id, clientUserMessageId: requestId, input: [{ type: "text", text }],
         approvalPolicy: "on-request", approvalsReviewer: mode === "auto" ? "auto_review" : "user",
         sandboxPolicy: mode === "plan" ? { type: "readOnly" } : { type: "workspaceWrite", writableRoots: [this.workspace], networkAccess: false },
         collaborationMode: { mode: mode === "plan" ? "plan" : "default", settings: { model: entry.model || this.model, reasoning_effort: entry.effort, developer_instructions: null } },
       }, 10000);
       if (active) {
-        try { await this.rpc.request("turn/steer", { threadId: id, expectedTurnId: active.id, clientUserMessageId: requestId, input: [{ type: "text", text }] }, 10000); }
+        try { await this.#nativeRequest("turn/steer", { threadId: id, expectedTurnId: active.id, clientUserMessageId: requestId, input: [{ type: "text", text }] }, 10000); }
         catch (error) {
           // The previous turn can finish after our read. Only this definitive
           // not-delivered rejection is safe to retry as a fresh native turn.
@@ -215,12 +216,13 @@ export class CodexAgentThreads {
   }
   async interrupt(id) {
     const entry = await this.#authorize(id);
-    const { goal } = await this.rpc.request("thread/goal/get", { threadId: id }, 10000);
+    const { goal } = await this.#nativeRequest("thread/goal/get", { threadId: id }, 10000);
     this.#check();
-    if (goal?.status === "active") await this.rpc.request("thread/goal/set", { threadId: id, status: "paused" }, 10000);
-    const current = await this.rpc.request("thread/turns/list", { threadId: id, limit: 1, sortDirection: "desc", itemsView: "notLoaded" }, 10000);
+    if (goal?.status === "active") await this.#nativeRequest("thread/goal/set", { threadId: id, status: "paused" }, 10000);
+    const current = await this.#nativeRequest("thread/turns/list", { threadId: id, limit: 1, sortDirection: "desc", itemsView: "notLoaded" }, 10000);
     this.#check(); const active = current.data?.find(turn => turn.status === "inProgress");
-    if (active) await this.rpc.request("turn/interrupt", { threadId: id, turnId: active.id }, 10000);
+    if (active) await this.#nativeRequest("turn/interrupt", { threadId: id, turnId: active.id }, 10000);
+    this.#check();
     entry.error = null; this.#emit(); return this.snapshot();
   }
   async respond(id, requestId, input) {

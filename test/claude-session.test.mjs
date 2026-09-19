@@ -92,6 +92,25 @@ async function fixture(t, { interactive = false } = {}) {
   return Object.assign(f, { adapter, config, broker, chat, store });
 }
 
+test("forwarded child frames reach only the observer and never complete or contaminate the parent turn", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const sending = f.adapter.send("Parent task", {}); let complete = false;
+  sending.then(() => { complete = true; });
+  await waitFor(() => f.adapter.turnSession?.active?.started);
+  const session_id = f.nativeSession;
+  f.emit({ type: "assistant", session_id, uuid: "root-agent", message: { content: [{ type: "tool_use", id: "agent-call", name: "Agent", input: { name: "Worker", prompt: "Child task", run_in_background: false } }] } });
+  f.emit({ type: "system", subtype: "task_started", session_id, task_type: "local_agent", task_id: "actual-child", tool_use_id: "agent-call" });
+  f.emit({ type: "assistant", session_id, parent_tool_use_id: "agent-call", uuid: "child-text", message: { content: [{ type: "text", text: "Child public answer" }, { type: "tool_use", id: "child-tool", name: "Read", input: { file_path: "CHILD_PRIVATE_PATH" } }] } });
+  f.emit({ type: "result", session_id, parent_tool_use_id: "agent-call", subtype: "success", result: "Child public answer", is_error: false });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(complete, false); assert.equal(f.adapter.turnSession.active !== null, true);
+  assert.match(JSON.stringify(f.adapter.agents.snapshot()), /Child public answer|Tool: Read/);
+  assert.doesNotMatch(JSON.stringify(f.events), /Child public answer|CHILD_PRIVATE_PATH|child-tool/);
+  f.emit({ type: "system", subtype: "task_notification", session_id, task_id: "actual-child", tool_use_id: "agent-call", status: "completed", skip_transcript: true });
+  f.complete("Parent final"); await sending;
+  assert.ok(f.controls.some(packet => packet.request.subtype === "initialize" && packet.request.forwardSubagentText === true));
+});
+
 test("Ultracode startup and retained-session disable confirm workflow state before any input", async t => {
   const f = await fixture(t, { interactive: true }); f.ultracodeApplied = false;
   await f.adapter.send("/run synthetic fixture", { effort: "xhigh", ultracode: true });
@@ -1356,7 +1375,7 @@ test("application replies retain one CLI and apply next-turn mode/model/effort w
   await f.adapter.send("/verify Probe invalid input", { mode: "plan", model: "haiku", effort: "low" });
   assert.equal(f.launches.length, 1); assert.deepEqual(f.inputs.map(packet => packet.message.content), [text, "/verify Probe invalid input"]);
   assert.notEqual(f.inputs[0].uuid, f.inputs[1].uuid);
-  assert.deepEqual(f.controls.map(packet => packet.request), [{ subtype: "initialize" }, { subtype: "set_permission_mode", mode: "plan" },
+  assert.deepEqual(f.controls.map(packet => packet.request), [{ subtype: "initialize", forwardSubagentText: true }, { subtype: "set_permission_mode", mode: "plan" },
     { subtype: "set_model", model: "haiku" }, { subtype: "apply_flag_settings", settings: { effortLevel: "low" } }]);
   assert.deepEqual(f.sessions, [session]); assert.equal(f.adapter.capability, capability);
   assert(!JSON.stringify(f.launches).includes(f.config.claude.providerKey));
@@ -1465,7 +1484,7 @@ test("background output is independent of a turn waiting for native controls and
 test("Auto uses the native effort reset before input and never pins later choices through the process environment", async t => {
   const f = await fixture(t);
   await f.adapter.send("/run Launch app", { model: "sonnet", resetEffort: true });
-  assert.deepEqual(f.controls.map(packet => packet.request), [{ subtype: "initialize" }, { subtype: "apply_flag_settings", settings: { effortLevel: null } }]);
+  assert.deepEqual(f.controls.map(packet => packet.request), [{ subtype: "initialize", forwardSubagentText: true }, { subtype: "apply_flag_settings", settings: { effortLevel: null } }]);
   assert.equal(f.launches[0].env.CLAUDE_CODE_EFFORT_LEVEL, undefined);
   for (const effort of ["high", "low", null, "medium"]) {
     await f.adapter.send(`Continue with ${effort || "Auto"}`, { model: "sonnet", effort, resetEffort: !effort });

@@ -1,6 +1,7 @@
 import { openSidePanel, closeSidePanel } from "./side-panels.js";
 import { renderContent } from "./message-content.js";
 import { renderAgentRequest } from "./agent-request.js";
+import { companyForChat } from "./company-scope.js";
 
 const $ = selector => document.querySelector(selector);
 const node = (tag, text, className = "") => { const value = document.createElement(tag); value.textContent = text; value.className = className; return value; };
@@ -9,6 +10,13 @@ export class AgentThreadsPanel {
   constructor({ api, getChat, toast, onPreview }) {
     Object.assign(this, { api, getChat, toast, onPreview }); this.version = 0; this.drafts = new Map(); this.requests = new Map();
     this.panel = $("#agents-panel"); this.input = $("#agents-input"); this.messages = $("#agents-messages"); this.picker = $("#agents-picker");
+    this.list = $("#agents-list"); this.dialog = $("#agent-conversation-dialog");
+    $("#close-agent-conversation").onclick = () => this.dialog.close();
+    this.dialog.addEventListener("close", () => {
+      this.saveDraft(); this.version++;
+      const button = [...this.list.querySelectorAll("button")].find(button => button.dataset.threadId === this.selected);
+      if (!this.panel.hidden) (button || $("#agents-refresh")).focus({ preventScroll: true });
+    });
     $("#open-agents").onclick = () => this.open().catch(error => toast(error.message));
     $("#hide-agents").onclick = () => this.hide();
     $("#agents-refresh").onclick = () => this.connect().catch(error => toast(error.message));
@@ -20,45 +28,50 @@ export class AgentThreadsPanel {
     this.input.oninput = () => this.saveDraft();
     this.input.onkeydown = event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); void this.send(); } };
   }
-  key(id = this.selected) { return `${this.chatId}:${this.snapshot?.rootThreadId}:${id}`; }
+  key(id = this.selected) { return `${this.scope}:${this.snapshot?.rootThreadId}:${id}`; }
   current() { return this.snapshot?.threads.find(thread => thread.id === this.selected); }
   saveDraft() { if (this.selected) this.drafts.set(this.key(), this.input.value); }
-  hide() { this.saveDraft(); this.version++; closeSidePanel("agents"); $("#message-input").focus(); }
+  hide() { this.saveDraft(); this.version++; this.dialog.close(); closeSidePanel("agents"); $("#message-input").focus(); }
   setChat(chat) {
-    $("#open-agents").hidden = chat?.agent !== "codex";
-    const identity = `${chat?.id}:${chat?.agent}:${chat?.agentSessionId}`;
+    $("#open-agents").hidden = !["codex", "claude"].includes(chat?.agent);
+    const scope = JSON.stringify([chat?.id, chat?.ownerId, chat?.agent, chat?.agentAccountId, chat?.environmentId, chat?.workspace, companyForChat(chat || {})]);
+    const identity = `${scope}:${chat?.agentSessionId}`;
     if (this.identity === identity) return;
-    if (this.chatId === chat?.id && this.agent === chat?.agent && !this.nativeRoot) { this.nativeRoot = chat?.agentSessionId; this.identity = identity; return; }
+    if (this.scope === scope && !this.nativeRoot) { this.nativeRoot = chat?.agentSessionId; this.identity = identity; return; }
     this.saveDraft(); this.version++; this.identity = identity; this.chatId = chat?.id;
+    this.scope = scope; this.dialog.close();
     this.nativeRoot = chat?.agentSessionId; this.agent = chat?.agent;
     this.snapshot = null; this.selected = null; this.page = null; this.input.value = "";
     closeSidePanel("agents"); this.render();
   }
   update(snapshot, chatId) {
-    if (this.chatId !== chatId || this.getChat()?.agent !== "codex") return;
-    if (snapshot.rootThreadId && this.getChat()?.agentSessionId && snapshot.rootThreadId !== this.getChat().agentSessionId) return;
+    if (this.chatId !== chatId || !["codex", "claude"].includes(this.getChat()?.agent)) return;
+    if ((snapshot.rootThreadId || null) !== (this.getChat()?.agentSessionId || null)) return;
     if (snapshot.epoch === this.snapshot?.epoch && snapshot.revision < this.snapshot.revision) return;
     this.snapshot = snapshot; this.render();
   }
   async refresh() {
-    const chatId = this.chatId;
-    if (!chatId || this.getChat()?.agent !== "codex") return;
-    try { this.update(await this.api(`/api/chats/${chatId}/subagents`), chatId); } catch { /* Opening reports errors; SSE reconnect can retry safely. */ }
+    const chatId = this.chatId, identity = this.identity, previous = this.snapshot;
+    if (!chatId || !["codex", "claude"].includes(this.getChat()?.agent)) return;
+    try {
+      const snapshot = await this.api(`/api/chats/${chatId}/subagents`);
+      if (identity === this.identity && (previous === this.snapshot || snapshot.epoch === this.snapshot?.epoch)) this.update(snapshot, chatId);
+    } catch { /* Opening reports errors; SSE reconnect can retry safely. */ }
   }
   async open() {
-    const chatId = this.chatId, version = ++this.version;
+    const chatId = this.chatId, identity = this.identity, version = ++this.version, previous = this.snapshot;
     if (!chatId) throw new Error("Select a chat first");
     openSidePanel("agents");
-    this.update(await this.api(`/api/chats/${chatId}/subagents`), chatId);
-    if (this.chatId !== chatId || version !== this.version) return;
-    if (!this.snapshot?.threads.length && !this.getChat()?.archived) await this.connect();
-    if (!this.panel.hidden) this.picker.focus();
+    const snapshot = await this.api(`/api/chats/${chatId}/subagents`);
+    if (identity !== this.identity || version !== this.version) return;
+    if (previous === this.snapshot || snapshot.epoch === this.snapshot?.epoch) this.update(snapshot, chatId);
+    if (!this.panel.hidden) (this.list.querySelector("button") || $("#agents-refresh")).focus();
   }
   async connect() {
-    const chatId = this.chatId;
+    const chatId = this.chatId, identity = this.identity;
     if (this.connecting) return;
     this.connecting = true; this.render();
-    try { this.update(await this.api(`/api/chats/${chatId}/subagents`, { method: "POST" }), chatId); }
+    try { const snapshot = await this.api(`/api/chats/${chatId}/subagents`, { method: "POST" }); if (identity === this.identity) this.update(snapshot, chatId); }
     finally { this.connecting = false; this.render(); }
   }
   async select(id, cursor = null) {
@@ -66,21 +79,22 @@ export class AgentThreadsPanel {
     if (!id) { this.selected = null; this.hide(); return; }
     const chatId = this.chatId, version = ++this.version;
     this.selected = id; this.page = null; this.input.value = this.drafts.get(this.key(id)) || ""; this.render();
+    if (!this.dialog.open) this.dialog.showModal();
     if (!this.snapshot?.awake) return; // Cached messages do not wake a worker.
     const result = await this.action("select", { cursor });
     if (this.chatId !== chatId || this.selected !== id || version !== this.version) return;
     if (cursor) this.page = result.page;
-    this.render(); if (!cursor) { this.messages.scrollTop = this.messages.scrollHeight; this.input.focus(); }
+    this.render(); if (!cursor) { this.messages.scrollTop = this.messages.scrollHeight; (this.agent === "claude" ? $("#close-agent-conversation") : this.input).focus(); }
   }
   async action(action, payload = {}) {
-    const chatId = this.chatId, threadId = this.selected, rootThreadId = this.snapshot?.rootThreadId;
+    const chatId = this.chatId, identity = this.identity, threadId = this.selected, rootThreadId = this.snapshot?.rootThreadId;
     if (!threadId || !rootThreadId) throw new Error("Choose an agent thread first");
     const result = await this.api(`/api/chats/${chatId}/subagents/${action}`, { method: "POST", body: JSON.stringify({ ...payload, threadId, rootThreadId }) });
-    this.update(result, chatId); return result;
+    if (identity === this.identity) this.update(result, chatId); return result;
   }
   async send() {
     const text = this.input.value.trim(), key = this.key();
-    if (!text || this.sending || !this.current() || !this.snapshot?.awake) return;
+    if (!text || this.sending || !this.current() || !this.snapshot?.awake || this.agent === "claude" || this.current().canAcceptDirectInput === false) return;
     let attempt = this.requests.get(key);
     if (!attempt || attempt.text !== text) { attempt = { text, requestId: crypto.randomUUID() }; this.requests.set(key, attempt); }
     this.sending = true; this.render();
@@ -94,19 +108,34 @@ export class AgentThreadsPanel {
   }
   render() {
     const snapshot = this.snapshot, current = this.current(), threads = snapshot?.threads || [];
+    const claude = this.agent === "claude", focusedId = this.list.contains(document.activeElement) ? document.activeElement.dataset.threadId : null;
+    this.list.replaceChildren();
+    for (const thread of threads) {
+      const row = node("li", ""), button = node("button", "", "agent-thread-card"); button.type = "button"; button.dataset.threadId = thread.id;
+      button.setAttribute("aria-label", `Open agent ${thread.name}`);
+      button.append(node("strong", thread.name), node("small", `${thread.role} · ${!snapshot.awake ? "offline snapshot" : thread.pendingRequest ? "input needed" : thread.status}`));
+      if (thread.lastTool) button.append(node("small", `Latest tool: ${thread.lastTool}`));
+      button.onclick = () => this.select(thread.id).catch(error => this.toast(error.message)); row.append(button); this.list.append(row);
+    }
+    if (!threads.length) this.list.append(node("li", "No observed child agents yet.", "muted"));
+    if (focusedId && document.activeElement === document.body) [...this.list.querySelectorAll("button")].find(button => button.dataset.threadId === focusedId)?.focus({ preventScroll: true });
     const requestCount = threads.filter(thread => thread.pendingRequest).length;
     $("#open-agents").textContent = requestCount ? `Agents · ${requestCount} need input` : threads.length ? `Agents · ${threads.length}` : "Agents";
     this.picker.replaceChildren(new Option("Main chat — return to its composer", ""));
     for (const thread of threads) this.picker.add(new Option(`${thread.name} · ${thread.role} · ${thread.pendingRequest ? "input needed" : thread.status}`, thread.id));
     this.picker.value = this.selected || "";
-    $("#agents-status").textContent = this.connecting ? "Connecting to the chat's native agents…" : !snapshot?.awake ? "Saved snapshot · worker asleep. Connect to refresh or send." : threads.length ? "Native threads belonging to this chat. Main chat continues independently." : "No child agents in this chat yet.";
+    $("#agents-status").textContent = this.connecting ? "Connecting to the chat's native agents…" : !snapshot?.awake ? "Saved snapshot · native process offline. Connect explicitly to refresh." : claude ? snapshot.coverage || "Observed native children. Main chat continues independently." : threads.length ? "Native threads belonging to this chat. Main chat continues independently." : "No child agents in this chat yet.";
+    $("#agent-conversation-title").textContent = current?.name || "Agent conversation";
+    $("#agent-conversation-status").textContent = current ? `${current.role} · ${!snapshot?.awake ? "offline snapshot" : current.stopping ? "Waiting for native Stop confirmation" : current.status}` : "";
+    $("#agent-conversation-capability").hidden = !claude;
+    $("#agent-conversation-capability").textContent = claude ? "Public conversation observed by this process only; earlier history is unavailable. Direct messaging to this child is not supported by this Claude interface. Stop affects only this child, not the main conversation." : "";
     $("#agents-refresh").textContent = snapshot?.awake ? "Refresh agents" : "Connect to agents";
     $("#agents-refresh").disabled = this.connecting || Boolean(this.getChat()?.archived);
     $("#agents-limit").hidden = !snapshot?.truncated;
-    $("#agents-form").hidden = !current;
+    $("#agents-form").hidden = !current || claude;
     $("#agents-send").disabled = this.sending || !snapshot?.awake || current?.canAcceptDirectInput === false;
     $("#agents-send").textContent = current?.status === "active" ? "Send to running agent" : "Send to agent";
-    $("#agents-stop").hidden = !snapshot?.awake || current?.status !== "active";
+    $("#agents-stop").hidden = !snapshot?.awake || (claude ? !current?.canStop : current?.status !== "active");
     $("#agents-error").textContent = current?.error || "";
     $("#agents-older").hidden = !snapshot?.awake || !(this.page?.nextCursor || !this.page && current?.nextCursor);
     $("#agents-latest").hidden = !this.page;
@@ -115,7 +144,7 @@ export class AgentThreadsPanel {
     const contentKey = JSON.stringify([this.selected, messages]);
     if (contentKey !== this.contentKey) {
       this.contentKey = contentKey; this.messages.replaceChildren();
-      if (current && !messages.length) this.messages.append(node("p", current.historyLoaded ? "No visible messages in this agent thread." : "Select this agent while connected to load its recent messages.", "muted"));
+      if (current && !messages.length) this.messages.append(node("p", current.historyLimited ? "History omitted because the saved preview reached its size limit." : claude ? "No public messages observed for this child in the current process." : current.historyLoaded ? "No visible messages in this agent thread." : "Select this agent while connected to load its recent messages.", "muted"));
       for (const message of messages) {
         const article = node("article", "", "side-message"), content = node("div", "");
         article.append(node("strong", message.role === "user" ? "Input · agent thread" : message.role === "tool" ? "Tool activity" : `${current?.name || "Agent"} · response`));
