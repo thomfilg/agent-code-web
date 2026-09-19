@@ -72,7 +72,7 @@ export class SharedBrowsers {
   }
   info(chatId) {
     this.requireChat(chatId);
-    const personal = this.personal?.grants.get(chatId);
+    const personal = this.personal?.currentGrant(chatId);
     if (personal?.active) return { ...personal.state, mode: "personal", viewers: personal.viewers.size };
     const entry = this.entries.get(chatId);
     return { ...(entry?.browser?.state || stopped()), starting: Boolean(entry && !entry.browser), viewers: entry?.viewers.size || 0 };
