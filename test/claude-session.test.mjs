@@ -589,6 +589,62 @@ test("unrelated native notifications and zero-token errors cannot consume anothe
   assert(f.events.some(event => event.type === "background_response" && event.failed && event.text === "Native report failed before output"));
 });
 
+test("ambient skip_transcript notifications cannot steal a completed Agent's report or strand Send now", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Finish one background unit"); await nativeTurnStarted(f);
+  const task = nativeAgent(f, "actual-unit"); f.complete(); await running;
+  for (const status of ["completed", "completed", "failed"]) {
+    f.emit({ type: "system", subtype: "task_notification", session_id: f.nativeSession,
+      task_id: "ambient-dream", status, skip_transcript: true });
+  }
+  f.emit(task); nativeWorkflowReport(f);
+  const before = f.controls.length;
+  f.adapter.applicationSession.controlTimeoutMs = 25;
+  // Before the fix this rejects with the reported "Native workflow report did
+  // not acknowledge cancellation" error: the idle native owner ACKs interrupt
+  // but has no task-notification report left to complete.
+  await f.adapter.interrupt();
+  assert.equal(f.adapter.isBackgroundBusy(), false, "the saved final report must release its actual Agent, not a phantom housekeeping report");
+  assert.equal(f.adapter.applicationSession.workflowNotifications.length, 0);
+  assert.equal(f.events.filter(event => event.type === "background_response").length, 1);
+  assert.equal(f.controls.length, before, "an idle native owner must not be asked to cancel a nonexistent report");
+  f.block = false; await f.adapter.send("Did you open the PR?");
+  assert.equal(f.launches.length, 1); assert.equal(f.inputs.length, 2);
+});
+
+test("ambient telemetry is excluded without dropping real unknown reports or changing workflow FIFO", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Keep both reports in order"); await nativeTurnStarted(f);
+  const first = nativeAgent(f, "first"), second = nativeAgent(f, "second"); f.complete(); await running;
+  const ambient = { type: "system", subtype: "task_notification", session_id: f.nativeSession, task_id: "ambient-scan", status: "completed", skip_transcript: true };
+  f.emit(ambient);
+  f.emit({ ...first, task_id: "real-untracked", tool_use_id: "untracked-call", skip_transcript: false });
+  f.emit(first); f.emit({ ...ambient, status: "failed" }); f.emit(second);
+  assert.deepEqual(f.adapter.applicationSession.workflowNotifications.map(item => item.id), ["real-untracked", "first", "second"]);
+  nativeWorkflowReport(f);
+  assert.deepEqual([...f.adapter.applicationSession.workflows.keys()], ["first", "second"]);
+  nativeWorkflowReport(f);
+  assert.deepEqual([...f.adapter.applicationSession.workflows.keys()], ["second"]);
+  f.emit(ambient); nativeWorkflowReport(f);
+  assert.equal(f.adapter.isBackgroundBusy(), false);
+  f.emit(ambient);
+  assert.equal(f.adapter.applicationSession.workflowNotifications.length, 0);
+  assert.equal(f.events.filter(event => event.type === "background_response").length, 3);
+});
+
+test("skip_transcript alone never releases an already bound workflow or broadens terminal identity matching", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Preserve the bound task until its report"); await nativeTurnStarted(f);
+  const notification = nativeAgent(f, "bound-unit"); f.complete(); await running;
+  f.emit({ ...notification, tool_use_id: "foreign-call", skip_transcript: true });
+  assert.equal(f.adapter.applicationSession.workflows.get(notification.task_id).settled, false);
+  f.emit({ ...notification, skip_transcript: true });
+  assert.equal(f.adapter.isBackgroundBusy(), true);
+  assert.equal(f.adapter.applicationSession.workflows.get(notification.task_id).settled, true);
+  nativeWorkflowReport(f);
+  assert.equal(f.adapter.isBackgroundBusy(), false);
+});
+
 test("an Agent launched from a notification report remains busy after the previous job is delivered", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
   const running = f.adapter.send("/batch Work that needs a follow-up unit"); await nativeTurnStarted(f);
