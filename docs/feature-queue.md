@@ -42,13 +42,27 @@ child-only Stop and same-parent continuation. Genuine Codex delegation, live
 provider/deployed acceptance and the remaining native limits are not closed.
 See [native agents evidence](native-agents-panel.md).
 
-The subsequent independent guest-browser review found three publication
-blockers: queued mutations after revocation, uncertain projection cleanup,
-and command starvation under continuous bounded events. Fixes and compatibility
-revalidation remain pending; the isolated starvation proof confirms a defect,
-not acceptance. A separate installed-Claude native-child smoke passed, but does
-not complete the agents-panel UI or live-account gates. See the
-[review evidence and boundaries](validation-2026-09-19-guest-browser-review.md).
+The independent guest-browser review found three publication blockers: queued
+mutations after revocation, uncertain projection cleanup, and command starvation
+under continuous bounded events. PR #83 fixes them and is integrated locally as
+`67d16fd`, with 48/48 component compatibility tests, including actual guest Chrome
+and the personal extension/gateway. The merge retained the existing extension
+readiness barrier and added cached-catalog assertions. The first combined Node
+run on `67d16fd` completed with **1,582/1,595 passed, 13 failed**, no skips or
+cancellations (476 seconds). Failures concern the exact guest launcher fixture
+and native-agent admission/snapshot fixtures. Follow-ups `6010d13` and `41969f5`
+correct only these fixtures, preserving exact-source and scope rejection checks.
+All four affected Node files then passed **56/56** together on `8ed1efc`
+(33.2 seconds, actual disposable guest Chrome enabled). A fresh full-suite pass
+is still required. Native-client mode switching and selected-account/deployed acceptance
+remain open. The [original review](validation-2026-09-19-guest-browser-review.md)
+is retained alongside the [fix and component evidence](guest-official-browser-mcp.md).
+
+Follow-up `8ed1efc` also integrates PR #85's popup receipt fixes: returning to a
+chat and retyping an identical child draft no longer lets an old receipt erase
+it, and retired observer history pages cannot replace current history. The
+browser reproduction failed before the fix; all **8/8** child-panel browser cases
+passed afterward without retries. See the [late receipt validation](validation-2026-09-19-agent-popup-stale-actions.md).
 
 Runtime follow-up candidate `188282e` passed **1,464/1,464 Node** cases with
 optional checks enabled and **40/40 targeted browser** cases without retries.
@@ -980,7 +994,7 @@ References inspected for this request:
 | 25 | Paste cropped/copied images and files into the focused composer | Locally accepted in the final 89-case browser run: paste, draft/sent previews, removal, local first-send staging and rejection preserve text/files. Deployed interaction acceptance pending; see events/search integration receipt |
 | 26 | Long chats mount a bounded message subset, retaining history navigation and reducing DOM memory | Local conversation and message-follow acceptance passed in the final 89-case run: bounded DOM, old/middle/latest navigation, streamed resize and real wheel detachment, Jump to latest reattachment, drafts and no worker actions. Deployed interaction acceptance remains open |
 | 27 | Auto mode handles the reported local IPC/tool approval without manual prompts | Source policy fix exists; exact native/live case unverified |
-| 28 | Remove invented rendering messages; do not inject browser activity into agent context; use official Playwright MCP when requested | Earlier checkpoint retained 241 tagged records; no cleanup completion is claimed from the later empty-database checkpoint. Personal grant-scoped official MCP integrated into the candidate and tested through the normal gateway; guest official integration, cached-schema mode switching and selected-native-agent acceptance remain open. See [bounded coverage](personal-official-browser-mcp.md) |
+| 28 | Remove invented rendering messages; do not inject browser activity into agent context; use official Playwright MCP when requested | Earlier checkpoint retained 241 tagged records; no cleanup completion is claimed from the later empty-database checkpoint. Personal and guest official MCP are integrated locally; guest component passed 48/48 including actual Chrome/extension/gateway and lifecycle regressions. Combined revalidation, cached-schema native-client mode switching and selected-native-agent acceptance remain open. See [guest coverage and limits](guest-official-browser-mcp.md) |
 | 29 | Sharp, non-opaque browser output at every viewport, including sm/md/lg/xlg, after resizing | Actual isolated AWS guest passed exact DPR-2 sharp pixels at all six sizes; md/xlg screenshots visually inspected. Authenticated deployed-product acceptance remains open |
 | 30 | Visible chat tabs and browser interaction pause idle sleep/countdown | Source/tests and actual isolated AWS guest viewer-presence checks passed; full deployed idle/countdown acceptance remains open |
 | 31 | Attachment images are clickable to inspect before and after sending | Local draft/sent image and file preview acceptance passed with all 12 attachment cases in the final 89-case browser run; desktop/mobile containment retained. Deployed interaction acceptance pending |
