@@ -83,16 +83,19 @@ export class Ec2Executor {
     this.metadata = { backend: "ec2", instanceId: instance.InstanceId, host };
   }
 
-  async prepare() {
+  async prepare(check = () => {}) {
     const chatRoot = path.posix.dirname(this.workspace);
     const marker = `${chatRoot}/.workspace-seeded`;
-    await this.backend.sshCapture(this.host, `install -d -m 700 ${shellQuote(this.workspace)} ${shellQuote(this.runtimeHome)} && touch ${shellQuote(this.heartbeat)}`, this.instance.InstanceId);
+    check(); await this.backend.sshCapture(this.host, `install -d -m 700 ${shellQuote(this.workspace)} ${shellQuote(this.runtimeHome)} && touch ${shellQuote(this.heartbeat)}`, this.instance.InstanceId);
+    check();
     const seeded = await this.backend.sshCapture(this.host, `test -f ${shellQuote(marker)} && printf ready || true`, this.instance.InstanceId);
+    check();
     if (seeded === "ready") {
       for (const repo of this.chat.repositories || []) {
         if (!/^[A-Za-z0-9_.-]+--[A-Za-z0-9_.-]+$/.test(repo.directory)) throw new Error("Invalid repository directory");
         const target = `${this.workspace}/${repo.directory}`;
         const exists = await this.backend.sshCapture(this.host, `test -e ${shellQuote(target)} && printf ready || true`, this.instance.InstanceId);
+        check();
         if (exists !== "ready") await this.#uploadWorkspace(marker, repo.directory);
       }
       return;
@@ -224,32 +227,51 @@ export class Ec2Backend {
     return this.commandRunner(this.config.ec2.sshBin, [...this.sshArgs(host, instanceId), remoteCommand], { timeoutMs: 60_000 });
   }
 
-  async acquire(chat) {
-    let instance = await this.#find(chat.id);
-    if (!instance) instance = await this.#create(chat.id);
+  async acquire(chat, { workspaceReady = Promise.resolve(), onStage = async () => {}, check = () => {} } = {}) {
+    // Observe an early clone rejection while AWS/SSH is still in flight. The
+    // same promise remains the mandatory join before any workspace upload.
+    workspaceReady.catch(() => {});
+    const stage = async (id, action) => {
+      check(); await onStage(id, "running");
+      try { check(); const value = await action(); check(); await onStage(id, "completed"); check(); return value; }
+      catch (error) { try { await onStage(id, "failed"); } catch {} throw error; }
+    };
+    let instance;
+    await stage("machine", async () => {
+    instance = await this.#find(chat.id); check();
+    if (!instance) instance = await this.#create(chat.id, check);
     // Existing/stopped workers retain their actual AMI, not necessarily the
     // currently configured one. A revoked marker denies new admission only;
     // sleep/destroy deliberately remain available for exact-owned cleanup.
-    await this.#acceptedImage(instance.ImageId);
+    check(); await this.#acceptedImage(instance.ImageId); check();
     if (instance.State?.Name === "stopping") {
       await this.#aws("ec2", "wait", "instance-stopped", "--instance-ids", instance.InstanceId);
+      check();
       instance.State.Name = "stopped";
     }
     if (instance.State?.Name === "stopped") {
       await this.#aws("ec2", "start-instances", "--instance-ids", instance.InstanceId);
+      check();
     }
     await this.#aws("ec2", "wait", "instance-running", "--instance-ids", instance.InstanceId);
+    check();
     instance = await this.#describe(instance.InstanceId, chat.id);
-    await this.#acceptedImage(instance.ImageId);
+    check(); await this.#acceptedImage(instance.ImageId); check();
+    });
     const host = this.config.ec2.usePublicIp ? instance.PublicIpAddress : instance.PrivateIpAddress;
     if (!host) throw new Error(`EC2 instance ${instance.InstanceId} has no ${this.config.ec2.usePublicIp ? "public" : "private"} IP`);
-    await mkdir(path.dirname(this.config.ec2.sshKnownHosts), { recursive: true, mode: 0o700 });
-    await this.#waitForSsh(host, instance.InstanceId);
+    await stage("connection", async () => {
+      await mkdir(path.dirname(this.config.ec2.sshKnownHosts), { recursive: true, mode: 0o700 });
+      check(); await this.#waitForSsh(host, instance.InstanceId, check);
+    });
     const executor = new Ec2Executor({ backend: this, chat, instance, host });
-    await executor.prepare();
+    await workspaceReady; check();
+    await stage("workspace", async () => {
+    await executor.prepare(check);
     // SSH readiness/workspace upload can take time; do not hand an executor
     // to provider credential delivery if acceptance was revoked meanwhile.
     await this.#acceptedImage(instance.ImageId);
+    });
     return executor;
   }
 
@@ -319,9 +341,10 @@ export class Ec2Backend {
     return assertWorkerImage(images[0], { imageId, deployment: ec2.deployment, keyName: ec2.keyName });
   }
 
-  async #create(chatId) {
+  async #create(chatId, check = () => {}) {
     const ec2 = this.config.ec2;
     await this.#acceptedImage(ec2.amiId);
+    check();
     const Tags = [
       { Key: "Name", Value: `agent-relay-${chatId.slice(-12)}` }, { Key: "AgentWebChat", Value: chatId },
       { Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: ec2.deployment },
@@ -349,14 +372,16 @@ export class Ec2Backend {
     return described;
   }
 
-  async #waitForSsh(host, instanceId) {
+  async #waitForSsh(host, instanceId, check = () => {}) {
     const deadline = Date.now() + this.config.ec2.sshReadyTimeoutMs;
     let lastError;
     while (Date.now() < deadline) {
+      check();
       try {
         await this.sshCapture(host, "test -f /opt/agent-web/READY && test -f /opt/agent-web/IMAGE_FINALIZED && test \"$(codex --version)\" = 'codex-cli 0.154.0' && test \"$(claude --version)\" = '2.1.222 (Claude Code)'", instanceId);
         return;
       } catch (error) {
+        check();
         lastError = error;
         await new Promise((resolve) => setTimeout(resolve, 3_000));
       }
