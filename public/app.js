@@ -51,6 +51,7 @@ import { CompanySettings } from "./company-settings.js";
 import { workingStatus, canInterruptWithEscape } from "./working-status.js";
 import { StartupProgress } from "./startup-progress.js";
 import { SavedPromptPicker } from "./saved-prompts.js";
+import { MessageSearch } from "./message-search.js";
 import { companyForChat } from "./company-scope.js";
 
 const state = {
@@ -162,7 +163,7 @@ function renderMessage(message, streaming = false) {
   const body = node("div", "message-body");
   body.append(node("div", "message-label", role === "assistant" ? agentLabel(message.agent || state.active?.agent) : role));
   const text = node("div", "message-text");
-  renderContent(text, message.text || "", { onPreview: preview => documentPreview.open({ ...preview, messageId: message.id }) });
+  renderContent(text, message.text || message.meta?.finalAnswer?.text || "", { onPreview: preview => documentPreview.open({ ...preview, messageId: message.id }) });
   if (streaming) text.append(node("span", "stream-caret"));
   body.append(text);
   if (message.attachments?.length) {
@@ -185,7 +186,7 @@ function renderMessages() {
   const anchorId = anchor?.dataset.messageId, anchorOffset = anchor ? anchor.getBoundingClientRect().top - oldTop : 0;
   toolActivity.captureExpanded();
   elements.messages.replaceChildren();
-  const persisted = (state.active.messages || []).filter(message => !message.meta?.renderingSample && !(message.meta?.segmentedTurn && !message.text?.trim()));
+  const persisted = (state.active.messages || []).filter(message => !message.meta?.renderingSample && !(message.meta?.segmentedTurn && !message.text?.trim() && !message.meta?.finalAnswer?.text));
   if (!persisted.length && !state.stream && !state.liveTools.size) {
     messageWindow.update(state.active.id, []);
     toolActivity.update(state.active.id, new Map());
@@ -362,7 +363,7 @@ function tickCountdown() {
   elements.countdown.textContent = `SLEEPS IN ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-async function selectChat(id, { closeSidebar = true } = {}) {
+async function selectChat(id, { closeSidebar = true, messageId = null } = {}) {
   const selection = state.selection = (state.selection || 0) + 1;
   if (state.active?.id && state.active.id !== id) { state.chatDrafts ||= new Map(); state.chatDrafts.set(state.active.id, elements.input.value); }
   await activeModelPicker.saving?.catch(() => {});
@@ -386,7 +387,16 @@ async function selectChat(id, { closeSidebar = true } = {}) {
     renderActive();
     if (closeSidebar) elements.sidebar.classList.remove("open");
     connectEvents(id);
-    requestAnimationFrame(() => { elements.messages.scrollTop = elements.messages.scrollHeight; });
+    requestAnimationFrame(() => {
+      if (state.selection !== selection || state.active?.id !== id) return;
+      if (messageId) {
+        messageNavigator.readingHistory = true;
+        if (messageWindow.show(messageId)) renderMessages();
+        const target = [...elements.messages.querySelectorAll(".message")].find(element => element.dataset.messageId === messageId);
+        if (target) { target.tabIndex = -1; target.focus({ preventScroll: true }); target.scrollIntoView({ block: "center" }); }
+        else toast("This message is no longer available.");
+      } else elements.messages.scrollTop = elements.messages.scrollHeight;
+    });
   } catch (error) { if (state.selection === selection) toast(error.message); }
 }
 
@@ -1040,6 +1050,7 @@ const runtimeWake = new RuntimeWake({ button: $("#wake-worker"), api, getChat: (
 const browserConnectionSettings = new BrowserConnectionSettings({ api, state, toast, browser: sharedBrowser,
   accountChanged: async () => {
     savedPrompts.invalidate();
+    messageSearch.invalidate();
     appPreview.resetIdentity();
     vimComposer.resetIdentity();
     statusline.resetIdentity();
@@ -1132,6 +1143,10 @@ const nativeImports = new NativeImportsControls({ state, api, controls: chatCont
   else toast(`Imported chat ready: ${chat.title}`, { outsideDialog: true });
 } });
 const messageHistory = new MessageHistory({ input: elements.input, state, onChange: resizeInput });
+const messageSearch = new MessageSearch({ api, toast,
+  context: () => JSON.stringify([browserConnectionSettings.identityVersion, state.selection]),
+  select: (id, messageId) => selectChat(id, { messageId }),
+});
 const messageNavigator = new MessageNavigator({ state, scroller: elements.messages, root: $("#message-navigator"), ensureVisible: id => { if (messageWindow.show(id)) renderMessages(); } });
 const messageFollow = new MessageFollow({ scroller: elements.messages,
   atLatest: () => messageWindow.tail, reading: () => messageNavigator.readingHistory,

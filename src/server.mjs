@@ -22,6 +22,7 @@ import { openDatabase } from "./database.mjs";
 import { ChatOrganization } from "./chat-organization.mjs";
 import { rememberChatSelection, restoreChatSelection } from "./chat-preferences.mjs";
 import { SavedPrompts, knownPromptProjects } from "./saved-prompts.mjs";
+import { searchMessages } from "./message-search.mjs";
 import { GitHubConnection } from "./github.mjs";
 import { Companies } from "./companies.mjs";
 import { GitHubWorkerGateway } from "./github-worker-gateway.mjs";
@@ -303,6 +304,21 @@ export async function createAgentWebServer(options = {}) {
       // Do not let an already accepted request open a new SSE stream afterward.
       if (stopping || draining) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
       const visibleChats = () => store.list().filter(chat => browserUsers.canRead(chat, user));
+      if (url.pathname === "/api/message-search" && request.method === "POST") {
+        const input = await bodyJson(request, 2000), guard = async () => {
+          const current = await browserUsers.session(request);
+          if (current?.id !== user?.id || current?.sessionId !== user?.sessionId || !auth.authenticated(request)
+            || googleAuth.enabled && (!current || googleAuth.revoked.has(current.sessionId))) throw Object.assign(new Error("Your account changed. Reopen search."), { statusCode: 409 });
+        };
+        await guard();
+        const result = searchMessages(visibleChats(), input);
+        await guard();
+        // The final asynchronous session read can overlap a transfer/deletion.
+        // Recheck current authorization synchronously, before serializing any
+        // saved snippet or title from the earlier snapshot.
+        if (result.results.some(match => !browserUsers.canRead(store.get(match.chatId), user))) throw Object.assign(new Error("Conversation access changed. Search again."), { statusCode: 409 });
+        return json(response, 200, { ...result, scope: user?.id || "shared" });
+      }
       if (url.pathname === "/api/saved-prompts" && ["GET", "PATCH"].includes(request.method)) {
         const scope = user?.id || "shared", guard = async () => {
           if ((await browserUsers.session(request))?.id !== user?.id || !auth.authenticated(request)) throw Object.assign(new Error("The prompt-library account changed. Reload before continuing."), { statusCode: 409 });

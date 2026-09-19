@@ -16,6 +16,7 @@ import { claudePluginReloadRequest, reloadClaudePlugins, CLAUDE_PLUGIN_PRIVATE_E
 import { claudeDebugRequest, CLAUDE_DEBUG_PRIVATE_ERROR } from "../claude-debug.mjs";
 import { ClaudeWorkspaceTrust, claudeTrustProbe } from "../claude-workspace-trust.mjs";
 import { claudeCommandMetadata } from "../command-catalog.mjs";
+import { claudeFinalAnswer } from "../message-search.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch, now = Date.now }) {
@@ -634,7 +635,9 @@ export class ClaudeAdapter {
             await this.disableFast(version);
             throw Object.assign(new Error(claudeFastUnavailable(nativeFast?.disabledReason)), { nativeFast: nativeFast || { state: "off" }, fastPreference: false, fastCooldown: null });
           }
-          resolve(this.redactAccount({ text: mcpOutcome?.text ?? output.text, status: "completed", compacted, ...(nativeSettings ? { nativeSettings } : {}), ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) }));
+          resolve(this.redactAccount({ text: mcpOutcome?.text ?? output.text, status: "completed", compacted,
+            finalAnswer: mcpControl || diagnostic || configuration || debugRequest ? null : claudeFinalAnswer(resultMessage, sessionId),
+            ...(nativeSettings ? { nativeSettings } : {}), ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) }));
         } else {
           reject(Object.assign(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`), { nativeSettings, ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) }));
         }

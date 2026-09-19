@@ -15,6 +15,7 @@ import { mergeUsage } from "./session-info.mjs";
 import { legacyClaudeContext } from "./legacy-usage.mjs";
 import { renderingSample } from "./rendering-sample.mjs";
 import { messageCommand } from "./message-command.mjs";
+import { finalAnswerMeta } from "./message-search.mjs";
 import { ChatPresence } from "./chat-presence.mjs";
 import { PreviewActivity } from "./preview-activity.mjs";
 import { publicRequest, responseFor } from "./agent-requests.mjs";
@@ -1429,7 +1430,7 @@ export class RuntimeManager extends EventEmitter {
       }
       if (turn.cancelled || version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(new Error("Turn cancelled"), { name: "AbortError" });
       await this.store.update(chatId, { awaitingUser: false, pendingRequest: null, ...(!chat.queuedMessages?.length ? { queuePaused: false, queueError: null } : {}) });
-      const userMessage = await this.store.appendMessage(chatId, { role: "user", kind: "message", text, ...(files.length ? { attachments: files.map(file => this.attachments.public(file)) } : {}) });
+      const userMessage = await this.store.appendMessage(chatId, { role: "user", kind: "message", text, meta: { authorship: "user" }, ...(files.length ? { attachments: files.map(file => this.attachments.public(file)) } : {}) });
       this.#emit(chatId, { type: "message", message: userMessage });
       if (Object.keys(provisionalTitlePatch(this.store.get(chatId), text, { hasAttachments: files.length > 0 })).length) {
         this.publishChat(await this.store.update(chatId, current => provisionalTitlePatch(current, text, { hasAttachments: files.length > 0 })));
@@ -1623,7 +1624,7 @@ export class RuntimeManager extends EventEmitter {
         agent: this.store.get(chatId).agent,
         kind: "message",
         text: remainingAssistantText(runtime, output.text),
-        ...(runtime.assistantPublishedLength ? { meta: { segmentedTurn: true } } : {}),
+        meta: { ...(runtime.assistantPublishedLength ? { segmentedTurn: true } : {}), ...finalAnswerMeta(result.finalAnswer, this.store.get(chatId).agent) },
       });
       if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
       this.#emit(chatId, { type: "turn_completed", message });
@@ -2149,7 +2150,7 @@ export class RuntimeManager extends EventEmitter {
       const output = extractResponse(event.text || "", chat.autoTitle);
       if (output.title) await this.#agentEvent(chatId, { type: "title", title: output.title });
       await this.store.update(chatId, { awaitingUser: output.awaitingUser, needsAgentHandoff: false });
-      const message = await this.store.appendMessage(chatId, { id: runtime.assistantMessageId, role: "assistant", agent: chat.agent, kind: "message", text: remainingAssistantText(runtime, output.text), ...(runtime.assistantPublishedLength ? { meta: { segmentedTurn: true } } : {}) });
+      const message = await this.store.appendMessage(chatId, { id: runtime.assistantMessageId, role: "assistant", agent: chat.agent, kind: "message", text: remainingAssistantText(runtime, output.text), meta: { ...(runtime.assistantPublishedLength ? { segmentedTurn: true } : {}), ...finalAnswerMeta(event.finalAnswer, chat.agent) } });
       this.#emit(chatId, { type: "turn_completed", message }); return;
     }
     if (event.type === "native_account_updated") {
