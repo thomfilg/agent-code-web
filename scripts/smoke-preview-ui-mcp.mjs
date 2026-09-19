@@ -161,8 +161,20 @@ window.fixtureEvents=new EventSource('/events');fixtureEvents.onmessage=e=>docum
   const pending = await app.agentAccounts.begin(ownerId, { provider: "codex", name: "Preview fixture" });
   agentAccount.clients.at(-1).approve();
   await waitFor(() => app.agentAccounts.hasConnected(ownerId, "codex"));
-  phase = "inline-company-chat-first-message";
-  await run(`await page.reload();await page.locator('#new-chat-page').waitFor();if(await page.locator('dialog[open]').count())throw Error('New chat must not use a modal');await page.waitForFunction(()=>!document.querySelector('#new-chat-fields').disabled);await page.getByRole('combobox',{name:'Environment',exact:true}).selectOption('${environment.id}');await page.getByRole('button',{name:'Add repositories',exact:true}).click();await page.locator('#repository-results').getByRole('checkbox',{name:/fixture-owner\\/preview-app/}).check();await page.getByRole('button',{name:'Add repositories',exact:true}).click();await page.getByRole('combobox',{name:'Branch for fixture-owner/preview-app',exact:true}).selectOption('main');await page.getByRole('combobox',{name:'Agent',exact:true}).selectOption('${pending.account.id}');await page.getByRole('textbox',{name:'New chat message',exact:true}).fill(${JSON.stringify(initialPrompt)});await page.screenshot({path:${JSON.stringify(path.join(output, "inline-company-draft.png"))}});await page.getByRole('button',{name:'Send first message',exact:true}).click();await page.locator('#conversation').waitFor();await page.locator('#messages').filter({hasText:'POC worker received'}).waitFor();`);
+  phase = "inline-reload-ready";
+  await run(`await page.reload();await page.locator('#new-chat-page').waitFor();if(await page.locator('dialog[open]').count())throw Error('New chat must not use a modal');await page.waitForFunction(()=>!document.querySelector('#new-chat-fields').disabled);`);
+  phase = "inline-select-environment";
+  await run(`await page.getByRole('combobox',{name:'Environment',exact:true}).selectOption('${environment.id}');`);
+  phase = "inline-select-repository";
+  await run(`await page.getByRole('button',{name:'Add repositories',exact:true}).click();await page.locator('#repository-results').getByRole('checkbox',{name:/fixture-owner\\/preview-app/}).check();await page.getByRole('button',{name:'Add repositories',exact:true}).click();`);
+  phase = "inline-select-branch";
+  await run(`await page.getByRole('combobox',{name:'Branch for fixture-owner/preview-app',exact:true}).selectOption('main');`);
+  phase = "inline-select-agent";
+  await run(`await page.getByRole('combobox',{name:'Agent',exact:true}).selectOption('${pending.account.id}');`);
+  phase = "inline-fill-draft";
+  await run(`await page.getByRole('combobox',{name:'New chat message',exact:true}).fill(${JSON.stringify(initialPrompt)});await page.screenshot({path:${JSON.stringify(path.join(output, "inline-company-draft.png"))}});`);
+  phase = "inline-send-first-message";
+  await run(`await page.getByRole('button',{name:'Send first message',exact:true}).click();await page.locator('#conversation').waitFor();await page.locator('#messages').filter({hasText:'POC worker received'}).waitFor();`);
   assert.equal(app.store.list().length, 1); chatId = app.store.list()[0].id;
   await waitFor(() => !app.manager.isBusy(chatId) && app.store.get(chatId).messages.some(message => message.role === "assistant"), { timeoutMs: 10000 });
   const chat = app.store.get(chatId);
@@ -216,7 +228,9 @@ window.fixtureEvents=new EventSource('/events');fixtureEvents.onmessage=e=>docum
 } catch (error) { failure = { ok: false, fixtureOnly: true, phase, category: ["fixture-dns", "fixture-tls", "browser-timeout", "ambiguous-locator", "browser-assertion", "browser-transport"].includes(error?.category) ? error.category : "fixture-assertion",
   diagnostics: { acquisitions, upstreamRequests: observed.length, websocketClients: wss?.clients.size || 0, sseStreams: streams.size,
     intentStatuses: apiCalls.filter(row => row.method === "POST" && row.path.endsWith("/app-preview/open")).map(row => row.status || 0).slice(-5),
-    bootstrapStatuses: apiCalls.filter(row => row.path === "/api/app-preview/bootstrap").map(row => row.status || 0).slice(-5) } }; }
+    bootstrapStatuses: apiCalls.filter(row => row.path === "/api/app-preview/bootstrap").map(row => row.status || 0).slice(-5) } };
+  if (client) await run(`await page.screenshot({path:${JSON.stringify(path.join(output, "failed-fixture.png"))}});`).catch(() => {});
+}
 finally {
   let cleanup = true;
   releaseAcquisition(); // A failed assertion must not strand a pending fixture executor.
