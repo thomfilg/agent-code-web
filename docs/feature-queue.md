@@ -2,6 +2,15 @@
 
 ## Current MVP audit — 2026-09-19
 
+Latest integrated source `8db8247` closes warmed-runtime admission after failed
+account revocation and rechecks delayed native actions after Stop/Escape.
+Clean full verification passed **1,286 Node tests with zero failures/skips**,
+including all three normally optional native/Chrome cases, plus **25 browser
+tests without retries**. Real read-only GitHub clone/fetch now traverses the
+capability gateway across encrypted-database restart; the preview harness uses
+the current inline company chat flow. These are local acceptance results, not
+deployed-account acceptance. See the [integration receipt and open gates](validation-2026-09-19-mvp-integration.md).
+
 Follow-up source `28fed2d` fixes named-account disconnection/refresh races,
 durable retry state, sibling-worker revocation and safe deployment drain.
 The clean integrated check passed 142 distinct focused Node tests and all 19
