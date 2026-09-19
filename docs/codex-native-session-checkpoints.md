@@ -33,7 +33,7 @@ The PostgreSQL suite covers encrypted persistence/reopen, competing service inst
 Still required before item 41 can be called complete:
 
 1. Extend the installed-native writer observation below to the actual worker lifecycle and failure timings. One observed terminal-record ordering is not a flush/fsync contract or a zero-loss guarantee.
-2. Demonstrate recovery after deletion of a disposable, actually isolated worker/container, including original instructions/native tool history and exact native ID; no silent transcript-only reconstruction.
+2. Extend the [completed-checkpoint genuine-native/OCI proof](validation-2026-09-19-native-oci-recovery.md) to the remaining lifecycle boundaries below. Actual isolated container/rootfs deletion and same-ID native history recovery have now been observed locally; this is not cloud-worker acceptance or abrupt mid-turn zero loss.
 3. Define and communicate the recovery point for abrupt mid-turn loss. Bytes not yet flushed by Codex or not yet committed on the controller cannot be recovered by this checkpoint mechanism. A one-second coalescing interval is not a zero-loss guarantee.
 4. Validate full native child-thread/workflow storage and pending native goal/tool state. Root rollout ancestry alone does not certify every independent child session or remote side effect. Never automatically replay ambiguous actions.
 5. Exercise real worker filesystem/SSH failure and account revocation during capture/restore, plus controller restart at each durable boundary. Local synthetic service tests are not cloud lifecycle evidence.
@@ -66,3 +66,5 @@ Receipt (2026-09-19): terminal exit 0; **three loopback Responses requests** (to
 The initial run failed because the fixture assumed Code Mode would be enabled in a clean native profile. The corrected fixture consumes an actually advertised Code Mode or native shell tool; it does not copy host configuration or relax the actual tool-output/history assertions. No model service, OAuth, production worker, or cloud resource was used.
 
 The [official app-server lifecycle documentation](https://learn.chatgpt.com/docs/app-server#lifecycle-overview) establishes the completion event, not a filesystem durability barrier. The observed 0.155.0 result must not be generalized to abrupt mid-turn loss, power loss, other versions, independent child workflows, or a guaranteed recovery point.
+
+Follow-up: [genuine native writer + real OCI deletion + PostgreSQL reopen](validation-2026-09-19-native-oci-recovery.md) passed as one combined local acceptance, including a separately counted harmless tool execution. The earlier process-only receipt above remains accurately scoped to its own run.

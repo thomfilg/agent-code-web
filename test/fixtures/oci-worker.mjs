@@ -84,6 +84,20 @@ export async function createOciWorker(runc) {
   const worker = {
     id, root, rootfs, state, inspect, runtimeHome: "/runtime-home", workspace: "/workspace", environmentPath: "/bin:/usr/bin",
     async put(source, destination) { if (deleted) throw Error("OCI fixture was deleted"); await put(source, destination); },
+    async installBinary(source, destination) { if (deleted) throw Error("OCI fixture was deleted"); await assertOwnership(); await binary(source, destination); },
+    enableLoopback() {
+      if (deleted) throw Error("OCI fixture was deleted");
+      const current = inspect();
+      if (current.id !== id || current.bundle !== bundle || current.status !== "running" || !Number.isSafeInteger(current.pid) || current.pid <= 1) throw Error("OCI fixture namespace ownership changed");
+      // Enter only this verified fixture's user/network namespaces. Keep host
+      // mount namespace solely to run public ip; never use host networking.
+      // Rootless user mappings deny setgroups; retain the caller's mapped
+      // identity instead of asking nsenter to reset supplementary groups.
+      const args = ["--target", String(current.pid), "--user", "--net", "--preserve-credentials", "/usr/bin/ip"];
+      const ip = tail => execFileSync("/usr/bin/nsenter", [...args, ...tail], { env, encoding: "utf8", timeout: 5000 });
+      ip(["link", "set", "lo", "up"]);
+      return { links: JSON.parse(ip(["-j", "link", "show"])), routes: ip(["route", "show"]).trim() };
+    },
     spawn(commandName, args, options = {}) {
       if (deleted) throw Error("OCI fixture was deleted");
       const { cwd = worker.workspace, env: childEnv = {}, ...rest } = options;
