@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { mkdir, writeFile, readFile, readdir, stat, symlink } from "node:fs/promises";
 import path from "node:path";
 import * as zlib from "node:zlib";
-import { captureSessionBundle, installSessionBundle, readSessionBytes, validateSessionBundle, workerSessionIO } from "../src/codex-session-bundle.mjs";
+import { captureSessionBundle, installSessionBundle, readSessionBytes, readScopedSessionBytes, restoreSessionBundleIfFresh, validateSessionBundle, workerSessionIO } from "../src/codex-session-bundle.mjs";
 import { temporaryDirectory } from "./helpers.mjs";
 
 const ids = ["11111111-1111-7111-8111-111111111111", "22222222-2222-7222-8222-222222222222", "33333333-3333-7333-8333-333333333333", "44444444-4444-7444-8444-444444444444"];
@@ -91,7 +91,43 @@ test("worker-side transfer uses the same validation without inheriting controlle
   const installed = await workerSessionIO(executor, { action: "install", home, bundle });
   const read = await workerSessionIO(executor, { action: "read", path: installed.path });
   assert.equal(read.data, bundle.files[0].data);
+  const scoped = await workerSessionIO(executor, { action: "readScoped", home, path: installed.path });
+  assert.equal(scoped.data, read.data);
+  const freshHome = path.join(root, "fresh-remote"); await mkdir(freshHome, { mode: 0o700 });
+  const restored = await workerSessionIO(executor, { action: "restoreFresh", home: freshHome, bundle });
+  assert.equal(restored.restored, true);
+  assert.deepEqual(await readFile(restored.path), Buffer.from(bundle.files[0].data, "base64"));
+  assert.deepEqual(await workerSessionIO(executor, { action: "restoreFresh", home: freshHome, bundle }), { restored: false });
   assert.deepEqual(Object.keys(executions[0].env).sort(), ["HOME", "LANG", "PATH"]);
   await assert.rejects(workerSessionIO(executor, { action: "read", path: path.join(root, "auth.json") }), /Unsupported native session file/);
   await assert.rejects(workerSessionIO(null, { action: "unrecognized", home, bundle }), /Unknown native transfer operation/);
+});
+
+test("checkpoint reads only complete native records inside the private profile", async t => {
+  const root = await temporaryDirectory(t), home = path.join(root, "profile"), folder = path.join(home, "sessions");
+  await mkdir(folder, { recursive: true, mode: 0o700 });
+  const filename = path.join(folder, "rollout.jsonl"), { original } = lineage();
+  await writeFile(filename, Buffer.concat([original, Buffer.from('{"partial":"'), Buffer.from([0xf0, 0x9f])]));
+  assert.deepEqual(await readScopedSessionBytes(home, filename), original);
+  await writeFile(path.join(root, "outside.jsonl"), original);
+  await assert.rejects(readScopedSessionBytes(home, path.join(root, "outside.jsonl")), /outside/);
+  await symlink(root, path.join(folder, "escape"));
+  await assert.rejects(readScopedSessionBytes(home, path.join(folder, "escape", "outside.jsonl")), /outside|symlink/);
+  await writeFile(filename, '{"unfinished":');
+  await assert.rejects(readScopedSessionBytes(home, filename), /complete/);
+});
+
+test("recovery installs into an empty private profile only and never overwrites an existing native profile", async t => {
+  const root = await temporaryDirectory(t), home = path.join(root, "profile"), { bundle } = await captureFixture();
+  await mkdir(home, { mode: 0o700 });
+  const restored = await restoreSessionBundleIfFresh(home, bundle);
+  assert.equal(restored.restored, true);
+  assert.deepEqual(await readFile(restored.path), Buffer.from(bundle.files[0].data, "base64"));
+  assert.deepEqual(await restoreSessionBundleIfFresh(home, bundle), { restored: false });
+  const untouched = path.join(root, "existing"); await mkdir(untouched, { mode: 0o700 });
+  await writeFile(path.join(untouched, "auth.json"), "synthetic sentinel, not credentials");
+  assert.deepEqual(await restoreSessionBundleIfFresh(untouched, bundle), { restored: false });
+  assert.deepEqual(await readdir(untouched), ["auth.json"]);
+  const publicHome = path.join(root, "public"); await mkdir(publicHome, { mode: 0o755 });
+  await assert.rejects(restoreSessionBundleIfFresh(publicHome, bundle), /private/);
 });
