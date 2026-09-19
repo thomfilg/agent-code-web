@@ -27,6 +27,34 @@ async function fixture(page) {
 const requestEvent = (page, id, event) => page.evaluate(({ id, event }) => window.fixtureSources.find(source => source.url.includes(`/chats/${id}/events`))
   .dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) })), { id, event });
 
+test("live Auto selection waits for acknowledgement and preserves a pending native approval and unsent draft", async ({ page }) => {
+  const f = await fixture(page);
+  const pendingRequest = { requestId: "pending-grep", method: "claude/tool/requestApproval", prompt: "Inspect fixture", command: "grep example fixture.txt", availableDecisions: ["accept", "decline"] };
+  f.snapshot = { ...f.snapshot, mode: "default", status: "running", pendingRequest }; await f.emit();
+  await page.locator("#message-input").fill("Keep this draft");
+  let release, requests = 0, fail = false;
+  const gate = new Promise(resolve => { release = resolve; });
+  await page.route(`**/api/chats/${f.snapshot.id}/mode`, async route => {
+    requests++; const { mode } = route.request().postDataJSON(); await gate;
+    if (fail) return route.fulfill({ status: 409, json: { error: "Claude could not confirm the permission change" } });
+    f.snapshot = { ...f.snapshot, mode, revision: f.snapshot.revision + 1 };
+    await route.fulfill({ json: { chat: f.snapshot } });
+  });
+  await page.locator("#mode-label").click(); await page.locator('[data-agent-mode="auto"]').click();
+  await expect.poll(() => requests).toBe(1);
+  await expect(page.locator("#mode-label")).toHaveText("Manual");
+  await expect(page.locator('[data-agent-mode="plan"]')).toBeDisabled();
+  release(); await expect(page.locator("#mode-label")).toHaveText("Auto");
+  await expect(page.locator("#approval-card")).toBeVisible();
+  await expect(page.locator("#message-input")).toHaveValue("Keep this draft");
+  fail = true;
+  await page.locator("#mode-label").click(); await page.locator('[data-agent-mode="plan"]').click();
+  await expect(page.locator('[data-agent-mode="plan"]')).toBeEnabled();
+  await expect(page.locator("#mode-label")).toHaveText("Auto");
+  await expect(page.locator("#toasts")).toContainText("could not confirm");
+  expect(f.calls).toEqual([]); expect(f.errors).toEqual([]);
+});
+
 for (const width of [1280, 320]) test(`doctor at ${width}px preserves queued files and requires separate cleanup/permission answers`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
   const f = await fixture(page), input = page.locator("#message-input"), card = page.locator("#approval-card"), replies = [];
