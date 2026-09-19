@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Real Relay UI/API/bootstrap/proxy; only OIDC, saved CF host registry and the
-// EC2 executor boundary are private local fixtures. Never run against production.
+// GitHub metadata and EC2 executor boundary are private local fixtures. Never run
+// against production. The inline first message uses a synthetic account and
+// mock adapter, never an actual model provider.
 import assert from "node:assert/strict";
 import http from "node:http";
 import https from "node:https";
@@ -17,6 +19,8 @@ import { createAgentWebServer } from "../src/server.mjs";
 import { SSH_WORKER_LAUNCHER, sshWorkerRequest } from "../src/ssh-worker-launcher.mjs";
 import { WORKER_TCP_BRIDGE } from "../src/worker-tcp-bridge.mjs";
 import { googleOidcFixture, googleTestEnv } from "../test/fixtures/google-oidc.mjs";
+import { codexAccountFixture } from "../test/fixtures/codex-account.mjs";
+import { MockAdapter } from "../src/adapters/mock.mjs";
 import { testConfig, waitFor } from "../test/helpers.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -26,8 +30,16 @@ const output = path.join(root, "test-results/preview-ui-integrated-mcp");
 await mkdir(output, { recursive: true, mode: 0o700 });
 const relayHost = "relay.fixture.test", previewHost = "app.preview-fixture.test", origin = `https://${relayHost}`;
 const destination = "/future-drink/menu?cart=1#saved";
-const provider = googleOidcFixture(), rows = [], children = [], streams = new Set(), tlsSockets = new Set();
+const companyId = "preview-company", githubId = "github_00000000-0000-0000-0000-000000000123";
+const initialPrompt = "Preview acceptance fixture: show the local app.";
+const repository = { id: 123, full_name: "fixture-owner/preview-app", default_branch: "main", size: 1, private: true, owner: { login: "fixture-owner" } };
+const provider = googleOidcFixture(), agentAccount = codexAccountFixture(), rows = [], children = [], streams = new Set(), tlsSockets = new Set();
 const observed = [], apiCalls = []; let acquisitions = 0, app, upstream, wss, front, client, transport, phase = "setup", receipt, failure;
+let chatId, transcript;
+const assertNoPreviewPrompts = () => {
+  assert.deepEqual(app.store.get(chatId).messages, transcript, "Preview actions must not send prompts or alter the existing conversation");
+  assert.equal(apiCalls.filter(call => call.method === "POST" && call.path === `/api/chats/${chatId}/messages`).length, 1, "Only the inline first message may reach the agent");
+};
 let releaseAcquisition;
 const acquisitionGate = new Promise(resolve => { releaseAcquisition = resolve; });
 let transportClosed; const observedTransportClose = new Promise(resolve => { transportClosed = resolve; });
@@ -82,11 +94,34 @@ window.fixtureEvents=new EventSource('/events');fixtureEvents.onmessage=e=>docum
     AGENT_PREVIEW_ACCOUNT_ID: "111122223333", AGENT_EC2_DEPLOYMENT: "relay-fixture", AGENT_PREVIEW_VPC_ORIGIN_ID: "vo_fixture",
     AGENT_PREVIEW_CONTROLLER_INSTANCE_ID: "i-0123456789abcdef0", AGENT_PREVIEW_CONTROLLER_ORIGIN_DNS: "ip-10-0-0-1.us-east-2.compute.internal", AGENT_PREVIEW_RELAY_DISTRIBUTION_ID: "ERELAYFIXTURE", AGENT_IDLE_TIMEOUT_MS: "60000" });
   app = await createAgentWebServer({ config, googleAuthOptions: { fetchImpl: provider.fetch }, previewHosts: hosts,
-    workerBackend: { acquire: async () => { acquisitions++; await acquisitionGate; return { workspace: directory, spawn(command, args, options) {
+    agentAccountsOptions: { clientFactory: agentAccount.factory }, adapterFactory: parameters => new MockAdapter(parameters),
+    workerBackend: { acquire: async chat => { acquisitions++; if (acquisitions > 1) await acquisitionGate; return { workspace: chat.workspace, runtimeHome: path.join(directory, "runtime-home"), mkdir: target => mkdir(target, { recursive: true }), spawn(command, args, options) {
       assert.equal(command, "/usr/bin/node"); assert.deepEqual(args, ["--input-type=module", "-e", WORKER_TCP_BRIDGE]); assert.deepEqual(options.env, {});
       const child = spawn(process.execPath, ["--input-type=module", "-e", SSH_WORKER_LAUNCHER], { ...options, env: {} }); children.push(child);
       child.stdin.write(sshWorkerRequest({ command: process.execPath, args, cwd: directory, env: {}, heartbeat })); return child;
     } }; }, sleep: async () => {}, destroy: async () => {} } });
+  const services = await app.resources.forOwner(null);
+  await services.companies.save({ id: companyId, name: "Preview Company" });
+  await services.records.put("github_connection", githubId, { id: githubId, companyId, name: "Fixture GitHub", login: "fixture-owner", token: "synthetic-preview-github-token", revision: 1 });
+  services.github.fetch = async (url, options = {}) => {
+    const parsed = new URL(url);
+    assert.equal(parsed.origin, "https://api.github.com");
+    assert.equal(new Headers(options.headers).get("authorization"), "Bearer synthetic-preview-github-token");
+    if (parsed.pathname === "/user/repos") return Response.json([repository]);
+    if (parsed.pathname === `/repos/${repository.full_name}`) return Response.json(repository);
+    if (parsed.pathname === `/repos/${repository.full_name}/branches`) return Response.json([{ name: "main" }]);
+    if (parsed.pathname === `/repos/${repository.full_name}/branches/main`) return Response.json({ name: "main", commit: { sha: "a".repeat(40) } });
+    throw Error("Unexpected GitHub request in preview fixture");
+  };
+  const environment = await services.environments.save({ name: "Preview Company dev", companies: [companyId], backend: "ec2", software: [] });
+  // Seed a disposable, already checked-out repository at the storage boundary;
+  // real chat admission/selection still runs, but no clone contacts GitHub.
+  const createStoredChat = app.store.create.bind(app.store);
+  app.store.create = async input => {
+    const chat = await createStoredChat(input);
+    for (const selected of chat.repositories) execFileSync("git", ["init", "--quiet", "--initial-branch=main", path.join(chat.workspace, selected.directory)], { env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
+    return chat;
+  };
   const started = await app.start(), controllerPort = Number(new URL(started.url).port);
   execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=Relay UI fixture", "-addext", `subjectAltName=DNS:${relayHost},DNS:${previewHost}`, "-keyout", path.join(directory, "key.pem"), "-out", path.join(directory, "cert.pem")], { stdio: "ignore" });
   front = https.createServer({ key: await readFile(path.join(directory, "key.pem")), cert: await readFile(path.join(directory, "cert.pem")) }, async (req, res) => {
@@ -97,7 +132,7 @@ window.fixtureEvents=new EventSource('/events');fixtureEvents.onmessage=e=>docum
       try { const callback = provider.approve(JSON.parse(body).url); res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ callback })); }
       catch { res.writeHead(400); res.end(); } return;
     }
-    const apiCall = req.headers.host === relayHost && req.url.includes("/app-preview") ? { method: req.method, path: req.url.split("?", 1)[0] } : null;
+    const apiCall = req.headers.host === relayHost && req.url.startsWith("/api/") ? { method: req.method, path: req.url.split("?", 1)[0] } : null;
     if (apiCall) apiCalls.push(apiCall);
     const request = http.request({ host: "127.0.0.1", port: controllerPort, path: req.url, method: req.method, headers: req.headers }, response => { if (apiCall) apiCall.status = response.statusCode; res.writeHead(response.statusCode, response.headers); response.pipe(res); response.once("error", () => res.destroy()); });
     request.once("error", () => res.destroy()); req.once("aborted", () => request.destroy()); res.once("close", () => request.destroy()); req.pipe(request);
@@ -122,12 +157,28 @@ window.fixtureEvents=new EventSource('/events');fixtureEvents.onmessage=e=>docum
   transport.onclose = transportClosed; transport.stderr?.on("data", () => {}); client = new Client({ name: "preview-ui-integrated-fixture", version: "1.0.0" }); await bounded(client.connect(transport), 20000);
   phase = "real-google-fixture-login";
   await run(`await page.context().route('**/*',async route=>{const url=route.request().url();if(url.startsWith('https://accounts.google.com/')){const response=await page.request.post('https://127.0.0.1:${front.address().port}/__fixture/google',{headers:{host:'${relayHost}'},data:{url}});const result=await response.json();await route.fulfill({status:302,headers:{location:result.callback}});return;}if(url.startsWith('${origin}/')||url.startsWith('https://${previewHost}/'))return route.continue();return route.abort();});await page.goto('${origin}/');await page.getByRole('button',{name:'Continue with Google',exact:true}).click();await page.locator('#relay-account-button').filter({hasText:'owner@example.com'}).waitFor();`);
-  phase = "create-chat-no-prompt";
-  await run(`const chat=await page.evaluate(async()=>{const r=await fetch('/api/chats',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({agent:'mock',title:'Preview acceptance fixture'})});if(r.status!==201)throw Error('Fixture chat creation failed');return (await r.json()).chat.id;});await page.goto('${origin}/#chat='+chat);await page.reload();await page.getByRole('button',{name:'Open app preview',exact:true}).click();await page.getByLabel('App port').fill('${appPort}');await page.getByLabel('App path').fill('${destination}');await page.getByRole('button',{name:'Set up preview',exact:true}).waitFor();`);
-  assert.equal(acquisitions, 0); assert.equal(rows.length, 0);
+  const ownerId = app.googleAuth.legacyOwnerId;
+  const pending = await app.agentAccounts.begin(ownerId, { provider: "codex", name: "Preview fixture" });
+  agentAccount.clients.at(-1).approve();
+  await waitFor(() => app.agentAccounts.hasConnected(ownerId, "codex"));
+  phase = "inline-company-chat-first-message";
+  await run(`await page.reload();await page.locator('#new-chat-page').waitFor();if(await page.locator('dialog[open]').count())throw Error('New chat must not use a modal');await page.waitForFunction(()=>!document.querySelector('#new-chat-fields').disabled);await page.getByRole('combobox',{name:'Environment',exact:true}).selectOption('${environment.id}');await page.getByRole('button',{name:'Add repositories',exact:true}).click();await page.locator('#repository-results').getByRole('checkbox',{name:/fixture-owner\\/preview-app/}).check();await page.getByRole('button',{name:'Add repositories',exact:true}).click();await page.getByRole('combobox',{name:'Branch for fixture-owner/preview-app',exact:true}).selectOption('main');await page.getByRole('combobox',{name:'Agent',exact:true}).selectOption('${pending.account.id}');await page.getByRole('textbox',{name:'New chat message',exact:true}).fill(${JSON.stringify(initialPrompt)});await page.screenshot({path:${JSON.stringify(path.join(output, "inline-company-draft.png"))}});await page.getByRole('button',{name:'Send first message',exact:true}).click();await page.locator('#conversation').waitFor();await page.locator('#messages').filter({hasText:'POC worker received'}).waitFor();`);
+  assert.equal(app.store.list().length, 1); chatId = app.store.list()[0].id;
+  await waitFor(() => !app.manager.isBusy(chatId) && app.store.get(chatId).messages.some(message => message.role === "assistant"), { timeoutMs: 10000 });
+  const chat = app.store.get(chatId);
+  assert.equal(chat.agent, "codex"); assert.equal(chat.agentAccountId, pending.account.id); assert.equal(chat.environmentId, environment.id);
+  assert.equal(chat.repositories.length, 1); assert.equal(chat.repositories[0].fullName, repository.full_name);
+  assert.equal(chat.repositories[0].companyId, companyId); assert.equal(chat.repositories[0].branch, "main");
+  assert.deepEqual(chat.messages.filter(message => message.role === "user").map(message => message.text), [initialPrompt]);
+  assert.equal(apiCalls.filter(call => call.method === "POST" && call.path === "/api/chats").length, 1);
+  await app.manager.stop(chatId, "fixture-cold-preview");
+  transcript = structuredClone(app.store.get(chatId).messages); assertNoPreviewPrompts();
+  phase = "open-preview-from-existing-inline-chat";
+  await run(`await page.reload();await page.locator('#chat-workspace-strip').filter({hasText:'preview-app'}).waitFor();await page.getByRole('button',{name:'Open app preview',exact:true}).click();await page.getByLabel('App port').fill('${appPort}');await page.getByLabel('App path').fill('${destination}');await page.getByRole('button',{name:'Set up preview',exact:true}).waitFor();`);
+  assert.equal(acquisitions, 1); assert.equal(rows.length, 0);
   phase = "explicit-pending-setup";
   await run(`await page.getByRole('button',{name:'Set up preview',exact:true}).click();await page.getByRole('status').filter({hasText:'several minutes'}).waitFor();`);
-  assert.equal(rows.length, 1); assert.equal(rows[0].port, appPort); assert.equal(acquisitions, 0);
+  assert.equal(rows.length, 1); assert.equal(rows[0].port, appPort); assert.equal(acquisitions, 1);
   assert.ok(apiCalls.some(row => row.method === "POST" && row.path.endsWith("/app-preview") && row.status === 202));
   assert.equal(apiCalls.filter(row => row.path.endsWith("/app-preview/open")).length, 0);
   rows[0].status = "ready";
@@ -138,10 +189,10 @@ window.fixtureEvents=new EventSource('/events');fixtureEvents.onmessage=e=>docum
   await run(`const created=page.waitForEvent('popup');await page.getByRole('button',{name:'Open app ↗',exact:true}).click();await created;`);
   phase = "cold-worker-preparation-ui";
   await run(`await page.getByRole('status').filter({hasText:'Preparing this chat'}).waitFor();const popup=page.context().pages().find(p=>p.url()==='about:blank');if(!popup)throw Error('Preparation tab missing');if(!await popup.evaluate(()=>window.opener===null&&document.body.textContent.includes('Preparing this chat')))throw Error('Preparation state missing');await page.screenshot({path:${JSON.stringify(path.join(output, "worker-preparing-320.png"))}});`);
-  assert.equal(acquisitions, 1); assert.equal(observed.length, 0);
+  assert.equal(acquisitions, 2); assert.equal(observed.length, 0);
   assert.ok(apiCalls.some(row => row.method === "POST" && row.path.endsWith("/app-preview/open") && row.status === 202));
   assert.ok(!apiCalls.some(row => row.path === "/api/app-preview/bootstrap"));
-  assert.ok(app.store.list().every(chat => chat.messages.length === 0));
+  assertNoPreviewPrompts();
   releaseAcquisition();
   phase = "trusted-bootstrap-app-http";
   await run(`const popup=page.context().pages().find(p=>!p.url().startsWith('${origin}/#chat='));if(!popup)throw Error('Fixture popup missing');await popup.getByRole('heading',{name:'Isolated fixture app',exact:true}).waitFor({timeout:15000});if(popup.url()!=='https://${previewHost}${destination}')throw Error('App target changed');if(!await popup.evaluate(()=>window.opener===null&&document.referrer===''&&!document.cookie.includes('relay')))throw Error('Popup isolation failed');`);
@@ -152,13 +203,14 @@ window.fixtureEvents=new EventSource('/events');fixtureEvents.onmessage=e=>docum
   assert.ok(apiCalls.some(row => row.method === "POST" && row.path.endsWith("/app-preview/open") && row.status === 200));
   assert.ok(observed.some(row => row.path === destination.split("#")[0]));
   assert.ok(observed.every(row => row.host === previewHost && !row.authorization && row.cookieNames.every(name => name === "app_cookie")));
-  assert.ok(app.store.list().every(chat => chat.messages.length === 0));
+  assertNoPreviewPrompts();
   phase = "ui-revoke-closes-live-streams";
   await run(`const relay=page.context().pages().find(p=>p.url().startsWith('${origin}/#chat='));if(!relay)throw Error('Relay fixture tab missing');await relay.getByRole('button',{name:'Revoke preview',exact:true}).click();await relay.getByRole('status').filter({hasText:'Access revoked'}).waitFor();const preview=page.context().pages().find(p=>p.url().startsWith('https://${previewHost}/'));await preview.locator('#ws').filter({hasText:'WS revoked'}).waitFor({timeout:10000});await preview.locator('#sse').filter({hasText:'SSE revoked'}).waitFor({timeout:10000});const denied=await preview.evaluate(async()=>{const r=await fetch('/after-revoke');return r.status;});if(![403,421].includes(denied))throw Error('Revoked access survived');`);
   await waitFor(() => streams.size === 0 && wss.clients.size === 0 && children.every(child => child.exitCode !== null || child.signalCode !== null), { timeoutMs: 10000 });
-  assert.equal(rows[0].status, "revoking"); assert.ok(app.store.list().every(chat => chat.messages.length === 0));
+  assert.equal(rows[0].status, "revoking"); assertNoPreviewPrompts();
   assert.ok(!observed.some(row => row.path === "/after-revoke"));
-  receipt = { schema: 1, fixtureOnly: true, actualRelayUiAndApis: true, officialPlaywrightMcp: true, separateHttpsOrigins: true, signedOidcFixture: true,
+  receipt = { schema: 2, fixtureOnly: true, actualRelayUiAndApis: true, officialPlaywrightMcp: true, separateHttpsOrigins: true, signedOidcFixture: true,
+    inlineCompanyChatCreation: true, selectedEnvironmentAndRepository: true, firstMessageViaComposer: true, initialMockMessagesPreserved: true, previewSendsNoPrompts: true,
     explicitAsyncSetup: true, coldWorkerPreparationUi: true, workerReadyBeforeBootstrap: true, originalPathQueryFragment: true, detachedNoReferrerTab: true, workerCookiesIsolated: true, http: true, websocket: true, incrementalSse: true,
     revokeClosesStreams: true, noModelPrompts: true, localLauncherChildrenClosed: true, realAwsOrAccountConsent: false, screenshots: "test-results/preview-ui-integrated-mcp" };
 } catch (error) { failure = { ok: false, fixtureOnly: true, phase, category: ["fixture-dns", "fixture-tls", "browser-timeout", "ambiguous-locator", "browser-assertion", "browser-transport"].includes(error?.category) ? error.category : "fixture-assertion",
