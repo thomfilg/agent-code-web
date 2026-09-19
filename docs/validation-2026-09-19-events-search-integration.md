@@ -104,3 +104,16 @@ only this receipt and the requirement ledger changed. This is a locally
 validated integration, not a deployed-product acceptance. GitHub webhook
 registration, selected-account cloud wake, guest official MCP, remaining native
 commands/recovery and production recovery remain open as recorded in the queue.
+
+## Separate test-only recovery evidence
+
+After the application suites completed, PR #80
+(`741ae8e1c84b50f4b71f8c17d086c9582df35ab0`) added only a standalone smoke,
+two test fixtures and its receipt. Its first execution passed 1/1 in 8.04 seconds
+(terminal session `82506`): a committed real native checkpoint survived actual
+controller SIGKILL and OCI/rootfs deletion, then was restored by a new process
+with an independent database pool. The counted tool remained at one and native
+resume made no implicit provider request. Source and receipt received independent
+read-only review; the root inspected the exact terminal log, not a production
+recovery. No application file changed, so the backend/browser candidate above is
+unchanged. See [exact scope and limits](validation-2026-09-19-native-controller-loss.md).
