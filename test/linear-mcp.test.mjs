@@ -190,6 +190,8 @@ test("independent same-name workspace OAuth reaches both selected provider envir
     const c = await mcps.save({ name: "linear", companies: [company], type: "http", url: "https://mcp.linear.app/mcp", authMode: "oauth" }); ids.push(c.id);
     const flow = await mcps.oauth.begin(c.id, "http://localhost:8787/oauth/mcp/callback");
     await mcps.oauth.finish(await consent(flow, fixtures.get(company).origin), cookies(flow));
+    assert.match(mcps.oauth.status(c.id).message, /company's chats/);
+    assert.doesNotMatch(mcps.oauth.status(c.id).message, /selecting.*environment/, "company MCPs have no separate environment selector");
   }
   const otherUser = new McpConnections(userRecords(app.records, "another-user"), { fetchImpl });
   assert.notEqual((await mcps.get(ids[0])).oauth.clientInformation.client_id, (await mcps.get(ids[1])).oauth.clientInformation.client_id, "workspaces must not reuse another connection's registration context");
