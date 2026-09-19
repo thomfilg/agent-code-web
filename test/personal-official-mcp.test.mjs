@@ -52,10 +52,15 @@ test('actual extension and official MCP use only the explicitly shared tab throu
   await unrelated.evaluate(() => {localStorage.setItem('unrelated-secret','fake-private');document.cookie='unrelated_cookie=fake-cookie';document.title='Unrelated private tab';});
   const popup = await profile.newPage(); await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup.html`);
   await popup.locator('#relay-url').fill(url); await popup.locator('#pair-code').fill(pair.code); await popup.getByRole('button',{name:'Pair this Chrome profile'}).click();
-  await waitFor(() => app.manager.browsers.personal.bridges.get(pair.id)?.ready);
+  // Authentication and availability arrive as separate extension frames.
+  const bridgeAvailable=()=>{const bridge=app.manager.browsers.personal.bridges.get(pair.id);return Boolean(bridge?.ready&&bridge.tabSelected);};
+  await waitFor(bridgeAvailable);
+  const runtime = app.manager.browsers.runtime(chat.id,url,{validWhile:()=>true}).relay_browser;
+  client = new Client({name:'synthetic-product-agent',version:'1'});
+  await client.connect(new StreamableHTTPClientTransport(new URL(runtime.url),{requestInit:{headers:runtime.headers}}));
+  const cachedGuestCatalog=await client.listTools();assert.equal(workerStarts,0);
   await app.manager.browsers.personal.enable(chat.id,user,pair.id);
   const grant = app.manager.browsers.personal.currentGrant(chat.id), tabId = grant.state.tabId;
-  const runtime = app.manager.browsers.runtime(chat.id,url,{validWhile:()=>true}).relay_browser;
   const originalRequest = app.manager.browsers.personal.request.bind(app.manager.browsers.personal); let projections = 0, projectionId, holdRelease;
   app.manager.browsers.personal.request = async (...args) => {
     if (args[1] === 'project' && args[2].operation === 'open') {projections++;projectionId = args[2].id;}
@@ -63,14 +68,15 @@ test('actual extension and official MCP use only the explicitly shared tab throu
     if (holdRelease && args[1] === 'project' && args[2].method === 'Input.dispatchMouseEvent' && args[2].params.type === 'mouseReleased') await holdRelease;
     return result;
   };
-  client = new Client({name:'synthetic-product-agent',version:'1'});
-  await client.connect(new StreamableHTTPClientTransport(new URL(runtime.url),{requestInit:{headers:runtime.headers}}));
   const before = profile.pages().length, catalog = await client.listTools();
+  assert.deepEqual(catalog,cachedGuestCatalog,'one MCP client can retain the exact guest schemas across explicit personal enable');
   assert.ok(catalog.tools.some(tool => tool.name === 'browser_snapshot'));
-  assert.ok(!catalog.tools.some(tool => ['browser_evaluate','browser_run_code_unsafe'].includes(tool.name)));
+  assert.ok(!catalog.tools.some(tool => tool.name === 'browser_run_code_unsafe'));
+  for(const name of ['browser_evaluate','browser_resize','browser_take_screenshot'])assert.match(catalog.tools.find(tool=>tool.name===name).description,/personal mode denies/);
   assert.equal(profile.pages().length,before); assert.equal(projections,0,'discovery does not acquire projection');
   const call = async (name,args={}) => { const result = await client.callTool({name,arguments:args}); assert.notEqual(result.isError,true,JSON.stringify(result)); return result; };
   await call('browser_navigate',{url:fixtureUrl});
+  assert.match((await call('browser_tabs',{action:'list'})).content[0].text,/^Browser mode: personal\./);
   const snapshot = await call('browser_snapshot');
   assert.match(JSON.stringify(snapshot),/Signed in as Alice/);
   assert.doesNotMatch(JSON.stringify(snapshot),/fake-private|fake-cookie|Unrelated private tab/);
@@ -83,9 +89,17 @@ test('actual extension and official MCP use only the explicitly shared tab throu
   await waitFor(async () => (await (await fetch(site.url+'/observed')).json()).clicks === 1);
   await call('browser_type',{target:'#entry',text:'Official MCP typed'});
   await waitFor(async () => (await (await fetch(site.url+'/observed')).json()).text === 'Official MCP typed');
+  // Only the disposable fixture's page triggers the burst; the personal agent
+  // still has no evaluate tool. Exercise real extension protocol event volume.
+  const automation=profile.pages().find(page=>page!==personal&&page!==unrelated&&page!==popup&&page.url().startsWith(fixtureUrl));
+  assert.ok(automation);
+  await automation.evaluate(async()=>{await Promise.all(Array.from({length:96},(_,i)=>fetch('/synthetic-asset?i='+i).then(r=>r.text())));history.pushState({},'', '/spa-state');});
+  assert.match(JSON.stringify(await call('browser_snapshot')),/Official MCP typed/);
   assert.equal(app.manager.browsers.personal.currentGrant(chat.id).state.tabId,tabId);
   assert.equal(personal.isClosed(),false); assert.equal(await unrelated.evaluate(() => localStorage.getItem('unrelated-secret')),'fake-private');
   await assert.rejects(client.callTool({name:'browser_evaluate',arguments:{function:'() => document.cookie'}}));
+  await assert.rejects(client.callTool({name:'browser_resize',arguments:{width:390,height:844}}));
+  await assert.rejects(client.callTool({name:'browser_take_screenshot',arguments:{}}));
   await assert.rejects(client.callTool({name:'browser_tabs',arguments:{action:'new'}}));
   const blockedNavigation = await client.callTool({name:'browser_navigate',arguments:{url}});
   assert.equal(blockedNavigation.isError,true,'Relay hostname is still blocked by the owning extension');
@@ -99,6 +113,7 @@ test('actual extension and official MCP use only the explicitly shared tab throu
     await app.records.put('agent-account',agentId,{...record,revision:2});
     release(); await assert.rejects(click,/REVOKED|revoked/);
   } finally {release();holdRelease = null;}
+  await assert.rejects(client.callTool({name:'browser_tabs',arguments:{action:'list'}}),'revocation must not return inferred mode metadata');
   assert.equal((await (await fetch(site.url+'/observed')).json()).clicks,2);
   assert.equal(projections,1,'no automatic reconnect or replay after a stale result');
   assert.equal((await app.manager.browsers.command(chat.id,'status',{})).running,true,'projection detach leaves the authorized user tab alive');
@@ -107,7 +122,7 @@ test('actual extension and official MCP use only the explicitly shared tab throu
   client = new Client({name:'stale-consent',version:'1'});
   const staleConsent = await fetch(renewedRuntime.url,{method:'POST',headers:{...renewedRuntime.headers,'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list'})});
   assert.equal(staleConsent.status,403,'reconnected account cannot inherit earlier sharing consent');
-  await assert.rejects(client.connect(new StreamableHTTPClientTransport(new URL(renewedRuntime.url),{requestInit:{headers:renewedRuntime.headers}})),/Personal browser MCP access is unavailable or revoked/);
+  await assert.rejects(client.connect(new StreamableHTTPClientTransport(new URL(renewedRuntime.url),{requestInit:{headers:renewedRuntime.headers}})),/Browser MCP access is unavailable or revoked/);
   await client.close();
   await app.manager.browsers.personal.revokeChat(chat.id);
   await app.manager.browsers.personal.enable(chat.id,user,pair.id);
@@ -118,7 +133,7 @@ test('actual extension and official MCP use only the explicitly shared tab throu
   app.manager.browsers.personal.bridges.get(pair.id).socket.terminate();
   await waitFor(() => !app.manager.browsers.personal.currentGrant(chat.id));
   await assert.rejects(client.callTool({name:'browser_snapshot',arguments:{}}));
-  await waitFor(() => app.manager.browsers.personal.bridges.get(pair.id)?.ready,{timeoutMs:10000});
+  await waitFor(bridgeAvailable,{timeoutMs:10000});
   assert.equal(app.manager.browsers.personal.currentGrant(chat.id),undefined,'automatic bridge reconnect never restores sharing');
   await client.close();
   const claudeId = `account_${randomUUID()}`;

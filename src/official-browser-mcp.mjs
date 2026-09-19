@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -22,7 +22,8 @@ const bindingSchema = z.strictObject({ ownerId: id, chatId: id, companyId: id, e
 
 // Context providers are trusted application wiring. Personal acquisition must
 // return a lease minted by the grant-owned projection, not a marker boolean or
-// generic profile CDP connection. Guest runtime integration remains separate.
+// generic profile CDP connection. Guest acquisition uses the existing owned
+// worker's private-pipe projection, never a host-browser fallback.
 export class OfficialBrowserMcp {
   #binding; #validate; #acquire; #server; #client; #directory; #initializing; #contextPromise; #lease; #released = false;
   #revoked = false; #closing; #controller = new AbortController(); #pending = 0; #queue = Promise.resolve();
@@ -35,16 +36,20 @@ export class OfficialBrowserMcp {
   get binding() { return this.#binding; }
   async #check() {
     if (this.#revoked) throw browserPolicyFailure("REVOKED");
+    if (this.#lease?.isCurrent && !this.#lease.isCurrent()) {this.#fence();throw browserPolicyFailure('CONNECTION_LOST');}
     let valid = false;
     try { valid = await this.#validate(this.#binding) === true; } catch { /* Fail closed without exposing authority diagnostics. */ }
-    if (this.#revoked || !valid) { this.#fence(); throw browserPolicyFailure("SCOPE_CHANGED"); }
+    if (this.#revoked || !valid || this.#lease?.isCurrent && !this.#lease.isCurrent()) { this.#fence(); throw browserPolicyFailure("SCOPE_CHANGED"); }
   }
   #fence() { this.#revoked = true; this.#controller.abort(browserPolicyFailure("REVOKED")); }
   async #context() {
     await this.#check();
     return this.#contextPromise ||= (async () => {
       try {
-        const lease = await this.#acquire({ binding: this.#binding, signal: this.#controller.signal, playwright: matchingBrowserRuntime() });
+        const lease = await this.#acquire({ binding: this.#binding, signal: this.#controller.signal, playwright: matchingBrowserRuntime(), retainCleanup:receipt=>{
+          if(this.#lease||typeof receipt?.release!=='function')throw browserPolicyFailure('CONTEXT_INVALID');
+          this.#lease=receipt;
+        } });
         if (typeof lease?.release === "function") this.#lease = lease;
         if (this.#binding.mode === 'personal' && !isPersonalProjectionLease(lease)) throw browserPolicyFailure('PERSONAL_PROJECTION_UNAVAILABLE');
         if (!lease || typeof lease.release !== "function" || !lease.context || typeof lease.context.pages !== "function") throw browserPolicyFailure("CONTEXT_INVALID");
@@ -59,7 +64,7 @@ export class OfficialBrowserMcp {
       await this.#check();
       this.#server = await official.createConnection({ browser: { browserName: "chromium", isolated: false }, capabilities: [],
         saveSession: false, outputDir: this.#directory, outputMaxSize: 2 * 1024 * 1024, allowUnrestrictedFileAccess: false,
-        console: { level: "error" }, timeouts: { action: 5000, navigation: 10000, settle: 0, idle: 0 }, imageResponses: "omit", snapshot: { mode: "full" } }, () => this.#context());
+        console: { level: "error" }, timeouts: { action: 5000, navigation: 10000, settle: 0, idle: 0 }, imageResponses: "allow", snapshot: { mode: "full" } }, () => this.#context());
       await this.#check();
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       this.#client = new Client({ name: "relay-browser-policy", version: "1" });
@@ -89,9 +94,41 @@ export class OfficialBrowserMcp {
         await this.#check();
         if (this.#binding.mode === 'personal' && !isPersonalProjectionProvider(this.#acquire)) throw browserPolicyFailure('PERSONAL_PROJECTION_UNAVAILABLE');
         await this.#initialize(); await this.#check();
-        const result = await this.#client.callTool({ name, arguments: input }, undefined, { signal: this.#controller.signal, timeout: 15000 });
+        await this.#context();
+        if (this.#lease.beforeTool) {
+          await this.#lease.beforeTool({selectTab:async index => {
+            const listed = await this.#client.callTool({name:'browser_tabs',arguments:{action:'list'}},undefined,{signal:this.#controller.signal,timeout:15000});
+            if(listed.isError)throw browserPolicyFailure('TAB_SYNC_FAILED');
+            const result = await this.#client.callTool({name:'browser_tabs',arguments:{action:'select',index}},undefined,{signal:this.#controller.signal,timeout:15000});
+            if(result.isError)throw browserPolicyFailure('TAB_SYNC_FAILED');
+          },resize:async size=>{
+            const result=await this.#client.callTool({name:'browser_resize',arguments:size},undefined,{signal:this.#controller.signal,timeout:15000});
+            if(result.isError)throw browserPolicyFailure('VIEWPORT_SYNC_FAILED');
+          }});
+          await this.#check();
+        }
+        let result;
+        try {result = await this.#client.callTool({ name, arguments: input }, undefined, { signal: this.#controller.signal, timeout: 15000 });}
+        catch(error) {if(name==='browser_take_screenshot')this.#fence();throw error;}
+        finally {
+          if(name==='browser_take_screenshot'&&this.#directory) {
+            const directory=this.#directory;
+            for(const file of await readdir(directory).catch(error=>{if(error.code==='ENOENT')return [];throw error;}))await rm(path.join(directory,file),{recursive:true,force:true});
+          }
+        }
         await this.#check();
+        if (name === 'browser_tabs') result={...result,content:[{type:'text',text:this.#binding.mode==='guest'
+          ? 'Browser mode: guest. localhost refers to this chat worker.'
+          : "Browser mode: personal. Only the explicitly shared automation tab is available; localhost refers to the user's computer."},...result.content]};
         if (Buffer.byteLength(JSON.stringify(result)) > 2 * 1024 * 1024) throw browserPolicyFailure("RESULT_TOO_LARGE");
+        if (name === 'browser_take_screenshot') {
+          // The official backend may create its own temporary output file. Never
+          // accept caller paths, retain a frame history or return filesystem links.
+          if (result.isError) return {isError:true,content:[{type:'text',text:'Shared viewport screenshot unavailable'}]};
+          const images=result.content.filter(item=>item.type==='image'&&item.mimeType==='image/png');
+          if(images.length!==1)throw browserPolicyFailure('SCREENSHOT_UNAVAILABLE');
+          return {content:[{type:'text',text:'Current shared guest viewport.'},...images]};
+        }
         return result;
       } catch (error) {
         if (this.#revoked) { await this.revoke().catch(() => {}); throw browserPolicyFailure("REVOKED"); }

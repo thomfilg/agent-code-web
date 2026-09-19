@@ -8,6 +8,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { OfficialBrowserMcp, officialBrowserVersions, matchingBrowserRuntime } from "../src/official-browser-mcp.mjs";
 import { authorizeBrowserTool } from "../src/official-browser-policy.mjs";
+import os from 'node:os';
+import path from 'node:path';
+import {readdir,stat} from 'node:fs/promises';
+import {temporaryDirectory} from './helpers.mjs';
 
 const binding = () => ({ ownerId: "synthetic-owner", chatId: "synthetic-chat", companyId: "synthetic-company", environmentId: "synthetic-environment",
   provider: "codex", accountId: "synthetic-account", accountRevision: 1, companyRevision: 1, environmentRevision: 1,
@@ -57,10 +61,14 @@ test("actual pinned official catalog is lazy and unsafe default core tools canno
   assert.equal(catalog.tools.find(tool => tool.name === "browser_snapshot").inputSchema.properties.filename, undefined);
 });
 
-test("personal policy preserves page interaction catalog but never admits an unimplemented whole-profile projection", async t => {
+test("stable mode catalog never grants unsupported personal operations or a whole-profile projection", async t => {
   const f = fixture(t, { mode: "personal" }), catalog = await f.proxy.toolsList();
-  assert.equal(catalog.tools.some(tool => tool.name === "browser_evaluate"), false);
-  const tabs = catalog.tools.find(tool => tool.name === "browser_tabs"); assert.deepEqual(tabs.inputSchema.properties.action.enum, ["list"]);
+  const guest=fixture(t),guestCatalog=await guest.proxy.toolsList();
+  assert.deepEqual(catalog,guestCatalog,'native clients can cache exactly the same names, descriptions and schemas');
+  for(const name of ['browser_evaluate','browser_resize','browser_take_screenshot'])assert.throws(()=>authorizeBrowserTool('personal',name,{}),{code:'MODE_UNAVAILABLE'});
+  const tabs = catalog.tools.find(tool => tool.name === "browser_tabs"); assert.deepEqual(tabs.inputSchema.properties.action.enum, ["list","new","close","select"]);
+  assert.throws(()=>authorizeBrowserTool('guest','browser_take_screenshot',{filename:'/tmp/escape.png'}),{code:'ARGUMENTS_DENIED'});
+  assert.throws(()=>authorizeBrowserTool('guest','browser_take_screenshot',{fullPage:true}),{code:'ARGUMENTS_DENIED'});
   assert.deepEqual(authorizeBrowserTool("personal", "browser_click", { target: "button" }), { target: "button" });
   for (const action of ["new", "select", "close"]) assert.throws(() => authorizeBrowserTool("personal", "browser_tabs", { action }), { code: "ARGUMENTS_DENIED" });
   await assert.rejects(f.proxy.callTool({ name: "browser_snapshot" }), { code: "PERSONAL_PROJECTION_UNAVAILABLE" });
@@ -128,6 +136,26 @@ test("cleanup failure stays fenced and retry resumes release without reacquiring
   await assert.rejects(f.proxy.revoke(), { code: "CLEANUP_UNCONFIRMED" });
   await assert.rejects(f.proxy.callTool({ name: "browser_snapshot" }), /REVOKED/);
   await f.proxy.revoke(); assert.equal(f.released, 2); assert.equal(f.acquired, 1); assert.equal(f.browser.isConnected(), false);
+});
+
+test('official viewport screenshots expose no file paths, purge output and close on caller deadline', {timeout:20000}, async t=>{
+  const root=await temporaryDirectory(t);t.mock.method(os,'tmpdir',()=>root);
+  const f=fixture(t);await f.proxy.callTool({name:'browser_snapshot'});
+  const directory=path.join(root,(await readdir(root)).find(name=>name.startsWith('relay-official-browser-mcp-')));
+  const screenshot=await f.proxy.callTool({name:'browser_take_screenshot'});
+  assert.equal(screenshot.content.filter(item=>item.type==='image').length,1);
+  assert.deepEqual(await readdir(directory),[],'no accumulating screenshot output');
+  assert.doesNotMatch(JSON.stringify(screenshot.content.filter(item=>item.type!=='image')),/\.png|\/tmp|file:/);
+  const sockets=new Set(),site=http.createServer((req,res)=>{if(req.url==='/font')return;res.end('<style>@font-face{font-family:pending;src:url(/font)}body{font-family:pending}</style>Waiting font fixture');});
+  site.on('connection',socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));});
+  await new Promise(resolve=>site.listen(0,'127.0.0.1',resolve));t.after(async()=>{for(const socket of sockets)socket.destroy();await new Promise(resolve=>site.close(resolve));});
+  await f.page.goto(`http://127.0.0.1:${site.address().port}`,{waitUntil:'domcontentloaded'});
+  await until(()=>f.page.evaluate(()=>document.fonts.status==='loading'));
+  const controller=new AbortController(),pending=f.proxy.callTool({name:'browser_take_screenshot'},{signal:controller.signal});pending.catch(()=>{});
+  await delay(100);controller.abort(Error('Synthetic caller deadline'));
+  await assert.rejects(pending,/REVOKED/);
+  await assert.rejects(stat(directory),{code:'ENOENT'});
+  assert.equal(f.acquired,1);assert.equal(f.browser.isConnected(),false);
 });
 
 test("queued requests have an admission bound and revocation fences every waiting action", { timeout: 20000 }, async t => {

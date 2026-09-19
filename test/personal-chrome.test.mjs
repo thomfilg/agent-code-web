@@ -115,7 +115,7 @@ test("real Chrome extension keeps logins private until the per-chat toggle, and 
     // official agent gateway is covered by personal-official-mcp.test.mjs.
     const denied = await fetch(tokenConfig.url,{method:'POST',headers:{...tokenConfig.headers,'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list'})});
     assert.equal(denied.status,403);
-    await assert.rejects(client.connect(new StreamableHTTPClientTransport(new URL(tokenConfig.url), { requestInit: { headers: tokenConfig.headers } })), /Personal browser MCP access is unavailable or revoked/);
+    await assert.rejects(client.connect(new StreamableHTTPClientTransport(new URL(tokenConfig.url), { requestInit: { headers: tokenConfig.headers } })), /Browser MCP access is unavailable or revoked/);
     const screenshot = await app.manager.browsers.command(chat.id, "screenshot", {});
     assert.ok(screenshot.data.length > 1000, "the authorized user still sees the same real tab");
   } finally { await client.close(); }
