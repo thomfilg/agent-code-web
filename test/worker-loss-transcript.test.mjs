@@ -256,3 +256,58 @@ test("externally killed disposable worker process preserves both chats and the v
     assert.equal(f.adapters.length, 1, "read/reload must not start another worker");
   } finally { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); await exited; await f.manager.shutdown(); }
 });
+
+for (const fatal of [false, true]) test(`explicit ${fatal ? "fatal" : "normal Stop"} cleanup saves the closed child-agent snapshot without reopening retired callbacks`, async t => {
+  const f = await fixture(t, "codex");
+  try {
+    const { adapter, turn } = await f.start();
+    await adapter.hooks.onSessionId("root-fixture");
+    adapter.turn.resolve({ text: "Completed parent" }); await turn.completion;
+    let closed = false;
+    const snapshot = () => ({ rootThreadId: "root-fixture", awake: !closed, threads: [{ id: "child", status: closed ? "stopped" : "idle", messages: [{ text: "Saved child response" }], pendingRequest: null }] });
+    adapter.agents = { snapshot, busy: () => false };
+    adapter.hooks.onAgentThreads(snapshot());
+    adapter.stop = async () => { closed = true; adapter.hooks.onAgentThreads(snapshot()); };
+    if (fatal) await adapter.hooks.onFatal(Error("worker exit")); else await f.manager.stop(f.chat.id);
+    assert.equal((await f.manager.agentThreads.get(f.chat.id)).awake, false);
+    assert.equal((await f.manager.agentThreads.get(f.chat.id)).threads[0].messages[0].text, "Saved child response");
+    adapter.hooks.onAgentThreads({ ...snapshot(), awake: true });
+    assert.equal((await f.manager.agentThreads.get(f.chat.id)).awake, false, "late callbacks cannot resurrect the offline observer");
+  } finally { await f.manager.shutdown(); }
+});
+
+for (const changed of ["account", "lifecycle"]) test(`delayed stopped observer cannot replace a changed ${changed}'s snapshot even when its native thread ID matches`, async t => {
+  const f = await fixture(t, "codex"), gate = Promise.withResolvers();
+  try {
+    const { adapter, turn } = await f.start();
+    await adapter.hooks.onSessionId("same-root");
+    adapter.turn.resolve({ text: "Completed parent" }); await turn.completion;
+    adapter.agents = { snapshot: () => ({ rootThreadId: "same-root", awake: false, threads: [{ id: "old-child", messages: [] }] }), busy: () => false };
+    let closing = false;
+    adapter.stop = async () => { closing = true; await gate.promise; };
+    const stopping = f.manager.stop(f.chat.id); await waitFor(() => closing);
+    if (changed === "account") await f.store.update(f.chat.id, { ownerId: "different-fixture-owner" });
+    else await f.manager.stop(f.chat.id);
+    await f.manager.agentThreads.update(f.chat.id, { rootThreadId: "same-root", awake: false, threads: [{ id: "new-child", messages: [] }] });
+    gate.resolve(); await stopping;
+    assert.equal((await f.manager.agentThreads.get(f.chat.id)).threads[0].id, "new-child");
+  } finally { gate.resolve(); await f.manager.shutdown(); }
+});
+
+test("normal Stop still cleans up Chrome and worker when its final display snapshot cannot be saved", async t => {
+  const f = await fixture(t, "codex");
+  try {
+    const { adapter, turn } = await f.start();
+    await adapter.hooks.onSessionId("root-fixture");
+    adapter.turn.resolve({ text: "Completed parent" }); await turn.completion;
+    adapter.agents = { snapshot: () => ({ rootThreadId: "root-fixture", awake: false, threads: [] }), busy: () => false };
+    f.manager.agentThreads.update = async () => { throw Error("snapshot storage fixture failure"); };
+    let browsers = 0, workers = 0;
+    f.manager.browsers = { stop: async () => { browsers++; }, hasViewers: () => false, shutdown: async () => {} };
+    f.manager.workerBackend.sleep = async () => { workers++; };
+    await f.manager.stop(f.chat.id);
+    assert.equal(browsers, 1); assert.equal(workers, 1);
+    assert.equal(f.store.get(f.chat.id).status, "stopped");
+    assert.equal(f.events.some(event => event.type === "runtime_log" && /snapshot could not be saved/.test(event.text)), true);
+  } finally { await f.manager.shutdown(); }
+});
