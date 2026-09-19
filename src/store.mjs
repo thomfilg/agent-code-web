@@ -87,7 +87,7 @@ export class ChatStore {
     return chat ? clone(chat) : null;
   }
 
-  async create({ title, agent, source = "", repositories = [], environmentId = null, environmentName = null, autoTitle = true, model = null, effort = null, modelSelectionSet = false, ownerId = null, agentAccountId = null }, prepare = null) {
+  async create({ title, agent, source = "", repositories = [], environmentId = null, environmentName = null, autoTitle = true, model = null, effort = null, ultracode = false, modelSelectionSet = false, ownerId = null, agentAccountId = null }, prepare = null) {
     const id = newId("chat");
     const timestamp = nowIso();
     const chat = {
@@ -99,6 +99,7 @@ export class ChatStore {
       agentAccountId,
       model,
       effort,
+      ultracode: agent === "claude" && ultracode === true,
       modelSelectionSet,
       mode: "accept_edits",
       source,

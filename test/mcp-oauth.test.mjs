@@ -132,11 +132,11 @@ test("company connections reach both adapters without environment selection; sto
   app.manager.github.fetch = async () => { throw new Error("No real GitHub requests in this fixture"); };
   const included = await mcps.save({ name: "selected", companyId: "acme", type: "http", url: "https://included.example/mcp", headers: { Authorization: "Bearer upstream-secret" } });
   await mcps.save({ name: "not-selected", companyId: "other", type: "http", url: "https://excluded.example/mcp" });
-  const environment = await app.manager.environments.save({ name: "Company MCPs", backend: "local", companies: ["acme"], allowUnassigned: true, mcpIds: [] });
+  const environment = await app.manager.environments.save({ name: "Company MCPs", backend: "local", companies: ["acme"], mcpIds: [] });
   const selectedName = `relay_selected_${included.id.slice(4).replaceAll("-", "")}`;
   for (const agent of ["codex", "claude"]) {
-    const chat = await app.manager.createChat({ agent, title: "MCP worker", environmentId: environment.id });
-    await app.store.update(chat.id, { repositories: [{ id: 31, fullName: "acme/fixture", githubConnectionId: "github" }] });
+    const chat = await app.manager.createChat({ agent, title: "MCP worker" });
+    await app.store.update(chat.id, { environmentId: environment.id, repositories: [{ id: 31, fullName: "acme/fixture", githubConnectionId: "github" }] });
     await app.manager.send(chat.id, "load tools"); const runtime = seen.at(-1);
     assert.equal(runtime.agent, agent); assert.deepEqual(Object.keys(runtime.servers), [selectedName, "relay_browser", "relay_github"]);
     const browserToken = runtime.servers.relay_browser.headers.Authorization.slice(7);

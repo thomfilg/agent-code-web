@@ -19,6 +19,7 @@ import { errorMessage } from "./utils.mjs";
 import { createWorkerBackend } from "./worker-backends.mjs";
 import { openDatabase } from "./database.mjs";
 import { ChatOrganization } from "./chat-organization.mjs";
+import { rememberChatSelection, restoreChatSelection } from "./chat-preferences.mjs";
 import { GitHubConnection } from "./github.mjs";
 import { Companies } from "./companies.mjs";
 import { GitHubWorkerGateway } from "./github-worker-gateway.mjs";
@@ -348,7 +349,7 @@ export async function createAgentWebServer(options = {}) {
         await releaseIdentity(user);
         return json(response, 200, { user: null }, { "set-cookie": browserUsers.cookie() });
       }
-      if (url.pathname === "/api/browser-connections" && request.method === "GET") return json(response, 200, { connections: await manager.browsers.personal.list(user) });
+      if (url.pathname === "/api/browser-connections" && request.method === "GET") return json(response, 200, { connections: await manager.browsers.personal.list(user, { companyId: url.searchParams.has("companyId") ? url.searchParams.get("companyId") : undefined, includeLegacy: url.searchParams.get("includeLegacy") === "1" }) });
       if (url.pathname === "/api/browser-extension/download" && request.method === "GET") {
         const files = {};
         for (const name of ["manifest.json", "worker.js", "popup.html", "popup.css", "popup.js"]) files[`agent-relay-chrome/${name}`] = new Uint8Array(await readFile(new URL(`../chrome-extension/${name}`, import.meta.url)));
@@ -361,6 +362,7 @@ export async function createAgentWebServer(options = {}) {
         return json(response, 201, await manager.browsers.personal.pair(user, await bodyJson(request, 2000)));
       }
       const browserConnection = /^\/api\/browser-connections\/(browser_[a-f0-9-]{36})$/.exec(url.pathname);
+      if (browserConnection && request.method === "PATCH") { const input = await bodyJson(request, 2000); return json(response, 200, await manager.browsers.personal.assign(browserConnection[1], user, input.companyId)); }
       if (browserConnection && request.method === "DELETE") { await manager.browsers.personal.remove(browserConnection[1], user); return json(response, 200, { removed: true }); }
 
       if (url.pathname === "/api/health" && request.method === "GET") {
@@ -445,25 +447,40 @@ export async function createAgentWebServer(options = {}) {
         if (!environmentRoute[2] && request.method === "PATCH") return json(response, 200, { environment: await environments.save(await bodyJson(request, config.maxBodyBytes), id) });
         if (!environmentRoute[2] && request.method === "DELETE") { await environments.remove(id, store.list()); return json(response, 200, { removed: true }); }
       }
-      if (url.pathname === "/api/preferences" && request.method === "GET") return json(response, 200, { preferences: await records.get("preferences", "new-chat") || {}, projectAgents: googleAuth.enabled ? await agentAccounts.projectPreferences(user.id) : {} });
+      if (url.pathname === "/api/preferences" && request.method === "GET") return json(response, 200, { preferences: await records.get("preferences", "new-chat") || {}, selectionMemory: true, projectAgents: googleAuth.enabled ? await agentAccounts.projectPreferences(user.id) : {} });
+      if (url.pathname === "/api/preferences/restore" && request.method === "GET") return json(response, 200, await restoreChatSelection({ records, companies, environments, github,
+        chats: visibleChats(), agentAccounts, ownerId: user?.id, namedAccounts: googleAuth.enabled, availableAgents: manager.availableAgents(user?.id),
+      }, { companyId: url.searchParams.get("company"), repository: url.searchParams.get("repository") || undefined }));
       if (url.pathname === "/api/preferences" && request.method === "PATCH") {
         const body = await bodyJson(request, config.maxBodyBytes);
         if (googleAuth.enabled && ["codex", "claude"].includes(body.agent)) await agentAccounts.select(user.id, body.agentAccountId, body);
-        if (googleAuth.enabled && !["mock", "codex", "claude"].includes(body.agent)) return json(response, 403, { error: "No agent account is connected for this user" });
-        await environments.get(body.environmentId);
+        if (googleAuth.enabled && body.agent !== null && !["mock", "codex", "claude"].includes(body.agent)) return json(response, 403, { error: "No agent account is connected for this user" });
+        const environment = await environments.get(body.environmentId);
         if (!Array.isArray(body.repositories) || body.repositories.length > 100 || body.repositories.some(repo => typeof repo.fullName !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(repo.fullName) || typeof repo.branch !== "string" || repo.branch.length > 250)) throw new Error("Invalid repository preferences");
-        const modelSettings = await models.validate(body.agent, body, { ...body, ownerId: user?.id });
+        // Ultracode is an explicit per-chat mode, never a user/project default.
+        const { ultracode: ignoredUltracode, ...preferenceInput } = body;
+        const { ultracode: ignoredDefault, ...modelSettings } = body.agent ? await models.validate(body.agent, preferenceInput, { ...preferenceInput, ownerId: user?.id }) : { model: null, effort: null };
         if (body.repositories.some(repo => repo.githubConnectionId && !/^github(?:_[a-f0-9-]{36})?$/.test(repo.githubConnectionId))) throw new Error("Invalid GitHub connection preference");
         const connections = github.connections ? await github.connections() : [];
+        if (body.repositories.some(repo => repo.githubConnectionId && !connections.some(connection => connection.id === repo.githubConnectionId))) throw new Error("Saved GitHub connection is no longer available");
         const preferences = { environmentId: body.environmentId, agent: ["codex", "claude", "mock"].includes(body.agent) ? body.agent : null,
           ...(["codex", "claude"].includes(body.agent) && body.agentAccountId ? { agentAccountId: body.agentAccountId } : {}),
           ...modelSettings, repositories: body.repositories.map(({ fullName, branch, githubConnectionId }) => {
             const companyId = connections.find(connection => connection.id === githubConnectionId)?.companyId;
             return { fullName, branch, ...(githubConnectionId ? { githubConnectionId } : {}), ...(companyId ? { companyId } : {}) };
           }) };
+        await rememberChatSelection(records, preferences, environment);
         await records.put("preferences", "new-chat", preferences);
         if (googleAuth.enabled) await agentAccounts.rememberProject(user.id, preferences);
         return json(response, 200, { preferences });
+      }
+      if (url.pathname === "/api/new-chat/commands" && request.method === "GET") {
+        const agent = url.searchParams.get("agent");
+        if (!["codex", "claude", "mock"].includes(agent) || agent === "mock" && !config.enableMock) return json(response, 400, { error: "Choose an available agent" });
+        const context = { agent, ownerId: user?.id, agentAccountId: url.searchParams.get("agentAccountId") || null };
+        // Fixture command services may only implement existing-chat discovery;
+        // the built-in draft path remains readonly and account-scoped.
+        return json(response, 200, await (commands.newChat ? commands : new CommandCatalog(config, models)).newChat(context));
       }
       if (url.pathname === "/api/chats" && request.method === "GET") {
         return json(response, 200, { chats: visibleChats().map(summary) });
@@ -875,7 +892,7 @@ export async function createAgentWebServer(options = {}) {
       adapterFactory: options.adapterFactory || null,
     });
     manager.browsers = new SharedBrowsers({ store, config, acquire: chatId => manager.browserExecutor(chatId), onIdle: chatId => manager.browserIdle(chatId), isActive: chatId => manager.presence.has(chatId), onViewers: chatId => manager.refreshActivity(chatId), ...options.browserOptions });
-    manager.browsers.personal = new BrowserConnections({ records, store, ttlMs: config.sessionCapabilityTtlMs });
+    manager.browsers.personal = new BrowserConnections({ records, store, ttlMs: config.sessionCapabilityTtlMs, validateCompany: async (user, companyId) => (await resources.forOwner(user.id)).companies.get(companyId) });
     manager.browsers.personal.on("viewers", chatId => { void manager.refreshActivity(chatId).catch(() => {}); });
     manager.browsers.personal.on("changed", chatId => {
       manager.browsers.touch(chatId);

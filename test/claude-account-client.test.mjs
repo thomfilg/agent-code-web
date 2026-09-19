@@ -8,7 +8,7 @@ import { ClaudeAccountClient, ClaudeAccountError, readClaudeAuth } from "../src/
 import { claudeAuthFixture, claudeModelsFixture } from "./fixtures/claude-account.mjs";
 
 const url = "https://claude.com/cai/oauth/authorize?state=fixture-state&client_id=fixture-client&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&code_challenge_method=S256&response_type=code";
-function fixture({ loginUrl = url, quiet = false, initialModels = claudeModelsFixture, currentModels = claudeModelsFixture, listFailure = false, bootstrapGate = null, bootstrapMissing = false, profile = { account: { uuid: "person", email: "claude@example.test" }, organization: { uuid: "company" } } } = {}) {
+function fixture({ loginUrl = url, quiet = false, initialModels = claudeModelsFixture, currentModels = claudeModelsFixture, initialCommands = [{ name: "fixture-command" }], settingsSnapshot = {}, listFailure = false, bootstrapGate = null, bootstrapMissing = false, profile = { account: { uuid: "person", email: "claude@example.test" }, organization: { uuid: "company" } } } = {}) {
   const children = [], requests = [];
   const spawn = (command, args, options) => {
     const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, signalCode: null });
@@ -31,7 +31,7 @@ function fixture({ loginUrl = url, quiet = false, initialModels = claudeModelsFi
           if (request.request.subtype === "list_models" && listFailure === "timeout") return;
           child.stdout.write(`${JSON.stringify({ type: "control_response", response: {
             subtype: request.request.subtype === "list_models" && listFailure ? "error" : "success", request_id: request.request_id,
-            error: "PRIVATE fixture native diagnostic", response: request.request.subtype === "initialize" ? { models: initialModels, commands: [{ name: "fixture-command" }] } : { models: currentModels },
+            error: "PRIVATE fixture native diagnostic", response: request.request.subtype === "initialize" ? { models: initialModels, commands: initialCommands } : request.request.subtype === "get_settings" ? settingsSnapshot : { models: currentModels },
           } })}\n`);
         }
       })().then(() => done(), done);
@@ -89,10 +89,21 @@ test("Claude refresh/model inspection uses no user turn and always validates acc
   assert.deepEqual(await client.models(), claudeModelsFixture);
   assert.equal(children.length, 1); assert.ok(children[0].args.includes("--strict-mcp-config")); assert.ok(children[0].args.includes('{"disableAllHooks":true}'));
   assert.ok(requests.every(value => JSON.parse(value).type === "control_request"));
-  assert.deepEqual(requests.map(value => JSON.parse(value).request.subtype), ["initialize", "list_models"]);
+  assert.deepEqual(requests.map(value => JSON.parse(value).request.subtype), ["initialize", "list_models", "get_settings"]);
   const wrong = await setup(t, { profile: { account: {}, organization: {} } });
   await writeFile(path.join(wrong.client.home, ".credentials.json"), JSON.stringify(claudeAuthFixture()), { mode: 0o600 });
   await assert.rejects(() => wrong.client.snapshot(), ClaudeAccountError);
+});
+
+test("Ultracode capability reuses selected-account initialization without another process or a user prompt", async t => {
+  const { client, requests, children } = await setup(t, { initialCommands: [{ name: "effort", argumentHint: "[high|xhigh|ultracode]" }],
+    settingsSnapshot: { applied: { model: "native-fixture", effort: "high", ultracode: false }, sources: [{ secret: "must-not-leave-client" }] } });
+  await writeFile(path.join(client.home, ".credentials.json"), JSON.stringify(claudeAuthFixture()));
+  const models = await client.models();
+  assert.deepEqual(models.ultracodeDiscovery, { model: "native-fixture", advertised: true, control: true });
+  assert.equal(children.length, 1); assert.equal(requests.length, 3);
+  assert.ok(requests.every(packet => JSON.parse(packet).type === "control_request"));
+  assert.doesNotMatch(JSON.stringify(models.ultracodeDiscovery), /secret|must-not-leave-client/);
 });
 
 test("Claude current native list replaces only startup models and preserves disabled reasons and command metadata", async t => {
@@ -105,7 +116,7 @@ test("Claude current native list replaces only startup models and preserves disa
   assert.deepEqual(await client.models(), currentModels);
   assert.deepEqual(client.initialized.commands, [{ name: "fixture-command" }]);
   assert.equal(client.initialized.models.discoveryIncomplete, undefined);
-  assert.deepEqual(await client.models(), currentModels); assert.equal(requests.length, 2); assert.equal(children.length, 1);
+  assert.deepEqual(await client.models(), currentModels); assert.equal(requests.length, 3); assert.equal(children.length, 1);
   assert.notEqual(children[0].child.exitCode, null);
 });
 
@@ -115,7 +126,7 @@ test("Claude refresh control failure keeps only the same account startup snapsho
     await writeFile(path.join(client.home, ".credentials.json"), JSON.stringify(claudeAuthFixture()));
     const models = await client.models();
     assert.deepEqual(models, claudeModelsFixture); assert.equal(models.discoveryIncomplete, true);
-    assert.equal(children.length, 1); assert.equal(requests.length, 2); assert.notEqual(children[0].child.exitCode, null);
+    assert.equal(children.length, 1); assert.equal(requests.length, 3); assert.notEqual(children[0].child.exitCode, null);
   }
 });
 
@@ -140,7 +151,7 @@ test("cold-profile discovery waits for the native bootstrap completion before li
   assert.deepEqual(requests.map(value => JSON.parse(value).request.subtype), ["initialize"]);
   gate.resolve(); const models = await pending;
   assert.deepEqual(models, currentModels); assert.equal(models.discoveryIncomplete, undefined);
-  assert.deepEqual(requests.map(value => JSON.parse(value).request.subtype), ["initialize", "list_models"]);
+  assert.deepEqual(requests.map(value => JSON.parse(value).request.subtype), ["initialize", "list_models", "get_settings"]);
   assert.notEqual(children[0].child.exitCode, null);
 });
 

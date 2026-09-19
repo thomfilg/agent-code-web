@@ -1,8 +1,8 @@
-# Claude Ultracode: implementation plan, not a shipped feature
+# Claude Ultracode: native contract and bounded implementation
 
-Status: investigated against the installed Claude Code 2.1.222 binary; not yet
-implemented or validated with a real account/worker. This work is separate from
-the reviewed model-catalog and command-initialization fixes.
+Status: implemented in the `feat/claude-ultracode` component branch with isolated
+protocol/UI fixtures; not deployed or validated with a real selected account/worker.
+Native contract investigation used the installed Claude Code 2.1.222 binary.
 
 ## Observed native contract
 
@@ -32,7 +32,7 @@ Unknown/absent metadata is not support. In particular, xhigh in `list_models`
 alone does not establish that workflows are enabled. Do not set feature-gate,
 organization-policy, or environment overrides to manufacture support.
 
-## Proposed bounded implementation
+## Bounded implementation
 
 1. Preserve bounded `argumentHint` and its observed model in the existing
    selected-account metadata discovery; no additional CLI just to open a menu.
@@ -61,11 +61,44 @@ organization-policy, or environment overrides to manufacture support.
    policy must be explicit: default new conversations to false unless the user
    deliberately copies that chat setting.
 
-Likely files: `src/models.mjs`, `src/agent-accounts.mjs`,
-`src/claude-account-client.mjs` (reuse discovery), `src/store.mjs`,
-`src/runtime-manager.mjs`, `src/adapters/claude.mjs`, `src/claude-session.mjs`,
-`public/model-picker.js`, and focused new tests. Shared-file owners must be
-coordinated after the current release checkpoint.
+Implementation notes:
+
+- Discovery reuses the existing selected-account CLI process. The public catalog
+  receives only a capability boolean and fixed reason; raw settings and account
+  details are not published. Only the actually observed default/concrete model
+  is verified: support is not guessed for other aliases.
+- The picker stores a per-chat boolean alongside real `xhigh`, not a new native
+  effort enum. Ordinary xhigh remains separate. New-chat preference saves omit
+  the boolean even when the current draft explicitly selects Ultracode; new
+  chats, imported sessions and forks default false. Provider/model changes clear
+  it. A saved but unavailable selection stays visible and cannot silently run.
+- Actual SDK startup applies and reads back the native composed mode before
+  sending input, with selection/account/revision/lifecycle checks around awaits.
+  The same checks run inside queued settings persistence, not just before it.
+- Ordinary SDK turns explicitly clear and read back Ultracode whenever native
+  metadata advertises the boolean, including lower effort and fresh/resumed
+  processes. Ordinary xhigh or a previously enabled mode requires this receipt.
+  Older CLIs without the field may continue ordinary non-xhigh only when no
+  prior/requested mode is enabled; their optional discovery query is bounded.
+- Side-chat turns explicitly choose false; no sidebar/project preference enables
+  workflow orchestration. No organization-policy, feature-gate or environment
+  override is used to manufacture Ultracode availability.
+- Native `/code-review` and mutating `/mcp` commands use different control
+  transports. Their combination with explicit Ultracode is currently unsupported
+  and rejected before launch, without changing the saved mode or silently
+  downgrading it. Select ordinary effort to use these commands. Ordinary command
+  behavior is retained; completing these combinations is remaining work.
+
+Fixture verification covers discovery, missing/denied/malformed readback,
+workflow and effective-effort mismatch, startup/retained/resume behavior,
+settings races, new-chat isolation, and picker pending/unavailable states.
+Final component receipt: 212/212 focused Node tests and 3/3 browser tests passed
+serially on CPU 0,1 with no browser retries. The focused files include the new
+Ultracode suite plus Claude session, account discovery, settings, MCP, review,
+catalog, model picker, model/worker settings, and workspace-settings regressions.
+These fixtures do not establish that a deployed worker or real account is
+entitled to Ultracode. That remaining acceptance requires a separately authorized
+selected-account/worker test, including the actual native workflow observation.
 
 ## Required evidence before claiming completion
 

@@ -1,6 +1,7 @@
 import { scopeLabel, companyForChat } from "./company-scope.js";
 import { companyOptions } from "./companies.js";
 import { isLinearMcp } from "./mcp-provider.js";
+import { companyContext } from "./company-context.js";
 const $ = s => document.querySelector(s);
 const el = (tag, text, cls) => { const node = document.createElement(tag); node.textContent = text; if (cls) node.className = cls; return node; };
 const statuses = { unverified: "Not tested", needs_auth: "Sign-in required", connected: "Connected", error: "Connection failed", worker_pending: "Verified when the worker starts" };
@@ -28,13 +29,18 @@ export class McpSettings {
     $("#mcp-dialog").addEventListener("close", () => { $("#mcp-headers").value = ""; $("#mcp-client-secret").value = ""; this.current = null; clearTimeout(this.oauthTimer); this.pendingOAuth = null; });
     if (location.hash === "#mcp-connections") setTimeout(() => this.open(), 500);
   }
-  async load() {
+  async load({ validWhile = () => true } = {}) {
+    const revision = this.loadRevision = (this.loadRevision || 0) + 1;
     const [saved, catalog, { companies }, github] = await Promise.all([this.api("/api/mcps"), this.api("/api/mcps/presets"), this.api("/api/companies"), this.api("/api/github")]);
+    if (revision !== this.loadRevision || !validWhile()) return false;
+    if ($("#mcp-dialog").dataset.companyScoped === "true" && !companies.some(company => company.id === this.companyId)) throw new Error("This company is no longer available. Return to Settings and choose a company.");
     this.github = github.connections;
     this.connections = saved.connections; this.presets = catalog.presets; this.companies = companies; this.state.companies = companies;
     if (!companies.some(company => company.id === this.companyId)) this.companyId = companies.find(company => company.id === companyForChat(this.state.active || {}))?.id || companies[0]?.id || "";
     companyOptions($("#mcp-company-filter"), companies, this.companyId);
+    companyContext($("#mcp-dialog"), companies, this.companyId);
     this.renderCards();
+    return true;
   }
   matchesPreset(connection, preset) { return connection.type === "http" && connection.url?.replace(/\/$/, "") === preset.url.replace(/\/$/, ""); }
   connectionsFor(preset) { return this.connections.filter(connection => this.matchesPreset(connection, preset) && (connection.companyId === this.companyId || !connection.companyId && (!connection.companies?.length || connection.companies.includes(this.companyId)))); }
@@ -79,7 +85,7 @@ export class McpSettings {
     $("#mcp-title").textContent = "MCP connections"; $("#mcp-overview").hidden = false; $("#mcp-detail").hidden = true;
     this.renderCards();
   }
-  async open() { try { await this.load(); this.overview(); if (!$("#mcp-dialog").open) $("#mcp-dialog").showModal(); } catch (error) { this.toast(error.message); } }
+  async open(companyId = null, { validWhile = () => true } = {}) { try { if (companyId) this.companyId = companyId; $("#mcp-dialog").dataset.companyScoped = String(Boolean(companyId)); if (!await this.load({ validWhile }) || !validWhile()) return; this.overview(); if (!$("#mcp-dialog").open) $("#mcp-dialog").showModal(); } catch (error) { if (validWhile()) this.toast(error.message); } }
   edit(connection = null, preset = null) {
     this.current = connection?.id ? connection : null; this.dirty = false;
     this.preset = preset || this.presets.find(candidate => connection && this.matchesPreset(connection, candidate)) || null;

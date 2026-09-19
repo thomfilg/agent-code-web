@@ -37,9 +37,15 @@ models.codex = async () => ({ models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol"
 models.claude = async () => ({ models: [{ id: "opus", label: "Opus", efforts: ["auto", "low", "medium", "high", "xhigh", "max"] }, { id: "sonnet", label: "Sonnet", efforts: ["auto", "low", "medium", "high", "xhigh", "max"], defaultEffort: "high" }, { id: "haiku", label: "Haiku", efforts: ["auto"] }, { id: "default", label: "Claude account default", efforts: ["auto", "high"] }], source: "fixture" });
 const commands = { list: async chat => ({ commands: [{ name: "usage", kind: "Web control" }, { name: "goal", kind: "CLI command" }, { name: "work", description: "Installed work skill", kind: "Skill" }, { name: "workflow", description: "Workflow plugin", kind: "Skill" }, ...(chat.agent === "claude" ? [{ name: "claude-only", kind: "Skill" }] : [])] }) };
 const app = await createAgentWebServer({ config, records, github, models, commands }); await app.start();
+const originalMcpFetch = app.manager.mcps.fetch;
+app.manager.mcps.fetch = (url, options) => {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname) || parsed.username || parsed.password) throw new Error("Browser MCP fixture blocks non-loopback endpoints; use the dedicated provider test configuration");
+  return originalMcpFetch(url, { ...options, redirect: "manual" });
+};
 for (const id of ["acme", "other", "12-apps", "g2i"]) await (await app.resources.forOwner(null)).companies.save({ id, name: id });
 const defaultEnvironment = (await app.manager.environments.list())[0];
-await app.manager.environments.save({ ...defaultEnvironment, companies: ["acme", "other", "12-apps", "g2i"], allowUnassigned: true }, defaultEnvironment.id);
+await app.manager.environments.save({ ...defaultEnvironment, companies: ["acme"], companyId: "acme", allowUnassigned: false, confirmCompanyAssignment: true }, defaultEnvironment.id);
 for (const title of ["Existing alpha", "Existing beta"]) await app.manager.createChat({ agent: "mock", title });
 const prChat = await app.store.create({ agent: "mock", title: "PR controls fixture", repositories: [{ fullName: "Acme/api", defaultBranch: "main", branch: "feature/controls" }] });
 await app.store.update(prChat.id, { workflowState: "pr_failing", pullRequests: [{ repository: "Acme/api", number: 42, url: "https://github.com/Acme/api/pull/42", state: "open", headRef: "feature/controls", baseRef: "main", additions: 12, deletions: 3, conflicts: true, checks: "pending", ci: { passed: 2, skipped: 1, inProgress: 1, failed: 0, total: 4 }, autoMerge: false, verifiedAt: new Date().toISOString() }] });

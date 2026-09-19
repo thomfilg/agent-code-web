@@ -33,7 +33,7 @@ test("model catalog validates provider-specific effort and resets sticky Codex s
   assert.deepEqual(await catalog.creationSettings("codex"), { model: "gpt-5.6-sol", effort: "high" });
   assert.deepEqual(await catalog.creationSettings("claude"), { model: "opus", effort: "high" });
   assert.deepEqual(await catalog.creationSettings("claude", { model: "haiku" }), { model: "haiku", effort: null });
-  assert.deepEqual(await catalog.turnSettings({ agent: "claude", modelSelectionSet: true }), { model: "opus", effort: "high", resetEffort: false });
+  assert.deepEqual(await catalog.turnSettings({ agent: "claude", modelSelectionSet: true }), { model: "opus", effort: "high", resetEffort: false, ultracode: false });
 });
 
 test("Fast and personality settings use the selected model's advertised capabilities", async () => {
@@ -56,10 +56,11 @@ test("Fast and personality settings use the selected model's advertised capabili
 });
 test("Docker is persisted as a capability but cannot share a local control-plane daemon", async () => {
   const environments = new Environments(new MemoryRecords());
+  await environments.companies.save({ id: "fixture", name: "Fixture" });
   assert.ok(SOFTWARE_CATALOG.some(item => item.id === "docker"));
   await assert.rejects(environments.save({ name: "Unsafe local", backend: "local", software: ["docker"] }), /dedicated EC2/);
-  const environment = await environments.save({ name: "Container worker", backend: "ec2", allowUnassigned: true, software: ["docker"] });
-  assert.deepEqual((await environments.runtime(environment.id)).software, ["docker"]);
+  const environment = await environments.save({ name: "Container worker", backend: "ec2", companies: ["fixture"], software: ["docker"] });
+  assert.deepEqual((await environments.runtime(environment.id, { repositories: [{ fullName: "fixture/project" }] })).software, ["docker"]);
   await assert.rejects(prepareSoftware({ runtimeHome: "/tmp/fake-home", metadata: { backend: "local" }, mkdir: async () => {}, spawn: () => assert.fail("Local Docker must not be contacted") }, { software: ["docker"] }, async () => {}), /dedicated EC2/);
 });
 test("Docker preflight uses the dedicated worker and injects only worker-local socket/config", async () => {

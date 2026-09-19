@@ -59,15 +59,16 @@ test("MCP organizations filter grants by primary repository and keep same-provid
 });
 test("saved MCP credentials stay masked, selections validate, revisions conflict and stdio has no secret env", async () => {
   const records = new MemoryRecords(), mcps = new McpConnections(records), envs = new Environments(records, "local", mcps);
-  const connection = await mcps.save({ name: "tools", allowUnassigned: true, type: "http", url: "https://tools.example/mcp", headers: { Authorization: "Bearer protected" } });
+  await envs.companies.save({ id: "fixture", name: "Fixture" });
+  const connection = await mcps.save({ name: "tools", companies: ["fixture"], type: "http", url: "https://tools.example/mcp", headers: { Authorization: "Bearer protected" } });
   assert.equal(connection.headers, undefined); assert.equal(connection.hasCredentials, true); assert.ok(!JSON.stringify(await mcps.list()).includes("protected"));
-  const environment = await envs.save({ name: "MCP env", backend: "local", allowUnassigned: true, mcpIds: [connection.id] });
-  assert.deepEqual((await envs.runtime(environment.id)).mcpIds, [connection.id]);
+  const environment = await envs.save({ name: "MCP env", backend: "local", companies: ["fixture"], mcpIds: [connection.id] });
+  assert.deepEqual((await envs.runtime(environment.id, { repositories: [{ fullName: "fixture/project" }] })).mcpIds, [connection.id]);
   await assert.rejects(mcps.remove(connection.id), /environments/);
   await assert.rejects(mcps.save({ ...connection, name: "changed", revision: 0 }, connection.id), /changed/);
   await assert.rejects(mcps.validateSelection(["missing"]), /Choose/);
   await assert.rejects(mcps.save({ name: "stdio", type: "stdio", command: "npx", args: [], env: { SECRET: "secret" } }), /Protected credentials/);
-  const runtime = await mcps.runtime("chat-a", [connection.id], "http://localhost:8787");
+  const runtime = await mcps.runtime("chat-a", [connection.id], "http://localhost:8787", { repositories: [{ fullName: "fixture/project" }] });
   assert.ok(!JSON.stringify(runtime).includes("protected")); assert.match(codexMcpArgs(runtime).join(" "), /http_headers/);
 });
 test("MCP gateway scopes capabilities, preserves protocol headers, blocks redirects and revokes on sleep", async t => {

@@ -37,6 +37,7 @@ import { claudePluginReloadRequest, CLAUDE_PLUGIN_PRIVATE_ERROR } from "./claude
 import { claudeDebugRequest, CLAUDE_DEBUG_PRIVATE_ERROR } from "./claude-debug.mjs";
 import { githubWorkerMcpConfig } from "./github-worker-mcp.mjs";
 import { runtimeMcpSecrets } from "./worker-capabilities.mjs";
+import { HIBERNATION_UNAVAILABLE, hibernationAdmission, hibernationUnavailableError } from "./worker-suspension.mjs";
 import { startupStage, failRunningStartup } from "./startup-progress.mjs";
 
 const ADAPTERS = {
@@ -624,7 +625,7 @@ export class RuntimeManager extends EventEmitter {
     const workspace = runtime.executor?.workspace || chat.workspace;
     const attached = attachmentPrompt(materialized, workspace);
     const prompt = first ? handoffPrompt({ ...chat, messages: [...chat.messages, {}] }, text + attached) : text + attached;
-    return { prompt, settings: { ...settings, ...contextForTurn(files, workspace), appReferences: appReferencesForTurn(chat, files, companyForChat(chat)), mode: chat.mode || "accept_edits", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) } };
+    return { prompt, settings: { ...settings, ...(chat.agent === "claude" ? { ultracode: false } : {}), ...contextForTurn(files, workspace), appReferences: appReferencesForTurn(chat, files, companyForChat(chat)), mode: chat.mode || "accept_edits", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) } };
   }
 
   async servicesFor(chat) { return this.resources ? this.resources.forOwner(chat?.ownerId) : { environments: this.environments, github: this.github, mcps: this.mcps }; }
@@ -747,9 +748,13 @@ export class RuntimeManager extends EventEmitter {
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     if (chat.archived || this.#previewStops.has(chatId)) throw Object.assign(new Error("This environment is archived or stopping"), { statusCode: 409 });
     if (this.#executors.has(chatId)) return this.#executors.get(chatId);
+    if (this.config.idlePolicy === "hibernate" && !hibernationAdmission().available) {
+      await this.#suspensionUnavailable(chatId, { admission: true });
+      throw hibernationUnavailableError();
+    }
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const controller = new AbortController();
-    let acquisitionStarted = false;
+    let acquisitionStarted = false, acquisitionMutation;
     this.#startupControllers.set(chatId, controller);
     const check = () => { controller.signal.throwIfAborted(); if (!this.store.get(chatId) || this.store.get(chatId).archived || (this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" }); };
     const pending = (async () => {
@@ -775,6 +780,7 @@ export class RuntimeManager extends EventEmitter {
         if (this.config.workerBackend !== "ec2") { await repositories; check(); }
         check(); acquisitionStarted = true;
         return this.workerBackend.acquire(this.store.get(chatId), { workspaceReady: repositories, check,
+          onMutation: receipt => { acquisitionMutation = receipt; },
           onStage: (id, status) => this.#startupStage(chatId, id, status, version) });
       })());
       const [repoResult, workerResult] = await Promise.allSettled([repositories, acquisition]);
@@ -793,7 +799,10 @@ export class RuntimeManager extends EventEmitter {
       return executor;
     })().catch(async error => {
       if (acquisitionStarted && this.#executors.get(chatId) === pending) {
-        try { await this.workerBackend.sleep(chat); pending.workerReleased = true; }
+        try {
+          if (acquisitionMutation) { await acquisitionMutation.release(); pending.workerReleased = true; }
+          else if (this.config.workerBackend !== "ec2") { await this.workerBackend.sleep(chat); pending.workerReleased = true; }
+        }
         catch { pending.cleanupFailed = true; throw new Error("Worker startup failed and its machine could not be stopped. Use Stop to retry cleanup before waking it again."); }
       }
       if ((this.#lifecycleVersions.get(chatId) || 0) === version && this.store.get(chatId)) {
@@ -901,7 +910,7 @@ export class RuntimeManager extends EventEmitter {
       await this.stop(chatId, "agent-switch");
       const updated = await this.store.update(chatId, current => ({ agent, agentAccountId, ...settings, modelSelectionSet: true,
         ...(agent !== "claude" && ["default", "dont_ask"].includes(current.mode) ? { mode: "plan" } : {}),
-        agentSessionId: null, needsAgentHandoff: true, pendingRequest: null, awaitingUser: false, claudeFastMode: false, claudeFastStatus: null,
+        agentSessionId: null, needsAgentHandoff: true, pendingRequest: null, awaitingUser: false, claudeFastMode: false, claudeFastStatus: null, ultracode: false,
         nativeForkSessionId: null, forkGoalPending: false, forkContextPending: false, goal: null,
         usage: null, usageAccount: null, rateLimits: null, sessionDetails: null, taskProgress: null, connectors: null, slashCommands: [], commandCatalog: [],
         messages: current.messages.map(message => ["assistant", "tool"].includes(message.role) ? { ...message, agent: message.agent || current.agent } : message),
@@ -918,10 +927,18 @@ export class RuntimeManager extends EventEmitter {
     if (this.#switching.has(chatId)) throw Object.assign(new Error("Wait for the agent switch to finish"), { statusCode: 409 });
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    const selectionVersion = this.#lifecycleVersions.get(chatId) || 0;
     const settings = await this.models.validate(chat.agent, input, chat);
-    guard();
-    if (this.#switching.has(chatId) || this.store.get(chatId)?.agent !== chat.agent) throw Object.assign(new Error("The agent changed; select its model again"), { statusCode: 409 });
-    const updated = await this.store.update(chatId, current => { guard(); return { ...settings, modelSelectionSet: true, modelSettingsRevision: (current.modelSettingsRevision || 0) + 1 }; });
+    const check = selected => {
+      guard();
+      if (this.#switching.has(chatId) || !selected || runtimeAccountBinding(selected) !== runtimeAccountBinding(chat)
+        || selected.modelSettingsRevision !== chat.modelSettingsRevision || (this.#lifecycleVersions.get(chatId) || 0) !== selectionVersion) throw Object.assign(new Error("The agent or settings changed; select its model again"), { statusCode: 409 });
+    };
+    check(this.store.get(chatId));
+    const updated = await this.store.update(chatId, current => {
+      check(current);
+      return { ...settings, modelSelectionSet: true, modelSettingsRevision: (current.modelSettingsRevision || 0) + 1 };
+    });
     this.publishChat(updated); return updated;
   }
 
@@ -1004,7 +1021,7 @@ export class RuntimeManager extends EventEmitter {
       if (Object.hasOwn(native, "model")) {
         if (current.model === original.model && current.effort === original.effort && current.modelSettingsRevision === original.modelSettingsRevision) {
           const selected = catalog?.models.find(item => item.id === native.model);
-          patch.model = native.model; patch.modelSelectionSet = true;
+          patch.model = native.model; patch.modelSelectionSet = true; patch.ultracode = false;
           patch.modelSettingsRevision = (current.modelSettingsRevision || 0) + 1;
           patch.effort = current.effort === "auto" || selected?.efforts.includes(current.effort) ? current.effort : "auto";
         } else conflicts.push("model/effort");
@@ -1090,7 +1107,7 @@ export class RuntimeManager extends EventEmitter {
         patch.modelSettingsRevision = (current.modelSettingsRevision || 0) + 1;
         // Native /fast on promotes unsupported aliases to Opus. Keep that
         // choice on the next print-mode process, without lowering effort.
-        if (result.fastPreference && /^opus(?:\[1m\])?$/.test(result.fastModel || "")) { patch.model = result.fastModel; patch.modelSelectionSet = true; }
+        if (result.fastPreference && /^opus(?:\[1m\])?$/.test(result.fastModel || "")) { patch.model = result.fastModel; patch.modelSelectionSet = true; if (patch.model !== current.model) patch.ultracode = false; }
       }
       patch.claudeFastStatus.selectionRevision = patch.modelSettingsRevision ?? current.modelSettingsRevision ?? 0;
       return patch;
@@ -1529,6 +1546,11 @@ export class RuntimeManager extends EventEmitter {
         this.#assertNativeAccount(chatId, runtime);
         return runtime.adapter.send(claude ? raw : metadata ? responsePrompt(prompt, automaticTitle) : prompt, {
         ...settings, ...explicitContext, appReferences: appReferencesForTurn(currentChat, files, companyForChat(currentChat)), ...(skill ? { skills: [skill] } : {}),
+        ...(claude ? { selectionCurrent: () => {
+          const selected = this.store.get(chatId);
+          return modeActive() && selected && runtimeAccountBinding(selected) === runtimeAccountBinding(settingsChat)
+            && selected.modelSettingsRevision === settingsChat.modelSettingsRevision;
+        } } : {}),
         ...(commandAction?.type === "review" ? { reviewTarget: commandAction.target } : {}),
         ...(commandAction?.type === "goal" ? { goalDirective: commandAction } : currentChat.forkGoalPending && currentChat.mode !== "plan" && commandAction?.type !== "review" ? { goalDirective: { action: "resume", fork: true } } : {}),
         ...(claude ? { systemPrompt: responsePrompt("", automaticTitle) + (currentChat.needsAgentHandoff ? handoffPrompt(currentChat, "") : "") + browserPrompt,
@@ -1675,6 +1697,9 @@ export class RuntimeManager extends EventEmitter {
   async stop(chatId, reason = "manual") {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("chat not found"), { statusCode: 404 });
+    // An idle request must never enter destructive Stop, even when suspension
+    // support or diagnostic persistence fails. Manual/revocation Stop is separate.
+    if (reason === "idle-timeout" && this.config.idlePolicy === "hibernate") return this.#suspensionUnavailable(chatId);
     const stoppingExecutor = this.#executors.get(chatId);
     this.#previewStops.set(chatId, (this.#previewStops.get(chatId) || 0) + 1);
     let stopped = false;
@@ -1942,7 +1967,7 @@ export class RuntimeManager extends EventEmitter {
       await this.browsers?.stop(chatId);
       checkCancelled();
       if (!this.#executors.get(chatId)?.cleanupFailed) this.#executors.delete(chatId);
-      if (executor) await this.workerBackend.sleep(chat).catch(() => {});
+      if (executor) await (this.config.workerBackend === "ec2" ? executor.releaseAcquisition?.() : this.workerBackend.sleep(chat))?.catch(() => {});
       checkCancelled();
       await this.store.update(chatId, current => { checkCancelled(); return { startupProgress: failRunningStartup(current.startupProgress) }; });
       checkCancelled();
@@ -1980,7 +2005,7 @@ export class RuntimeManager extends EventEmitter {
       this.#executors.delete(chatId);
       await adapter?.stop().catch(() => {});
       checkCancelled();
-      if (chat.agent !== "mock") await this.workerBackend.sleep(chat).catch(() => {});
+      if (chat.agent !== "mock") await (this.config.workerBackend === "ec2" ? executor?.releaseAcquisition?.() : this.workerBackend.sleep(chat))?.catch(() => {});
       checkCancelled();
       await this.store.update(chatId, current => { checkCancelled(); return { startupProgress: failRunningStartup(current.startupProgress) }; });
       checkCancelled();
@@ -2006,9 +2031,24 @@ export class RuntimeManager extends EventEmitter {
     runtime.idleTimer = setTimeout(() => {
       if (this.#importPending(chatId) || this.#forking.has(chatId) || runtime.adapter.hasScheduledWork?.() || runtime.adapter.agents?.busy() || this.sideChats.busy(chatId) || this.browsers?.hasViewers(chatId) || this.previewActivity.has(chatId) || this.workspacePresence.has(chatId) || this.presence.has(chatId)) { void this.#scheduleIdleStop(chatId, runtime); return; }
       if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.trustReviewing || runtime.adapter.isBackgroundBusy?.()) return;
-      this.stop(chatId, "idle-timeout").catch((error) => this.#fatal(chatId, error));
+      this.stop(chatId, "idle-timeout").catch((error) => {
+        if (this.config.idlePolicy === "hibernate") this.#emit(chatId, { type: "runtime_log", text: "Hibernation unavailable; its diagnostic could not be saved. Worker left running; use Stop explicitly." });
+        else this.#fatal(chatId, error);
+      });
     }, this.config.idleTimeoutMs);
     runtime.idleTimer.unref?.();
+  }
+
+  async #suspensionUnavailable(chatId, { admission = false } = {}) {
+    const version = this.#lifecycleVersions.get(chatId) || 0;
+    const updated = await this.store.update(chatId, current => {
+      if ((this.#lifecycleVersions.get(chatId) || 0) !== version || current.archived || current.status === "stopping") return {};
+      if (!admission && (this.isBusy(chatId) || current.status === "running" || this.sideChats.busy(chatId) || this.presence.has(chatId) || this.previewActivity.has(chatId) || this.workspacePresence.has(chatId) || this.browsers?.hasViewers(chatId))) return {};
+      return { idleDeadlineAt: null, idleKeepAwakeReason: "hibernation-unavailable", statusDetail: HIBERNATION_UNAVAILABLE,
+        suspension: { policy: "hibernate", status: "unavailable", checkedAt: nowIso() } };
+    });
+    if ((this.#lifecycleVersions.get(chatId) || 0) === version && updated) this.publishChat(updated);
+    return updated;
   }
 
   async #setStatus(chatId, status, statusDetail, idleDeadlineAt) {
