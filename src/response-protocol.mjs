@@ -8,8 +8,8 @@ export function responsePrompt(text, automaticTitle) {
 }
 export function extractResponse(text, automaticTitle = true) {
   const waiting = [...text.matchAll(metadata)].at(-1)?.[1] === "yes";
-  const output = automaticTitle ? extractTitle(text) : { text, title: null };
-  return { ...output, text: output.text.replace(metadata, "").trimEnd(), awaitingUser: waiting };
+  const output = extractTitle(text);
+  return { ...output, title: automaticTitle ? output.title : null, text: output.text.replace(metadata, "").trimEnd(), awaitingUser: waiting };
 }
 
 // Hide metadata even when a tag is split across streaming chunks. Ordinary text
@@ -17,8 +17,8 @@ export function extractResponse(text, automaticTitle = true) {
 export class ResponseStream {
   constructor(emit, automaticTitle) {
     this.buffer = "";
-    this.title = automaticTitle ? new TitleStream(emit) : null;
-    this.emit = delta => this.title ? this.title.delta(delta) : emit({ type: "assistant_delta", delta });
+    this.title = new TitleStream(event => { if (event.type !== "title" || automaticTitle) emit(event); });
+    this.emit = delta => this.title.delta(delta);
   }
   delta(delta) {
     this.buffer += delta;
