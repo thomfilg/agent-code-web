@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Manual acceptance driver through the official Playwright MCP. Every identity,
 // credential, provider response and record below belongs to disposable fixtures.
+// Run after npm run build:auth: taskset -c 0,1 nice -n 10 node scripts/smoke-account-ux-mcp.mjs
+// This verifies configuration UX only, not real OAuth consent or worker startup.
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
@@ -19,10 +21,16 @@ const directory = await mkdtemp(path.join(os.tmpdir(), "relay-account-mcp-"));
 const screenshots = path.join(root, "test-results/account-ux-mcp");
 await mkdir(screenshots, { recursive: true });
 const google = googleOidcFixture(), codex = codexAccountFixture(), claude = claudeAccountFixture();
+let workerAcquisitions = 0, adapterStarts = 0;
 const app = await createAgentWebServer({
   config: testConfig(directory, { ...googleTestEnv, AGENT_ENABLE_MOCK: "0", OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "" }),
   googleAuthOptions: { fetchImpl: google.fetch },
   agentAccountsOptions: { clientFactory: provider => provider === "claude" ? claude.factory() : codex.factory() },
+  workerBackend: {
+    acquire: async () => { workerAcquisitions++; throw Error("Configuration fixture must not acquire a worker"); },
+    sleep: async () => {}, destroy: async () => {},
+  },
+  adapterFactory: () => { adapterStarts++; throw Error("Configuration fixture must not launch a native agent"); },
 });
 const client = new Client({ name: "relay-account-ux-fixtures", version: "1.0.0" });
 const transport = new StdioClientTransport({ command: process.execPath,
@@ -53,39 +61,44 @@ try {
   assert.equal(new URL(url).hostname, "127.0.0.1");
   assert.notEqual(new URL(url).port, "8787");
   app.config.google.origin = url; await app.googleAuth.initialize();
-  const fixture = cookieClient(url); await fixture.login(google);
+  const fixture = cookieClient(url), owner = await fixture.login(google);
+  const services = await app.resources.forOwner(owner.id);
+  let runtimeCalls = 0;
+  // This is account/configuration acceptance, never native model acceptance.
+  for (const method of ["send", "submit", "enqueue", "wake"]) app.manager[method] = async () => { runtimeCalls++; throw Error("Fixture must not start a worker or send a model prompt"); };
   await client.connect(transport);
   const cookies = [...fixture.cookies].map(([name, value]) => ({ name, value, url, httpOnly: true, sameSite: "Lax" }));
   privateFixtureValues.push(...cookies.map(cookie => cookie.value));
-  await run(`await page.context().addCookies(${JSON.stringify(cookies)}); await page.goto(${JSON.stringify(url)});`);
+  await run(`await page.context().route('**/*', route => route.request().url().startsWith(${JSON.stringify(url + "/")}) ? route.continue() : route.abort());
+    await page.context().addCookies(${JSON.stringify(cookies)}); await page.goto(${JSON.stringify(url + "/#new")});`);
   await call("browser_resize", { width: 390, height: 844 });
-  await run(`await page.locator('#welcome-new-chat').click();
-    await page.locator('#agent-account-hint').filter({hasText:'No agent is connected'}).waitFor();
+  await run(`await page.locator('#new-chat-page').waitFor();
+    await page.locator('#agent-account-hint').filter({hasText:'Connect Codex or Claude'}).waitFor();
     if (!(await page.locator('#create-chat-button').isDisabled())) throw Error('Chat creation must require an account');
     await page.locator('#connect-codex-button').click();`);
   await shot("01-no-agent-onboarding.png");
   await run(`await page.locator('#agent-account-new').click();
     await page.getByLabel('Account name',{exact:true}).fill('Personal');
-    await page.locator('#agent-account-companies').getByLabel('Unassigned chats (no company)',{exact:true}).check();
+    if(await page.locator('#agent-account-companies').count()) throw Error('Agent accounts must not require company assignment');
     await page.getByRole('button',{name:'Sign in to Codex',exact:true}).click();
     await page.getByRole('region',{name:'Personal · Codex',exact:true}).getByRole('link',{name:'Open Codex sign-in for Personal',exact:true}).waitFor();`);
   codex.clients.at(-1).approve();
   await run(`await page.getByRole('region',{name:'Personal · Codex',exact:true}).getByText('codex@example.test · Connected',{exact:true}).waitFor();
     await page.locator('#agent-account-new').click();
     await page.getByLabel('Account name',{exact:true}).fill('Company');
-    await page.locator('#agent-account-companies').getByLabel('Add companies',{exact:true}).fill('example-company');
-    await page.locator('#agent-account-companies').getByRole('button',{name:'Add companies',exact:true}).click();
     await page.getByRole('button',{name:'Sign in to Codex',exact:true}).click();
     await page.getByRole('region',{name:'Company · Codex',exact:true}).getByRole('link',{name:'Open Codex sign-in for Company',exact:true}).waitFor();
     if (await page.getByRole('region',{name:'Personal · Codex',exact:true}).getByRole('link').count()) throw Error('Unrelated account must not acquire another account link');`);
   await shot("02-company-login-is-account-scoped.png");
+  const pendingCodex = codex.clients.findLast(item => item.completed && !item.closed);
+  assert.ok(pendingCodex, "Pending fixture login must exist before deletion");
   await call("browser_click", { target: 'role=region[name="Company · Codex"] >> role=button[name="Delete account"]' });
   await call("browser_handle_dialog", { accept: true });
   await run(`await page.getByRole('region',{name:'Company · Codex',exact:true}).waitFor({state:'detached'});`);
+  assert.equal(pendingCodex.cancelled, true); assert.equal(pendingCodex.closed, true);
   await run(`await page.locator('#agent-account-new').click();
     await page.locator('#agent-account-provider').selectOption('claude');
     await page.getByLabel('Account name',{exact:true}).fill('Claude Personal');
-    await page.locator('#agent-account-companies').getByLabel('Unassigned chats (no company)',{exact:true}).check();
     await page.getByRole('button',{name:'Sign in to Claude',exact:true}).click();
     await page.getByRole('region',{name:'Claude Personal · Claude',exact:true}).getByRole('link',{name:'Open Claude sign-in for Claude Personal',exact:true}).waitFor();`);
   await shot("03-claude-link-and-code.png");
@@ -95,8 +108,7 @@ try {
     await card.getByText('claude@example.test · Connected',{exact:true}).waitFor();
     if (await card.locator('input').count()) throw Error('Completed code must disappear');`);
   await shot("04-two-providers-connected-fixtures.png");
-  await run(`await page.getByRole('button',{name:'Close agent accounts',exact:true}).click();
-    await page.locator('#new-chat-dialog').getByRole('button',{name:'Close',exact:true}).click();`);
+  await run(`await page.getByRole('button',{name:'Close agent accounts',exact:true}).click();`);
   // Exact dialog labeling can vary independently; the page must always fit.
   for (const width of [320, 390, 1600]) {
     await call("browser_resize", { width, height: 1000 });
@@ -104,67 +116,136 @@ try {
     assert.match(result, /"fits":\s*true/);
   }
   assert.equal(app.store.list().length, 0);
-  assert.equal(app.agentAccounts.list(app.googleAuth.legacyOwnerId).length, 2);
-  // GitHub permission is provider-owned: even an old empty Relay company list
-  // must not require a second setup step. Agent/environment scopes stay intact.
-  // All records and upstream responses below belong to disposable fixtures.
-  for (const account of app.agentAccounts.list(app.googleAuth.legacyOwnerId)) {
-    const saved = await app.agentAccounts.get(app.googleAuth.legacyOwnerId, account.id);
-    await app.agentAccounts.save({ ...saved, companies: ["12-apps", "thomfilg"], allowUnassigned: false });
+  const accounts = app.agentAccounts.list(owner.id);
+  assert.equal(accounts.length, 2);
+  const personal = accounts.find(account => account.provider === "codex");
+  const claudePersonal = accounts.find(account => account.provider === "claude");
+  // Real owner isolation through the signed, entirely synthetic OIDC boundary.
+  const member = cookieClient(url);
+  await member.login(google, { sub: "google-member", email: "member@example.com", email_verified: true, name: "Fixture member" });
+  assert.deepEqual((await (await member.request("/api/agent-accounts")).json()).accounts, []);
+  for (const method of ["GET", "DELETE"]) assert.equal((await member.request(`/api/agent-accounts/${personal.id}`, { method })).status, 404);
+  assert.equal((await member.request(`/api/models?agent=codex&account=${personal.id}`)).status, 404);
+  // Companies are registered through the visible Settings hub, not hidden
+  // legacy sidebar buttons. One company may contain several GitHub owners.
+  await run(`await page.getByRole('button',{name:'Settings',exact:true}).click();`);
+  for (const [id, name] of [["personal-projects", "Personal projects"], ["example-company", "Company"]]) {
+    await run(`const hub=page.locator('#company-settings-dialog');
+      if(await hub.locator('#settings-company-form').isHidden()) await hub.getByRole('button',{name:'+ Add company',exact:true}).click();
+      await hub.getByLabel('Company name',{exact:true}).fill(${JSON.stringify(name)});
+      await hub.getByLabel('Company identifier',{exact:true}).fill(${JSON.stringify(id)});
+      await hub.getByRole('button',{name:'Save company',exact:true}).click();
+      await hub.locator('#settings-tab-${id}[aria-selected=true]').waitFor();`);
   }
-  const fixtureRepo = { id: 101, full_name: "12-apps/fixture-repo", name: "fixture-repo", private: true, default_branch: "main", size: 0 };
+  await run(`await page.getByRole('button',{name:'Close settings',exact:true}).click();`);
+  const repos = [
+    { id: 101, full_name: "12-apps/fixture-repo", name: "fixture-repo" },
+    { id: 102, full_name: "thomfilg/fixture-shared", name: "fixture-shared" },
+    { id: 103, full_name: "example-org/company-repo", name: "company-repo" },
+  ].map(repo => ({ ...repo, private: true, default_branch: "main", size: 0 }));
+  const fixtureRepo = repos[0];
   let repositoryReads = 0;
-  app.resources.legacy.github.fetch = async target => {
+  services.github.fetch = async (target, options) => {
     const pathname = new URL(target).pathname;
-    if (pathname === "/user") return Response.json({ id: 42, login: "fixture-github" });
-    if (pathname === "/user/repos") { repositoryReads++; return Response.json([fixtureRepo]); }
-    if (pathname === "/repos/12-apps/fixture-repo") return Response.json(fixtureRepo);
+    const authorization = new Headers(options?.headers).get("authorization");
+    assert.ok(["Bearer fixture_company_credential", "Bearer fixture_personal_credential"].includes(authorization), "Only explicit fixture GitHub credentials may be used");
+    const company = authorization === "Bearer fixture_company_credential";
+    const allowed = company ? repos.slice(2) : repos.slice(0, 2);
+    if (pathname === "/user") return Response.json({ id: company ? 43 : 42, login: company ? "fixture-company" : "fixture-personal" });
+    if (pathname === "/user/repos") { repositoryReads++; return Response.json(allowed); }
+    for (const repo of allowed) {
+      if (pathname === `/repos/${repo.full_name}`) return Response.json(repo);
+      if (pathname === `/repos/${repo.full_name}/branches`) return Response.json([{ name: "main" }, { name: "dev" }]);
+    }
     throw new Error("Unexpected fixture GitHub request");
   };
-  await app.resources.legacy.github.connect({ token: "fixture_github_credential_only", name: "Fixture GitHub", companies: [], allowUnassigned: false });
-  await run(`await page.reload(); await page.locator('#welcome-new-chat').click();
-    await page.locator('#repository-results').getByRole('checkbox').waitFor();
-    if(await page.locator('#github-companies').count())throw Error('GitHub must not have an extra company selector');
-    if (!(await page.locator('#new-agent-account').isDisabled())) throw Error('Unassigned chat must not offer company accounts');
-    if (!(await page.locator('#create-chat-button').isDisabled())) throw Error('Incomplete setup must not create chats');
-    const order=await page.evaluate(()=>document.querySelector('#repository-picker').compareDocumentPosition(document.querySelector('#new-agent-account-field'))&Node.DOCUMENT_POSITION_FOLLOWING);
-    if(!order)throw Error('Repositories must precede company-dependent accounts');
-    await page.getByRole('button',{name:'Manage agent accounts',exact:true}).click();
-    await page.locator('#agent-account-new').waitFor();
-    await page.getByRole('button',{name:'Close agent accounts',exact:true}).click();`);
-  assert.ok(repositoryReads > 0, "Connected GitHub lists provider-authorized repositories without another permission step");
-  await call("browser_resize", { width: 390, height: 1000 });
-  await shot("05-repositories-immediately-available.png");
-  await run(`await page.locator('#repository-results').getByRole('checkbox').check();
-    await page.locator('#agent-select').selectOption('codex');
-    await page.locator('#new-agent-account').selectOption({label:'Personal · codex@example.test'});
+  const personalGitHub = (await services.github.connect({ token: "fixture_personal_credential", name: "Fixture personal GitHub", companyId: "personal-projects" })).connection;
+  const companyGitHub = (await services.github.connect({ token: "fixture_company_credential", name: "Fixture company GitHub", companyId: "example-company" })).connection;
+  await assert.rejects(services.github.connect({ token: "fixture_duplicate_credential", name: "Duplicate", companyId: "personal-projects" }), /one|already/i);
+  await assert.rejects(services.github.connect({ token: "fixture_multi_credential", name: "Invalid", companies: ["personal-projects", "example-company"] }));
+  await run(`await page.reload(); await page.locator('#new-chat-page').waitFor();
+    await page.locator('#new-agent-account').selectOption(${JSON.stringify(personal.id)});
     await page.locator('#new-model-controls[data-status=ready]').waitFor();
-    if(!(await page.locator('#create-chat-button').isDisabled()))throw Error('Missing company environment must block creation');
-    await page.locator('#environment-settings').click();
-    await page.locator('#environment-companies').getByRole('checkbox',{name:'12-apps',exact:true}).check();
-    await page.getByRole('button',{name:'Save environment',exact:true}).click();
-    await page.locator('#environment-save-status').getByText('Saved securely',{exact:true}).waitFor();
-    await page.getByRole('button',{name:'Close environments',exact:true}).click();
-    await page.locator('#agent-select').selectOption('claude');
-    await page.locator('#new-agent-account').selectOption({label:'Claude Personal · claude@example.test'});
-    await page.locator('#new-model-controls[data-status=ready]').waitFor();
-    await page.locator('#agent-select').selectOption('codex');
-    await page.locator('#new-agent-account').selectOption({label:'Personal · codex@example.test'});
+    if(!(await page.locator('#create-chat-button').isDisabled())) throw Error('Missing company environment must block creation');
+    await page.getByRole('button',{name:'Settings',exact:true}).click();`);
+  const environments = [];
+  for (const [companyId, name] of [["personal-projects", "Personal development"], ["example-company", "Company development"]]) {
+    await run(`const hub=page.locator('#company-settings-dialog');
+      await hub.locator('#settings-tab-${companyId}').click();
+      await hub.getByRole('button',{name:'GitHub',exact:true}).click();
+      await page.locator('#github-dialog').waitFor();
+      await page.locator('#github-account-list').getByRole('button',{name:'Edit',exact:true}).waitFor();
+      if(await page.locator('#github-company-filter').inputValue()!==${JSON.stringify(companyId)}) throw Error('Wrong GitHub company');
+      if(await page.locator('#github-company-filter').isVisible()) throw Error('Scoped GitHub editor must keep hub context');
+      if(await page.locator('#github-account-list').getByRole('button',{name:'Edit',exact:true}).count()!==1) throw Error('Only selected company connection should appear');
+      await page.getByRole('button',{name:'Close GitHub dialog',exact:true}).click();
+      await hub.getByRole('button',{name:'Environments',exact:true}).click();
+      await page.locator('#add-environment').click();
+      await page.getByLabel('Environment name',{exact:true}).fill(${JSON.stringify(name)});
+      if(await page.locator('#environment-company').inputValue()!==${JSON.stringify(companyId)}) throw Error('Environment must belong to the selected company');
+      await page.getByRole('button',{name:'Save environment',exact:true}).click();
+      await page.locator('#environments-dialog').waitFor({state:'hidden'});`);
+    environments.push((await services.environments.list()).find(env => env.name === name));
+  }
+  await run(`await page.getByRole('button',{name:'Close settings',exact:true}).click();
+    await page.reload(); await page.locator('#new-chat-page').waitFor();`);
+  for (let i = 0; i < environments.length; i++) {
+    const environment = environments[i], repo = i ? repos[2] : fixtureRepo;
+    assert.deepEqual(environment.companies, [i ? "example-company" : "personal-projects"]);
+    await run(`await page.locator('#environment-select').selectOption(${JSON.stringify(environment.id)});
+      await page.getByRole('button',{name:'Add repositories',exact:true}).click();
+      await page.locator('#repository-results').getByRole('checkbox',{name:${JSON.stringify(repo.full_name)}}).check();
+      if(await page.locator('#repository-results').getByRole('checkbox',{name:${JSON.stringify(i ? fixtureRepo.full_name : repos[2].full_name)}}).count()) throw Error('Repositories from another company must not be offered');
+      await page.getByRole('button',{name:'Add repositories',exact:true}).click();
+      await page.locator('#new-agent-account').selectOption({label:'Claude · Claude Personal · claude@example.test'});
+      await page.locator('#new-model-controls[data-status=ready]').waitFor();
+      await page.locator('#new-agent-account').selectOption({label:'Codex · Personal · codex@example.test'});
+      await page.locator('#new-model-controls[data-status=ready]').waitFor();`);
+  }
+  // A single company's GitHub account covers both owners; company switching
+  // restores the last selection without assigning or cloning agent credentials.
+  await run(`await page.locator('#environment-select').selectOption(${JSON.stringify(environments[0].id)});
+    await page.locator('#selected-repositories .repository-name').filter({hasText:'fixture-repo'}).waitFor();
+    await page.getByRole('button',{name:'Add repositories',exact:true}).click();
+    await page.locator('#repository-results').getByRole('checkbox',{name:'thomfilg/fixture-shared'}).check();
+    await page.getByRole('button',{name:'Add repositories',exact:true}).click();
+    await page.locator('#new-agent-account').selectOption(${JSON.stringify(personal.id)});
     await page.locator('#new-model-controls[data-status=ready]').waitFor();`);
+  const postChat = body => fixture.request('/api/chats', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const selection = { agent: "codex", agentAccountId: personal.id, environmentId: environments[0].id,
+    repositories: [{ fullName: fixtureRepo.full_name, branch: "main", githubConnectionId: personalGitHub.id }] };
+  for (const denied of [
+    { ...selection, agentAccountId: claudePersonal.id },
+    { ...selection, environmentId: environments[1].id },
+    { ...selection, repositories: [...selection.repositories, { fullName: repos[2].full_name, branch: "main", githubConnectionId: companyGitHub.id }] },
+  ]) assert.ok([400, 403, 409].includes((await postChat(denied)).status), "Invalid provider/company combination must be denied");
+  assert.equal(app.store.list().length, 0);
   assert.ok(repositoryReads > 0);
   for (const width of [320, 390, 1600]) {
     await call("browser_resize", { width, height: 1000 });
-    await run(`if(!await page.locator('#new-chat-dialog').evaluate(e=>e.scrollWidth<=e.clientWidth))throw Error('New chat dialog overflow');`);
+    await run(`if(await page.locator('#sidebar').evaluate(e=>e.classList.contains('open'))) await page.getByRole('button',{name:'Close chats',exact:true}).click();
+      if(await page.locator('dialog[open]').count()) throw Error('New chat must be inline');
+      if(!await page.locator('#new-chat-page').evaluate(e=>e.scrollWidth<=e.clientWidth)) throw Error('New chat page overflow');`);
     await shot(`06-new-chat-configured-${width}.png`);
   }
-  await run(`await page.locator('#create-chat-button').click();await page.locator('#new-chat-dialog').waitFor({state:'hidden'});`);
+  // Explicit local command creates the configured chat without a model prompt.
+  await run(`await page.locator('#initial-prompt').fill('/rename Fixture configured chat');
+    await page.locator('#create-chat-button').click();
+    await page.locator('#conversation').waitFor();
+    await page.locator('#chat-title').filter({hasText:'Fixture configured chat'}).waitFor();`);
   const created = app.store.list(); assert.equal(created.length, 1);
-  assert.equal(created[0].agent, "codex"); assert.equal(created[0].repositories[0].fullName, fixtureRepo.full_name);
+  assert.equal(created[0].agent, "codex"); assert.equal(created[0].agentAccountId, personal.id);
+  assert.deepEqual(created[0].repositories.map(repo => repo.fullName), repos.slice(0, 2).map(repo => repo.full_name));
+  assert.equal(created[0].environmentId, environments[0].id);
+  assert.ok(created[0].repositories.every(repo => repo.companyId === "personal-projects"));
   assert.deepEqual(created[0].messages, []); assert.equal(created[0].workspaceReady, false);
+  assert.equal(runtimeCalls, 0); assert.equal(workerAcquisitions, 0); assert.equal(adapterStarts, 0);
+  assert.equal(app.agentAccounts.list(owner.id).length, 2);
   console.log(JSON.stringify({ browserTransport: "official Playwright MCP", disposableFixtures: true,
     missingAgentOnboarding: true, scopedCodexLink: true, pendingAccountDeletion: true, claudeCodeCompletion: true,
-    repositoryFirst: true, agentSettingsIcon: true, githubProviderPermissions: true, noGitHubCompanySetup: true, selectedProviderAccounts: true,
-    explicitEnvironmentCompanyAccess: true, retainedAccounts: 2, chatsCreated: 1, realProviderConsents: 0, modelPrompts: 0,
+    ownerIsolation: true, inlineNewChat: true, companySettingsHub: true, singleCompanyConnections: true,
+    multiCompanyAgentAccounts: true, githubProviderPermissions: true, mixedCompanyDenied: true, wrongProviderDenied: true,
+    explicitEnvironmentCompanyAccess: true, retainedAccounts: 2, chatsCreated: 1, realProviderConsents: 0, modelPrompts: 0, workerStarts: 0,
     responsiveWidths: [320, 390, 1600], screenshots }));
 } finally {
   await client.callTool({ name: "browser_close", arguments: {} }).catch(() => {});
