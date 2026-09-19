@@ -26,6 +26,13 @@ is unchanged from the 1,547-test candidate. Production publication remains
 pending authorization; this does not claim recovery of the live stuck chat. See the
 [events/search receipt](validation-2026-09-19-events-search-integration.md).
 
+Follow-up `3a0d394` integrates PR #81's `/copy` correction: only a proven final
+answer is copied, and late clipboard completion cannot modify another chat's
+composer. Its component validation passed 11/11 Node and 15/15 browser cases,
+including existing controls and message search. These focused results do not
+replace the broader integration counts above or claim production publication.
+See [copy validation](copy-completed-answer.md).
+
 The subsequent independent guest-browser review found three publication
 blockers: queued mutations after revocation, uncertain projection cleanup,
 and command starvation under continuous bounded events. Fixes and compatibility
