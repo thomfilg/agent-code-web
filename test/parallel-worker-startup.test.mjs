@@ -28,8 +28,9 @@ async function fixture(t, { local = false } = {}) {
   let lateStage;
   const manager = new RuntimeManager({ store, config, gatewayOrigin: "http://localhost", broker: new CapabilityBroker({ ttlMs: 10000 }),
     github: { tokenForRepository: async () => { calls.token++; return token.promise; } },
-    workerBackend: { acquire: async (chat, { workspaceReady, onStage, check }) => {
+    workerBackend: { acquire: async (chat, { workspaceReady, onStage, check, onMutation }) => {
       calls.acquire++; lateStage = onStage;
+      onMutation({ instanceId: "fixture-owned-start", release: () => manager.workerBackend.sleep(chat) });
       await onStage("machine", "running");
       try { await machine.promise; check(); await onStage("machine", "completed"); }
       catch (error) { await onStage("machine", "failed").catch(() => {}); throw error; }

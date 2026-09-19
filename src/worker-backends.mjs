@@ -5,6 +5,7 @@ import { isIP } from "node:net";
 import { spawnWorker } from "./worker-process.mjs";
 import { SSH_WORKER_LAUNCHER, sshWorkerRequest } from "./ssh-worker-launcher.mjs";
 import { assertWorkerImage } from "./worker-image.mjs";
+import { hibernationAdmission, hibernationUnavailableError } from "./worker-suspension.mjs";
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
@@ -227,19 +228,27 @@ export class Ec2Backend {
     return this.commandRunner(this.config.ec2.sshBin, [...this.sshArgs(host, instanceId), remoteCommand], { timeoutMs: 60_000 });
   }
 
-  async acquire(chat, { workspaceReady = Promise.resolve(), onStage = async () => {}, check = () => {} } = {}) {
+  async acquire(chat, { workspaceReady = Promise.resolve(), onStage = async () => {}, check = () => {}, onMutation = () => {} } = {}) {
     // Observe an early clone rejection while AWS/SSH is still in flight. The
     // same promise remains the mandatory join before any workspace upload.
     workspaceReady.catch(() => {});
+    if (this.config.idlePolicy === "hibernate" && !hibernationAdmission().available) throw hibernationUnavailableError();
     const stage = async (id, action) => {
       check(); await onStage(id, "running");
       try { check(); const value = await action(); check(); await onStage(id, "completed"); check(); return value; }
       catch (error) { try { await onStage(id, "failed"); } catch {} throw error; }
     };
-    let instance;
+    let instance, releaseAcquisition = async () => null;
+    const mutated = instanceId => {
+      // The closure owns one exact mutation target, never a later chat lookup.
+      // Publish before further awaited admission checks, including cancellation.
+      let pending;
+      releaseAcquisition = () => pending ||= this.#releaseAcquisition(instanceId, chat.id).catch(error => { pending = null; throw error; });
+      onMutation({ instanceId, release: releaseAcquisition });
+    };
     await stage("machine", async () => {
     instance = await this.#find(chat.id); check();
-    if (!instance) instance = await this.#create(chat.id, check);
+    if (!instance) instance = await this.#create(chat.id, check, mutated);
     // Existing/stopped workers retain their actual AMI, not necessarily the
     // currently configured one. A revoked marker denies new admission only;
     // sleep/destroy deliberately remain available for exact-owned cleanup.
@@ -250,6 +259,7 @@ export class Ec2Backend {
       instance.State.Name = "stopped";
     }
     if (instance.State?.Name === "stopped") {
+      mutated(instance.InstanceId);
       await this.#aws("ec2", "start-instances", "--instance-ids", instance.InstanceId);
       check();
     }
@@ -265,6 +275,7 @@ export class Ec2Backend {
       check(); await this.#waitForSsh(host, instance.InstanceId, check);
     });
     const executor = new Ec2Executor({ backend: this, chat, instance, host });
+    executor.releaseAcquisition = releaseAcquisition;
     await workspaceReady; check();
     await stage("workspace", async () => {
     await executor.prepare(check);
@@ -273,6 +284,15 @@ export class Ec2Backend {
     await this.#acceptedImage(instance.ImageId);
     });
     return executor;
+  }
+
+  async #releaseAcquisition(instanceId, chatId) {
+    const instance = await this.#describe(instanceId, chatId);
+    if (instance.State?.Name !== "stopped") {
+      await this.#aws("ec2", "stop-instances", "--instance-ids", instanceId);
+      await this.#aws("ec2", "wait", "instance-stopped", "--instance-ids", instanceId);
+    }
+    return { instanceId, stopped: true };
   }
 
   async sleep(chat) {
@@ -341,7 +361,7 @@ export class Ec2Backend {
     return assertWorkerImage(images[0], { imageId, deployment: ec2.deployment, keyName: ec2.keyName });
   }
 
-  async #create(chatId, check = () => {}) {
+  async #create(chatId, check = () => {}, onMutation = () => {}) {
     const ec2 = this.config.ec2;
     await this.#acceptedImage(ec2.amiId);
     check();
@@ -367,6 +387,7 @@ export class Ec2Backend {
     );
     const instance = JSON.parse(output);
     if (!/^i-[a-f0-9]{8,17}$/.test(instance?.InstanceId || "")) throw new Error("EC2 launch did not return a valid worker ID");
+    onMutation(instance.InstanceId);
     const described = await this.#describe(instance.InstanceId, chatId);
     if (described.ImageId !== ec2.amiId) throw new Error("New worker does not use the requested accepted AMI");
     return described;
