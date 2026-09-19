@@ -1,5 +1,20 @@
 # Feature queue — original request order
 
+## Settings UX — included in MVP, requested 2026-09-19
+
+- Implemented in source, pending publication: environment settings use the MCP
+  card pattern, with company and company-filtered environment selectors, then
+  Installed software / Environment variables / Setup script summary cards.
+  Only the selected editor is shown. Save stays visible, requires an actual
+  change and closes the modal after success; errors keep the draft open.
+- Implemented in source, pending publication: Browser connections fits its outer
+  dialog, including long profile labels and narrow viewports, without unnecessary
+  horizontal scrolling or desktop vertical scrolling. No sign-in or profile
+  changes are involved.
+- Existing grants and protected values are preserved; opening a settings card
+  does not change company access. This is presentation work, not a credential
+  migration or a claim that every remaining settings feature is finished.
+
 ## Startup follow-up — requested 2026-09-19
 
 - **Implement now:** start the chat's EC2 machine in parallel with repository
@@ -7,6 +22,9 @@
   agent. Preserve cancellation, company/account checks and failed-start cleanup.
 - **Implement now:** show the actual startup stages and their elapsed times,
   including concurrent stages, with completed timings retained for inspection.
+- Both immediate items are now implemented and locally tested, pending
+  publication. Upload/agent startup still waits for both preparation branches;
+  cancellation and failure cleanup retain the exact runtime lease.
 - **Post-MVP, explicitly deferred by the user:** Git and dependency caches
   isolated by company, repository and environment version. Dependency reuse
   must also respect the lockfile/toolchain; do not share credentials or editable
