@@ -66,6 +66,20 @@ export class EncryptedRecords {
     if (admissionRecordKind(kind) || kind === "native-session") await this.#transaction([recordLockKey(kind, id)], remove);
     else await remove(this.pool);
   }
+  async savedPromptsCompareAndSwap(scope, expected, update, guard) {
+    const kind = "saved-prompts";
+    return this.#transaction([recordLockKey(kind, scope)], async client => {
+      await guard();
+      const { rows } = await client.query("SELECT payload FROM relay_records WHERE kind=$1 AND id=$2", [kind, scope]);
+      const previous = rows[0] ? this.cipher.open(kind, scope, rows[0].payload) : null;
+      if ((previous?.revision || 0) !== expected || !Number.isSafeInteger(expected + 1)) throw Object.assign(new Error("Saved prompts changed in another tab. Reload the library; your editor text is kept."), { statusCode: 409 });
+      const value = { scope, revision: expected + 1, items: update(previous) };
+      await guard();
+      await client.query(`INSERT INTO relay_records(kind,id,payload) VALUES($1,$2,$3)
+        ON CONFLICT(kind,id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=now()`, [kind, scope, this.cipher.seal(kind, scope, value)]);
+      await guard(); return value;
+    }, true);
+  }
   async #transaction(keys, action, requireCommit = false) {
     // Existing offline maintenance injects an already checked-out client and
     // owns its outer transaction. Never commit/rollback that transaction here.
@@ -172,6 +186,15 @@ export class MemoryRecords {
   async delete(kind, id) {
     const remove = () => { this.rows.delete(`${kind}/${id}`); };
     return admissionRecordKind(kind) || kind === "native-session" ? this.#locked([recordLockKey(kind, id)], remove) : remove();
+  }
+  async savedPromptsCompareAndSwap(scope, expected, update, guard) {
+    return this.#locked([recordLockKey("saved-prompts", scope)], async () => {
+      await guard(); const previous = await this.get("saved-prompts", scope);
+      if ((previous?.revision || 0) !== expected || !Number.isSafeInteger(expected + 1)) throw Object.assign(new Error("Saved prompts changed in another tab. Reload the library; your editor text is kept."), { statusCode: 409 });
+      const value = { scope, revision: expected + 1, items: update(previous) };
+      await guard(); this.rows.set(`saved-prompts/${scope}`, structuredClone(value));
+      return structuredClone(value);
+    });
   }
   async #locked(keys, action) {
     const releases = [];

@@ -21,6 +21,7 @@ import { createWorkerBackend } from "./worker-backends.mjs";
 import { openDatabase } from "./database.mjs";
 import { ChatOrganization } from "./chat-organization.mjs";
 import { rememberChatSelection, restoreChatSelection } from "./chat-preferences.mjs";
+import { SavedPrompts, knownPromptProjects } from "./saved-prompts.mjs";
 import { GitHubConnection } from "./github.mjs";
 import { Companies } from "./companies.mjs";
 import { GitHubWorkerGateway } from "./github-worker-gateway.mjs";
@@ -120,6 +121,7 @@ export async function createAgentWebServer(options = {}) {
   const tabTitles = new TabTitlePreferences(records);
   const syntaxThemes = new SyntaxThemePreferences(records);
   const pets = new PetPreferences(records, { fetchImpl: options.petFetch });
+  const savedPrompts = new SavedPrompts(records);
   const gateway = new ProviderGateway({ config, broker });
   const sseClients = new Set();
   const sidebarClients = new Set();
@@ -301,6 +303,18 @@ export async function createAgentWebServer(options = {}) {
       // Do not let an already accepted request open a new SSE stream afterward.
       if (stopping || draining) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
       const visibleChats = () => store.list().filter(chat => browserUsers.canRead(chat, user));
+      if (url.pathname === "/api/saved-prompts" && ["GET", "PATCH"].includes(request.method)) {
+        const scope = user?.id || "shared", guard = async () => {
+          if ((await browserUsers.session(request))?.id !== user?.id || !auth.authenticated(request)) throw Object.assign(new Error("The prompt-library account changed. Reload before continuing."), { statusCode: 409 });
+        };
+        await guard();
+        // Legacy local provider settings are shared, even with private browser
+        // users. Do not treat another such user's remembered draft as a project.
+        const remembered = user && !googleAuth.enabled ? [] : await records.list("new-chat-project");
+        const projects = knownPromptProjects(visibleChats(), remembered, await companies.list());
+        const result = request.method === "PATCH" ? await savedPrompts.save(scope, await bodyJson(request, 600000), projects, guard) : await savedPrompts.get(scope, projects, guard);
+        return json(response, 200, result);
+      }
       if (url.pathname === "/api/pets" || url.pathname.startsWith("/api/pets/")) {
         const scope = user?.id || "shared", guard = async () => {
           if ((await browserUsers.session(request))?.id !== user?.id || !auth.authenticated(request)) throw Object.assign(new Error("The pet account changed. Reload /pets."), { statusCode: 409 });

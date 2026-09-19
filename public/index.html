@@ -130,6 +130,7 @@
                 <label class="sr-only" for="initial-prompt">New chat message</label><textarea id="initial-prompt" rows="1" maxlength="100000" placeholder="Describe a task or ask a question…"></textarea>
                 <div class="composer-footer">
                   <button type="button" id="new-add-attachments" class="small-icon" aria-label="Add files or photos" title="Add files or photos">+</button>
+                  <button type="button" class="saved-prompts-trigger" data-saved-prompts aria-label="Saved prompts" aria-controls="saved-prompts-picker" aria-expanded="false" title="Saved prompts">▤</button>
                   <div class="draft-agent-picker" id="new-agent-account-field"><select id="agent-select" aria-label="Agent" required></select><select id="new-agent-account" aria-label="Agent" hidden><option value="">Select an agent account</option></select><button type="button" class="small-icon" id="connect-codex-button" aria-label="Manage agent accounts" title="Manage agent accounts" hidden>⚙</button></div>
                   <div class="model-controls compact-model-controls" id="new-model-controls"><select class="model-select" aria-label="New chat model" title="Model"></select><select class="effort-select" aria-label="New chat effort" title="Effort"></select><p class="model-note" role="status"></p></div>
                   <button class="send-button" id="create-chat-button" type="submit" aria-label="Send first message" title="Send message" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg></button>
@@ -185,6 +186,7 @@
               <div id="vim-status" class="vim-status" hidden><span id="vim-mode" role="status"></span><span class="muted">i to edit · Esc for Normal</span><button type="button" id="vim-help">Keys</button><button type="button" id="vim-disable">Vim off</button></div>
               <div class="composer-footer">
                 <div class="composer-pickers">
+                  <button type="button" class="saved-prompts-trigger" data-saved-prompts aria-label="Saved prompts" aria-controls="saved-prompts-picker" aria-expanded="false" title="Saved prompts">▤</button>
                   <details class="control-menu upward composer-add"><summary aria-label="Add to message" title="Add files, commands or connectors">+</summary><div class="control-popover">
                     <button type="button" id="add-attachments">Add files or photos</button>
                     <button type="button" id="add-workspace-context">Workspace files &amp; selections</button>
@@ -477,6 +479,25 @@
     </dialog>
     <dialog id="relay-account-dialog"><section class="dialog-card compact"><div class="dialog-heading"><h2>Your Relay account</h2><button type="button" class="icon-button" id="relay-account-close" aria-label="Close account">×</button></div><p id="relay-account-email" class="relay-account-email"></p><p class="muted">Your conversations, GitHub connections, environments and MCP connections are private to this account. Signing out revokes personal Chrome access; it does not delete conversations.</p><button type="button" class="secondary-button full" id="relay-sign-out">Sign out</button><p class="form-error" id="relay-account-error" role="alert"></p></section></dialog>
 
+    <section id="saved-prompts-picker" class="saved-prompts-picker" aria-labelledby="saved-prompts-heading" hidden>
+      <div class="saved-prompts-heading"><strong id="saved-prompts-heading">Saved prompts</strong><button type="button" id="saved-prompt-add" class="secondary-button">+ Prompt</button></div>
+      <p id="saved-prompts-context" class="muted"></p>
+      <label class="saved-prompts-filter"><input type="checkbox" id="saved-prompts-all"> Show all to manage</label>
+      <ul id="saved-prompts-list"></ul>
+      <p id="saved-prompts-status" class="muted" role="status"></p>
+      <button type="button" id="saved-prompts-reload" class="secondary-button" hidden>Reload library</button>
+    </section>
+    <dialog id="saved-prompt-dialog" aria-labelledby="saved-prompt-title"><section class="dialog-card saved-prompt-editor">
+      <div class="dialog-heading"><h2 id="saved-prompt-title">Add prompt</h2><button type="button" class="icon-button" id="saved-prompt-close" aria-label="Close prompt editor">×</button></div>
+      <form id="saved-prompt-form"><fieldset id="saved-prompt-fields">
+        <label><span>Prompt text</span><textarea id="saved-prompt-text" rows="8" maxlength="20000" required placeholder="Instructions to insert into your draft…"></textarea></label>
+        <label><span>Available in</span><select id="saved-prompt-availability"><option value="all">All my projects</option><option value="projects">Selected projects</option></select></label>
+        <div id="saved-prompt-projects" class="saved-prompt-projects" role="group" aria-label="Prompt projects"></div>
+        <p class="muted">Private to your Relay account. Inserting a prompt never sends a message.</p>
+        <div class="dialog-actions"><button type="button" id="saved-prompt-cancel" class="secondary-button">Cancel</button><button type="submit" class="primary-button">Save prompt</button></div>
+      </fieldset></form>
+      <p id="saved-prompt-error" class="form-error" role="alert"></p><button type="button" id="saved-prompt-reload" class="secondary-button" hidden>Reload library · keep my text</button>
+    </section></dialog>
     <div class="toast-region" id="toasts" aria-live="assertive"></div>
     <div class="sr-only" id="sidebar-announcement" role="status"></div>
     <script type="module" src="app.js"></script>

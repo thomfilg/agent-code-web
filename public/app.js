@@ -50,6 +50,8 @@ import { CompaniesPage } from "./companies.js";
 import { CompanySettings } from "./company-settings.js";
 import { workingStatus, canInterruptWithEscape } from "./working-status.js";
 import { StartupProgress } from "./startup-progress.js";
+import { SavedPromptPicker } from "./saved-prompts.js";
+import { companyForChat } from "./company-scope.js";
 
 const state = {
   config: null,
@@ -217,6 +219,7 @@ function renderApproval() {
 
 function renderActive() {
   const chat = state.active;
+  savedPrompts.sync();
   $("#companies-page").hidden = state.page !== "companies";
   statusline.render();
   tabTitle.render();
@@ -1036,6 +1039,7 @@ const runtimeWake = new RuntimeWake({ button: $("#wake-worker"), api, getChat: (
 });
 const browserConnectionSettings = new BrowserConnectionSettings({ api, state, toast, browser: sharedBrowser,
   accountChanged: async () => {
+    savedPrompts.invalidate();
     appPreview.resetIdentity();
     vimComposer.resetIdentity();
     statusline.resetIdentity();
@@ -1057,6 +1061,14 @@ const browserConnectionSettings = new BrowserConnectionSettings({ api, state, to
   chatUpdated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = chat; renderActive(); } },
 });
 const companySettings = new CompanySettings({ api, state, workspace: workspaceSettings, mcps: mcpSettings, browsers: browserConnectionSettings });
+const savedPrompts = new SavedPromptPicker({ api, toast, context: () => {
+  const selection = state.active || { repositories: workspaceSettings.selected }, companyId = companyForChat(selection);
+  const repository = selection.repositories?.[0]?.fullName;
+  const project = companyId && repository ? { companyId, repository } : null;
+  const company = companyId || workspaceSettings.selectedEnvironment()?.companies?.[0] || "";
+  return { key: JSON.stringify([browserConnectionSettings.identityVersion, state.selection, state.active?.id || "new", company, repository || ""]), project,
+    input: state.page === "companies" || state.creatingChat ? null : state.active ? elements.input : $("#initial-prompt") };
+} });
 const chatControls = new ChatControls({ state, api, toast,
   newDraftScope: () => workspaceSettings.selectedEnvironment()?.companies?.[0] || workspaceSettings.selectionCompany || "unassigned",
   preview: documentPreview,

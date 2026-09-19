@@ -686,6 +686,30 @@ dialog { max-height: calc(100dvh - 28px); }
 .message-attachments { margin-top: 10px; }
 .attachment-drop-active::after { content: "Drop files to attach · nothing will be sent"; position: fixed; z-index: 90; inset: 12px; display: grid; place-items: center; padding: 24px; text-align: center; border: 2px dashed var(--lime); border-radius: 14px; background: #171d17eb; color: var(--lime); pointer-events: none; font-size: 18px; }
 .attachment-image-preview { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+.saved-prompts-trigger { flex: 0 0 34px; width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--text); }
+.saved-prompts-trigger[aria-expanded="true"] { border-color: var(--lime); color: var(--lime); }
+.saved-prompts-picker { position: fixed; z-index: 80; padding: 12px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: 0 10px 36px #0008; }
+.saved-prompts-picker[hidden], .saved-prompt-row-actions[hidden] { display: none; }
+.saved-prompts-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.saved-prompts-picker p { margin: 8px 0; overflow-wrap: anywhere; font-size: 11px; }
+.saved-prompts-filter { display: flex; gap: 8px; align-items: center; margin: 8px 0; font-size: 11px; }
+#saved-prompts-list { padding: 0; margin: 10px 0; list-style: none; }
+.saved-prompt-row { border-top: 1px solid var(--line); padding: 6px 0; }
+.saved-prompt-row-main { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.saved-prompt-row > small { display: block; margin-left: 27px; font-size: 10px; }
+.saved-prompt-insert { flex: 1; min-width: 0; padding: 8px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; color: var(--text); background: transparent; font: inherit; font-size: 12px; }
+.saved-prompt-insert:hover { color: var(--lime); }
+.saved-prompt-insert:disabled { color: var(--muted); cursor: not-allowed; }
+.saved-prompt-drag { flex: 0 0 22px; padding: 6px 0; color: var(--muted); background: transparent; cursor: grab; }
+.saved-prompt-row-actions { display: flex; flex-wrap: wrap; gap: 4px; padding: 5px 0 0 27px; }
+.saved-prompt-row-actions button { padding: 6px; font-size: 11px; }
+.saved-prompt-editor { width: min(560px, calc(100vw - 28px)); max-width: 100%; }
+#saved-prompt-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
+#saved-prompt-text { width: 100%; resize: vertical; min-height: 150px; max-height: 45dvh; font: inherit; }
+.saved-prompt-projects { max-height: 180px; overflow: auto; margin-top: 10px; }
+.saved-prompt-projects label { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0; overflow-wrap: anywhere; }
+.saved-prompt-projects input { flex: 0 0 auto; width: auto; margin-top: 3px; }
+.saved-prompts-picker button:focus-visible { outline: 2px solid var(--lime); outline-offset: 1px; }
 .image-actual-size .attachment-image-preview { max-width: none; margin: 0; }
 #environment-setup-script { width: 100%; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px; font: 12px/1.5 ui-monospace, monospace; }
 @media (max-width: 1000px) { .main.diff-open { display: flex; } .diff-panel { position: fixed; top: 16px; right: 16px; bottom: 16px; width: min(680px, calc(100vw - 32px)); z-index: 45; border: 1px solid var(--line-bright); border-radius: 10px; box-shadow: 0 15px 60px #0009; } }
@@ -905,6 +929,7 @@ dialog { max-height: calc(100dvh - 28px); }
 .composer .send-button[aria-label="Stop agent"] path { fill: currentColor; stroke-width: 0; }
 @container (max-width: 540px) {
   .composer { padding: 12px 10px 10px; }
+  .composer:has(.saved-prompts-trigger) textarea { min-height: 32px; }
   .composer-footer { gap: 6px; }
   .composer-pickers, .composer .compact-model-controls { gap: 3px; }
   .composer-pickers select, .composer-pickers .control-menu > summary { font-size: 12px; padding: 4px; }
