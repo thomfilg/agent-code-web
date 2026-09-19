@@ -2,6 +2,13 @@
 
 ## Current MVP audit — 2026-09-19
 
+**Pending publication:** native Codex MCP/dynamic tool events now retain sanitized
+arguments and error details, distinguish failed calls from missing results, and
+preserve those states in the saved activity timeline. The focused adapter and
+renderer checks are recorded in the [tool-result receipt](validation-2026-09-19-codex-tool-results.md).
+This correction is not deployed while the user tests Linear in the g2i chat;
+it does not establish that the live Linear read succeeded.
+
 **Publication update:** after the user renewed AWS access, build source `d9c0ce6`
 (runtime `8db8247`) was manually published at 13:03 UTC. Independent image/source
 hashes, readiness 200, anonymous chats 401 and all 13 deployed denial checks

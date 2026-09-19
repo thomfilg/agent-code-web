@@ -38,6 +38,13 @@ MCP provider-internal `_meta` and unrelated reasoning fields are not displayed.
 - Separately, the parent verified **2/2** renderer browser cases after the
   repository's `build-auth` prerequisite (failure/missing/success labels,
   arguments, reload, mobile layout, and literal HTML output).
+- Integrated source `e8436d9` was then checked in a clean worktree: the same
+  **39/39 Node tests** passed with zero failures/skips (14.5 seconds), followed
+  by **2/2 browser tests** with no retries (3.8 seconds). The existing full-suite
+  receipt predates this narrow correction; no new full-suite run is claimed.
+- Independent read-only review accepted the native schema mapping, credential
+  handling, persistence path, and renderer coverage. Publication remains pending
+  to avoid restarting the worker while the user verifies Linear.
 
 No real model prompt, provider request, OAuth consent, credential copying, cloud
 operation, or deployment was performed. This verifies event presentation, not
