@@ -1,7 +1,9 @@
-# MVP consent handoff
+# MVP consent and execution handoff
 
-Use this checklist when the user returns. No item below is marked complete by
-fixture tests, an operator's CLI login or an isolated copied-credential test.
+Current UI instructions checked against published runtime `4c45f16` on September
+19, 2026. The pending company-tab Settings redesign is not assumed published.
+No item below is marked complete by fixture tests, an operator's CLI login or
+an isolated copied-credential test.
 Record results separately for local Relay and AWS; they do not share accounts
 or conversations. Do not import host logins, copy cookies or disable access
 checks to pass a gate.
@@ -9,19 +11,21 @@ checks to pass a gate.
 Latest user-reported AWS results (2026-09-18): Google login and both Codex/Claude
 connections work. At 14:45 UTC the user also confirmed a Personal Codex/Luna chat
 and supplied its deployed response screenshot under `12-apps/future-pay`.
-Do not ask to repeat those consents just because historical checklist rows below
-remain granular. Account reload/revocation, Claude execution, selected-worker
-GitHub operations, restart/resume, Linear and preview checks are separate gates.
+Later user screenshots also show Claude responses and tool use. Do not ask to
+repeat successful consent merely because historical checklist rows below remain
+granular. Account reload/revocation, selected-account native restart/resume,
+selected-worker GitHub operations and authenticated preview remain separate gates.
+The company migration verified existing Linear with 79 tools and an authenticated
+controller workspace read, bound exclusively to g2i. A read through the selected
+agent/worker is still separate. See the [company publication receipt](validation-2026-09-18-company-chat.md).
 
 ## 1. Google cloud sign-in
 
 Observed on 2026-09-18 at 09:59 UTC with official Playwright MCP: the deployed
 button reached `accounts.google.com`, which returned **Error 400:
-redirect_uri_mismatch**. No identity, password or consent was supplied. Register
-the exact cloud callback below before trying provider onboarding; restarting
-Relay or re-entering the Google client secret cannot register that URI. This
-initial blocker was subsequently resolved by the user's callback registration
-and reported successful AWS login.
+redirect_uri_mismatch**. This historical blocker was subsequently resolved by
+the user's callback registration and reported successful AWS login. Do not
+re-register or reset a working configuration based on that old receipt.
 The reviewed [repeatable probe](deployed-login-probe.md) confirmed the same
 result at 10:10 UTC and can recheck provider initiation after configuration;
 it never completes account consent.
@@ -33,7 +37,8 @@ it never completes account consent.
   Keep localhost configuration separate. Confirm the intended email is allowed
   by Relay and, if applicable, Google's test-user list; never widen the allowlist
   merely to get a successful test.
-- [ ] User: open that AWS origin → **Continue with Google** → select the intended
+- [ ] If already signed in, inspect the current account and reload; do not sign
+  out just to repeat consent. Otherwise, open that AWS origin → **Continue with Google** → select the intended
   Google identity. Expected: return to the same HTTPS origin, correct Relay user,
   and the user's own data after reload. A separate signed-out browser must still
   be denied access to private APIs. Local sign-in is not cloud callback evidence.
@@ -42,9 +47,11 @@ it never completes account consent.
 
 Repeat separately for each intended personal/company identity:
 
-- [ ] **Agent accounts** → **＋ Add agent account** → choose **Codex** or
-  **Claude Code**, enter **Account name**, select allowed companies (or
-  **Unassigned chats**) → **Sign in to Codex** / **Sign in to Claude**.
+- [ ] Inspect existing **Agent accounts** first; do not reconnect a working
+  account just to test onboarding. For a missing account: **＋ Add agent account**
+  → choose **Codex** or **Claude Code**, enter **Account name** → **Sign in**.
+  Agent accounts have no company/project assignment step. All connected accounts
+  owned by the Relay user are available across that user's projects.
   Expected: immediate connecting progress, then the link inside that named card.
 - [ ] Codex: **Open Codex sign-in** and enter that card's one-time code on the
   provider page. Claude: **Open Claude sign-in**, authorize the intended
@@ -59,21 +66,28 @@ Repeat separately for each intended personal/company identity:
 
 ## 3. GitHub identity and exact repository
 
-- [ ] **Connect GitHub** (or **GitHub · …**) → **＋ Add GitHub connection** →
+- [ ] **Companies** contains **g2i** and **thomfilg + 12-apps**; the latter is
+  one Relay company spanning two repository owners. Do not recreate them.
+  **GitHub** → choose the company and inspect its existing connection. Only for
+  a missing connection: **＋ Add GitHub connection** →
   **Open GitHub sign-in**. User enters the displayed code and approves the
   intended GitHub identity. Expected: **Signed in as …** on its own card.
-- [ ] Repositories permitted by the connected GitHub account become available
-  without any Relay company-access step, including existing saved connections.
+- [ ] Repositories permitted by that company's connected GitHub account become
+  available without an additional organization allowlist, including saved connections.
   A display-name change is optional. There is no PAT-entry, server-login import
   or second organization authorization form in Relay.
-- [ ] **New chat** → **Choose repositories**: find the intended repository,
+- [ ] Inline **New chat** → choose the company's environment → compact `+`
+  repository strip: find the intended repository,
   verify the connection name shown alongside it, select its branch, and confirm
-  the first repository determines the intended company. Repository/branch listing
+  its selected connection determines the intended company. A chat cannot mix
+  companies; repository-owner names are not Relay company identities. Repository/branch listing
   is a provider read; it does not prove clone, push or PR access from an AWS worker.
 
 ## 4. Linear consent and environment selection
 
-- [ ] **MCP connections** → **Add a development tool** → **Linear**. Give the
+- [ ] **MCP connections** → choose the company → **Linear** card → its details.
+  Inspect the existing g2i connection first; do not duplicate its credentials or
+  grant it to the combined company. For a new independent connection, give the
   connection a distinct name, select its company, leave **Linear permissions**
   at **Read only** → **Save connection** → **Connect with OAuth**. User approves
   the intended Linear workspace. If the popup is blocked, use **Open sign-in
@@ -84,9 +98,9 @@ Repeat separately for each intended personal/company identity:
   discovery or a saved configuration alone is not success. Workspace content is
   not stored in the verification receipt. Confirm the intended workspace during
   provider consent; a generic Connected label alone does not identify it.
-- [ ] **Environments** → choose/create the intended environment, allow the same
-  company, check that exact connection under **MCP connections** → **Save
-  environment**. For independent workspaces, repeat with separate connections;
+- [ ] **Environments** → choose the intended company's environment and inspect
+  **Company tools**. Company MCPs load automatically: there is no extra MCP
+  checkbox to select. For independent workspaces, use separate connections;
   never reuse another company's authorization. Changes apply on the next worker
   start, not to an already-running worker.
 
@@ -99,11 +113,12 @@ For an old chat with incomplete saved GitHub selection, reselect the repository
 and connection in a new chat; reconnecting alone does not repair that binding.
 Afterward:
 
-- [ ] In **New chat**, explicitly select the provider and named **Codex account**
-  / **Claude account**, exact repository/connection and matching **Environment**.
-  Inspect the model choices. Leave **What would you like to work on?** empty.
-  **Create chat** saves a chat/selection without sending a prompt; its repository
-  clone is deferred until the worker starts. Cancel instead for no new chat.
+- [ ] In inline **New chat**, choose the combined
+  `provider · account name · identity` selector, exact repository/connection and
+  matching environment. Inspect the model choices and preserve any draft.
+  Opening this page/selecting options does not send a prompt. The first message
+  creates and starts the chat; there is no empty-message **Create chat** step.
+  The last explicit agent-account choice is remembered per primary repository.
 - [ ] Only after authorization for the target deployment, named account, exact
   prompt and quota: send the approved minimal prompt, verify the final answer,
   intended account binding and selected repository clone. Use a validation
@@ -111,16 +126,22 @@ Afterward:
   external mutations. This starts a worker and can incur AWS/model cost.
   The existing one-off approval for Codex **Personal**, “Responda apenas OK”, is
   not blanket permission for Claude, other accounts or repeated tests.
-- [ ] After an operator-coordinated idle stop/restart, reload the same saved chat
+- [ ] After an operator-coordinated idle **Stop worker** and **Wake environment**,
+  reload the same saved chat
   and confirm its account/repository/environment binding and transcript persist.
   Proving native conversation resume requires another explicitly authorized turn;
-  simply reopening the page does not establish resume.
+  simply reopening the page does not establish resume. Wake sends no prompt.
+  Composer **Stop/Escape** only interrupts the turn and submits the next queued
+  message if one exists; it is not a worker-restart test.
 - [ ] A read-only Linear tool call through that selected worker/environment is
   a separate runtime gate from the controller's verification button. If performed
   through an agent prompt, obtain model-use authorization first. GitHub PR/check
   reads must likewise use the selected product connection. Push/PR creation or
   editing and Linear issue writes require separate exact-target authorization;
   do not create synthetic external records merely to complete this checklist.
+- [ ] Verify **Open app** in the selected AWS chat: authenticated HTTP and
+  WebSocket/HMR traffic, plus isolation from unrelated chats. Public readiness
+  and anonymous rejection are not authenticated app-traffic evidence.
 
 ## Evidence and stopping rules
 
@@ -130,6 +151,11 @@ failure category and whether a prompt/write was authorized. Crop/redact codes,
 URLs containing OAuth state, tokens, cookies and private workspace content from
 evidence. A failed or ambiguous submitted operation must be inspected before
 retrying; never silently switch credentials.
+
+An expired operator AWS session blocks internal AWS inspection/publication, not
+local development and not necessarily application health. On September 19,
+`code-web` reported expired credentials while public readiness returned 200.
+No restart, account reset or production write was attempted for this check.
 
 Isolated native Claude turns, copied-host GitHub reads/pushes/PRs, synthetic
 Google callbacks and browser fixtures remain separate evidence. They do not

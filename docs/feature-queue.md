@@ -1,5 +1,37 @@
 # Feature queue — original request order
 
+## Current MVP audit — 2026-09-19
+
+Runtime `4c45f16` was published and independently verified at 00:07 UTC; PR #4
+includes its receipt at `1047a95`. Stop/Escape, working elapsed time/tool count,
+native message paragraphs and chronological inline action groups are published.
+The prior goal turn made verified progress: code, deployment and PR changed.
+
+This checkpoint supersedes stale status language in the historical entries below:
+
+| Required integration | Current evidence | Remaining product acceptance |
+| --- | --- | --- |
+| Google | User-reported cloud sign-in; callback issue resolved; anonymous entry/denials verified | Operator-observed authenticated reload/isolation |
+| Codex | User-reported connected account and successful deployed turns | Selected-account native conversation resume after worker restart; reconnect/revocation |
+| Claude | User-reported connected account and screenshots of responses/tool execution | Selected-account native conversation resume after worker restart; reconnect/revocation |
+| GitHub | Both company-bound product connections retained; repository selection/chat activity observed | Combined selected-product-connection worker clone/write/PR/restart |
+| Linear | g2i-only product binding; live controller tools/read verification succeeded | Authenticated selected-agent/worker read, not just the verification button |
+| AWS | Repeatable immutable deployment and recovery evidence; latest health/assets/denials matched | Combined authenticated product flows and authenticated remote-app HTTP/WS |
+
+On resumption, public readiness returns 200 while the operator's `code-web`
+session reports expired credentials. No restart, production data change or
+authentication reset was attempted. Local implementation/testing continues;
+internal AWS verification/publication requires session renewal. This is not
+evidence that the application itself is unavailable.
+
+The GitHub and real-CLI MCP smoke harnesses are being re-audited against today's
+company-scoped production model: legacy unassigned fixtures cannot prove that
+boundary. The [current consent/execution checklist](mvp-consent-checklist.md)
+uses inline chat, the combined account selector and automatic company MCPs;
+it no longer asks for removed company checkboxes or empty-message chat creation.
+Company-tab Settings, compact browser header, hibernation and unfinished doctor
+changes remain excluded/uncommitted. No complete-MVP claim is made.
+
 Environment selector correction (2026-09-18): remembered repositories must not
 hide another company's environment. Keep all active environments selectable;
 scope only the unsent repository draft on an explicit switch, preserve its text,
