@@ -47,6 +47,7 @@ import { agentAccountLabel } from "./agent-account-options.js";
 import { ChatRepositoryPicker } from "./chat-repository-picker.js";
 import { CompaniesPage } from "./companies.js";
 import { workingStatus, canInterruptWithEscape } from "./working-status.js";
+import { StartupProgress } from "./startup-progress.js";
 
 const state = {
   config: null,
@@ -82,6 +83,7 @@ const elements = {
   dialogSecurity: $("#dialog-security"),
   loginDialog: $("#login-dialog"),
 };
+const startupProgress = new StartupProgress({ container: elements.detail.parentElement, detail: elements.detail });
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -232,6 +234,7 @@ function renderActive() {
   elements.conversation.hidden = !chat;
   elements.actions.hidden = !chat;
   runtimeWake.render(chat);
+  renderStartupProgress();
   if (state.page === "companies") {
     elements.title.textContent = "Companies"; elements.meta.textContent = "";
     closeSidePanel("diff"); return;
@@ -831,7 +834,10 @@ function renderWorkingStatus() {
   $("#working-status").textContent = text;
   $("#working-status").hidden = !text;
 }
-setInterval(() => { if (!document.hidden) renderWorkingStatus(); }, 1000);
+function renderStartupProgress() {
+  startupProgress.update(state.deletingChats.has(state.active?.id) ? null : state.active);
+}
+setInterval(() => { if (!document.hidden) { renderWorkingStatus(); renderStartupProgress(); } }, 1000);
 document.addEventListener("keydown", event => {
   if (!["running", "starting"].includes(state.active?.status) || !canInterruptWithEscape(event)) return;
   event.preventDefault(); void interruptAgent();

@@ -23,3 +23,13 @@ test("active tools count current-turn running tools only, deduplicates live entr
   assert.equal(activeToolCount(chat, tools), 2);
   tools.set("a", { state: "completed" }); assert.equal(activeToolCount(chat, tools), 1);
 });
+
+test("startup uses its persisted start on cold wake/reload without changing later working-turn timing", () => {
+  const start = "2026-09-19T12:00:00Z", now = Date.parse(start) + 20000;
+  const chat = { status: "starting", startupProgress: { startedAt: start }, workingStartedAt: "2026-09-19T11:00:00Z", messages: [] };
+  assert.match(workingStatus(chat, new Map(), now), /^Starting · 0m 20s/);
+  assert.match(workingStatus({ ...chat, status: "running" }, new Map(), now), /^Working · 1h 0m 20s/);
+  assert.match(workingStatus({ ...chat, startupProgress: { startedAt: "invalid" } }, new Map(), now), /^Starting · 1h 0m 20s/);
+  delete chat.workingStartedAt;
+  assert.match(workingStatus(chat, new Map(), now), /^Starting · 0m 20s/);
+});
