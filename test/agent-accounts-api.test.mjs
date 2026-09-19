@@ -120,3 +120,34 @@ test("account deletion enforces owner and Origin, stops its worker, keeps messag
   assert.equal(app.store.get(chat.id).agentAccountId, id); assert.equal(ctx.codex.clients.length, nativeClients);
   assert.equal(app.agentAccounts.hasConnected(user.id, "codex"), true);
 });
+
+for (const action of ["disconnect", "delete"]) test(`account ${action} attempts every matching worker stop and sanitizes aggregate failure`, async t => {
+  const ctx = await setup(t), { app, browser, user } = ctx, id = await connect(ctx);
+  const matching = [];
+  for (let index = 0; index < 3; index++) matching.push(await app.store.create({ agent: "codex", ownerId: user.id, agentAccountId: id, title: `Matching ${index}` }));
+  const otherAccount = await app.store.create({ agent: "codex", ownerId: user.id, agentAccountId: "account_bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", title: "Other account" });
+  const otherOwner = await app.store.create({ agent: "codex", ownerId: `user_${"b".repeat(32)}`, agentAccountId: id, title: "Other owner" });
+  const selected = app.store.list().filter(chat => chat.ownerId === user.id && chat.agentAccountId === id), attempts = [];
+  const privateError = "private-worker-stop-diagnostic-fixture";
+  t.mock.method(app.manager, "stop", (chatId, reason) => {
+    attempts.push({ chatId, reason });
+    // The first call throws synchronously; another rejects asynchronously.
+    // Both must be collected without skipping the remaining selected worker.
+    if (chatId === selected[0].id) throw new Error(privateError);
+    if (chatId === selected[1].id) return Promise.reject(new Error(privateError));
+    return Promise.resolve();
+  });
+  const response = action === "delete"
+    ? await browser.request(`/api/agent-accounts/${id}`, { method: "DELETE" })
+    : await post(browser, `/api/agent-accounts/${id}/disconnect`);
+  assert.equal(response.status, 503, "partial stop must not be reported as success");
+  const result = await response.json();
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(privateError));
+  assert.match(result.error, /[Aa]ccess is blocked/);
+  assert.match(result.error, /[Rr]etry/);
+  assert.deepEqual(attempts, selected.map(chat => ({ chatId: chat.id, reason: "account-disconnected" })), "each matching worker is attempted exactly once");
+  assert.equal(attempts.some(item => [otherAccount.id, otherOwner.id].includes(item.chatId)), false);
+  assert.equal(app.agentAccounts.hasConnected(user.id, "codex"), false);
+  await assert.rejects(app.agentAccounts.credentials(user.id, id, { agent: "codex" }), { statusCode: action === "delete" ? 404 : 409 });
+  assert.ok(matching.every(chat => app.store.get(chat.id)?.agentAccountId === id), "failed stop does not erase or rebind chats");
+});
