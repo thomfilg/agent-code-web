@@ -310,12 +310,12 @@ export class WorkspaceSettings {
     $("#save-environment").disabled = Boolean(this.environmentSaving) || !this.environmentDirty();
     if (!this.draft) return;
     $("#environment-software-summary").textContent = `${this.draft.software.length} selected`;
-    $("#environment-variables-summary").textContent = this.draft.variablesEnabled ? `${this.draft.variables.length} variables` : "Disabled";
+    $("#environment-variables-summary").textContent = this.draft.variablesEnabled ? `${this.draft.variables.length} ${this.draft.variables.length === 1 ? "variable" : "variables"}` : "Disabled";
     $("#environment-setup-summary").textContent = this.draft.setupScript.trim() ? "Startup script configured" : "No startup script";
   }
   showEnvironmentSection(section = null) {
     $("#environment-overview").hidden = Boolean(section); $("#environment-editor-heading").hidden = !section;
-    const titles = { software: "Software", variables: "Environment variables", setup: "Setup script" };
+    const titles = { software: "Installed software", variables: "Environment variables", setup: "Setup script" };
     for (const id of Object.keys(titles)) $("#environment-" + id + "-editor").hidden = id !== section;
     $("#environment-editor-title").textContent = titles[section] || "";
     this.updateEnvironmentDirty();
