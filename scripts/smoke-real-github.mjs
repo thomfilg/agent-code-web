@@ -13,6 +13,7 @@ import { Companies } from "../src/companies.mjs";
 import { GitHubConnection } from "../src/github.mjs";
 import { userRecords } from "../src/user-services.mjs";
 import { prepareRepositories } from "../src/workspace.mjs";
+import { createReadOnlyWorkerProbe } from "./github-worker-readonly-probe.mjs";
 
 const owner = "authorized-smoke-owner", companyId = "smoke-projects", otherCompanyId = "smoke-other";
 const run = promisify(execFile);
@@ -34,10 +35,10 @@ export function readOnlyGitHubFetch(fetchImpl) {
 
 // Injectable provider/clone boundaries are for deterministic harness regression
 // tests. CLI execution always uses real GitHub, git and encrypted PostgreSQL.
-export async function runReadOnlyGitHubSmoke({ account, repository, getCredential = localCredential, fetchImpl = fetch, cloneRepositories = prepareRepositories, onStage = () => {} }) {
+export async function runReadOnlyGitHubSmoke({ account, repository, getCredential = localCredential, fetchImpl = fetch, cloneRepositories = prepareRepositories, workerGateway = false, gitFetchImpl = fetch, onStage = () => {} }) {
   if (!account || !/^[\w-]+$/.test(account) || !repository || !/^[\w.-]+\/[\w.-]+$/.test(repository) || repository.split("/")[0] !== account) throw new Error("Pass --account and an owned --repository explicitly.");
   const directory = await mkdtemp(path.join(os.tmpdir(), "relay-github-real-test-"));
-  let records, github, another;
+  let records, github, another, worker, workerReceipt;
   try {
     onStage("local-credential");
     const token = await getCredential(account);
@@ -90,6 +91,12 @@ export async function runReadOnlyGitHubSmoke({ account, repository, getCredentia
     const checks = await github.request(`/repos/${repository}/commits/${prs[0].head.sha}/check-runs`, requestOptions);
     assert.ok(Array.isArray(checks.check_runs));
 
+    if (workerGateway) {
+      onStage("local-worker-gateway-clone");
+      worker = await createReadOnlyWorkerProbe({ github, repository: selected[0], ownerId: owner, directory, fetchImpl: gitFetchImpl });
+      await worker.beforeRestart();
+    }
+
     onStage("encrypted-restart");
     await github.close(); await records.close(); records = await openDatabase(config);
     scoped = userRecords(records, owner); companies = new Companies(scoped);
@@ -102,14 +109,16 @@ export async function runReadOnlyGitHubSmoke({ account, repository, getCredentia
     const beforeRestoredDenial = providerCalls;
     await assert.rejects(github.request(`/repos/${repository}`, { connectionId: connection.id, chatCompany: otherCompanyId }), { statusCode: 403 });
     assert.equal(providerCalls, beforeRestoredDenial);
+    if (worker) { onStage("local-worker-gateway-resume"); workerReceipt = await worker.resume(github); }
     onStage("provider-and-user-denials");
     await assert.rejects(github.request("/repos/not-authorized/repository", requestOptions), error => [403, 404].includes(error.statusCode));
     const otherRecords = userRecords(records, "other-smoke-user"), otherCompanies = new Companies(otherRecords);
     another = new GitHubConnection({ ...options, records: otherRecords, companies: otherCompanies });
     assert.equal((await another.status()).connections.length, 0); assert.deepEqual(await otherCompanies.list(), []);
     await assert.rejects(another.get(connection.id), { statusCode: 404 });
-    return { credentialSource: "explicitly authorized local test copy; not new OAuth consent", encryptedRestart: true, account, repository, companyBoundConnection: true, oneConnectionPerCompany: true, companyBindingRestored: true, providerAuthorizedListing: true, selectedClone: true, noPersistedGitCredential: true, pullRequestRead: true, checksRead: true, providerDeniedRepository: true, crossCompanyDeniedBeforeProvider: true, crossUserDenied: true, remoteWrites: false, deployedProductSelection: false, workerGatewayAcceptance: false };
+    return { credentialSource: "explicitly authorized local test copy; not new OAuth consent", encryptedRestart: true, account, repository, companyBoundConnection: true, oneConnectionPerCompany: true, companyBindingRestored: true, providerAuthorizedListing: true, selectedClone: true, noPersistedGitCredential: true, pullRequestRead: true, checksRead: true, providerDeniedRepository: true, crossCompanyDeniedBeforeProvider: true, crossUserDenied: true, remoteWrites: false, deployedProductSelection: false, workerGatewayAcceptance: Boolean(workerReceipt), ...(workerReceipt ? { workerGateway: workerReceipt } : {}) };
   } finally {
+    await worker?.close();
     await another?.close(); await github?.close(); await records?.close();
     await rm(directory, { recursive: true, force: true });
   }
@@ -121,7 +130,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     if (!process.argv.includes("--allow-local-test-credential")) throw new Error("Explicit test authorization required");
     const account = process.argv.find(arg => arg.startsWith("--account="))?.slice(10);
     const repository = process.argv.find(arg => arg.startsWith("--repository="))?.slice(13);
-    console.log(JSON.stringify(await runReadOnlyGitHubSmoke({ account, repository, onStage: value => { stage = value; } })));
+    console.log(JSON.stringify(await runReadOnlyGitHubSmoke({ account, repository, workerGateway: process.argv.includes("--worker-gateway"), onStage: value => { stage = value; } })));
   } catch {
     console.error(JSON.stringify({ ok: false, stage, message: "GitHub real read-only smoke failed. Sensitive subprocess and credential output suppressed." }));
     process.exitCode = 1;
