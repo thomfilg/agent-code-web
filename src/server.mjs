@@ -698,9 +698,16 @@ export async function createAgentWebServer(options = {}) {
           return json(response, 200, await manager.inspectCommand(chatId, "ps", input.terminate));
         }
         if (tail === "side" && request.method === "GET") return json(response, 200, manager.sideChats.get(chatId));
-        if (tail === "subagents" && request.method === "GET") return json(response, 200, await manager.agentThreads.get(chatId));
-        if (tail === "subagents" && request.method === "POST") return json(response, 200, await manager.agentThreadAction(chatId, "refresh"));
-        if (/^subagents\/(select|messages|stop|respond)$/.test(tail) && request.method === "POST") return json(response, 200, await manager.agentThreadAction(chatId, tail.split("/")[1], await bodyJson(request, config.maxBodyBytes)));
+        if (tail === "subagents" && ["GET", "POST"].includes(request.method)) {
+          request.guardChat();
+          const result = request.method === "GET" ? await manager.agentThreads.get(chatId) : await manager.agentThreadAction(chatId, "refresh");
+          request.guardChat(); return json(response, 200, result);
+        }
+        if (/^subagents\/(select|messages|stop|respond)$/.test(tail) && request.method === "POST") {
+          const input = await bodyJson(request, config.maxBodyBytes); request.guardChat();
+          const result = await manager.agentThreadAction(chatId, tail.split("/")[1], input);
+          request.guardChat(); return json(response, 200, result);
+        }
         if (tail === "side" && request.method === "POST") return json(response, 200, await manager.sideChats.open(chatId));
         if ((tail === "side" && request.method === "DELETE") || (tail.startsWith("side/") && request.method === "POST")) {
           const input = await bodyJson(request, config.maxBodyBytes);

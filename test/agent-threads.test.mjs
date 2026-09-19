@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
+import { request as httpRequest } from "node:http";
 import { CodexAgentThreads } from "../src/codex-agent-threads.mjs";
 import { NativeAgentSnapshots } from "../src/native-agent-snapshots.mjs";
 import { createAgentWebServer } from "../src/server.mjs";
@@ -217,4 +218,88 @@ test("controller agent endpoints enforce auth/origin/owner/root, retain snapshot
   assert.ok(!app.manager.eventsSince(chat.id).some(event => event.type === "agent_threads_updated"));
   await app.store.update(chat.id, { ownerId: "someone-else" });
   assert.equal((await request()).status, 404); assert.equal((await request("", {})).status, 404);
+});
+
+for (const field of ["environmentId", "workspace"]) for (const kind of ["select", "stop"]) test(`agent ${kind} and observer hooks reject ${field} changes across native awaits`, async t => {
+  const directory = await temporaryDirectory(t), entered = Promise.withResolvers(), release = Promise.withResolvers(); let hooks, controls = 0;
+  const snapshot = { rootThreadId: "main", epoch: "fixture", revision: 1, awake: true, threads: [] };
+  const app = await createAgentWebServer({ config: testConfig(directory, { AGENT_IDLE_TIMEOUT_MS: "60000" }),
+    adapterFactory: options => {
+      hooks = options.hooks;
+      return { start: async () => { await hooks.onSessionId("main"); }, stop: async () => {}, agents: {
+        busy: () => false,
+        refresh: async () => { hooks.assertAgentCurrent("main"); return snapshot; },
+        select: async () => { hooks.assertAgentCurrent("main"); entered.resolve(); await release.promise; hooks.assertAgentCurrent("main"); controls++; return snapshot; },
+        interrupt: async () => { hooks.assertAgentCurrent("main"); controls++; entered.resolve(); await release.promise; return snapshot; },
+      } };
+    },
+  });
+  await app.start(); t.after(() => app.stop());
+  const chat = await app.manager.createChat({ agent: "codex" });
+  await app.manager.agentThreadAction(chat.id, "refresh");
+  const action = app.manager.agentThreadAction(chat.id, kind, { rootThreadId: "main", threadId: "child" });
+  await entered.promise; await app.store.update(chat.id, { [field]: `${app.store.get(chat.id)[field] || "initial"}-changed` }); release.resolve();
+  await assert.rejects(action, /scope changed/); assert.equal(controls, kind === "select" ? 0 : 1, "A dispatched Stop is not replayed or treated as success in a new scope");
+  assert.throws(() => hooks.assertAgentCurrent("main"), /scope changed/);
+  hooks.onAgentThreads(snapshot); assert.deepEqual((await app.manager.agentThreads.get(chat.id)).threads, []);
+});
+
+test("Claude child input denial and cached reads never start a worker", async t => {
+  const directory = await temporaryDirectory(t); let starts = 0;
+  const app = await createAgentWebServer({ config: testConfig(directory), adapterFactory: () => { starts++; throw Error("Worker must not start"); } });
+  await app.start(); t.after(() => app.stop()); const chat = await app.manager.createChat({ agent: "claude" });
+  assert.deepEqual((await app.manager.agentThreads.get(chat.id)).threads, []);
+  await assert.rejects(app.manager.agentThreadAction(chat.id, "messages", { text: "Do not proxy" }), /not supported/);
+  await assert.rejects(app.manager.agentThreadAction(chat.id, "select", { rootThreadId: "unbound", threadId: "child" }), /session changed/);
+  assert.equal(starts, 0); assert.deepEqual(app.store.get(chat.id).messages, []);
+});
+
+test("stored child snapshots bind every scope field and recheck delayed reads; legacy roots alone confer no access", async () => {
+  const base = { id: "chat", ownerId: "owner", agent: "claude", agentAccountId: "account", environmentId: "environment", workspace: "/workspace", agentSessionId: "main", repositories: [] };
+  let chat = { ...base }, record;
+  const store = { get: () => chat, records: { get: async () => record, put: async (_kind, _id, value) => { record = value; } } };
+  const snapshot = { provider: "claude", rootThreadId: "main", awake: true, threads: [{ id: "child", messages: [{ role: "assistant", text: "Bound history" }] }] };
+  const manager = new NativeAgentSnapshots(store, () => {}); await manager.update("chat", snapshot);
+  assert.equal((await new NativeAgentSnapshots(store, () => {}).get("chat")).threads.length, 1);
+  for (const field of ["ownerId", "agentAccountId", "environmentId", "workspace", "agentSessionId", "agent"]) {
+    chat = { ...base, [field]: "different" };
+    assert.deepEqual((await manager.get("chat")).threads, []);
+    assert.deepEqual((await new NativeAgentSnapshots(store, () => {}).get("chat")).threads, []);
+  }
+  chat = { ...base }; const gate = Promise.withResolvers(), entered = Promise.withResolvers();
+  store.records.get = async () => { entered.resolve(); await gate.promise; return record; };
+  const reading = new NativeAgentSnapshots(store, () => {}).get("chat"); await entered.promise; chat = { ...base, ownerId: "new-owner" }; gate.resolve();
+  assert.deepEqual((await reading).threads, []);
+  chat = { ...base }; store.records.get = async () => snapshot;
+  assert.deepEqual((await new NativeAgentSnapshots(store, () => {}).get("chat")).threads, []);
+});
+
+test("Codex dispatch rechecks scope after cached authorization and after native goal updates", async t => {
+  let current = true;
+  const { agents, rpc } = observer(t, { assertCurrent: () => { if (!current) throw Error("Scope changed"); } });
+  await agents.refresh();
+  const before = rpc.calls.length, selecting = agents.select("nested"); current = false;
+  await assert.rejects(selecting, /Scope changed/);
+  assert.equal(rpc.calls.length, before, "No resume/history RPC after cached authorize yields");
+  current = true; rpc.goals.set("child", { status: "active" });
+  const original = rpc.request.bind(rpc);
+  rpc.request = async (method, input) => { const result = await original(method, input); if (method === "thread/goal/set") current = false; return result; };
+  await assert.rejects(agents.interrupt("child"), /Scope changed/);
+  assert.equal(rpc.calls.at(-1).method, "thread/goal/set", "No subsequent turn lookup/interrupt after scope revocation");
+});
+
+test("agent POST rechecks ownership after its delayed request body before any worker action", async t => {
+  const directory = await temporaryDirectory(t), app = await createAgentWebServer({ config: testConfig(directory, { AGENT_WEB_AUTH_TOKEN: "fixture-token" }) });
+  const { url } = await app.start(); t.after(() => app.stop()); const chat = await app.manager.createChat({ agent: "codex" });
+  const checked = Promise.withResolvers(), original = app.browserUsers.canRead.bind(app.browserUsers); let actions = 0;
+  app.browserUsers.canRead = (value, user) => { const result = original(value, user); if (value?.id === chat.id && result) checked.resolve(); return result; };
+  app.manager.agentThreadAction = async () => { actions++; throw Error("No action authorized"); };
+  const body = JSON.stringify({ rootThreadId: "main", threadId: "child" });
+  let request; const response = new Promise((resolve, reject) => {
+    request = httpRequest(`${url}/api/chats/${chat.id}/subagents/stop`, { method: "POST", headers: { authorization: "Bearer fixture-token", "content-type": "application/json", "content-length": Buffer.byteLength(body) } }, reply => { reply.resume(); reply.on("end", () => resolve(reply.statusCode)); });
+    request.on("error", reject); request.flushHeaders();
+  });
+  t.after(() => request.destroy()); await checked.promise;
+  await app.store.update(chat.id, { ownerId: "new-owner" }); request.end(body);
+  assert.equal(await response, 404); assert.equal(actions, 0);
 });

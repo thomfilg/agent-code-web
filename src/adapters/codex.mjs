@@ -220,6 +220,7 @@ export class CodexAdapter {
     const imports = this.importControls;
     this.importStop = null;
     this.agents = new CodexAgentThreads({ rpc, root: () => this.threadId, workspace: this.workspace, model: this.config.codex.model, saved: this.savedAgentThreads,
+      assertCurrent: this.hooks.assertAgentCurrent,
       secrets: authMode === "account" || this.credentialSecrets.size ? this.credentialSecrets : null,
       publish: snapshot => this.hooks.onAgentThreads?.(snapshot), log: text => this.hooks.onLog?.(text) });
     rpc.on("notification", (message) => this.#notification(message));
