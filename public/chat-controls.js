@@ -102,7 +102,7 @@ export class ChatControls {
     $("#usage-ring").style.setProperty("--usage", `${percentage}%`);
     $("#archive-current-chat").textContent = chat.archived ? "Unarchive" : "Archive";
     $("#edit-chat-environment").disabled = !chat.environmentId;
-    const signature = JSON.stringify([chat.id, chat.repositories, chat.gitBranches, chat.workspaceStatus?.branch, chat.pullRequests, chat.githubSyncWarning]);
+    const signature = JSON.stringify([chat.id, chat.repositories, chat.gitBranches, chat.workspaceStatus?.branch, chat.pullRequests, chat.githubSyncWarning, chat.githubEvents]);
     if (signature !== this.signature) { this.signature = signature; this.repositories(chat); this.pullRequests(chat); }
     this.renderAttachments();
     const goalStatus = $("#goal-status"); goalStatus.replaceChildren();
@@ -238,8 +238,36 @@ export class ChatControls {
         finally { input.disabled = pr.state !== "open"; }
       });
       auto.append(input, el("span", "Auto-merge when ready")); body.append(auto);
-      const fix = el("label", undefined, "checkbox-label"); const fixing = document.createElement("input"); fixing.type = "checkbox"; fixing.disabled = true;
-      fix.append(fixing, el("span", "Auto-fix CI & comments · not available")); body.append(fix, el("p", "CI checks refresh every minute. Auto-merge follows GitHub repository rules; no admin bypass.", "muted"));
+      const subscription = chat.githubEvents?.subscriptions?.find(item => item.repository === pr.repository.toLowerCase() && item.number === pr.number);
+      const choices = [];
+      for (const [field, label] of [["notifyFailures", "Notify agent when checks fail"], ["wakePassing", "Wake this chat when checks pass"]]) {
+        const row = el("label", undefined, "checkbox-label"), control = document.createElement("input"); control.type = "checkbox";
+        control.checked = Boolean(subscription?.[field]); control.disabled = !chat.ownerId || !control.checked && (!chat.agentAccountId || pr.state !== "open");
+        control.setAttribute("aria-label", `${label} for PR ${pr.number}`); choices.push(control);
+        control.addEventListener("change", async () => {
+          if (field === "wakePassing" && control.checked && !confirm(`Allow verified passing checks for ${pr.repository} #${pr.number} to start this chat's worker and send an agent message? This may use worker time and model tokens. It does not enable merging or resume other paused messages.`)) { control.checked = Boolean(subscription?.[field]); return; }
+          for (const choice of choices) choice.disabled = true;
+          try {
+            const { chat: updated } = await this.api(`/api/chats/${chat.id}/pull-requests/subscription`, { method: "PATCH", body: JSON.stringify({ repository: pr.repository, number: pr.number,
+              notifyFailures: Boolean(subscription?.notifyFailures), wakePassing: Boolean(subscription?.wakePassing), [field]: control.checked, revision: chat.githubEvents?.revision || 0 }) });
+            if (this.state.active?.id === chat.id) this.updated(updated);
+          } catch (error) { control.checked = Boolean(subscription?.[field]); if (this.state.active?.id === chat.id) body.append(el("p", error.message, "form-error")); }
+          finally { for (const choice of choices) choice.disabled = !chat.ownerId || !choice.checked && (!chat.agentAccountId || pr.state !== "open"); }
+        });
+        row.append(control, el("span", label)); body.append(row);
+      }
+      body.append(el("p", chat.githubEvents?.configured ? "Signed event receiver configured; polling reconciles every minute. GitHub webhook registration is managed separately." : "Polling every minute. Live events require an operator-configured GitHub webhook.", "muted"));
+      for (const event of chat.githubEvents?.deliveries?.filter(item => item.repository === pr.repository.toLowerCase() && item.number === pr.number).slice(-3) || []) {
+        body.append(el("p", `GitHub notification: ${event.checks} · ${event.status}`, event.status === "uncertain" || event.status === "blocked" ? "form-error" : "muted"));
+        if (["uncertain", "blocked", "pending"].includes(event.status)) {
+          for (const [action, label] of [["retry", "Review and retry notification"], ["discard", "Discard notification"]]) body.append(button(label, async () => {
+            if (action === "retry" && !confirm("Review the conversation first: this notification may already have reached the agent. Retry may repeat work. Send it again only if appropriate?")) return;
+            try { const { chat: updated } = await this.api(`/api/chats/${chat.id}/pull-requests/event`, { method: "PATCH", body: JSON.stringify({ id: event.id, action }) }); if (this.state.active?.id === chat.id) this.updated(updated); }
+            catch (error) { if (this.state.active?.id === chat.id) body.append(el("p", error.message, "form-error")); }
+          }, "secondary-button"));
+        }
+      }
+      body.append(el("p", "GitHub events grant no merge or permission changes. Auto-merge follows existing repository rules; no admin bypass.", "muted"));
       ci.append(summary, body); row.append(ci, button("×", () => { this.hiddenPRs.add(`${chat.id}:${pr.repository}:${pr.number}`); this.pullRequests(chat); }, "small-icon")); root.append(row);
     }
     for (const ref of branchesWithoutPullRequests(chat)) {

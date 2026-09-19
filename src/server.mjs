@@ -235,6 +235,13 @@ export async function createAgentWebServer(options = {}) {
         return json(response, ok ? 200 : 503, { ok });
       }
       if (await gateway.handle(request, response, url)) return;
+      if (url.pathname === "/webhooks/github" && request.method === "POST") {
+        if (!manager.githubEvents || !config.github.webhookSecret) return json(response, 404, { error: "Not found" });
+        const chunks = []; let size = 0;
+        for await (const chunk of request) { size += chunk.length; if (size > 1024 * 1024) return json(response, 413, { error: "Webhook too large" }); chunks.push(chunk); }
+        await manager.githubEvents.receive(Buffer.concat(chunks), request.headers);
+        return json(response, 202, { accepted: true });
+      }
       if (await githubWorkers.handle(request, response, url)) return;
       if (await handleGitHubWorkerMcp(request, response, url, { gateway: githubWorkers })) return;
       if (await resources.handleMcp(request, response, url)) return;
@@ -714,6 +721,24 @@ export async function createAgentWebServer(options = {}) {
           const body = await bodyJson(request, config.maxBodyBytes);
           return json(response, 200, { chat: await manager.pullRequests.autoMerge(chatId, body.repository, body.number, body.enabled) });
         }
+        if (tail === "pull-requests/subscription" && request.method === "PATCH") {
+          if (!manager.githubEvents) return json(response, 409, { error: "GitHub event subscriptions require durable storage and a named agent account." });
+          const body = await bodyJson(request, 2000);
+          const caller = { ownerId: user?.id, session: { kind: googleAuth.enabled ? "relay-session" : "browser-user-session", id: user?.sessionId, ownerId: user?.id }, guard: request.guardChat, check: async () => {
+            request.guardChat(); const current = await browserUsers.session(request); request.guardChat();
+            if (!current || current.id !== user?.id || current.sessionId !== user?.sessionId) throw Object.assign(new Error("Sign in again before changing GitHub subscriptions"), { statusCode: 401 });
+          } };
+          return json(response, 200, { chat: await manager.githubEvents.configure(chatId, body, caller) });
+        }
+        if (tail === "pull-requests/event" && request.method === "PATCH") {
+          if (!manager.githubEvents) return json(response, 409, { error: "GitHub events unavailable" });
+          const body = await bodyJson(request, 1000);
+          const caller = { ownerId: user?.id, session: { kind: googleAuth.enabled ? "relay-session" : "browser-user-session", id: user?.sessionId, ownerId: user?.id }, guard: request.guardChat, check: async () => {
+            request.guardChat(); const current = await browserUsers.session(request); request.guardChat();
+            if (!current || current.id !== user?.id || current.sessionId !== user?.sessionId) throw Object.assign(new Error("Sign in again before reviewing GitHub delivery"), { statusCode: 401 });
+          } };
+          return json(response, 200, { chat: await manager.githubEvents.review(chatId, body.id, body.action, caller) });
+        }
         if (tail === "pull-requests/refresh" && request.method === "POST") {
           await manager.pullRequests.refresh(chatId); return json(response, 200, { chat: store.get(chatId) });
         }
@@ -928,7 +953,9 @@ export async function createAgentWebServer(options = {}) {
       } catch (error) { await manager.shutdown(); await new Promise(resolve => server.close(resolve)); throw error; }
     }
     manager.on("event", event => { if (["chat_updated", "message", "chat_deleted"].includes(event.type)) sidebarChanged(); });
+    await manager.githubEvents?.initialize();
     manager.pullRequests.start();
+    manager.githubEvents?.process();
     return { host: config.host, port, url: `http://${config.host.includes(":") ? `[${config.host}]` : config.host}:${port}` };
   }
 
