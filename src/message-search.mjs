@@ -1,13 +1,12 @@
 import { extractResponse } from "./response-protocol.mjs";
 import { redact } from "./utils.mjs";
 import { companyForChat } from "../public/company-scope.js";
+import { FINAL_ANSWER_LIMIT as limit, finalAnswerText, completedAnswerText, excludedMessage } from "../public/completed-answer.js";
 
-const sources = new Map([["codex-final-answer", "codex"], ["claude-success-result", "claude"], ["mock-final-answer", "mock"]]);
-const limit = 100000;
 // Only explicit final projections enter this feature. Never infer a final
 // answer from a transcript role, a missing commentary flag, or the last item.
 export function finalAnswerMeta(answer, agent) {
-  if (!answer || sources.get(answer.source) !== agent || typeof answer.text !== "string" || answer.text.length > limit) return {};
+  if (finalAnswerText(answer, agent) === null) return {};
   const text = extractResponse(redact(answer.text), false).text;
   return text.trim() ? { finalAnswer: { version: 1, source: answer.source, text } } : {};
 }
@@ -35,9 +34,9 @@ export function codexFinalAnswer(current, params, threadId) {
 }
 export function searchableText(message) {
   const meta = message.meta || {};
-  if (meta.renderingSample || meta.source === "github" || meta.githubEventId || meta.generated || meta.interrupted || meta.commentary) return null;
+  if (excludedMessage(message)) return null;
   if (message.role === "user" && message.kind === "message" && (!meta.source || meta.source === "user") && (!meta.authorship || meta.authorship === "user")) return typeof message.text === "string" ? message.text : null;
-  if (message.role !== "assistant" || message.kind !== "message" || meta.finalAnswer?.version !== 1) return null;
+  if (completedAnswerText(message) === null) return null;
   return finalAnswerMeta(meta.finalAnswer, message.agent).finalAnswer?.text || null;
 }
 const fail = message => Object.assign(Error(message), { statusCode: 400 });
