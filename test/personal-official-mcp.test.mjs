@@ -52,7 +52,13 @@ test('actual extension and official MCP use only the explicitly shared tab throu
   await unrelated.evaluate(() => {localStorage.setItem('unrelated-secret','fake-private');document.cookie='unrelated_cookie=fake-cookie';document.title='Unrelated private tab';});
   const popup = await profile.newPage(); await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup.html`);
   await popup.locator('#relay-url').fill(url); await popup.locator('#pair-code').fill(pair.code); await popup.getByRole('button',{name:'Pair this Chrome profile'}).click();
-  await waitFor(() => app.manager.browsers.personal.bridges.get(pair.id)?.ready);
+  // Authentication and the extension's availability message are separate
+  // frames. Enable requires both; observing only hello races real readiness.
+  const bridgeAvailable = () => {
+    const bridge = app.manager.browsers.personal.bridges.get(pair.id);
+    return Boolean(bridge?.ready && bridge.tabSelected);
+  };
+  await waitFor(bridgeAvailable);
   await app.manager.browsers.personal.enable(chat.id,user,pair.id);
   const grant = app.manager.browsers.personal.currentGrant(chat.id), tabId = grant.state.tabId;
   const runtime = app.manager.browsers.runtime(chat.id,url,{validWhile:()=>true}).relay_browser;
@@ -118,7 +124,7 @@ test('actual extension and official MCP use only the explicitly shared tab throu
   app.manager.browsers.personal.bridges.get(pair.id).socket.terminate();
   await waitFor(() => !app.manager.browsers.personal.currentGrant(chat.id));
   await assert.rejects(client.callTool({name:'browser_snapshot',arguments:{}}));
-  await waitFor(() => app.manager.browsers.personal.bridges.get(pair.id)?.ready,{timeoutMs:10000});
+  await waitFor(bridgeAvailable,{timeoutMs:10000});
   assert.equal(app.manager.browsers.personal.currentGrant(chat.id),undefined,'automatic bridge reconnect never restores sharing');
   await client.close();
   const claudeId = `account_${randomUUID()}`;
