@@ -153,3 +153,31 @@ test("deletion wins a concurrent disconnect and gated credential refresh without
   assert.equal(await records.get("agent-account-disconnection", id), null);
   assert.deepEqual(accounts.list(owner), []); assert.equal(accounts.disconnecting.has(id), false);
 });
+
+test("deletion waits for a delayed disconnection intent before removing its account and marker", async t => {
+  const { accounts, records, id } = await setup(t, "codex"), put = records.put.bind(records);
+  const entered = Promise.withResolvers(), gate = Promise.withResolvers();
+  records.put = async (...args) => { if (args[0] === "agent-account-disconnection") { entered.resolve(); await gate.promise; } return put(...args); };
+  const disconnecting = accounts.disconnect(owner, id); disconnecting.catch(() => {}); await entered.promise;
+  let deleted = false; const deleting = accounts.remove(owner, id).then(() => { deleted = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  try { assert.equal(deleted, false); } finally { gate.resolve(); }
+  await deleting; await Promise.allSettled([disconnecting]);
+  assert.equal(await records.get("agent-account", id), null);
+  assert.equal(await records.get("agent-account-disconnection", id), null);
+});
+
+test("failed intent write still persists retry through credential erasure when worker stop fails", async t => {
+  const { accounts, records, fixture, id } = await setup(t, "claude"), put = records.put.bind(records);
+  records.put = async (...args) => { if (args[0] === "agent-account-disconnection") throw Error("private-intent-error"); return put(...args); };
+  accounts.onRevoke = async () => { throw Error("private-worker-error"); };
+  await assert.rejects(() => accounts.disconnect(owner, id), { statusCode: 503 });
+  assert.equal((await records.get("agent-account", id)).auth, null);
+  assert.equal((await records.get("agent-account", id)).status, "disconnecting");
+  await accounts.close();
+  const restarted = new AgentAccounts({ records, clientFactory: fixture.factory }); await restarted.initialize(); t.after(() => restarted.close());
+  assert.equal(restarted.list(owner)[0].status, "disconnecting");
+  await assert.rejects(() => restarted.begin(owner, { id, provider: "claude", name: "Selected" }), { statusCode: 409 });
+  records.put = put; await restarted.disconnect(owner, id);
+  assert.equal(restarted.list(owner)[0].status, "disconnected");
+});
