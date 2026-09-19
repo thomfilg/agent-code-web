@@ -26,6 +26,7 @@ test("wake admits immediately, deduplicates startup and preserves messages, sess
   await store.update(chat.id, { agentSessionId: "saved-session", queuePaused: false, queuedMessages: [{ id: "existing", text: "Do not send this" }] });
   const before = store.get(chat.id), first = await manager.wake(chat.id), second = await manager.wake(chat.id);
   assert.equal(first.accepted, true); assert.equal(store.get(chat.id).status, "starting");
+  await waitFor(() => calls.acquire === 1);
   assert.equal(first.completion, second.completion); assert.equal(calls.acquire, 1); assert.equal(calls.adapters, 0);
   await assert.rejects(manager.submit(chat.id, "Must wait"), /waking up/);
   gate.resolve({ metadata: { backend: "fixture" } }); await first.completion;
