@@ -791,21 +791,22 @@ dialog { max-height: calc(100dvh - 28px); }
 .message-latest-button { flex: none; margin: 0 auto 8px; padding: 6px 12px; font-size: 12px; }
 .queue-send { padding: 4px 7px; font-size: 11px; }
 .composer { position: relative; }
-#slash-menu { position: absolute; bottom: calc(100% + 10px); left: 0; width: min(560px, 100%); max-height: min(440px, 55dvh); display: flex; flex-direction: column; border: 1px solid #454d3e; border-radius: 14px; background: #22261f; box-shadow: 0 16px 48px #0007; z-index: 40; overflow: hidden; }
+:is(#slash-menu, #new-slash-menu) { position: absolute; bottom: calc(100% + 10px); left: 0; width: min(560px, 100%); max-height: min(440px, 55dvh); display: flex; flex-direction: column; border: 1px solid #454d3e; border-radius: 14px; background: #22261f; box-shadow: 0 16px 48px #0007; z-index: 40; overflow: hidden; }
 .slash-heading { display: flex; align-items: center; gap: 10px; padding: 13px 14px; border-bottom: 1px solid #ffffff0c; flex-shrink: 0; }
 .slash-symbol { display: grid; place-items: center; width: 30px; height: 32px; border: 1px solid #c9f27c25; border-radius: 8px; background: #c9f27c0a; color: var(--lime); font: 18px ui-monospace, monospace; }
 .slash-heading > div { flex: 1; min-width: 0; } .slash-heading strong { font-size: 13px; font-weight: 600; }
-#slash-caption { display: block; margin-top: 3px; color: #adb5a5; font-size: 11px; }
-#slash-count { font-size: 11px; color: #aeb6a7; font-variant-numeric: tabular-nums; }
-#slash-options { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 6px; scrollbar-width: thin; }
-#slash-options:empty { padding: 0; }
+:is(#slash-caption, #new-slash-caption) { display: block; margin-top: 3px; color: #adb5a5; font-size: 11px; }
+:is(#slash-count, #new-slash-count) { font-size: 11px; color: #aeb6a7; font-variant-numeric: tabular-nums; }
+:is(#slash-options, #new-slash-options) { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 6px; scrollbar-width: thin; }
+:is(#slash-options, #new-slash-options):empty { padding: 0; }
 .slash-option { display: flex; align-items: center; gap: 12px; min-height: 54px; padding: 10px; border: 1px solid transparent; border-radius: 8px; cursor: pointer; font-size: 13px; }
 .slash-option-copy { flex: 1; min-width: 0; } .slash-option strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .slash-option small { display: block; margin-top: 4px; color: #b3bcaa; font-size: 12px; line-height: 1.45; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .slash-option[aria-selected=true] { background: #343d2c; border-color: #c9f27c24; }
 .slash-option[aria-selected=true] strong { color: #e1f4c1; }
+.slash-option[aria-disabled=true] { opacity: .65; cursor: not-allowed; }
 .slash-kind { flex-shrink: 0; border: 1px solid #ffffff12; border-radius: 5px; padding: 2px 5px; color: #abb5a1; font-size: 10px; }
-#slash-status { padding: 15px; margin: 0; color: #b3bcaa; font-size: 12px; line-height: 1.5; overflow: auto; }
+:is(#slash-status, #new-slash-status) { padding: 15px; margin: 0; color: #b3bcaa; font-size: 12px; line-height: 1.5; overflow: auto; }
 .slash-footer { display: flex; flex-shrink: 0; gap: 15px; padding: 9px 14px; border-top: 1px solid #ffffff0c; font-size: 10px; color: #adb5a5; }
 .slash-footer span:last-child { margin-left: auto; } .slash-footer kbd { display: inline-block; min-width: 17px; text-align: center; padding: 1px 3px; border: 1px solid #ffffff1a; border-radius: 4px; color: #d4dbc9; font: inherit; }
 #mcp-dialog { width: min(660px, calc(100vw - 28px)); }
