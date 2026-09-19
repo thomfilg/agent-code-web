@@ -63,7 +63,7 @@ and remain at the beginning of native stream-json input.
 | `/mcp reconnect/enable/disable [server\|all]` (Claude) | Actual native SDK controls with post-action status verification, per-chat native persistence, FIFO, error/Stop recovery and no model call. Bare `/mcp` keeps the saved-connection manager; `/mcp verbose` shows worker-reported status. Private-file preflight and host-profile mutation gates apply; live activation pending. |
 | `/new`, `/clear`, `/resume` | New-chat flow or searchable saved-chat picker; never implicitly delete the old conversation. |
 | `/rename [title]`, `/archive`, `/delete` | Existing organization APIs; deletion retains explicit target confirmation. Delayed responses preserve newer drafts. |
-| `/copy`, `/raw`, `/transcript` | Latest completed response and plain transcript preview. |
+| `/copy`, `/raw`, `/transcript` | `/copy` selects only the latest explicitly proven final answer (the same provenance as message search); `/raw` and `/transcript` preview the plain transcript. Unclassified older answers, commentary and interrupted output are not copy candidates. |
 | `/stop`, `/quit`, `/exit` | Relay's stop-agent-and-pause-queue control. This is broader than native Codex `/stop` (background terminals only), and is labelled accordingly. |
 | `/ps`, `/clean` | Native thread-only background-terminal discovery and confirmed individual/all termination; never send a model prompt or kill another chat's tasks. Controller/browser tests and real-CLI empty-task inspection/cleanup pass. |
 | `/debug-config` | Explicit allowlist of non-secret effective Codex configuration and source layers; never dump raw config, MCP credentials or environment variables. |

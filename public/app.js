@@ -5,6 +5,7 @@ import { closeSidePanel } from "./side-panels.js";
 import { WorkspaceSettings } from "./workspace-settings.js";
 import { ModelPicker, claudeCatalogMatchesChat } from "./model-picker.js";
 import { ChatControls } from "./chat-controls.js";
+import { latestCompletedAnswer } from "./completed-answer.js";
 import { renderContent } from "./message-content.js";
 import { ToolActivity, groupTools } from "./tool-activity.js";
 import { UsagePanel } from "./usage-panel.js";
@@ -775,7 +776,8 @@ async function sendMessage(event) {
   }
   if (["/skills", "/help"].includes(text) && !files.length) { elements.input.value = "/"; elements.input.focus(); void slashComposer.update(); return; }
   if (!files.length) {
-    try { if (await runWebCommand(text)) { if (state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } return; } }
+    const selection = state.selection;
+    try { if (await runWebCommand(text)) { if (state.selection === selection && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } return; } }
     catch (error) { toast(error.message); return; } // Failed controls keep the typed command.
   }
   const queued = ["starting", "running", "stopping"].includes(state.active.status) || state.active.queuedMessages?.length;
@@ -816,7 +818,13 @@ async function runWebCommand(text) {
   if (text === "/archive") { const { chat } = await api(`/api/chats/${chatId}`, { method: "PATCH", body: JSON.stringify({ archived: true }) }); apply(chat); return true; }
   if (text === "/delete") { await sidebar.remove(state.active); return true; }
   if (["/raw", "/transcript"].includes(text)) { chatControls.transcript(); return true; }
-  if (text === "/copy") { const last = [...state.active.messages].reverse().find(message => message.role === "assistant" && message.text && !message.meta?.renderingSample); if (!last) throw new Error("No completed assistant response to copy yet"); await chatControls.copy(last.text, "Latest response copied"); return true; }
+  if (text === "/copy") {
+    const answer = latestCompletedAnswer(state.active.messages);
+    if (answer === null) throw new Error("No completed assistant response to copy yet");
+    const selection = state.selection;
+    await chatControls.copy(answer, "Latest response copied", { validWhile: () => state.selection === selection && state.active?.id === chatId });
+    return true;
+  }
   if (text === "/resume") { chatControls.savedChats(state.chats, chat => selectChat(chat.id)); return true; }
   if (text === "/compact") return false; // Send through the ordinary message/queue path.
   if (text === "/plan") {

@@ -78,7 +78,11 @@ export class ChatControls {
     document.addEventListener("click", event => document.querySelectorAll(".control-menu[open]").forEach(menu => { if (!event.composedPath().includes(menu)) menu.open = false; }));
     document.addEventListener("keydown", event => { if (event.key === "Escape") document.querySelectorAll(".control-menu[open]").forEach(menu => menu.open = false); });
   }
-  async copy(text, message = "Copied") { try { await navigator.clipboard.writeText(text); this.toast(message); } catch { this.dialog("Copy", el("pre", text)); } }
+  async copy(text, message = "Copied", { validWhile = () => true } = {}) {
+    if (!validWhile()) return;
+    try { await navigator.clipboard.writeText(text); if (validWhile()) this.toast(message); }
+    catch { if (validWhile()) this.dialog("Copy", el("pre", text)); }
+  }
   dialog(title, ...content) {
     this.dialogVersion = (this.dialogVersion || 0) + 1;
     document.querySelectorAll(".control-menu[open]").forEach(menu => menu.open = false);
