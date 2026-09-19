@@ -6,6 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 import { authorizeBrowserTool, browserToolCatalog, browserPolicyFailure } from "./official-browser-policy.mjs";
+import { isPersonalProjectionLease, isPersonalProjectionProvider } from './personal-browser-projection.mjs';
 
 const require = createRequire(import.meta.url), officialRequire = createRequire(require.resolve("@playwright/mcp"));
 const official = require("@playwright/mcp");
@@ -17,11 +18,11 @@ export function matchingBrowserRuntime() {
 const id = z.string().min(1).max(200), revision = z.number().int().positive();
 const bindingSchema = z.strictObject({ ownerId: id, chatId: id, companyId: id, environmentId: id, provider: z.enum(["codex", "claude"]), accountId: id,
   accountRevision: revision, companyRevision: revision, environmentRevision: revision, attemptId: id, generation: revision,
-  mode: z.enum(["guest", "personal"]), personalGrantId: id.optional() }).refine(value => value.mode === "personal" ? Boolean(value.personalGrantId) : value.personalGrantId === undefined);
+  mode: z.enum(["guest", "personal"]), personalGrantId: id.optional(), accountIdentityHash:z.string().regex(/^[a-f0-9]{64}$/).optional() }).refine(value => value.mode === "personal" ? Boolean(value.personalGrantId) : value.personalGrantId === undefined);
 
-// No HTTP endpoint or runtime caller is enabled by this partition. The trusted
-// context provider owns a guest context; personal projection is not implemented
-// and cannot be admitted with a marker boolean or generic CDP URL.
+// Context providers are trusted application wiring. Personal acquisition must
+// return a lease minted by the grant-owned projection, not a marker boolean or
+// generic profile CDP connection. Guest runtime integration remains separate.
 export class OfficialBrowserMcp {
   #binding; #validate; #acquire; #server; #client; #directory; #initializing; #contextPromise; #lease; #released = false;
   #revoked = false; #closing; #controller = new AbortController(); #pending = 0; #queue = Promise.resolve();
@@ -41,11 +42,11 @@ export class OfficialBrowserMcp {
   #fence() { this.#revoked = true; this.#controller.abort(browserPolicyFailure("REVOKED")); }
   async #context() {
     await this.#check();
-    if (this.#binding.mode === "personal") throw browserPolicyFailure("PERSONAL_PROJECTION_UNAVAILABLE");
     return this.#contextPromise ||= (async () => {
       try {
         const lease = await this.#acquire({ binding: this.#binding, signal: this.#controller.signal, playwright: matchingBrowserRuntime() });
         if (typeof lease?.release === "function") this.#lease = lease;
+        if (this.#binding.mode === 'personal' && !isPersonalProjectionLease(lease)) throw browserPolicyFailure('PERSONAL_PROJECTION_UNAVAILABLE');
         if (!lease || typeof lease.release !== "function" || !lease.context || typeof lease.context.pages !== "function") throw browserPolicyFailure("CONTEXT_INVALID");
         await this.#check();
         return lease.context;
@@ -86,7 +87,7 @@ export class OfficialBrowserMcp {
     const operation = this.#queue.then(async () => {
       try {
         await this.#check();
-        if (this.#binding.mode === "personal") throw browserPolicyFailure("PERSONAL_PROJECTION_UNAVAILABLE");
+        if (this.#binding.mode === 'personal' && !isPersonalProjectionProvider(this.#acquire)) throw browserPolicyFailure('PERSONAL_PROJECTION_UNAVAILABLE');
         await this.#initialize(); await this.#check();
         const result = await this.#client.callTool({ name, arguments: input }, undefined, { signal: this.#controller.signal, timeout: 15000 });
         await this.#check();

@@ -85,7 +85,7 @@ test("private live streams deny other users, logout revokes viewers, and the ext
   const archive = await fetch(`${url}/api/browser-extension/download`);
   assert.equal(archive.headers.get("content-type"), "application/zip");
   const files = unzipSync(new Uint8Array(await archive.arrayBuffer()));
-  assert.deepEqual(Object.keys(files).sort(), ["manifest.json", "popup.css", "popup.html", "popup.js", "worker.js"].map(name => `agent-relay-chrome/${name}`).sort());
+  assert.deepEqual(Object.keys(files).sort(), ["manifest.json", "popup.css", "popup.html", "popup.js", "worker.js", "projection-policy.js"].map(name => `agent-relay-chrome/${name}`).sort());
   const manifest = JSON.parse(new TextDecoder().decode(files["agent-relay-chrome/manifest.json"]));
   assert.deepEqual(manifest.permissions, ["debugger", "storage"]); assert.equal(manifest.content_scripts, undefined);
 });

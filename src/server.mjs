@@ -1,4 +1,5 @@
 import http from "node:http";
+import { personalBrowserScope } from './personal-browser-authority.mjs';
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -352,7 +353,7 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/browser-connections" && request.method === "GET") return json(response, 200, { connections: await manager.browsers.personal.list(user, { companyId: url.searchParams.has("companyId") ? url.searchParams.get("companyId") : undefined, includeLegacy: url.searchParams.get("includeLegacy") === "1" }) });
       if (url.pathname === "/api/browser-extension/download" && request.method === "GET") {
         const files = {};
-        for (const name of ["manifest.json", "worker.js", "popup.html", "popup.css", "popup.js"]) files[`agent-relay-chrome/${name}`] = new Uint8Array(await readFile(new URL(`../chrome-extension/${name}`, import.meta.url)));
+        for (const name of ["manifest.json", "worker.js", "projection-policy.js", "popup.html", "popup.css", "popup.js"]) files[`agent-relay-chrome/${name}`] = new Uint8Array(await readFile(new URL(`../chrome-extension/${name}`, import.meta.url)));
         const archive = zipSync(files);
         response.writeHead(200, { "content-type": "application/zip", "content-disposition": 'attachment; filename="agent-relay-chrome.zip"', "cache-control": "no-store" });
         response.end(Buffer.from(archive)); return;
@@ -895,9 +896,12 @@ export async function createAgentWebServer(options = {}) {
     manager.browsers.personal = new BrowserConnections({ records, store, ttlMs: config.sessionCapabilityTtlMs, validateCompany: async (user, companyId) => (await resources.forOwner(user.id)).companies.get(companyId) });
     manager.browsers.personal.on("viewers", chatId => { void manager.refreshActivity(chatId).catch(() => {}); });
     manager.browsers.personal.on("changed", chatId => {
+      manager.browsers.invalidateOfficial(chatId);
       manager.browsers.touch(chatId);
       for (const socket of manager.browsers.entries.get(chatId)?.viewers || []) socket.close(4001, "Browser access changed");
     });
+    manager.browsers.personalScope = chatId => personalBrowserScope({store,records,resources,agentAccounts},chatId);
+    manager.browsers.personal.officialScope = manager.browsers.personalScope;
     if (config.preview?.enabled) {
       try {
         const { PreviewHosts } = options.previewHosts ? {} : await import("./preview-hosts.mjs");

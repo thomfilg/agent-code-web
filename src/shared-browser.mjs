@@ -10,6 +10,11 @@ import { prepareChrome } from "./chrome-software.mjs";
 import { captureWorker } from "./software.mjs";
 import { browserSelectionExpression } from "./browser-clipboard.mjs";
 import { sendBrowserFrame } from "./browser-frames.mjs";
+import { randomUUID } from 'node:crypto';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { OfficialBrowserMcp } from './official-browser-mcp.mjs';
+import { personalProjectionProvider } from './personal-browser-projection.mjs';
 
 const stopped = () => ({ running: false, mode: "guest", tabs: [], tabId: null });
 const uiActions = new Set(["status", "navigate", "reload", "back", "forward", "newTab", "selectTab", "closeTab", "mouse", "key", "text", "resize", "dialog", "copy"]);
@@ -108,6 +113,7 @@ export class SharedBrowsers {
   constructor({ store, config, acquire, onIdle = async () => {}, isActive = () => false, onViewers = async () => {}, processFactory = child => new BrowserProcess(child) }) {
     this.store = store; this.config = config; this.acquire = acquire; this.processFactory = processFactory;
     this.isActive = isActive; this.onViewers = onViewers;
+    this.browserAttempts = new Map();
     this.entries = new Map(); this.versions = new Map(); this.grants = new CapabilityBroker({ ttlMs: config.sessionCapabilityTtlMs }); this.onIdle = onIdle;
   }
   requireChat(chatId) {
@@ -237,6 +243,9 @@ export class SharedBrowsers {
   }
   async stop(chatId, revoke = true) {
     await this.personal?.revokeChat(chatId);
+    this.invalidateOfficial(chatId);
+    await this.browserAttempts.get(chatId)?.proxy?.revoke();
+    this.browserAttempts.delete(chatId);
     this.versions.set(chatId, (this.versions.get(chatId) || 0) + 1);
     if (revoke) this.grants.revokeChat(chatId);
     const entry = this.entries.get(chatId);
@@ -254,10 +263,44 @@ export class SharedBrowsers {
     })();
     try { await entry.stopPromise; } finally { entry.stopPromise = null; }
   }
-  async shutdown() { await this.personal?.shutdown(); await Promise.allSettled([...this.entries.keys()].map(id => this.stop(id))); }
-  runtime(chatId, origin) {
+  async shutdown() {
+    await this.personal?.shutdown();
+    await Promise.allSettled([...new Set([...this.entries.keys(),...this.browserAttempts.keys()])].map(id => this.stop(id)));
+  }
+  runtime(chatId, origin, {validWhile = null} = {}) {
+    this.invalidateOfficial(chatId);
+    this.browserAttempts.set(chatId,{id:randomUUID(),validWhile,personalUsed:false,generation:(this.versions.get(chatId)||0)+1});
     const token = this.grants.issue({ chatId, provider: "browser" });
     return { relay_browser: { type: "http", url: `${origin}/gateway/browser`, headers: { Authorization: `Bearer ${token}` } } };
+  }
+  invalidateOfficial(chatId) {
+    const attempt = this.browserAttempts.get(chatId);
+    if (attempt?.personalUsed) { attempt.revoked = true; void attempt.proxy?.revoke().catch(() => {}); }
+  }
+  async officialPersonal(chatId,token) {
+    const attempt = this.browserAttempts.get(chatId), grant = this.personal.currentGrant(chatId);
+    if (!attempt || !grant?.active || typeof attempt.validWhile !== 'function' || !attempt.validWhile() || !this.personalScope) throw Error('Personal browser MCP requires the current authorized agent attempt');
+    if (attempt.revoked) {
+      // Only a fresh explicit sharing grant can admit a new projection. A link
+      // reconnect, retry or later message under the old grant cannot do so.
+      if (attempt.proxyGrantId === grant.id) throw Error('Personal browser sharing was revoked');
+      attempt.proxy = null; attempt.initializing = null; attempt.revoked = false;
+    }
+    if (attempt.proxy) return attempt.proxy;
+    attempt.personalUsed = true; attempt.proxyGrantId = grant.id;
+    return attempt.initializing ||= (async () => {
+      const scope = await this.personalScope(chatId);
+      if (!grant.officialScope || JSON.stringify(grant.officialScope) !== JSON.stringify(scope)) throw Error('Authorize Chrome sharing again for the current agent scope');
+      const binding = {...scope,attemptId:attempt.id,generation:attempt.generation,mode:'personal',personalGrantId:grant.id};
+      const validate = async () => {
+        if (attempt.revoked || this.browserAttempts.get(chatId) !== attempt || !attempt.validWhile() || !this.grants.validate(token,'browser') || this.personal.currentGrant(chatId) !== grant || !grant.active) return false;
+        const current = await this.personalScope(chatId);
+        return JSON.stringify(current) === JSON.stringify(scope) && !attempt.revoked && this.browserAttempts.get(chatId) === attempt && attempt.validWhile() && this.personal.currentGrant(chatId) === grant && grant.active;
+      };
+      if (!await validate()) throw Error('Personal browser scope changed');
+      attempt.proxy = new OfficialBrowserMcp({binding,validateBinding:validate,acquireContext:personalProjectionProvider({personal:this.personal,grant,validate})});
+      return attempt.proxy;
+    })();
   }
   async handle(request, response, url) {
     if (url.pathname !== "/gateway/browser") return false;
@@ -270,6 +313,15 @@ export class SharedBrowsers {
     let size = 0; const chunks = [];
     for await (const chunk of request) { size += chunk.length; if (size > 100000) return finish(413, "Browser request too large"); chunks.push(chunk); }
     let body; try { body = JSON.parse(Buffer.concat(chunks)); } catch { return finish(400, "Invalid JSON"); }
+    if (this.personal?.grants.has(grant.chatId) || this.browserAttempts.get(grant.chatId)?.personalUsed) {
+      let proxy; try { proxy = await this.officialPersonal(grant.chatId,token); } catch { return finish(403,'Personal browser MCP access is unavailable or revoked'); }
+      const server = new Server({name:'relay-official-personal-chrome',version:'1'},{capabilities:{tools:{}}});
+      server.setRequestHandler(ListToolsRequestSchema,() => proxy.toolsList());
+      server.setRequestHandler(CallToolRequestSchema,(request,extra) => proxy.callTool(request.params,{signal:extra.signal}));
+      const transport = new StreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true});
+      response.once('close',() => { void transport.close(); void server.close(); });
+      await server.connect(transport); await transport.handleRequest(request,response,body); return true;
+    }
     const server = new McpServer({ name: "relay-shared-chrome", version: "1.0.0" });
     const run = async (action, params) => {
       try {

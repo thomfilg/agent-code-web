@@ -26,7 +26,10 @@ export const browserPolicyFailure = code => Object.assign(new Error(`Browser MCP
 
 export function allowedBrowserTools(mode) {
   if (!["guest", "personal"].includes(mode)) throw browserPolicyFailure("MODE_INVALID");
-  return Object.keys(schemas).filter(name => mode === "guest" || name !== "browser_evaluate");
+  // Personal viewport remains owned by the shared UI/extension screencast.
+  // Do not advertise a tool whose emulation changes this projection cannot
+  // yet coordinate with that owner.
+  return Object.keys(schemas).filter(name => mode === "guest" || !["browser_evaluate", "browser_resize"].includes(name));
 }
 
 export function authorizeBrowserTool(mode, name, args = {}) {

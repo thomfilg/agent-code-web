@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Agent Relay · Personal Chrome",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pair your Chrome profile with Agent Relay. Agent access is off until you explicitly enable it for a chat.",
   "minimum_chrome_version": "120",
   "permissions": ["debugger", "storage"],

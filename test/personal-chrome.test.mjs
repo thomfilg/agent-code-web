@@ -108,11 +108,16 @@ test("real Chrome extension keeps logins private until the per-chat toggle, and 
   await relay.getByLabel("Browser tools", { exact: true }).click();
   await expect(relay.locator("#browser-tabs")).toBeDisabled();
   const tokenConfig = app.manager.browsers.runtime(chat.id, url).relay_browser, client = new Client({ name: "personal-browser-test", version: "1" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(tokenConfig.url), { requestInit: { headers: tokenConfig.headers } }));
   try {
-    const result = await client.callTool({ name: "browser_evaluate", arguments: { expression: "document.querySelector('#session').textContent" } });
-    assert.equal(JSON.parse(result.content[0].text), "Signed in as Alice", "the real MCP agent transport shares the authorized page");
-    const screenshot = await client.callTool({ name: "browser_screenshot", arguments: {} }); assert.equal(screenshot.content[0].type, "image");
+    // Personal agent MCP now requires a durable named account/current attempt.
+    // This legacy local-user/mock fixture still exercises real user consent,
+    // signed-in UI, viewport, clipboard, restart and revocation below. The real
+    // official agent gateway is covered by personal-official-mcp.test.mjs.
+    const denied = await fetch(tokenConfig.url,{method:'POST',headers:{...tokenConfig.headers,'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list'})});
+    assert.equal(denied.status,403);
+    await assert.rejects(client.connect(new StreamableHTTPClientTransport(new URL(tokenConfig.url), { requestInit: { headers: tokenConfig.headers } })), /Personal browser MCP access is unavailable or revoked/);
+    const screenshot = await app.manager.browsers.command(chat.id, "screenshot", {});
+    assert.ok(screenshot.data.length > 1000, "the authorized user still sees the same real tab");
   } finally { await client.close(); }
   await assert.rejects(app.manager.browsers.command(chat.id, "navigate", { url }), /hostname cannot be opened/);
   await app.manager.browsers.command(chat.id, "fill", { selector: "#entry", text: "Agent used my authorized profile" });

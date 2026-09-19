@@ -1955,7 +1955,10 @@ export class RuntimeManager extends EventEmitter {
         if (mcps?.companies) executor.mcpServers = await mcps.runtime(chatId, await mcps.forCompany(companyForChat(chat)), executor.gatewayOrigin || this.gatewayOrigin, chat);
         checkCancelled();
       }
-      if (executor && this.browsers) executor.mcpServers = { ...executor.mcpServers, ...this.browsers.runtime(chatId, executor.gatewayOrigin || this.gatewayOrigin) };
+      if (executor && this.browsers) executor.mcpServers = { ...executor.mcpServers, ...this.browsers.runtime(chatId, executor.gatewayOrigin || this.gatewayOrigin, {validWhile:() => {
+        const current = this.store.get(chatId);
+        return Boolean(current) && !current.archived && runtimeAccountBinding(current) === runtimeAccountBinding(chat) && (this.#lifecycleVersions.get(chatId)||0) === version;
+      }}) };
       if (executor && this.githubWorkers) {
         checkCancelled();
         const origin = executor.gatewayOrigin || this.gatewayOrigin;
