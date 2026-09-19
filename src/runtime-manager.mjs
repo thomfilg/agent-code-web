@@ -71,6 +71,7 @@ export class RuntimeManager extends EventEmitter {
   #workerWakes = new Map();
   #awakeWorkers = new Set();
   #workerIdleTimers = new Map();
+  #modeChanges = new Map();
 
   #assertNativeAccount(chatId, expectedRuntime = null) {
     const chat = this.store.get(chatId);
@@ -646,7 +647,7 @@ export class RuntimeManager extends EventEmitter {
     ];
   }
 
-  isBusy(chatId) { const runtime = this.#runtimes.get(chatId); return this.#workerWakes.has(chatId) || this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.busy || runtime?.adapter.isBackgroundBusy?.()) || this.#importPending(chatId); }
+  isBusy(chatId) { const runtime = this.#runtimes.get(chatId); return this.#modeChanges.has(chatId) || this.#workerWakes.has(chatId) || this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.busy || runtime?.adapter.isBackgroundBusy?.()) || this.#importPending(chatId); }
   publishChat(chat) { if (chat) this.#emit(chat.id, { type: "chat_updated", chat }); }
 
   // Admit quickly: a cold EC2 start can outlast the public HTTP timeout. This
@@ -923,15 +924,46 @@ export class RuntimeManager extends EventEmitter {
     this.publishChat(updated); return updated;
   }
 
-  async setMode(chatId, mode) {
+  async setMode(chatId, mode, { nextTurn = false } = {}) {
     if (this.#switching.has(chatId)) throw Object.assign(new Error("Wait for the agent switch to finish"), { statusCode: 409 });
-    const updated = await this.store.update(chatId, chat => {
-      const allowed = chat.agent === "claude" ? Object.values(CLAUDE_PERMISSION_MODES) : ["auto", "accept_edits", "plan"];
-      if (!allowed.includes(mode)) throw new Error("Choose a permission mode supported by this agent");
-      return { mode, modeSettingsRevision: (chat.modeSettingsRevision || 0) + 1 };
-    });
-    if (!updated) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
-    this.publishChat(updated); return updated;
+    const chat = this.store.get(chatId);
+    if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    const allowed = chat.agent === "claude" ? Object.values(CLAUDE_PERMISSION_MODES) : ["auto", "accept_edits", "plan"];
+    if (!allowed.includes(mode)) throw new Error("Choose a permission mode supported by this agent");
+    if (this.#modeChanges.has(chatId)) throw Object.assign(Error("Wait for the current permission change to finish"), { statusCode: 409 });
+    const runtime = this.#runtimes.get(chatId), generation = runtime?.generation;
+    if (chat.agent === "claude" && !runtime && this.#queued.has(chatId) && !nextTurn) throw Object.assign(Error("Claude is starting; retry the permission selection when ready."), { statusCode: 409 });
+    const version = this.#lifecycleVersions.get(chatId) || 0;
+    const check = () => {
+      if ((this.#lifecycleVersions.get(chatId) || 0) !== version || this.#runtimes.get(chatId) !== runtime
+        || runtime?.generation !== generation || this.#switching.has(chatId) || this.#interruptions.has(chatId)
+        || runtimeAccountBinding(this.store.get(chatId) || {}) !== runtimeAccountBinding(chat)) {
+        throw Object.assign(Error("The chat changed during the permission update; select the mode again."), { statusCode: 409 });
+      }
+      if (runtime && chat.agent === "claude") this.#assertNativeAccount(chatId, runtime);
+    };
+    const pending = { acknowledged: false, latest: null };
+    this.#modeChanges.set(chatId, pending);
+    try {
+      check();
+      let applied = false;
+      if (chat.agent === "claude" && runtime?.adapter.setPermissionMode) {
+        applied = await runtime.adapter.setPermissionMode(mode, check, () => {
+          check(); pending.acknowledged = true;
+          runtime.permissionEpoch = (runtime.permissionEpoch || 0) + 1;
+        });
+        if (!applied && runtime.busy && !nextTurn) throw Object.assign(Error("Claude is starting; retry the permission selection when ready."), { statusCode: 409 });
+      }
+      let updated;
+      do {
+        updated = await this.store.update(chatId, current => {
+          check(); return { mode: pending.latest || mode, modeSettingsRevision: (current.modeSettingsRevision || 0) + 1 };
+        });
+        check();
+      } while (pending.latest && updated.mode !== pending.latest);
+      if (applied && runtime.modeState) Object.assign(runtime.modeState, { mode: updated.mode, revision: updated.modeSettingsRevision, conflict: false });
+      this.publishChat(updated); return updated;
+    } finally { this.#modeChanges.delete(chatId); void this.#drainQueue(chatId); }
   }
 
   #checkClaudeConfiguration(chat, text, attachments) {
@@ -1005,7 +1037,7 @@ export class RuntimeManager extends EventEmitter {
       changed = true;
       return { mode, modeSettingsRevision: (current.modeSettingsRevision || 0) + 1 };
     });
-    if (changed) {
+    if (changed && active()) {
       state.mode = updated.mode; state.revision = updated.modeSettingsRevision;
     }
     const latest = this.store.get(chatId);
@@ -1343,7 +1375,7 @@ export class RuntimeManager extends EventEmitter {
     const commandAction = approval ? { type: "approvalRetry", approval,
       prompt: "I confirmed the specific denied action recorded by the native approval immediately before this message. Retry that exact action once in the same context, using the current permission policy. Do not broaden the operation, change permissions, or treat this as permission for other actions. If the action is no longer appropriate or still denied, explain and stop this retry." } : messageCommand(chat.agent, text);
     if (chat.workflowState === "archived") throw Object.assign(new Error("Unarchive this chat before sending a message"), { statusCode: 409 });
-    if (this.#interruptions.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || this.#runtimes.get(chatId)?.busy || this.#runtimes.get(chatId)?.adapter.isBackgroundBusy?.() || (this.#sendingNow.has(chatId) && this.#sendingNow.get(chatId) !== queueAction)) {
+    if (this.#modeChanges.has(chatId) || this.#interruptions.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || this.#runtimes.get(chatId)?.busy || this.#runtimes.get(chatId)?.adapter.isBackgroundBusy?.() || (this.#sendingNow.has(chatId) && this.#sendingNow.get(chatId) !== queueAction)) {
       throw Object.assign(new Error("this chat already has a running turn"), { statusCode: 409 });
     }
     this.#queued.add(chatId);
@@ -1447,7 +1479,7 @@ export class RuntimeManager extends EventEmitter {
         const fastContext = Object.hasOwn(current, "serviceTier") ? current : { ...current, serviceTier: runtime.adapter.settings?.serviceTier };
         const settings = commandAction.type === "fast" ? await this.models.fastSettings(fastContext, commandAction.action) : commandAction.settings;
         check();
-        if (Object.hasOwn(settings, "mode")) await this.setMode(chatId, settings.mode);
+        if (Object.hasOwn(settings, "mode")) await this.setMode(chatId, settings.mode, { nextTurn: true });
         else await this.setModel(chatId, { model: current.model || null, effort: Object.hasOwn(settings, "model") ? null : current.effort || null, ...settings }, check);
         if (turn.cancelled || runtime.generation !== generation) return;
         const message = await this.store.appendMessage(chatId, { role: "system", kind: "notice", text: Object.entries(settings).map(([key, value]) => `${key}: ${value || "default"}`).join(" · ") });
@@ -1486,6 +1518,7 @@ export class RuntimeManager extends EventEmitter {
       // metadata/handoff instructions belong in the appended system prompt.
       const claude = currentChat.agent === "claude";
       const modeState = { original: currentChat, mode: currentChat.mode, revision: currentChat.modeSettingsRevision };
+      runtime.modeState = modeState;
       const modeActive = () => !turn.cancelled && runtime.generation === generation && this.#runtimes.get(chatId) === runtime;
       const send = () => {
         if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) throw Object.assign(new Error("Turn cancelled before native dispatch"), { name: "AbortError" });
@@ -1497,7 +1530,14 @@ export class RuntimeManager extends EventEmitter {
         ...(claude ? { systemPrompt: responsePrompt("", automaticTitle) + (currentChat.needsAgentHandoff ? handoffPrompt(currentChat, "") : "") + browserPrompt,
           onPermissionMode: mode => {
             if (!modeActive()) return runtime.eventQueue;
-            runtime.eventQueue = runtime.eventQueue.then(() => this.#syncClaudePermissionMode(chatId, mode, modeState, modeActive));
+            const change = this.#modeChanges.get(chatId);
+            if (change?.acknowledged) {
+              if (Object.values(CLAUDE_PERMISSION_MODES).includes(mode)) change.latest = mode;
+              return runtime.eventQueue;
+            }
+            const permissionEpoch = runtime.permissionEpoch || 0;
+            const stillCurrent = () => modeActive() && (runtime.permissionEpoch || 0) === permissionEpoch;
+            runtime.eventQueue = runtime.eventQueue.then(() => this.#syncClaudePermissionMode(chatId, mode, modeState, stillCurrent));
             return runtime.eventQueue;
           },
           onFastConstraint: value => {

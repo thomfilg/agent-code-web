@@ -641,6 +641,39 @@ export class ClaudeAdapter {
     });
   }
 
+  async setPermissionMode(mode, guard = () => {}, onAcknowledged = () => {}) {
+    const nativeMode = Object.keys(CLAUDE_PERMISSION_MODES).find(key => CLAUDE_PERMISSION_MODES[key] === mode);
+    if (!nativeMode) throw Error("Unsupported Claude permission mode");
+    const session = this.turnSession || this.applicationSession;
+    if (!session) {
+      if (this.child) throw Object.assign(Error("This Claude transport cannot change permissions live. Wait for this turn to finish."), { statusCode: 409 });
+      return false;
+    }
+    const check = () => {
+      guard(); this.assertCapability();
+      if (this.stopped || session.ended || session.stopping || !session.initialized || session.pending
+        || ![this.turnSession, this.applicationSession].includes(session)) {
+        throw Object.assign(Error("Claude is starting or changed; retry the permission selection when ready."), { statusCode: 409 });
+      }
+    };
+    check();
+    try {
+      await session.control.request("set_permission_mode", { mode: nativeMode }, { onSuccess: result => {
+        if (result.mode !== nativeMode) throw Error("Claude did not confirm the selected permission mode");
+        check(); onAcknowledged();
+      } });
+      check();
+    } catch (error) {
+      // Never surface native errors containing private settings, or silently
+      // substitute bypassPermissions when Auto is unavailable.
+      if (error.statusCode) throw error;
+      throw Error("Claude could not confirm the permission change. Check account/model restrictions and retry; the selection was not saved.");
+    }
+    // Pending tools remain native-owned. A mode change is not Approve once.
+    // Native control_cancel_request removes prompts that Claude re-evaluates.
+    return true;
+  }
+
   async respond(requestId, payload) {
     const requests = this.turnSession?.requests || this.applicationSession?.requests;
     if (!requests || this.stopped) throw Object.assign(Error("Claude request is no longer active"), { statusCode: 409 });
