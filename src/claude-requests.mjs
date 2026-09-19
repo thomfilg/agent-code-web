@@ -22,6 +22,21 @@ export class ClaudeRequests {
     if (this.closed) return true;
     const native = event.request, id = event.request_id;
     if (typeof id !== "string" || !id || this.requests.has(id)) return true;
+    if (native?.subtype === "oauth_token_refresh" && this.hooks.accountCredentials) {
+      // Credential renewal is not an approval and must never enter chat
+      // history or the user-visible request queue. No refresh token leaves
+      // the controller; the hook rechecks the owner/account/company binding.
+      if (this.refreshing) {
+        void this.write({ type: "control_response", response: { subtype: "error", request_id: id, error: "Claude credential renewal is already pending." } }).catch(() => {});
+        return true;
+      }
+      this.refreshing = true;
+      void Promise.resolve().then(() => this.hooks.accountCredentials({ refresh: true })).then(credentials => {
+        if (this.closed) return;
+        return this.write({ type: "control_response", response: { subtype: "success", request_id: id, response: { accessToken: credentials.accessToken } } });
+      }, error => this.closed ? null : this.write({ type: "control_response", response: { subtype: "error", request_id: id, error: error?.statusCode === 503 ? "Claude is temporarily unavailable. Retry this action; your saved account was not disconnected." : "Reconnect this Claude account; no other credentials were used." } })).catch(() => {}).finally(() => { this.refreshing = false; });
+      return true;
+    }
     if (native?.subtype !== "can_use_tool" || typeof native.tool_name !== "string" || !object(native.input)) {
       void this.write({ type: "control_response", response: { subtype: "error", request_id: id, error: "This native request is not supported by Relay. No permission was granted." } }).catch(() => {});
       return true;

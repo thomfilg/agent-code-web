@@ -18,12 +18,12 @@ export class ClaudeControlChannel {
     child.once("close", this.onClose); child.once("error", this.onClose);
     child.stdin.on("error", this.onClose);
   }
-  request(subtype, fields = {}) {
+  request(subtype, fields = {}, { onSuccess, timeoutMs = this.timeoutMs } = {}) {
     if (this.closed || !this.child.stdin.writable) return Promise.reject(Error("Claude MCP control channel stopped"));
     const id = randomUUID();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(Error(`Claude ${subtype} control timed out`)); }, this.timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      const timer = setTimeout(() => { this.pending.delete(id); reject(Error(`Claude ${subtype} control timed out`)); }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timer, onSuccess });
       this.child.stdin.write(`${JSON.stringify({ type: "control_request", request_id: id, request: { subtype, ...fields } })}\n`, error => {
         if (!error || !this.pending.has(id)) return;
         clearTimeout(timer); this.pending.delete(id); reject(Error("Claude MCP control channel stopped"));
@@ -38,7 +38,13 @@ export class ClaudeControlChannel {
     // Native connection errors can contain endpoint URLs or credentials. Expose
     // only known categories, followed by separately validated status metadata.
     if (event.response?.subtype === "error") pending.reject(Error(/managed policy/i.test(event.response.error || "") ? "Blocked by managed policy" : "Native MCP control failed"));
-    else if (event.response?.subtype === "success") pending.resolve(event.response.response || {});
+    else if (event.response?.subtype === "success") {
+      const result = event.response.response || {};
+      // Run before the next stdout frame, not in a promise continuation. A
+      // permission status after this acknowledgement supersedes the selection.
+      try { pending.onSuccess?.(result); pending.resolve(result); }
+      catch (error) { pending.reject(error); }
+    }
     else pending.reject(Error("Invalid Claude MCP control response"));
   }
   close() {

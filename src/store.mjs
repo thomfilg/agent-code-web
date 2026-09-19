@@ -5,7 +5,10 @@ import { runtimeWorkflowPatch } from "../public/chat-organization.js";
 
 function restored(chat) {
   chat = { ...chat, archived: chat.archived ?? chat.workflowState === "archived" };
-  return { pinned: false, customGroupId: null, workflowState: "idle", ...chat,
+  // The original source-only schema predates saved repository selections.
+  // An absent field means no GitHub grant, not permission to infer a connection.
+  // Explicit null/malformed selections remain intact so admission rejects them.
+  return { repositories: [], pinned: false, customGroupId: null, workflowState: "idle", ...chat,
     ...runtimeWorkflowPatch(chat, "stopped"), status: "stopped", pendingRequest: null, idleDeadlineAt: null,
     queuePaused: Boolean(chat.queuedMessages?.length) || Boolean(chat.queuePaused) };
 }
@@ -84,7 +87,7 @@ export class ChatStore {
     return chat ? clone(chat) : null;
   }
 
-  async create({ title, agent, source = "", repositories = [], environmentId = null, environmentName = null, autoTitle = true, model = null, effort = null, modelSelectionSet = false, ownerId = null }, prepare = null) {
+  async create({ title, agent, source = "", repositories = [], environmentId = null, environmentName = null, autoTitle = true, model = null, effort = null, ultracode = false, modelSelectionSet = false, ownerId = null, agentAccountId = null }, prepare = null) {
     const id = newId("chat");
     const timestamp = nowIso();
     const chat = {
@@ -93,8 +96,10 @@ export class ChatStore {
       revision: 1,
       title,
       agent,
+      agentAccountId,
       model,
       effort,
+      ultracode: agent === "claude" && ultracode === true,
       modelSelectionSet,
       mode: "accept_edits",
       source,

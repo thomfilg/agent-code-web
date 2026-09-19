@@ -5,6 +5,8 @@ import { JsonRpcProcess } from "../json-rpc-process.mjs";
 import { buildWorkerEnvironment } from "../worker-process.mjs";
 import { inspectDesktopSession } from "../desktop-handoff.mjs";
 import { errorMessage, redact } from "../utils.mjs";
+import { SecretTextStream } from "../secret-text-stream.mjs";
+import { capabilityMcpServers, codexShellEnvironmentArgs } from "../worker-capabilities.mjs";
 import { codexUsage, safeRateLimits, cliVersionFromUserAgent, safeSessionDetails } from "../session-info.mjs";
 import { codexMcpArgs } from "../mcp-connections.mjs";
 import { captureSessionBundle, workerSessionIO } from "../codex-session-bundle.mjs";
@@ -34,6 +36,17 @@ function gatewayArgs(origin) {
   ];
 }
 
+function safeToolJson(value) {
+  if (value == null) return "";
+  // Transport already strips known account/capability credentials. Tool arguments
+  // can also contain user-supplied credentials under structured secret keys.
+  return redact(JSON.stringify(value, (key, field) => {
+    const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+    return /^(?:password|passwd|authorization|proxyauthorization|cookie|setcookie|apikey|secret|clientsecret|token|accesstoken|refreshtoken|idtoken|bearertoken|sessiontoken|credentials)$/.test(normalized)
+      ? "[redacted]" : field;
+  }, 2));
+}
+
 function safeToolEvent(item, state) {
   if (!item || typeof item !== "object") return null;
   if (item.type === "commandExecution") {
@@ -59,13 +72,23 @@ function safeToolEvent(item, state) {
     };
   }
   if (item.type === "mcpToolCall" || item.type === "dynamicToolCall") {
+    const completed = state === "completed";
+    const result = item.type === "mcpToolCall"
+      ? (item.result == null ? null : { content: item.result.content, structuredContent: item.result.structuredContent })
+      : item.contentItems;
+    // MCP _meta is provider-internal metadata, not the user-visible tool result.
+    const error = typeof item.error?.message === "string" ? redact(item.error.message) : "";
+    const output = completed ? [safeToolJson(result), error ? `Error: ${error}` : ""].filter(Boolean).join("\n") : "";
     return {
       type: "tool",
       tool: item.type,
       state,
       itemId: item.id,
       title: redact(item.tool || item.name || "Tool call"),
-      output: state === "completed" ? redact(JSON.stringify(item.result ?? item.contentItems ?? "")).slice(-16_000) : "",
+      input: safeToolJson(item.arguments).slice(0, 16_000),
+      output: output.slice(-16_000),
+      failed: completed && (item.status === "failed" || item.error != null || item.success === false),
+      resultMissing: completed && result == null && !error,
     };
   }
   return null;
@@ -99,13 +122,15 @@ export class CodexAdapter {
     this.children = new Set();
     this.sharedParent = null;
     this.sharedListeners = null;
+    this.credentialSecrets = new Set(executor?.capabilitySecrets || []);
   }
 
   async start() {
     if (this.rpc) return;
     if (this.sharedParent) throw new Error("This temporary side chat has closed; open a new side chat");
     if (this.requireResume && !this.threadId) throw new Error("The fork's native session ID is missing; refusing to start an empty conversation");
-    const authMode = this.config.codex.authMode;
+    const authMode = this.chat.agentAccountId ? "account" : this.config.codex.authMode;
+    if (authMode === "account" && !this.hooks.accountCredentials) throw new Error("The selected Codex account is unavailable; reconnect it in Agent accounts");
     if (authMode === "gateway" && !this.config.codex.providerKey) {
       throw new Error("OPENAI_API_KEY is required when CODEX_AUTH_MODE=gateway");
     }
@@ -134,32 +159,28 @@ export class CodexAdapter {
       ...(this.executor ? { spawn: this.executor.spawn.bind(this.executor) } : { isolation: this.config.processIsolation }) });
     this.plugins = new CodexPlugins({ run: args => this.pluginCli.run(args),
       request: (method, params) => { if (!this.rpc) throw new Error("The native plugin connection stopped"); return this.rpc.request(method, params, 30000); },
-      workspace: this.workspace, thread: () => this.threadId, mutable: authMode === "gateway",
+      workspace: this.workspace, thread: () => this.threadId, mutable: authMode !== "host",
       busy: () => this.nativeSettingsBusy() || Boolean(this.hookControls?.changing || this.featureControls?.changing || this.memoryControls?.changing || this.importControls?.changing || this.importControls?.needsRefresh),
       changed: () => this.refreshSkills() });
     this.hookControls = new CodexHooks({ request: (method, params) => { if (!this.rpc) throw new Error("The native hook connection stopped"); return this.rpc.request(method, params, 30000); },
-      workspace: this.workspace, thread: () => this.threadId, mutable: authMode === "gateway",
+      workspace: this.workspace, thread: () => this.threadId, mutable: authMode !== "host",
       busy: () => this.nativeSettingsBusy() || Boolean(this.plugins?.changing || this.featureControls?.changing || this.memoryControls?.changing || this.importControls?.changing || this.importControls?.needsRefresh) });
     this.featureControls = new CodexFeatures({ request: (method, params) => { if (!this.rpc) throw new Error("The native feature connection stopped"); return this.rpc.request(method, params, 30000); },
-      workspace: this.workspace, thread: () => this.threadId, mutable: authMode === "gateway",
+      workspace: this.workspace, thread: () => this.threadId, mutable: authMode !== "host",
       busy: () => this.nativeSettingsBusy() || Boolean(this.plugins?.changing || this.hookControls?.changing || this.memoryControls?.changing || this.importControls?.changing || this.importControls?.needsRefresh) });
     this.memoryControls = new CodexMemories({ request: (method, params) => { if (!this.rpc) throw new Error("The native memory connection stopped"); return this.rpc.request(method, params, 30000); },
-      workspace: this.workspace, thread: () => this.threadId, mutable: authMode === "gateway",
+      workspace: this.workspace, thread: () => this.threadId, mutable: authMode !== "host",
       busy: () => this.nativeSettingsBusy() || Boolean(this.plugins?.changing || this.hookControls?.changing || this.featureControls?.changing || this.importControls?.changing || this.importControls?.needsRefresh) });
-    if (this.restoreFork && authMode === "gateway") {
+    if (this.restoreFork && authMode !== "host") {
       if (this.restoreFork.threadId !== this.threadId) throw new Error("Fork history does not match its native session ID");
       await workerSessionIO(this.executor, { action: "install", home: env.CODEX_HOME, bundle: this.restoreFork });
     }
 
     const args = ["app-server"];
-    args.push(...codexMcpArgs(this.executor?.mcpServers));
+    if (authMode === "account") args.push("-c", 'cli_auth_credentials_store="ephemeral"', "-c", 'model_provider="openai"');
+    args.push(...codexMcpArgs(capabilityMcpServers(this.executor?.mcpServers, this.credentialSecrets, env, "codex")));
     if (authMode === "gateway") args.push(...gatewayArgs(this.gatewayOrigin));
-    args.push(
-      "-c", `shell_environment_policy.inherit=${toml("core")}`,
-      "-c", "shell_environment_policy.ignore_default_excludes=false",
-      "-c", `shell_environment_policy.exclude=[${toml("AGENT_SESSION_TOKEN")},${toml("OPENAI_API_KEY")},${toml("ANTHROPIC_API_KEY")}]`,
-    );
-    for (const [name, value] of Object.entries(this.executor?.environmentVariables || {})) args.push("-c", `shell_environment_policy.set.${name}=${toml(value)}`);
+    args.push(...codexShellEnvironmentArgs(env, this.executor?.environmentVariables, this.credentialSecrets));
 
     const rpc = new JsonRpcProcess({
       command: this.config.codex.bin,
@@ -167,6 +188,11 @@ export class CodexAdapter {
       isolation: this.executor ? "none" : this.config.processIsolation,
       spawnFn: this.executor ? this.executor.spawn.bind(this.executor) : null,
       spawnOptions: { cwd: this.workspace, env },
+      deferAgentDeltaRedaction: authMode === "account" || this.credentialSecrets.size > 0,
+      redactSecrets: value => {
+        for (const secret of [...this.credentialSecrets].sort((a, b) => b.length - a.length)) value = value.replaceAll(secret, "[redacted]");
+        return value;
+      },
     });
     this.rpc = rpc;
     this.feedbackStartupPolicy = null;
@@ -179,11 +205,14 @@ export class CodexAdapter {
     const imports = this.importControls;
     this.importStop = null;
     this.agents = new CodexAgentThreads({ rpc, root: () => this.threadId, workspace: this.workspace, model: this.config.codex.model, saved: this.savedAgentThreads,
+      secrets: authMode === "account" || this.credentialSecrets.size ? this.credentialSecrets : null,
       publish: snapshot => this.hooks.onAgentThreads?.(snapshot), log: text => this.hooks.onLog?.(text) });
     rpc.on("notification", (message) => this.#notification(message));
     rpc.on("request", (message) => this.#serverRequest(message));
-    rpc.on("stderr", (text) => this.hooks.onLog?.(redact(text)));
-    rpc.on("protocolError", (error) => this.hooks.onLog?.(errorMessage(error)));
+    // Native diagnostics can split a credential across stderr chunks. Named
+    // accounts expose structured, redacted errors, never raw native stderr.
+    rpc.on("stderr", (text) => { if (authMode !== "account" && !this.credentialSecrets.size) this.hooks.onLog?.(redact(text)); });
+    rpc.on("protocolError", (error) => this.hooks.onLog?.(this.credentialSecrets.size ? "Codex returned invalid protocol output; private diagnostics were omitted." : errorMessage(error)));
     rpc.on("error", (error) => this.hooks.onFatal?.(error));
     rpc.on("exit", ({ code, signal }) => {
       const confirmed = this.executor?.metadata?.backend !== "ec2" || Number.isInteger(code) && code >= 0 && code < 255 && !signal;
@@ -201,6 +230,12 @@ export class CodexAdapter {
     });
     this.cliVersion = cliVersionFromUserAgent(initialized?.userAgent);
     rpc.notify("initialized", {});
+    if (authMode === "account") {
+      const credentials = await this.hooks.accountCredentials({});
+      this.credentialSecrets.add(credentials.accessToken);
+      try { await rpc.request("account/login/start", { type: "chatgptAuthTokens", ...credentials }); }
+      catch { throw new Error("Codex could not use the selected account. Reconnect it in Agent accounts; no server credentials were used."); }
+    }
     await this.#loadThread();
     // Native feedback retains its invocation configuration after reloads.
     // Remember its startup policy without blocking ordinary work on old CLIs.
@@ -232,8 +267,8 @@ export class CodexAdapter {
       cwd: this.workspace,
       approvalPolicy: "on-request",
       sandbox: "workspace-write",
-      ...(this.config.codex.model ? { model: this.config.codex.model } : {}),
-      ...(this.config.codex.authMode === "gateway" ? { modelProvider: "agent_gateway" } : {}),
+      ...(this.chat.model || this.nativeAuthMode !== "account" && this.config.codex.model ? { model: this.chat.model || this.config.codex.model } : {}),
+      ...(this.nativeAuthMode === "gateway" ? { modelProvider: "agent_gateway" } : {}),
     };
     let result;
     if (this.threadId) {
@@ -272,6 +307,8 @@ export class CodexAdapter {
     if (!result.thread?.id) throw new Error("Codex did not return a side thread ID");
     const child = new CodexAdapter({ chat: this.chat, store: this.store, config: this.config, broker: this.broker, gatewayOrigin: this.gatewayOrigin, executor: this.executor, hooks });
     child.rpc = rpc; child.threadId = result.thread.id; child.sharedParent = this;
+    child.nativeAuthMode = this.nativeAuthMode;
+    child.credentialSecrets = this.credentialSecrets;
     child.settings = { model: result.model, serviceTier: result.serviceTier ?? null };
     child.sharedListeners = {
       notification: message => { if (message.params?.threadId === child.threadId) child.#notification(message); },
@@ -388,9 +425,11 @@ export class CodexAdapter {
     check(); const rpc = this.rpc, threadId = this.threadId, workerId = this.importWorkerId, accountEpoch = this.accountEpoch || 0;
     if (!rpc || !threadId || !workerId || this.intentionalStop || this.sharedParent) throw new Error("Connect this chat's native Codex worker before inspecting sign-out");
     const busy = () => this.nativeSettingsBusy() || [this.plugins, this.hookControls, this.featureControls, this.memoryControls, this.importControls].some(service => service?.changing || service?.needsRefresh);
-    const base = { threadId, workerId, gateway: this.config.codex.authMode === "gateway", privateProfile: this.config.codex.authMode === "gateway",
+    const authMode = this.nativeAuthMode || this.config.codex.authMode;
+    const base = { threadId, workerId, gateway: authMode === "gateway", privateProfile: authMode !== "host",
       busy: busy(), account: null, credentialPresent: null, storage: null, canLogout: false };
     if (!base.privateProfile) return { ...base, reason: "This shared host profile may be used by other companies. Native sign-out is locked until company/profile isolation is complete." };
+    if (authMode === "account") return { ...base, reason: "Disconnect this named account in Agent accounts to remove its saved credentials and stop its workers." };
     const guard = () => {
       check(); if (this.rpc !== rpc || this.threadId !== threadId || this.importWorkerId !== workerId || this.intentionalStop) throw new Error("The sign-out worker changed or stopped");
       if ((this.accountEpoch || 0) !== accountEpoch) throw new Error("The native account changed during inspection. Refresh /logout.");
@@ -436,7 +475,7 @@ export class CodexAdapter {
     if (!rpc || !threadId || this.intentionalStop || this.sharedParent) throw new Error("Connect this chat's native Codex worker before reviewing feedback");
     const guard = () => { check(); if (this.rpc !== rpc || this.threadId !== threadId || this.importWorkerId !== workerId || this.intentionalStop) throw new Error("The feedback worker changed or stopped"); };
     const result = await codexFeedbackPolicy({ request: (method, params) => rpc.request(method, params, startup ? 5000 : 20000), workspace: this.workspace,
-      nativeHome: this.nativeHome, privateProfile: this.config.codex.authMode === "gateway", threadId, workerId }, guard);
+      nativeHome: this.nativeHome, privateProfile: (this.nativeAuthMode || this.config.codex.authMode) !== "host", threadId, workerId }, guard);
     guard(); if (startup) return result;
     const initial = this.feedbackStartupPolicy;
     const enabled = result.enabled && initial?.enabled !== false;
@@ -650,6 +689,8 @@ export class CodexAdapter {
     this.createdForks.clear();
     this.rpc = null;
     if (rpc) await rpc.stop();
+    // Retain known tokens for delayed notifications and restored native
+    // history throughout this adapter's lifetime, including after refresh.
     await this.importStop;
     this.broker.revokeChat(this.chat.id);
   }
@@ -672,7 +713,8 @@ export class CodexAdapter {
       const current = this.current;
       if (current.goalRun && current.awaitingContinuation) {
         clearTimeout(current.continuationTimer); current.awaitingContinuation = false;
-        current.text = ""; current.finalText = "";
+        current.text = ""; current.finalText = ""; current.outputRedactor = null;
+        current.agentMessageId = undefined; current.pendingAgentMessageId = undefined; current.agentMessageIds = new Set();
         this.hooks.onEvent?.({ type: "goal_turn_started" });
       }
       current.turnId = params.turn?.id || current.turnId;
@@ -692,12 +734,16 @@ export class CodexAdapter {
       return;
     }
     if (method === "item/agentMessage/delta" && this.current) {
-      this.current.text += params.delta || "";
-      this.hooks.onEvent?.({ type: "assistant_delta", delta: params.delta || "" });
+      this.#appendAgentMessage(this.current, params.delta || "", params.itemId);
       return;
     }
     if ((method === "item/started" || method === "item/completed") && params.item) {
+      if (method === "item/started" && params.item.type === "agentMessage" && this.current) this.current.pendingAgentMessageId = params.item.id;
       if (method === "item/completed" && params.item.type === "agentMessage" && this.current) {
+        const id = params.item.id ?? this.current.pendingAgentMessageId ?? "legacy-message";
+        // Some transports deliver only a completed message. Keep that block
+        // too, without appending a second copy of already-streamed text.
+        if (!this.current.agentMessageIds?.has(id)) this.#appendAgentMessage(this.current, params.item.text || "", id);
         this.current.finalText = params.item.text || "";
       }
       if (method === "item/completed" && params.item.type === "exitedReviewMode" && this.current) this.current.reviewText = params.item.review || "";
@@ -715,6 +761,7 @@ export class CodexAdapter {
         if (!current.review || params.turn.id !== current.reviewTurnId) return;
       }
       const status = params.turn?.status || "completed";
+      this.#finishOutput(current);
       if (status === "completed" && current.goalRun) {
         this.hooks.onEvent?.({ type: "goal_turn_completed", text: current.text || current.finalText });
         current.awaitingContinuation = true;
@@ -740,11 +787,20 @@ export class CodexAdapter {
   #finishGoalRun() {
     const current = this.current;
     if (!current) return;
+    this.#finishOutput(current);
     this.current = null; clearTimeout(current.timer); clearTimeout(current.continuationTimer);
     current.resolveTurn({ text: "", status: "completed", turnsHandled: true });
   }
 
   #serverRequest(message) {
+    if (message.method === "account/chatgptAuthTokens/refresh" && this.hooks.accountCredentials && this.nativeAuthMode === "account") {
+      const rpc = this.rpc;
+      void this.hooks.accountCredentials({ refresh: true, previousAccountId: message.params?.previousAccountId }).then(credentials => {
+        this.credentialSecrets.add(credentials.accessToken);
+        if (this.rpc === rpc) rpc.respond(message.id, credentials);
+      }, () => { if (this.rpc === rpc) rpc.respondError(message.id, -32000, "Reconnect the selected Codex account in Relay"); }).catch(() => {});
+      return;
+    }
     if (message.params?.threadId && message.params.threadId !== this.threadId) return;
     const supported = new Set([
       "item/commandExecution/requestApproval",
@@ -764,10 +820,40 @@ export class CodexAdapter {
   #rejectCurrent(error) {
     if (!this.current) return;
     const current = this.current;
+    this.#finishOutput(current);
     this.current = null;
     current.resolveStarted?.(null);
     clearTimeout(current.timer);
     clearTimeout(current.continuationTimer);
     current.rejectTurn(error);
+  }
+
+  #appendAgentMessage(current, text, itemId) {
+    if (!text) return;
+    const id = itemId ?? current.pendingAgentMessageId ?? "legacy-message";
+    current.agentMessageIds ||= new Set();
+    if (current.agentMessageId !== undefined && current.agentMessageId !== id) {
+      // Native agentMessage items are separate visible updates, not arbitrary
+      // token chunks. Flush redaction safely and retain their paragraph break
+      // in both the live stream and the saved turn text.
+      const tail = current.outputRedactor?.boundary() || "";
+      current.text += tail;
+      if (tail) this.hooks.onEvent?.({ type: "assistant_delta", delta: tail });
+      const separator = current.text ? current.text.endsWith("\n\n") ? "" : current.text.endsWith("\n") ? "\n" : "\n\n" : "";
+      current.text += separator;
+      if (separator) this.hooks.onEvent?.({ type: "assistant_delta", delta: separator });
+    }
+    current.agentMessageId = id; current.agentMessageIds.add(id);
+    if (this.nativeAuthMode === "account" || this.credentialSecrets.size) current.outputRedactor ||= new SecretTextStream(this.credentialSecrets);
+    const delta = current.outputRedactor ? current.outputRedactor.push(text) : text;
+    current.text += delta;
+    if (delta) this.hooks.onEvent?.({ type: "assistant_delta", delta });
+  }
+
+  #finishOutput(current) {
+    const tail = current.outputRedactor?.finish();
+    if (!tail) return;
+    current.text += tail;
+    this.hooks.onEvent?.({ type: "assistant_delta", delta: tail });
   }
 }

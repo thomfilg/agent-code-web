@@ -6,6 +6,19 @@ function link(label, url) { const node = el("a", label); node.href = url; node.t
 const ghUrl = (repo, suffix = "") => /^[\w.-]+\/[\w.-]+$/.test(repo || "") ? `https://github.com/${repo}${suffix}` : null;
 const count = value => Number.isFinite(value) ? new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(value) : "Unavailable";
 
+// Selected checkout defaults are not proof of the worker's current branch.
+// Use observed snapshots only, and do not repeat a branch already shown by a PR.
+export function branchesWithoutPullRequests(chat) {
+  const observed = value => typeof value === "string" && value.trim() ? value.trim().slice(0, 4096) : null;
+  const repositories = chat.repositories?.length ? chat.repositories : [{ fullName: null }];
+  return repositories.flatMap((repository, index) => {
+    const branch = (index === 0 ? observed(chat.workspaceStatus?.branch) : null)
+      || observed(chat.gitBranches?.find(item => item.repository === repository.fullName)?.branch);
+    if (!branch || (chat.pullRequests || []).some(pr => pr.repository?.toLowerCase() === repository.fullName?.toLowerCase() && pr.headRef === branch)) return [];
+    return [{ repository: repository.fullName, branch }];
+  });
+}
+
 export class ChatControls {
   constructor(options) {
     Object.assign(this, options); this.drafts = new Map(); this.hiddenPRs = new Set(); this.uploads = new Map();
@@ -22,8 +35,16 @@ export class ChatControls {
     $("#open-workspace").addEventListener("click", () => this.workspace());
     $("#show-connectors").addEventListener("click", () => this.connectors());
     document.querySelectorAll("[data-agent-mode]").forEach(node => node.addEventListener("click", async () => {
-      try { const { chat } = await this.api(`/api/chats/${this.state.active.id}/mode`, { method: "PATCH", body: JSON.stringify({ mode: node.dataset.agentMode }) }); this.updated(chat); $("#mode-menu").open = false; }
+      if (this.modeChanging) return;
+      const chatId = this.state.active.id;
+      this.modeChanging = true;
+      document.querySelectorAll("[data-agent-mode]").forEach(button => { button.disabled = true; });
+      try {
+        const { chat } = await this.api(`/api/chats/${chatId}/mode`, { method: "PATCH", body: JSON.stringify({ mode: node.dataset.agentMode }) });
+        if (this.state.active?.id === chatId) { this.updated(chat); $("#mode-menu").open = false; }
+      }
       catch (error) { this.toast(error.message); }
+      finally { this.modeChanging = false; document.querySelectorAll("[data-agent-mode]").forEach(button => { button.disabled = false; }); }
     }));
     $("#add-attachments").addEventListener("click", () => $("#attachment-input").click());
     $("#attachment-input").addEventListener("change", event => this.attach(event.target.files));
@@ -33,7 +54,9 @@ export class ChatControls {
       if (!files.length) return; // Leave text and unsupported OS file paths alone.
       event.preventDefault(); void this.attach(files);
     });
-    document.addEventListener("click", event => document.querySelectorAll(".control-menu[open]").forEach(menu => { if (!menu.contains(event.target)) menu.open = false; }));
+    // An action may replace its own DOM before the click bubbles here. The
+    // dispatch path still identifies the menu that was actually clicked.
+    document.addEventListener("click", event => document.querySelectorAll(".control-menu[open]").forEach(menu => { if (!event.composedPath().includes(menu)) menu.open = false; }));
     document.addEventListener("keydown", event => { if (event.key === "Escape") document.querySelectorAll(".control-menu[open]").forEach(menu => menu.open = false); });
   }
   async copy(text, message = "Copied") { try { await navigator.clipboard.writeText(text); this.toast(message); } catch { this.dialog("Copy", el("pre", text)); } }
@@ -60,7 +83,7 @@ export class ChatControls {
     $("#usage-ring").style.setProperty("--usage", `${percentage}%`);
     $("#archive-current-chat").textContent = chat.archived ? "Unarchive" : "Archive";
     $("#edit-chat-environment").disabled = !chat.environmentId;
-    const signature = JSON.stringify([chat.id, chat.repositories, chat.gitBranches, chat.pullRequests, chat.githubSyncWarning]);
+    const signature = JSON.stringify([chat.id, chat.repositories, chat.gitBranches, chat.workspaceStatus?.branch, chat.pullRequests, chat.githubSyncWarning]);
     if (signature !== this.signature) { this.signature = signature; this.repositories(chat); this.pullRequests(chat); }
     this.renderAttachments();
     const goalStatus = $("#goal-status"); goalStatus.replaceChildren();
@@ -162,24 +185,10 @@ export class ChatControls {
       if (branch) root.append(button(`Copy branch · ${branch}`, () => this.copy(branch, "Branch name copied")));
     }
     if (!chat.repositories?.length) root.append(el("p", "No GitHub repositories selected", "muted"));
-    root.append(button("Add repository…", () => this.addRepository()));
-  }
-  async addRepository() {
-    const chatId = this.state.active.id;
-    this.dialog("Add repository", el("p", "Loading your GitHub repositories…"));
-    try {
-      const { repositories } = await this.api("/api/github/repositories");
-      const select = el("select"); select.setAttribute("aria-label", "Repository to add");
-      for (const repo of repositories.filter(repo => !this.state.active.repositories?.some(existing => existing.fullName === repo.fullName))) { const option = el("option", `${repo.fullName}${repo.connectionName ? ` · ${repo.connectionName}` : ""}`); option.value = repo.fullName; option.dataset.connectionId = repo.githubConnectionId || ""; select.append(option); }
-      const branch = el("input"); branch.placeholder = "Default branch"; branch.setAttribute("aria-label", "Branch to add");
-      const save = button("Add repository", async () => {
-        save.disabled = true;
-        try { const { chat } = await this.api(`/api/chats/${chatId}/repositories`, { method: "POST", body: JSON.stringify({ fullName: select.value, branch: branch.value || undefined, githubConnectionId: select.selectedOptions[0]?.dataset.connectionId || undefined }) }); this.updated(chat); $("#controls-dialog").close(); }
-        catch (error) { this.toast(error.message); }
-        finally { save.disabled = false; }
-      }); save.disabled = !select.options.length;
-      $("#controls-content").replaceChildren(el("p", "Stop active work first. Your original primary repository and company grouping stay unchanged. New repositories clone on the next message.", "muted"), select, branch, save);
-    } catch (error) { $("#controls-content").replaceChildren(el("p", error.message, "form-error")); }
+    root.append(button("Add repository…", () => {
+      $("#repositories-menu").open = false;
+      const picker = $("#chat-workspace-strip details"); picker.open = true; picker.querySelector("summary").focus();
+    }));
   }
   pullRequests(chat) {
     const root = $("#pull-request-bars"); root.replaceChildren();
@@ -213,6 +222,13 @@ export class ChatControls {
       const fix = el("label", undefined, "checkbox-label"); const fixing = document.createElement("input"); fixing.type = "checkbox"; fixing.disabled = true;
       fix.append(fixing, el("span", "Auto-fix CI & comments · not available")); body.append(fix, el("p", "CI checks refresh every minute. Auto-merge follows GitHub repository rules; no admin bypass.", "muted"));
       ci.append(summary, body); row.append(ci, button("×", () => { this.hiddenPRs.add(`${chat.id}:${pr.repository}:${pr.number}`); this.pullRequests(chat); }, "small-icon")); root.append(row);
+    }
+    for (const ref of branchesWithoutPullRequests(chat)) {
+      const row = el("div", undefined, "pull-request-bar branch-only"); row.setAttribute("role", "group"); row.setAttribute("aria-label", `Git branch for ${ref.repository || "workspace"}`);
+      const icon = el("span", "⑂"); icon.setAttribute("aria-hidden", "true");
+      const branch = el("span", `${ref.repository?.split("/")[1] || "Workspace"} · ${ref.branch}`, "pr-branch");
+      branch.title = `${ref.repository || "Workspace"} · ${ref.branch}`;
+      row.append(icon, branch); root.append(row);
     }
   }
   async showChanges(pr = this.state.active?.pullRequests?.at(-1)) {

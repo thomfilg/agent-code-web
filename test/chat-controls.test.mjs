@@ -86,8 +86,9 @@ test("PR auto-merge uses only explicit GitHub auto-merge mutations and rejects f
 });
 test("setup scripts persist but protected variables remain unavailable, and network restrictions are not fabricated", async () => {
   const environments = new Environments(new MemoryRecords());
-  const env = await environments.save({ name: "Scripted", backend: "local", allowUnassigned: true, setupScript: "npm --version", variables: [{ key: "SECRET", value: "hidden" }, { key: "VISIBLE", value: "ok", secret: false }] });
-  const runtime = await environments.runtime(env.id);
+  await environments.companies.save({ id: "fixture", name: "Fixture" });
+  const env = await environments.save({ name: "Scripted", backend: "local", companies: ["fixture"], setupScript: "npm --version", variables: [{ key: "SECRET", value: "hidden" }, { key: "VISIBLE", value: "ok", secret: false }] });
+  const runtime = await environments.runtime(env.id, { repositories: [{ fullName: "fixture/project" }] });
   assert.equal(runtime.setupScript, "npm --version"); assert.deepEqual(runtime.variables, { VISIBLE: "ok" });
   await assert.rejects(environments.save({ ...env, networkAccess: "restricted" }, env.id), /cannot enforce/);
   await assert.rejects(environments.save({ ...env, setupScript: "a\0b" }, env.id), /Setup script/);
@@ -105,9 +106,13 @@ test("environment setup runs before each worker start with only agent-readable v
   const app = await createAgentWebServer({ config: testConfig(root), models: { creationSettings: async () => ({}), turnSettings: async () => ({}) },
     adapterFactory: () => ({ start: async () => {}, send: async () => ({ text: "ready" }), stop: async () => {} }) });
   await app.start(); t.after(() => app.stop());
-  const environment = await app.manager.environments.save({ name: "Setup isolation", backend: "local", allowUnassigned: true, variables: [{ key: "SECRET", value: "private" }, { key: "VISIBLE", value: "ok", secret: false }],
+  await (await app.resources.forOwner(null)).companies.save({ id: "fixture", name: "Fixture" });
+  const environment = await app.manager.environments.save({ name: "Setup isolation", backend: "local", companies: ["fixture"], variables: [{ key: "SECRET", value: "private" }, { key: "VISIBLE", value: "ok", secret: false }],
     setupScript: 'test -z "${SECRET+x}" && test "$VISIBLE" = "ok" && printf "ready\\n" >> setup-check.txt' });
-  const chat = await app.manager.createChat({ agent: "codex", title: "Setup fixture", environmentId: environment.id });
+  const chat = await app.manager.createChat({ agent: "codex", title: "Setup fixture" });
+  // A prepared synthetic workspace supplies company identity without a clone.
+  await mkdir(chat.workspace, { recursive: true });
+  await app.store.update(chat.id, { environmentId: environment.id, source: "https://github.com/fixture/project.git", workspaceReady: true });
   await app.manager.send(chat.id, "first");
   assert.equal(await readFile(path.join(chat.workspace, "setup-check.txt"), "utf8"), "ready\n");
   await app.manager.stop(chat.id); await app.manager.send(chat.id, "second");

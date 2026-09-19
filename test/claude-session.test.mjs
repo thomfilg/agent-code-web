@@ -35,11 +35,17 @@ function transport(f) {
   };
   f.respond = packet => {
     let response = {};
+    if (packet.request.subtype === "initialize" && f.initializeSnapshot) response = f.initializeSnapshot;
+    if (packet.request.subtype === "set_permission_mode") response = f.modeAck ?? { mode: packet.request.mode };
     if (f.mcp && packet.request.subtype === "mcp_toggle" && f.refuse !== "mcp_toggle") {
       f.mcp.find(server => server.name === packet.request.serverName).status = packet.request.enabled ? "connected" : "disabled";
     }
     if (f.mcp && packet.request.subtype === "mcp_status") response = { mcpServers: f.mcp.map(server => ({ ...server })) };
     if (packet.request.subtype === "get_settings") response = f.settingsSnapshot || { sources: [{ source: "flagSettings", settings: f.flagSettings || {} }] };
+    if (packet.request.subtype === "get_settings" && Object.hasOwn(f, "ultracodeApplied")) response = { applied: { model: "native-fixture", effort: f.ultracodeEffort || "xhigh", ultracode: f.ultracodeApplied } };
+    if (packet.request.subtype === "apply_flag_settings" && f.refuse !== "apply_flag_settings" && Object.hasOwn(f, "ultracodeApplied") && typeof packet.request.settings.ultracode === "boolean") {
+      f.ultracodeApplied = f.ultracodeLockedOn ? true : f.ultracodeDenied ? false : packet.request.settings.ultracode;
+    }
     if (packet.request.subtype === "reload_plugins") response = f.pluginSnapshot || { commands: [{ name: "fixture:stamp", description: "Native plugin stamp" }], plugins: [{ name: "fixture" }], agents: [], mcpServers: [], error_count: 0 };
     if (packet.request.subtype === "apply_flag_settings" && f.fastState && f.refuse !== "apply_flag_settings" && typeof packet.request.settings.fastMode === "boolean") {
       f.fastState = !f.fastPolicyDenied && packet.request.settings.fastMode ? "on" : "off";
@@ -85,6 +91,128 @@ async function fixture(t, { interactive = false } = {}) {
   t.after(() => adapter.stop());
   return Object.assign(f, { adapter, config, broker, chat, store });
 }
+
+test("Ultracode startup and retained-session disable confirm workflow state before any input", async t => {
+  const f = await fixture(t, { interactive: true }); f.ultracodeApplied = false;
+  await f.adapter.send("/run synthetic fixture", { effort: "xhigh", ultracode: true });
+  assert.equal(f.ultracodeApplied, true); assert.equal(f.inputs.length, 1);
+  assert.ok(f.controls.some(packet => packet.request.subtype === "apply_flag_settings" && packet.request.settings.ultracode === true && packet.request.settings.effortLevel === "xhigh"));
+  assert.equal(JSON.parse(f.launches[0].args[f.launches[0].args.indexOf("--settings") + 1]).ultracode, true);
+  await f.adapter.send("Ordinary xhigh is not Ultracode", { effort: "xhigh", ultracode: false });
+  assert.equal(f.ultracodeApplied, false); assert.equal(f.inputs.length, 2); assert.equal(f.launches.length, 1);
+  await f.adapter.stop();
+  await f.adapter.send("Explicitly resume Ultracode", { effort: "xhigh", ultracode: true });
+  assert.equal(f.launches.length, 2); assert.equal(f.ultracodeApplied, true); assert.equal(f.inputs.length, 3);
+  assert.ok(f.launches[1].args.includes("--resume"));
+});
+
+test("Ultracode without interactive hooks still verifies before sending a correctly framed user packet", async t => {
+  const f = await fixture(t); f.ultracodeApplied = false;
+  await f.adapter.send("Synthetic explicit mode", { effort: "xhigh", ultracode: true });
+  assert.equal(f.inputs.length, 1); assert.equal(f.inputs[0].message.content, "Synthetic explicit mode");
+  assert.equal(f.ultracodeApplied, true);
+  const missing = await fixture(t);
+  await assert.rejects(missing.adapter.send("Must not be published", { effort: "xhigh", ultracode: true }));
+  assert.equal(missing.inputs.length, 0); assert.deepEqual(missing.sessions, []); assert.equal(missing.adapter.sessionId, null);
+});
+
+test("ordinary effort clears inherited native Ultracode on fresh and resumed SDK sessions with or without request hooks", async t => {
+  for (const interactive of [true, false]) for (const effort of ["xhigh", "low"]) {
+    const f = await fixture(t, { interactive }); f.ultracodeApplied = true;
+    await f.adapter.send("Fresh ordinary selection", { effort, ultracode: false });
+    assert.equal(f.ultracodeApplied, false); assert.equal(f.inputs.length, 1);
+    await f.adapter.stop(); f.ultracodeApplied = true;
+    const firstControl = f.controls.length;
+    await f.adapter.send("Resumed ordinary selection", { effort, ultracode: false });
+    assert.equal(f.ultracodeApplied, false); assert.equal(f.inputs.length, 2);
+    assert.ok(f.launches.at(-1).args.includes("--resume"));
+    assert.deepEqual(f.controls.slice(firstControl).map(packet => packet.request.subtype), ["initialize", "get_settings", "apply_flag_settings", "get_settings"]);
+    assert.equal(f.controls.at(-2).request.settings.ultracode, false);
+  }
+});
+
+test("special native MCP/review commands reject Ultracode before launching and preserve the saved mode", async t => {
+  for (const text of ["/mcp reconnect all", "/code-review"]) {
+    const f = await fixture(t, { interactive: true }); f.chat.ultracode = true;
+    await f.store.update(f.chat.id, { ultracode: true, effort: "xhigh" });
+    await assert.rejects(f.adapter.send(text, { effort: "xhigh", ultracode: true }), /not supported for this native command/);
+    assert.equal(f.launches.length, 0); assert.equal(f.inputs?.length || 0, 0);
+    assert.equal(f.store.get(f.chat.id).ultracode, true);
+  }
+});
+
+test("ordinary effort cannot send while native policy retains Ultracode, including low and resumed sessions", async t => {
+  for (const effort of ["xhigh", "low"]) for (const resume of [false, true]) {
+    const f = await fixture(t, { interactive: true }); f.ultracodeApplied = false;
+    if (resume) { await f.adapter.send("Create synthetic checkpoint", { effort: "low", ultracode: false }); await f.adapter.stop(); }
+    f.ultracodeApplied = true; f.ultracodeLockedOn = true;
+    await assert.rejects(f.adapter.send("Must not send implicit mode", { effort, ultracode: false }), /did not confirm/);
+    assert.equal(f.inputs.length, Number(resume));
+  }
+});
+
+test("missing native metadata denies ordinary xhigh but preserves old non-xhigh CLI compatibility", async t => {
+  const high = await fixture(t, { interactive: true });
+  await assert.rejects(high.adapter.send("No implicit xhigh mode", { effort: "xhigh", ultracode: false }), /did not confirm/);
+  assert.equal(high.inputs.length, 0);
+  const overridden = await fixture(t, { interactive: true });
+  overridden.adapter.executor.environmentVariables = { CLAUDE_CODE_EFFORT_LEVEL: "xhigh" };
+  await assert.rejects(overridden.adapter.send("No implicit overridden mode", { effort: "low", ultracode: false }), /did not confirm/);
+  assert.equal(overridden.inputs.length, 0);
+  const low = await fixture(t, { interactive: true });
+  await low.adapter.send("Legacy low", { effort: "low", ultracode: false });
+  assert.equal(low.inputs.length, 1);
+  assert(!low.controls.some(packet => packet.request.subtype === "apply_flag_settings"));
+  const prior = await fixture(t, { interactive: true }); prior.ultracodeApplied = false;
+  await prior.adapter.send("/run Synthetic enabled checkpoint", { effort: "xhigh", ultracode: true });
+  delete prior.ultracodeApplied;
+  await assert.rejects(prior.adapter.send("Cannot forget the previous workflow flag", { effort: "low", ultracode: false }), /did not confirm/);
+  assert.equal(prior.inputs.length, 1);
+});
+
+test("Ultracode refuses missing contract, disabled workflow, overridden effort and stale selection before input", async t => {
+  for (const failure of ["missing", "workflow", "effort", "stale", "stop"]) {
+    const f = await fixture(t, { interactive: true });
+    if (failure !== "missing") f.ultracodeApplied = false;
+    if (failure === "workflow") f.ultracodeDenied = true;
+    if (failure === "effort") f.ultracodeEffort = "high";
+    let current = true;
+    if (["stale", "stop"].includes(failure)) f.hold = "get_settings";
+    const sending = f.adapter.send("Must not reach native input", { effort: "xhigh", ultracode: true, selectionCurrent: () => current }); sending.catch(() => {});
+    if (["stale", "stop"].includes(failure)) {
+      await waitFor(() => f.controls?.some(packet => packet.request.subtype === "get_settings"));
+      if (failure === "stop") await f.adapter.stop();
+      else { current = false; f.respond(f.controls.find(packet => packet.request.subtype === "get_settings")); }
+    }
+    await assert.rejects(sending); assert.equal(f.inputs.length, 0, failure);
+  }
+});
+
+test("native initialization commands and early system metadata survive before the first logical turn", async t => {
+  const f = await fixture(t, { interactive: true }); f.hold = "initialize";
+  f.initializeSnapshot = { commands: [{ name: "goal", description: "Native goal", privateAccount: "must-not-publish" }], account: "must-not-publish" };
+  const sending = f.adapter.send("Explicit synthetic turn"); sending.catch(() => {});
+  await waitFor(() => f.controls?.some(packet => packet.request.subtype === "initialize"));
+  f.emit({ type: "system", subtype: "init", slash_commands: ["goal", "fixture:plugin"], mcp_servers: [], claude_code_version: "fixture", privateAccount: "must-not-publish" });
+  await waitFor(() => f.events.some(event => event.type === "session_capabilities"));
+  assert.deepEqual(f.events.find(event => event.type === "session_capabilities").slashCommands, ["goal", "fixture:plugin"]);
+  assert.deepEqual(f.inputs, [], "Native discovery does not send a user message");
+  f.respond(f.controls.find(packet => packet.request.subtype === "initialize"));
+  await sending;
+  assert.equal(f.events.find(event => event.type === "command_catalog").commands[0].name, "goal");
+  assert.doesNotMatch(JSON.stringify(f.events), /must-not-publish|privateAccount/);
+  assert.equal(f.inputs.length, 1); assert.equal(f.inputs[0].message.content, "Explicit synthetic turn");
+  await f.adapter.stop(); const count = f.events.length;
+  f.adapter.backgroundEvent({ type: "command_catalog", commands: [{ name: "late" }] });
+  f.adapter.backgroundEvent({ type: "system", subtype: "init", slash_commands: ["late"] });
+  assert.equal(f.events.length, count, "A stopped adapter cannot publish a late catalog");
+});
+
+test("missing initialize commands do not erase a previously known catalog", async t => {
+  const f = await fixture(t, { interactive: true });
+  await f.adapter.send("Explicit synthetic turn");
+  assert(!f.events.some(event => event.type === "command_catalog"));
+});
 
 test("untrusted-workspace warnings survive native startup without leaking private paths or granting trust", async t => {
   const f = await fixture(t, { interactive: true }); f.hold = "initialize";
@@ -627,6 +755,62 @@ test("workflow completion racing stop_task also waits for cancellation of its ne
   assert.equal(f.inputs.length, 1); assert(!f.events.some(event => event.type === "background_response" && event.failed));
 });
 
+test("Manual to Auto changes the active Claude session through native control, never auto-approves a pending tool", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Inspect the fixture", { mode: "default" }); await nativeTurnStarted(f);
+  f.emit({ type: "control_request", request_id: "pending-bash", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "grep example fixture.txt" } } });
+  await waitFor(() => f.requests.length === 1);
+  f.hold = "set_permission_mode";
+  let acknowledged = false;
+  const changing = f.adapter.setPermissionMode("auto").then(value => { acknowledged = value; });
+  await waitFor(() => f.controls.some(packet => packet.request.subtype === "set_permission_mode"));
+  assert.equal(acknowledged, false);
+  const packet = f.controls.find(packet => packet.request.subtype === "set_permission_mode");
+  assert.deepEqual(packet.request, { subtype: "set_permission_mode", mode: "auto" });
+  f.respond(packet); await changing;
+  assert.equal(acknowledged, true); assert.equal(f.launches.length, 1); assert.equal(f.inputs.length, 1);
+  assert.deepEqual(f.permissionReplies || [], [], "Selecting Auto is not an allow reply or a bypass");
+  f.emit({ type: "control_cancel_request", request_id: "pending-bash" });
+  await assert.rejects(f.adapter.respond(f.requests[0].requestId, { decision: "accept" }), /no longer active/);
+  f.complete(); await running;
+});
+
+test("live permission controls reject unavailable, unsupported and stopped native sessions", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  await assert.rejects(f.adapter.setPermissionMode("bypassPermissions"), /Unsupported/);
+  assert.equal(await f.adapter.setPermissionMode("auto"), false, "An idle adapter does not launch a process to change defaults");
+  const running = f.adapter.send("Held turn", { mode: "default" }); await nativeTurnStarted(f);
+  f.refuse = "set_permission_mode";
+  await assert.rejects(f.adapter.setPermissionMode("auto"), /could not confirm/);
+  f.refuse = null;
+  for (const modeAck of [{}, { mode: "default" }]) {
+    f.modeAck = modeAck;
+    await assert.rejects(f.adapter.setPermissionMode("auto"), /could not confirm/);
+  }
+  f.modeAck = null; f.hold = "set_permission_mode";
+  const count = f.controls.length;
+  const changed = f.adapter.setPermissionMode("auto"), rejected = assert.rejects(changed, /confirm|starting or changed/);
+  const stopped = assert.rejects(running, /interrupted/);
+  await waitFor(() => f.controls.length > count);
+  await f.adapter.stop(); await rejected; await stopped;
+  assert.deepEqual(f.permissionReplies || [], []);
+});
+
+test("permission acknowledgement ordering survives status frames in the same stdout chunk", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const observed = []; let acknowledged = false;
+  const running = f.adapter.send("Held turn", { mode: "default", onPermissionMode: mode => observed.push({ mode, acknowledged }) });
+  await nativeTurnStarted(f); f.hold = "set_permission_mode";
+  const changing = f.adapter.setPermissionMode("auto", () => {}, () => { acknowledged = true; });
+  await waitFor(() => f.controls.some(packet => packet.request.subtype === "set_permission_mode"));
+  const packet = f.controls.find(packet => packet.request.subtype === "set_permission_mode");
+  const status = permissionMode => ({ type: "system", subtype: "status", status: null, session_id: f.nativeSession, permissionMode });
+  f.child.stdout.write([status("plan"), { type: "control_response", response: { subtype: "success", request_id: packet.request_id, response: { mode: "auto" } } }, status("default")].map(event => JSON.stringify(event) + "\n").join(""));
+  await changing;
+  assert.deepEqual(observed, [{ mode: "plan", acknowledged: false }, { mode: "default", acknowledged: true }]);
+  f.complete(); await running;
+});
+
 test("private ordinary turns use live native approvals and close their transport after the reply", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
   const running = f.adapter.send("Write the fixture recipe", { mode: "default" });
@@ -1127,8 +1311,8 @@ test("application replies retain one CLI and apply next-turn mode/model/effort w
 test("native MCP controls preserve a retained application's CLI, session, capability and next user input", async t => {
   const f = await fixture(t); f.mcp = [{ name: "relay_one", status: "connected" }];
   await f.adapter.send("/run Keep this app"); const token = f.adapter.capability, session = f.adapter.sessionId;
-  assert.equal((await f.adapter.send("/mcp reconnect relay_one")).text, 'Reconnected "relay_one".');
-  assert.equal((await f.adapter.send("/mcp disable relay_one")).text, 'Disabled "relay_one".');
+  assert.equal((await f.adapter.send("/mcp reconnect relay_one", { effort: "low", ultracode: false })).text, 'Reconnected "relay_one".');
+  assert.equal((await f.adapter.send("/mcp disable relay_one", { effort: "low", ultracode: false })).text, 'Disabled "relay_one".');
   assert.equal(f.mcp[0].status, "disabled");
   f.refuse = "mcp_toggle";
   await assert.rejects(f.adapter.send("/mcp enable relay_one"), /Native MCP control failed/);

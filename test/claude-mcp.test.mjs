@@ -52,6 +52,15 @@ test("native control timeouts, closed workers and EPIPE reject pending work with
   }
 });
 
+test("optional discovery timeout does not shorten unrelated native controls", async t => {
+  const f = controlFixture(t, 1000);
+  const normal = f.channel.request("initialize");
+  await assert.rejects(f.channel.request("get_settings", {}, { timeoutMs: 5 }), /timed out/);
+  assert.equal(f.channel.timeoutMs, 1000); assert.equal(f.channel.pending.size, 1);
+  f.channel.accept({ type: "control_response", response: { subtype: "success", request_id: f.writes[0].request_id, response: {} } });
+  await normal;
+});
+
 function inventoryFixture(initial) {
   const f = { servers: initial.map(server => ({ ...server })), calls: [] };
   f.request = async (subtype, fields = {}) => {

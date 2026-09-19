@@ -15,6 +15,7 @@ export function desktopBinding(chat, config) {
     chat.agent, chat.agentSessionId || null, chat.workspace, config.workerBackend,
     chat.runtimeMetadata || null, config.codex.authMode,
     config.codex.authMode === "host" ? process.env.CODEX_HOME || path.join(os.homedir(), ".codex") : null,
+    ...(chat.agentAccountId ? ["account", chat.agentAccountId] : []),
   ])).digest("hex");
 }
 

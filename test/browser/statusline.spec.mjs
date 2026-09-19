@@ -1,3 +1,4 @@
+import { openSettingsSection, switchSettingsCompany } from "./settings-navigation.mjs";
 import { test, expect } from "@playwright/test";
 import { DEFAULT_STATUS_ITEMS, STATUS_ITEMS } from "../../public/status-line.js";
 
@@ -35,7 +36,7 @@ const preview = page => page.getByLabel("Status line preview", { exact: true });
 async function save(page) { await page.getByRole("button", { name: "Save status line", exact: true }).click(); await expect(page.locator("#controls-content [role=status]")).toContainText("saved and active"); }
 
 test("status-line fields toggle, reorder, save and reload without sending or losing the draft/files", async ({ page }) => {
-  const f = await setup(page); await expect(footer(page)).toContainText("80% left"); await expect(footer(page)).toContainText("main");
+  const f = await setup(page); await expect(footer(page)).toBeHidden();
   await page.locator("#message-input").fill("Keep my draft"); await page.locator("#attachment-input").setInputFiles({ name: "keep.txt", mimeType: "text/plain", buffer: Buffer.from("attachment fixture") });
   await expect(page.locator("#attachment-chips")).toContainText("keep.txt"); await open(page);
   await expect(page.locator("#controls-content")).toContainText("shared by this Relay installation");
@@ -52,9 +53,10 @@ test("status-line fields toggle, reorder, save and reload without sending or los
 
 test("slash statusline works while busy; cancelling, hiding and restoring affect only the footer", async ({ page }) => {
   const f = await setup(page, { busy: true }); await open(page, true, true); await expect(page.locator("#message-input")).toHaveValue("");
-  await page.getByRole("button", { name: "Hide status line", exact: true }).click(); await close(page); expect(await items(footer(page))).toEqual(DEFAULT_STATUS_ITEMS);
+  await page.getByLabel("Show Session ID", { exact: true }).check(); await close(page); expect(await items(footer(page))).toEqual(DEFAULT_STATUS_ITEMS);
+  await open(page); await page.getByLabel("Show Session ID", { exact: true }).check(); await save(page); await close(page); await expect(footer(page)).toBeVisible();
   await open(page); await page.getByRole("button", { name: "Hide status line", exact: true }).click(); await save(page); await close(page); await expect(footer(page)).toBeHidden();
-  await open(page); await page.getByRole("button", { name: "Restore defaults", exact: true }).click(); await save(page); await close(page); await expect(footer(page)).toBeVisible();
+  await open(page); await page.getByRole("button", { name: "Restore defaults", exact: true }).click(); await save(page); await close(page); await expect(footer(page)).toBeHidden();
   await page.locator("#message-input").fill("/statusline unexpected"); await page.getByRole("button", { name: "Queue", exact: true }).click();
   await expect(page.locator("#toasts")).toContainText("without arguments"); await expect(page.locator("#message-input")).toHaveValue("/statusline unexpected");
   expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
@@ -62,6 +64,7 @@ test("slash statusline works while busy; cancelling, hiding and restoring affect
 
 test("mobile status line supports actual drag reordering, every field, and stale-save recovery", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 }); const f = await setup(page); await open(page);
+  await page.getByLabel("Show Model and reasoning", { exact: true }).check(); await page.getByLabel("Show Git branch", { exact: true }).check();
   await page.locator('[data-id="git-branch"] .statusline-drag').dragTo(page.locator('[data-id="model-with-reasoning"]'));
   expect((await items(preview(page)))[0]).toBe("git-branch");
   for (const item of STATUS_ITEMS) await page.getByLabel(`Show ${item.label}`, { exact: true }).check();
@@ -77,6 +80,36 @@ test("mobile status line supports actual drag reordering, every field, and stale
   page.once("dialog", dialog => dialog.dismiss()); await page.getByRole("button", { name: "Reload status line", exact: true }).click(); await expect(page.getByLabel("Show Session ID", { exact: true })).toBeChecked();
   page.once("dialog", dialog => dialog.accept()); await page.getByRole("button", { name: "Reload status line", exact: true }).click(); await expect(page.getByLabel("Show Session ID", { exact: true })).not.toBeChecked();
   await close(page); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
+});
+
+test("default and unsaved legacy footer stay hidden while observed branches use the PR strip", async ({ page }, testInfo) => {
+  const f = await setup(page);
+  f.saved = { ...f.saved, items: ["model-with-reasoning", "context-remaining", "git-branch"] };
+  await page.reload(); await expect(footer(page)).toBeHidden();
+  const strip = page.locator("#pull-request-bars"), branch = strip.locator(".branch-only .pr-branch");
+  for (const width of [1600, 320]) {
+    await page.setViewportSize({ width, height: 900 });
+    if (width < 768) {
+      if (await page.locator("#sidebar").evaluate(node => node.classList.contains("open"))) await page.getByRole("button", { name: "Close chats", exact: true }).click();
+      await expect.poll(() => page.locator("#sidebar").evaluate(node => node.getBoundingClientRect().right)).toBeLessThanOrEqual(0);
+    }
+    await expect(branch).toHaveText("Workspace · main");
+    await expect(branch).toBeInViewport();
+    expect(await branch.evaluate(node => { const box = node.getBoundingClientRect(); return node.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)); })).toBe(true);
+    await expect(strip.locator(".branch-only")).toHaveAttribute("aria-label", "Git branch for workspace");
+    await expect(page.getByLabel("Context and usage", { exact: true })).toBeVisible();
+    await expect(page.locator("#composer-model-controls")).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`branch-strip-${width}.png`) });
+  }
+  expect(f.saved.revision).toBe(0); expect(f.calls.saves).toEqual([]);
+  await open(page); await page.getByLabel("Show Git branch", { exact: true }).uncheck(); await page.getByLabel("Show Git branch", { exact: true }).check(); await save(page); await close(page);
+  await expect(footer(page)).toBeVisible(); await expect(footer(page)).toContainText("80% left");
+  await open(page); await page.getByRole("button", { name: "Restore defaults", exact: true }).click(); await save(page); await close(page);
+  await expect(footer(page)).toBeHidden();
+  f.snapshot.workspaceStatus = { branch: null }; await page.reload();
+  await expect(strip.locator(".branch-only")).toHaveCount(0);
+  expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
 });
 
 test("live snapshots update values and switching chats never reuses another chat's session or usage", async ({ page }) => {
@@ -124,8 +157,8 @@ test("late account-scoped acknowledgements do not restore another account's foot
   await page.route("**/api/browser-connections", route => route.fulfill({ json: { connections: [] } }));
   await page.locator("#message-input").fill("Account-change draft"); await open(page); await page.getByLabel("Show Session ID", { exact: true }).check();
   await page.getByRole("button", { name: "Save status line", exact: true }).click(); await entered.promise; await close(page);
-  await page.getByRole("button", { name: "Browser connections", exact: true }).click(); await page.getByLabel("Username", { exact: true }).fill("statusline-user"); await page.getByLabel("Account password", { exact: true }).fill("fixture-only-password");
-  await page.locator("#browser-account-form button[value=login]").click(); await expect(page.locator("#browser-account-name")).toHaveText("Signed in as statusline-user"); await page.locator("#browser-connections-close").click();
+  await openSettingsSection(page, "Browser connections"); await page.getByLabel("Username", { exact: true }).fill("statusline-user"); await page.getByLabel("Account password", { exact: true }).fill("fixture-only-password");
+  await page.locator("#browser-account-form button[value=login]").click(); await expect(page.locator("#browser-account-name")).toHaveText("Signed in as statusline-user"); await page.locator("#browser-connections-close").click(); await page.getByLabel("Close settings", { exact: true }).click();
   await expect.poll(() => items(footer(page))).toEqual(["model-name"]); release.resolve(); await expect(page.locator("#toasts")).toContainText("original panel");
   expect(await items(footer(page))).toEqual(["model-name"]); await expect(page.locator("#message-input")).toHaveValue("Account-change draft"); expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
 });

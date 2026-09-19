@@ -2,7 +2,9 @@
 # Builds a credential-free Agent Relay worker. Provider keys belong only on the
 # control plane and must never be added here, in an AMI, or in EC2 user-data.
 package_update: true
-package_upgrade: true
+# The selected Canonical base is pinned by the stack. Do not restart/upgrade
+# cloud-init underneath its own image build; explicit packages still update.
+package_upgrade: false
 packages:
   - ca-certificates
   - curl
@@ -15,13 +17,13 @@ packages:
   - unzip
   - fonts-liberation
   - libasound2t64
-  - libatk-bridge2.0-0
-  - libatk1.0-0
-  - libatspi2.0-0
-  - libcups2
+  - libatk-bridge2.0-0t64
+  - libatk1.0-0t64
+  - libatspi2.0-0t64
+  - libcups2t64
   - libdrm2
   - libgbm1
-  - libgtk-3-0
+  - libgtk-3-0t64
   - libnss3
   - libxcomposite1
   - libxdamage1
@@ -37,6 +39,237 @@ users:
     shell: /bin/bash
 
 write_files:
+  - path: /etc/needrestart/conf.d/99-agent-relay-build.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      # Builder-only: keep bootstrap and SSM alive through APT transactions.
+      # Removed by the image finalizer; normal update/restart policy is retained.
+      $nrconf{override_rc}->{qr(^cloud-(init(-(local|main))?|config|final)\.service$)} = 0;
+      $nrconf{override_rc}->{qr(^(amazon-ssm-agent|snap\.amazon-ssm-agent\.amazon-ssm-agent)\.service$)} = 0;
+  - path: /usr/local/sbin/agent-web-finalize-image
+    owner: root:root
+    permissions: "0700"
+    content: |
+      #!/bin/sh
+      set -eu
+      [ "$(id -u)" -eq 0 ]
+      test -f /opt/agent-web/BUILD_PENDING
+      test -f /opt/agent-web/READY
+      # Only the selected deployment PUBLIC key is retained. Final workers have
+      # IMDS disabled and therefore cannot depend on cloud-init key injection.
+      install -d -o ubuntu -g ubuntu -m 0700 /home/ubuntu/.ssh
+      printf '%s' '__RELAY_WORKER_PUBLIC_KEY_BASE64__' | base64 -d > /home/ubuntu/.ssh/authorized_keys
+      chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+      chmod 0600 /home/ubuntu/.ssh/authorized_keys
+      test -s /home/ubuntu/.ssh/authorized_keys
+      # Public hashes only: acceptance must prove fresh worker identity differs
+      # from this builder, not merely that a marker file exists.
+      python3 - <<'PY'
+      import hashlib, json, pathlib
+      digest = lambda value: hashlib.sha256(value).hexdigest()
+      root = pathlib.Path('/etc/ssh')
+      identity = {'machine': digest(pathlib.Path('/etc/machine-id').read_bytes().strip()), 'hostKeys': {p.name: digest(p.read_bytes().split()[1]) for p in root.glob('ssh_host_*_key.pub')}}
+      pathlib.Path('/usr/local/share/agent-relay-builder-identity.json').write_text(json.dumps(identity))
+      PY
+      touch /etc/cloud/cloud-init.disabled
+      # SSM is a builder-only transport. This finalizer is scheduled AFTER its
+      # SendCommand has completed so no agent state/credentials enter the AMI.
+      systemctl disable --now agent-web-idle-watchdog.timer
+      for unit in amazon-ssm-agent.service snap.amazon-ssm-agent.amazon-ssm-agent.service; do
+        systemctl disable --now "$unit" 2>/dev/null || true
+        if systemctl is-active --quiet "$unit" || systemctl is-enabled --quiet "$unit"; then
+          echo 'Builder SSM service could not be disabled.' >&2
+          exit 1
+        fi
+      done
+      # Builder-only package removal. --purge is essential: ordinary snap
+      # removal creates an automatic snapshot containing the registration.
+      if command -v snap >/dev/null 2>&1; then
+        snap_inventory=$(timeout 30 snap list 2>/dev/null) || { echo 'Builder snap inventory failed.' >&2; exit 1; }
+        if printf '%s\n' "$snap_inventory" | grep -q '^amazon-ssm-agent[[:space:]]'; then
+          timeout 180 snap remove --purge amazon-ssm-agent >/dev/null 2>&1 || { echo 'Builder SSM snap removal failed.' >&2; exit 1; }
+        fi
+      fi
+      ssm_package_status=$(dpkg-query -W -f='${Status}' amazon-ssm-agent 2>/dev/null || true)
+      if [ -n "$ssm_package_status" ] && [ "$ssm_package_status" != 'unknown ok not-installed' ]; then
+        timeout 180 dpkg --purge amazon-ssm-agent >/dev/null 2>&1 || { echo 'Builder SSM package removal failed.' >&2; exit 1; }
+      fi
+      # No deletion of unrelated snaps, packages or snapshots. Unexpected
+      # old SSM snapshots fail closed, even though this purge creates none.
+      for archive in /var/lib/snapd/snapshots/*_amazon-ssm-agent_*.zip; do
+        [ ! -e "$archive" ] || { echo 'Builder SSM snapshot remains.' >&2; exit 1; }
+      done
+      for binary in /snap/amazon-ssm-agent/current /usr/bin/amazon-ssm-agent /usr/local/bin/amazon-ssm-agent; do
+        [ ! -e "$binary" ] && [ ! -L "$binary" ] || { echo 'Builder SSM package remains.' >&2; exit 1; }
+      done
+      systemctl daemon-reload
+      systemctl mask amazon-ssm-agent.service snap.amazon-ssm-agent.amazon-ssm-agent.service
+      cloud-init clean --logs --seed --machine-id
+      rm -f /etc/needrestart/conf.d/99-agent-relay-build.conf
+      # Cloud-init's original netplan may match the builder NIC's MAC address.
+      # Fresh workers use plain DHCP and do not contact IMDS for networking.
+      rm -f /etc/netplan/50-cloud-init.yaml
+      printf '%s\n' agent-worker > /etc/hostname
+      rm -rf -- /var/lib/amazon/ssm /var/log/amazon/ssm /var/snap/amazon-ssm-agent /root/snap/amazon-ssm-agent /home/ubuntu/snap/amazon-ssm-agent /home/agent/snap/amazon-ssm-agent /root/.aws /root/.codex /root/.claude /root/.npm /root/.cache /home/ubuntu/.aws /home/ubuntu/.codex /home/ubuntu/.claude /home/agent/.aws /home/agent/.codex /home/agent/.claude
+      rm -f -- /root/.bash_history /root/.claude.json /home/ubuntu/.bash_history /home/ubuntu/.ssh/known_hosts /home/ubuntu/.claude.json /home/agent/.claude.json
+      # Remove nontransport SSH state, including the worker user created by
+      # cloud-init. A successful provider-file scan alone never proved this.
+      rm -rf -- /root/.ssh /home/agent/.ssh
+      for directory in /root/.ssh /home/agent/.ssh; do
+        [ ! -e "$directory" ] && [ ! -L "$directory" ] || { echo 'Unexpected worker SSH state remains.' >&2; exit 1; }
+      done
+      # Only the exact selected public transport key may survive. Refuse
+      # unknown users/alternate key files rather than silently deleting them.
+      authorized_keys_suspect=$(find /root /home /opt/agent-web \( -name authorized_keys -o -name authorized_keys2 \) ! -path /home/ubuntu/.ssh/authorized_keys -print -quit)
+      [ -z "$authorized_keys_suspect" ] || { echo 'Unexpected worker authorized key file remains.' >&2; exit 1; }
+      [ -d /home/ubuntu/.ssh ] && [ ! -L /home/ubuntu/.ssh ] && [ -f /home/ubuntu/.ssh/authorized_keys ] && [ ! -L /home/ubuntu/.ssh/authorized_keys ] || { echo 'Worker transport key is not an ordinary file.' >&2; exit 1; }
+      [ "$(stat -c '%U:%G' /home/ubuntu/.ssh)" = ubuntu:ubuntu ] && [ "$(stat -c '%U:%G' /home/ubuntu/.ssh/authorized_keys)" = ubuntu:ubuntu ] || { echo 'Worker transport key ownership changed.' >&2; exit 1; }
+      [ "$(stat -c '%a' /home/ubuntu/.ssh)" = 700 ] && [ "$(stat -c '%a' /home/ubuntu/.ssh/authorized_keys)" = 600 ] || { echo 'Worker transport key permissions changed.' >&2; exit 1; }
+      printf '%s' '__RELAY_WORKER_PUBLIC_KEY_BASE64__' | base64 -d | cmp -s - /home/ubuntu/.ssh/authorized_keys || { echo 'Worker transport public key changed.' >&2; exit 1; }
+      # Remove builder host identity only after the transport key boundary.
+      for kind in rsa ecdsa ed25519; do
+        rm -f -- "/etc/ssh/ssh_host_${kind}_key" "/etc/ssh/ssh_host_${kind}_key.pub"
+      done
+      test -z "$(find /etc/ssh -maxdepth 1 -type f -name 'ssh_host_*_key' -print -quit)"
+      # Names only, never contents; any unexpected credential file fails closed.
+      suspect=$(find /root /home /opt/agent-web -type f \( -name auth.json -o -name .credentials.json -o -name credentials -o -name id_rsa -o -name id_ed25519 -o -name '*.pem' \) -print -quit)
+      [ -z "$suspect" ] || { echo 'Credential filename scan failed; no AMI may be created.' >&2; exit 1; }
+      systemctl enable agent-web-heartbeat.service agent-web-idle-watchdog.timer agent-web-hostkeys.service
+      rm -f /opt/agent-web/BUILD_PENDING
+      touch /opt/agent-web/IMAGE_FINALIZED
+      sync
+      systemctl poweroff
+  - path: /usr/local/sbin/agent-web-audit-image
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/usr/bin/python3 -I
+      # Fixed read-only checks. No paths/commands/arguments come from the caller;
+      # Only fixed-category counts, booleans and public identity hashes leave
+      # this root helper; credential names, paths and contents never do.
+      import base64, errno, hashlib, json, os, pathlib, subprocess, sys, urllib.request, urllib.error
+
+      def credential_failures():
+          counts = dict.fromkeys(('providerAuthFiles', 'sshPrivateKeyFiles', 'pemFiles', 'ssmLibraryFiles', 'ssmSnapFiles', 'ssmSnapshotFiles', 'ssmPackageFiles', 'unexpectedAuthorizedKeys', 'scanErrors'), 0)
+          def scan_error(_error):
+              counts['scanErrors'] += 1
+          for root in ('/root', '/home', '/opt/agent-web'):
+              for folder, dirs, files in os.walk(root, followlinks=False, onerror=scan_error):
+                  for name in files:
+                      if name in ('auth.json', '.credentials.json', 'credentials'):
+                          counts['providerAuthFiles'] += 1
+                      elif name in ('id_rsa', 'id_ed25519'):
+                          counts['sshPrivateKeyFiles'] += 1
+                      elif name.endswith('.pem'):
+                          counts['pemFiles'] += 1
+          for location, category in (('/var/lib/amazon/ssm', 'ssmLibraryFiles'), ('/var/snap/amazon-ssm-agent', 'ssmSnapFiles'), ('/root/snap/amazon-ssm-agent', 'ssmSnapFiles'), ('/home/ubuntu/snap/amazon-ssm-agent', 'ssmSnapFiles'), ('/home/agent/snap/amazon-ssm-agent', 'ssmSnapFiles'), ('/root/.ssh/authorized_keys', 'unexpectedAuthorizedKeys'), ('/home/agent/.ssh/authorized_keys', 'unexpectedAuthorizedKeys')):
+              candidate = pathlib.Path(location)
+              try:
+                  if candidate.is_file():
+                      counts[category] += 1
+                  elif candidate.is_dir():
+                      for folder, dirs, files in os.walk(location, followlinks=False, onerror=scan_error):
+                          counts[category] += len(files)
+              except OSError:
+                  counts['scanErrors'] += 1
+          try:
+              counts['ssmSnapshotFiles'] = sum(1 for entry in pathlib.Path('/var/lib/snapd/snapshots').glob('*_amazon-ssm-agent_*.zip'))
+              counts['ssmPackageFiles'] = sum(1 for location in ('/snap/amazon-ssm-agent/current', '/usr/bin/amazon-ssm-agent', '/usr/local/bin/amazon-ssm-agent') if os.path.lexists(location))
+          except OSError:
+              counts['scanErrors'] += 1
+          # Bound diagnostics, not the scan: any nonzero category still fails.
+          return {key: min(value, 1000000) for key, value in counts.items()}
+
+      def metadata_probe():
+          # A tokenless GET returning 401 proves IMDSv2 is required, not that
+          # IMDS is disabled. Probe its exact token endpoint instead. Do not
+          # read, retain, print or use a returned token; status alone fails.
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          request = urllib.request.Request('http://169.254.169.254/latest/api/token', data=b'', method='PUT', headers={'X-aws-ec2-metadata-token-ttl-seconds': '1'})
+          try:
+              with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(request, timeout=2) as response:
+                  return True, 'token-endpoint-accessible' if response.status == 200 else 'unexpected-http-response'
+          except urllib.error.HTTPError as error:
+              # AWS documents 403 as request denied OR IMDS turned off. This
+              # is only evidence of denied access; the operator separately
+              # requires EC2 HttpEndpoint=disabled and no instance role.
+              if error.code == 403:
+                  return False, 'http-403-denied'
+              return True, 'http-401-unauthorized' if error.code == 401 else 'unexpected-http-response'
+          except (OSError, urllib.error.URLError) as error:
+              reason = error.reason if isinstance(error, urllib.error.URLError) else error
+              if isinstance(reason, TimeoutError) or isinstance(reason, OSError) and reason.errno in (errno.ETIMEDOUT, errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH):
+                  return False, 'network-unavailable'
+              return True, 'unexpected-network-error'
+      if os.geteuid() != 0 or len(sys.argv) != 1:
+          sys.exit(64)
+      digest = lambda value: hashlib.sha256(value).hexdigest()
+      builder = json.loads(pathlib.Path('/usr/local/share/agent-relay-builder-identity.json').read_text())
+      machine = digest(pathlib.Path('/etc/machine-id').read_bytes().strip())
+      host_keys = {p.name: digest(p.read_bytes().split()[1]) for p in pathlib.Path('/etc/ssh').glob('ssh_host_*_key.pub')}
+      unit_ready = lambda action, unit: subprocess.run(['/usr/bin/systemctl', action, '--quiet', unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+      ssm_disabled = all(not unit_ready(action, unit) for action in ('is-active', 'is-enabled') for unit in ('amazon-ssm-agent.service', 'snap.amazon-ssm-agent.amazon-ssm-agent.service'))
+      credential_counts = credential_failures()
+      credentials_absent = not any(credential_counts.values())
+      expected_key = base64.b64decode('__RELAY_WORKER_PUBLIC_KEY_BASE64__').strip()
+      transport_key_matches = pathlib.Path('/home/ubuntu/.ssh/authorized_keys').read_bytes().strip() == expected_key
+      metadata_reachable, metadata_result = metadata_probe()
+      fresh_identity = len(host_keys) >= 1 and all(value not in builder['hostKeys'].values() for value in host_keys.values()) and machine != builder['machine']
+      finalized = pathlib.Path('/opt/agent-web/IMAGE_FINALIZED').is_file() and not pathlib.Path('/opt/agent-web/BUILD_PENDING').exists()
+      cloud_init_disabled = pathlib.Path('/etc/cloud/cloud-init.disabled').is_file()
+      receipt = {'schema': 1, 'finalized': finalized, 'cloudInitDisabled': cloud_init_disabled, 'ssmDisabled': ssm_disabled, 'credentialsAbsent': credentials_absent, 'credentialFailureCounts': credential_counts, 'transportKeyMatches': transport_key_matches, 'metadataReachable': metadata_reachable, 'metadataProbe': metadata_result, 'freshIdentity': fresh_identity, 'machine': machine, 'hostKeys': host_keys, 'heartbeatEnabled': unit_ready('is-enabled', 'agent-web-heartbeat.service'), 'watchdogActive': unit_ready('is-active', 'agent-web-idle-watchdog.timer')}
+      receipt['valid'] = all(receipt[name] for name in ('finalized', 'cloudInitDisabled', 'ssmDisabled', 'credentialsAbsent', 'transportKeyMatches', 'freshIdentity', 'heartbeatEnabled', 'watchdogActive')) and not metadata_reachable
+      print(json.dumps(receipt))
+      sys.exit(0 if receipt['valid'] else 1)
+  - path: /etc/sudoers.d/93-agent-web-audit
+    owner: root:root
+    permissions: "0440"
+    content: |
+      agent ALL=(root) NOPASSWD: /usr/local/sbin/agent-web-audit-image ""
+  - path: /etc/netplan/99-agent-relay.yaml
+    owner: root:root
+    permissions: "0600"
+    content: |
+      network:
+        version: 2
+        ethernets:
+          relay:
+            match:
+              name: "en*"
+            dhcp4: true
+            dhcp6: false
+            optional: true
+  - path: /etc/systemd/system/agent-web-hostkeys.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Generate unique SSH host keys on a credential-free worker
+      # Socket units precede basic.target. Avoid the normal service dependency
+      # After=basic.target, which would form a cycle with ssh.socket.
+      DefaultDependencies=no
+      After=local-fs.target
+      Before=ssh.service ssh.socket
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/ssh-keygen -A
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+  - path: /etc/systemd/system/ssh.service.d/agent-relay-hostkeys.conf
+    permissions: "0644"
+    content: |
+      [Unit]
+      Requires=agent-web-hostkeys.service
+      After=agent-web-hostkeys.service
+  - path: /etc/systemd/system/ssh.socket.d/agent-relay-hostkeys.conf
+    permissions: "0644"
+    content: |
+      [Unit]
+      Requires=agent-web-hostkeys.service
+      After=agent-web-hostkeys.service
   - path: /usr/local/sbin/agent-web-install-chrome
     owner: root:root
     permissions: "0755"
@@ -91,7 +324,7 @@ write_files:
     permissions: "0755"
     content: |
       #!/bin/sh
-      # EC2 injects the launch key for ubuntu. Keep that transport account, but
+      # The baker retains only the deployment's public key for ubuntu, but
       # force every SSH command to execute as the non-sudo agent account.
       [ -n "${SSH_ORIGINAL_COMMAND:-}" ] || exit 64
       exec sudo -n -u agent -- /bin/sh -c "${SSH_ORIGINAL_COMMAND}"
@@ -156,9 +389,10 @@ runcmd:
   - apt-get install -y nodejs
   - /usr/local/sbin/agent-web-install-docker
   - /usr/local/sbin/agent-web-install-chrome
-  - npm install --global @openai/codex @anthropic-ai/claude-code
+  - npm install --global @openai/codex@0.154.0 @anthropic-ai/claude-code@2.1.222
   - install -d -o agent -g agent -m 0700 /opt/agent-web /opt/agent-web/chats
   - install -o agent -g agent -m 0600 /dev/null /opt/agent-web/.heartbeat
+  - touch /opt/agent-web/BUILD_PENDING
   - sh -c 'codex --version > /opt/agent-web/versions.txt'
   - sh -c 'claude --version >> /opt/agent-web/versions.txt'
   - sh -c 'google-chrome --version >> /opt/agent-web/versions.txt'
@@ -167,4 +401,4 @@ runcmd:
   - systemctl enable agent-web-heartbeat.service agent-web-idle-watchdog.timer
   - systemctl restart ssh
   - rm -f /tmp/nodesource-setup.sh
-  - sh -c 'codex --version && claude --version && docker --version && docker compose version && docker buildx version && touch /opt/agent-web/READY'
+  - sh -c 'test "$(codex --version)" = "codex-cli 0.154.0" && test "$(claude --version)" = "2.1.222 (Claude Code)" && docker --version && docker compose version && docker buildx version && touch /opt/agent-web/READY'

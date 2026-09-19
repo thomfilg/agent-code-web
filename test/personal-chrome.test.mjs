@@ -4,6 +4,7 @@ import path from "node:path";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { chromium } from "playwright";
 import { expect } from "@playwright/test";
+import { openSettingsSection } from "./browser/settings-navigation.mjs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createAgentWebServer } from "../src/server.mjs";
@@ -18,8 +19,9 @@ test("real Chrome extension keeps logins private until the per-chat toggle, and 
   const root = await mkdtemp("/tmp/relay-personal-test-"), site = await startBrowserSite(); let profile;
   const config = testConfig(path.join(root, "relay"), { AGENT_IDLE_TIMEOUT_MS: "60000" }), records = new MemoryRecords();
   const models = new ModelCatalog(config); models.codex = models.claude = async () => ({ models: [], source: "fixture" });
-  const options = { config, records, models, github: { status: async () => ({ connected: false }) }, commands: { list: async () => ({ commands: [] }) } };
+  const options = { config, records, models, github: { status: async () => ({ connected: false, connections: [] }) }, commands: { list: async () => ({ commands: [] }) } };
   let app = await createAgentWebServer(options); const { url, port } = await app.start();
+  await (await app.resources.forOwner(null)).companies.save({ id: "fixture-company", name: "Fixture company" });
   t.after(async () => { await profile?.close(); await app.stop(); await site.close(); await rm(root, { recursive: true, force: true }); });
   const request = async (route, cookie, method = "GET", value) => {
     const response = await fetch(url + route, { method, headers: { "content-type": "application/json", ...(cookie ? { cookie } : {}) }, ...(value ? { body: JSON.stringify(value) } : {}) });
@@ -30,9 +32,21 @@ test("real Chrome extension keeps logins private until the per-chat toggle, and 
   const launch = () => chromium.launchPersistentContext(path.join(root, "personal-profile"), { channel: "chromium", headless: true, chromiumSandbox: true, viewport: { width: 1600, height: 1000 },
     args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`] });
   profile = await launch();
-  const relay = await profile.newPage(), uiErrors = []; relay.on("pageerror", error => uiErrors.push(error.message));
+  const relay = await profile.newPage(), uiErrors = [], consentRequests = [];
+  relay.on("pageerror", error => uiErrors.push(error.message));
+  const consentRoute = value => /\/privacy$/.test(new URL(value).pathname) ? "privacy" : /\/browser\/access$/.test(new URL(value).pathname) ? "browser-access" : null;
+  relay.on("requestfailed", request => {
+    const route = consentRoute(request.url()); if (!route) return;
+    const error = request.failure()?.errorText || "";
+    consentRequests.push({ route, error: /^net::[A-Z_]+$/.test(error) ? error : "network-failure" });
+  });
+  relay.on("response", response => { const route = consentRoute(response.url()); if (route) consentRequests.push({ route, status: response.status() }); });
+  // Fixed endpoint classifications/status only: never bodies, cookies, URLs or
+  // pairing codes, including when this fixture fails before consent completes.
+  t.after(() => t.diagnostic(JSON.stringify({ consentRequests })));
   await relay.goto(url);
-  await relay.getByRole("button", { name: "Browser connections", exact: true }).click();
+  await expect(relay.locator("#new-chat-button")).toBeEnabled({ timeout: 15000 });
+  await openSettingsSection(relay, "Browser connections", "fixture-company");
   await relay.getByLabel("Username", { exact: true }).fill("alice"); await relay.getByLabel("Account password", { exact: true }).fill("private fixture chrome");
   await relay.getByRole("button", { name: "Create private account", exact: true }).click();
   await expect(relay.locator("#browser-account-name")).toContainText("alice");
@@ -45,6 +59,7 @@ test("real Chrome extension keeps logins private until the per-chat toggle, and 
   const paired = { code: await relay.locator("#browser-pair-code").inputValue(), id: (await request("/api/browser-connections", cookie)).body.connections[0].id };
   // This pre-existing shared chat is claimed privately only after explicit consent.
   const chat = (await request("/api/chats", null, "POST", { agent: "mock", title: "Private browser fixture" })).body.chat;
+  await app.store.update(chat.id, { repositories: [{ fullName: "fixture/project", companyId: "fixture-company" }] });
   const worker = profile.serviceWorkers()[0] || await profile.waitForEvent("serviceworker"), extensionId = new URL(worker.url()).host;
   const personalTab = await profile.newPage(), fixtureUrl = site.url.replace("127.0.0.1", "localhost");
   await personalTab.goto(fixtureUrl); await personalTab.getByRole("button", { name: "Fixture sign in" }).click();
@@ -84,11 +99,13 @@ test("real Chrome extension keeps logins private until the per-chat toggle, and 
   assert.equal(app.manager.browsers.info(chat.id).mode, "personal");
   await expect(relay.locator("#browser-canvas")).toBeVisible();
   await expect(relay.locator("#browser-canvas")).toHaveAttribute("width", "2560");
+  await relay.getByLabel("Browser tools", { exact: true }).click();
   await relay.locator("#browser-viewport").selectOption("390x844");
   await expect(relay.locator("#browser-canvas")).toHaveAttribute("width", "780");
   await expect(relay.locator("#browser-canvas")).toHaveAttribute("height", "1688");
   await relay.locator("#browser-viewport").selectOption("1280x800");
   await expect(relay.locator("#browser-canvas")).toHaveAttribute("width", "2560");
+  await relay.getByLabel("Browser tools", { exact: true }).click();
   await expect(relay.locator("#browser-tabs")).toBeDisabled();
   const tokenConfig = app.manager.browsers.runtime(chat.id, url).relay_browser, client = new Client({ name: "personal-browser-test", version: "1" });
   await client.connect(new StreamableHTTPClientTransport(new URL(tokenConfig.url), { requestInit: { headers: tokenConfig.headers } }));
@@ -100,6 +117,8 @@ test("real Chrome extension keeps logins private until the per-chat toggle, and 
   await assert.rejects(app.manager.browsers.command(chat.id, "navigate", { url }), /hostname cannot be opened/);
   await app.manager.browsers.command(chat.id, "fill", { selector: "#entry", text: "Agent used my authorized profile" });
   await waitFor(async () => (await (await fetch(`${site.url}/observed`)).json()).text === "Agent used my authorized profile");
+  await app.manager.browsers.command(chat.id, "evaluate", { expression: "document.querySelector('#entry').select()" });
+  assert.deepEqual(await app.manager.browsers.personal.command(chat.id, "copy", { expression: "document.body.textContent='must not run'" }), { text: "Agent used my authorized profile" });
   await relay.screenshot({ path: "/tmp/agent-relay-personal-chrome-desktop.png", fullPage: true });
   const pending = app.manager.browsers.command(chat.id, "evaluate", { expression: "new Promise(resolve => setTimeout(() => resolve('private late result'), 5000))" });
   const rejected = assert.rejects(pending, /revoked|changed|closed/i);

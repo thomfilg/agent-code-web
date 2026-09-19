@@ -30,7 +30,7 @@ export async function createCodexImportControls(adapter, env, rpc, workerId) {
   // No plaintext or memory-only fallback for tracking an external write.
   if (!store.records) return null;
   const scope = current => [current.id, current.ownerId || null, current.agent, companyForChat(current), current.environmentId || null,
-    config.codex.authMode, executor?.metadata?.backend || "local", workspace, env.HOME, env.CODEX_HOME];
+    current.agentAccountId || null, adapter.nativeAuthMode || config.codex.authMode, executor?.metadata?.backend || "local", workspace, env.HOME, env.CODEX_HOME];
   const identity = JSON.stringify(scope(chat));
   const binding = createHash("sha256").update(identity).digest("hex");
   const scopeCheck = () => {
@@ -48,7 +48,7 @@ export async function createCodexImportControls(adapter, env, rpc, workerId) {
     return inspectCodexImportFiles(executor, { ...input, workspace, home: env.HOME, codexHome: env.CODEX_HOME }, guard);
   };
   return new CodexImports({ workspace, home: env.HOME, binding, workerId, saved: saved ?? null,
-    mutable: config.codex.authMode === "gateway", thread: () => adapter.threadId,
+    mutable: (adapter.nativeAuthMode || config.codex.authMode) !== "host", thread: () => adapter.threadId,
     busy: () => adapter.nativeSettingsBusy() || [adapter.plugins, adapter.hookControls, adapter.featureControls, adapter.memoryControls].some(service => service?.changing || service?.needsRefresh),
     request, inspect,
     save: async state => { scopeCheck(); await store.records.put("native-import", chat.id, state); scopeCheck(); },

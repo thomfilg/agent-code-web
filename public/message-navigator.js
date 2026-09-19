@@ -1,6 +1,6 @@
 const make = (tag, cls, text) => { const n = document.createElement(tag); n.className = cls; if (text !== undefined) n.textContent = text; return n; };
 export class MessageNavigator {
-  constructor({ state, scroller, root, ensureVisible, atLatest = () => true }) {
+  constructor({ state, scroller, root, ensureVisible }) {
     Object.assign(this, { state, scroller, root, ensureVisible }); this.key = ""; this.readingHistory = false;
     this.toggle = root.querySelector("button"); this.list = root.querySelector(".message-nav-list"); this.ticks = root.querySelector(".message-nav-ticks");
     this.toggle.onclick = () => { this.open = !this.open; this.root.dataset.open = String(this.open); this.toggle.setAttribute("aria-expanded", String(this.open)); };
@@ -10,7 +10,8 @@ export class MessageNavigator {
     root.onfocusin = () => { delete this.root.dataset.dismissed; this.toggle.setAttribute("aria-expanded", "true"); };
     root.onfocusout = event => { if (!root.contains(event.relatedTarget)) this.close(); };
     document.addEventListener("pointerdown", event => { if (!root.contains(event.target)) this.close(); });
-    scroller.addEventListener("scroll", () => { if (atLatest() && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40) this.readingHistory = false; this.mark(); }, { passive: true });
+    // MessageFollow owns attachment intent, including render/resize scrolls.
+    scroller.addEventListener("scroll", () => this.mark(), { passive: true });
   }
   close() { this.open = false; this.root.dataset.open = "false"; this.toggle.setAttribute("aria-expanded", "false"); }
   update() {

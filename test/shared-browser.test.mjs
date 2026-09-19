@@ -11,6 +11,7 @@ import { createAgentWebServer } from "../src/server.mjs";
 import { testConfig, temporaryDirectory, waitFor } from "./helpers.mjs";
 import { startBrowserSite } from "./fixtures/browser-site.mjs";
 import { prepareChrome } from "../src/chrome-software.mjs";
+import { browserSelectionExpression } from "../src/browser-clipboard.mjs";
 
 const executable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || process.env.AGENT_CHROME_BIN || "google-chrome";
 let available = false; try { execFileSync(executable, ["--version"], { stdio: "ignore" }); available = true; } catch {}
@@ -129,6 +130,11 @@ test("shared-browser gateway: authenticated WebSocket, real MCP, same live page,
   const result = await client.callTool({ name: "browser_evaluate", arguments: { expression: "document.querySelector('#click').textContent" } });
   assert.equal(JSON.parse(result.content[0].text), "Clicks: 1", "agent sees the user's click");
   await client.callTool({ name: "browser_fill", arguments: { selector: "#entry", text: "From the agent" } });
+  await app.manager.browsers.command(chat.id, "evaluate", { expression: "document.querySelector('#entry').select()" });
+  socket.send(JSON.stringify({ id: 3, action: "copy", params: { expression: "document.body.textContent='must not execute'" } }));
+  await waitFor(() => events.some(e => e.id === 3));
+  assert.deepEqual(events.find(e => e.id === 3).value, { text: "From the agent" }, "copy ignores caller-supplied expressions");
+  assert.ok(events.find(e => e.event === "status").value.clipboard);
   await waitFor(() => events.some(e => e.event === "frame" && e.value.data.length > 5000));
   const screenshot = await client.callTool({ name: "browser_screenshot", arguments: {} }); assert.equal(screenshot.content[0].type, "image");
   const second = app.manager.browsers.runtime(other.id, url).relay_browser;
@@ -141,9 +147,9 @@ test("shared-browser gateway: authenticated WebSocket, real MCP, same live page,
   assert.equal(app.store.get(chat.id).messages.length, 0, "opening Chrome never starts an LLM or logs browser input into the transcript");
 });
 
-test("live frames are lossless, high-DPI and retain the exact CSS viewport through rapid resizing", { skip: !available }, async t => {
+test("idle frames are lossless, high-DPI and retain the exact CSS viewport through rapid resizing", { skip: !available }, async t => {
   const browser = new ChromeBrowser({ executable }); t.after(() => browser.stop()); await browser.start();
-  const frames = []; browser.on("frame", frame => { frames.push(frame); if (frames.length > 12) frames.shift(); });
+  const frames = []; browser.on("frame", frame => { if (frame.mimeType === "image/png") frames.push(frame); });
   await browser.watch(true);
   await waitFor(() => frames.some(frame => frame.width === 1280));
   assert.deepEqual(pngSize(frames.at(-1)), [2560, 1600]);
@@ -160,4 +166,25 @@ test("live frames are lossless, high-DPI and retain the exact CSS viewport throu
   await browser.evaluate("document.body.style.background='red'");
   await new Promise(resolve => setTimeout(resolve, 150));
   assert.equal(frames.length, count, "closing the viewer stops captures, including in-flight frames");
+});
+
+test("remote copy reads only the explicit selection, including textarea/shadow DOM, never passwords or the host clipboard", { skip: !available }, async t => {
+  const browser = new ChromeBrowser({ executable }); t.after(() => browser.stop()); await browser.start();
+  await browser.evaluate(`document.body.innerHTML = '<input id="input" value="Selected fixture text"><textarea id="area">Line one\\nLine two</textarea><input type="password" id="password" value="fixture private"><div id="shadow"></div><p id="paragraph">Ordinary selected page text</p>'`);
+  await browser.evaluate("document.querySelector('#input').focus();document.querySelector('#input').setSelectionRange(9,16)");
+  assert.deepEqual(await browser.evaluate(browserSelectionExpression), { text: "fixture" });
+  await browser.evaluate("document.querySelector('#area').focus();document.querySelector('#area').select()");
+  assert.deepEqual(await browser.evaluate(browserSelectionExpression), { text: "Line one\nLine two" });
+  await browser.evaluate("const root=document.querySelector('#shadow').attachShadow({mode:'open'});root.innerHTML='<input value=shadow>';root.firstChild.focus();root.firstChild.select()");
+  assert.deepEqual(await browser.evaluate(browserSelectionExpression), { text: "shadow" });
+  await browser.evaluate("document.querySelector('#password').focus();document.querySelector('#password').select()");
+  await assert.rejects(browser.evaluate(browserSelectionExpression), /Password fields cannot/);
+  await browser.evaluate("document.activeElement.blur();const range=document.createRange();range.selectNodeContents(document.querySelector('#paragraph'));getSelection().removeAllRanges();getSelection().addRange(range)");
+  assert.deepEqual(await browser.evaluate(browserSelectionExpression), { text: "Ordinary selected page text" });
+  await browser.evaluate("document.querySelector('#paragraph').contentEditable='true';document.querySelector('#paragraph').focus()");
+  assert.deepEqual(await browser.evaluate(browserSelectionExpression), { text: "Ordinary selected page text" });
+  await browser.evaluate("getSelection().removeAllRanges()");
+  await assert.rejects(browser.evaluate(browserSelectionExpression), /Select text/);
+  await browser.evaluate("const input=document.querySelector('#input');input.value='x'.repeat(30001);input.focus();input.select()");
+  await assert.rejects(browser.evaluate(browserSelectionExpression), /30,000 characters/);
 });

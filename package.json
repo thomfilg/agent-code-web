@@ -15,9 +15,12 @@
     "dev:local": "AGENT_ENABLE_MOCK=1 node --watch src/server.mjs",
     "test": "node --test test/*.test.mjs",
     "test:browser": "playwright test",
+    "test:linear:browser": "playwright test --config playwright.linear.config.mjs",
     "test:google:browser": "playwright test --config playwright.google.config.mjs",
+    "test:accounts:browser": "playwright test --config playwright.accounts.config.mjs",
     "check": "find src public scripts test chrome-extension -type f \\( -name '*.mjs' -o -name '*.js' \\) -print0 | xargs -0 -n1 node --check && node --test test/*.test.mjs",
     "smoke:codex": "node scripts/smoke-real-codex.mjs",
+    "smoke:codex:account-login": "node scripts/smoke-codex-account-login.mjs",
     "smoke:mcps": "node scripts/smoke-real-mcps.mjs"
   },
   "engines": {

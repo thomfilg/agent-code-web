@@ -1,6 +1,9 @@
 import { ModelPicker } from "./model-picker.js";
 import { companyForChat, scopeAllows, scopeLabel, scopesOverlap } from "./company-scope.js";
-import { CompanyPicker, knownCompanies } from "./company-picker.js";
+import { companyContext } from "./company-context.js";
+import { environmentAllows, environmentCompany } from "./environment-scope.js";
+import { GitHubAccounts } from "./github-accounts.js";
+import { agentAccountLabel, agentProjectKey } from "./agent-account-options.js";
 const $ = selector => document.querySelector(selector);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 const option = (value, text) => { const e = el("option", "", text); e.value = value; return e; };
@@ -8,93 +11,336 @@ const button = (text, action, cls = "secondary-button") => { const e = el("butto
 
 export class WorkspaceSettings {
   constructor({ api, state, toast }) {
-    Object.assign(this, { api, state, toast }); this.selected = []; this.environments = []; this.repositories = []; this.branchCache = new Map();
-    this.environmentCompanies = new CompanyPicker($("#environment-companies"), scope => { Object.assign(this.draft, scope); this.renderEnvironmentMcps(); });
-    this.githubCompanies = new CompanyPicker($("#github-companies"));
-    $("#github-connections").onchange = event => this.editGitHub(this.github.connections.find(connection => connection.id === event.target.value));
-    $("#github-new").onclick = () => this.editGitHub(null);
-    $("#github-save-scope").onclick = event => this.connectGitHub({}, event.target);
+    Object.assign(this, { api, state, toast }); this.selected = []; this.environments = []; this.repositories = []; this.branchCache = new Map(); this.repositoryRequest = 0;
+    $("#environment-company").addEventListener("change", event => {
+      const companyId = event.target.value;
+      if (this.environmentScopedCompanyId && companyId !== this.environmentScopedCompanyId) { event.target.value = this.environmentScopedCompanyId; return; }
+      Object.assign(this.draft, { companyId, companies: companyId ? [companyId] : [], allowUnassigned: false, scopeNeedsReview: !companyId, confirmCompanyAssignment: true });
+      this.renderEnvironmentMcps(); this.updateEnvironmentDirty();
+    });
+    this.githubAccounts = new GitHubAccounts(this);
     this.modelPicker = new ModelPicker({ root: $("#new-model-controls"), api, onChange: () => this.remember() });
     $("#github-button").addEventListener("click", () => this.openGitHub());
     $("#connect-github-button").addEventListener("click", () => this.openGitHub());
-    $("#github-local").addEventListener("click", event => this.connectGitHub({ method: "local" }, event.target));
-    $("#github-token-form").addEventListener("submit", event => { event.preventDefault(); this.connectGitHub({ token: $("#github-token").value, expiresAt: $("#github-expiry").value || null }, event.submitter); });
-    $("#github-disconnect").addEventListener("click", async () => { try { this.requireCompanyScopes(); if (!this.editingGitHub?.id || !confirm(`Disconnect only “${this.editingGitHub.name}”? Its other company connections will remain saved.`)) return; await api(`/api/github/connections/${this.editingGitHub.id}`, { method: "DELETE" }); this.repositories = []; this.branchCache.clear(); await this.load(); await this.openGitHub(); } catch (error) { toast(error.message); } });
-    $("#github-oauth").addEventListener("click", () => this.startDevice());
-    $("#github-dialog").addEventListener("close", () => { clearTimeout(this.deviceTimer); $("#github-token").value = ""; });
     $("#repo-search").addEventListener("input", () => this.renderRepositories());
+    const repositoryMenu = $("#repository-picker details");
+    repositoryMenu.addEventListener("toggle", () => {
+      repositoryMenu.querySelector("summary").setAttribute("aria-expanded", String(repositoryMenu.open));
+      if (repositoryMenu.open) $("#repo-search").focus();
+    });
     $("#refresh-repositories").addEventListener("click", () => this.loadRepositories(true).catch(error => toast(error.message)));
-    $("#environment-select").addEventListener("change", () => this.remember());
-    $("#agent-select").addEventListener("change", async () => { await this.modelPicker.setAgent($("#agent-select").value, {}, { useDefaults: true }); this.remember(); });
+    $("#environment-select").addEventListener("change", () => this.changeEnvironment().catch(error => toast(error.message)));
+    $("#agent-select").addEventListener("change", async () => { this.renderAccounts(); await this.updateModels(); this.remember(); });
+    $("#new-agent-account").addEventListener("change", async () => {
+      this.syncAccountAgent();
+      const id = $("#new-agent-account").value;
+      void this.remember({ model: null, effort: null });
+      await this.updateModels(); if ($("#new-agent-account").value === id) this.remember();
+    });
     $("#environment-settings").addEventListener("click", () => this.openEnvironments($("#environment-select").value));
     $("#environments-button").addEventListener("click", () => this.openEnvironments());
-    $("#add-environment").addEventListener("click", () => this.editEnvironment(null));
+    $("#add-environment").addEventListener("click", () => { if (this.discardEnvironmentEdits()) this.editEnvironment(null); });
+    $("#environment-company-filter").addEventListener("change", event => {
+      if (!this.discardEnvironmentEdits()) { event.target.value = this.settingsCompanyId; return; }
+      this.settingsCompanyId = event.target.value; this.editEnvironment(this.companyEnvironments()[0]);
+    });
+    $("#environment-editor-select").addEventListener("change", event => {
+      if (!this.discardEnvironmentEdits()) { event.target.value = this.draft.id || ""; return; }
+      this.editEnvironment(this.companyEnvironments().find(env => env.id === event.target.value));
+    });
+    document.querySelectorAll("[data-environment-section]").forEach(node => node.addEventListener("click", () => this.showEnvironmentSection(node.dataset.environmentSection)));
+    $("#environment-editor-back").addEventListener("click", () => this.showEnvironmentSection());
+    for (const type of ["input", "change"]) $("#environment-form").addEventListener(type, () => this.updateEnvironmentDirty());
     $("#environment-form").addEventListener("submit", event => this.saveEnvironment(event));
     $("#delete-environment").addEventListener("click", () => this.deleteEnvironment());
     $("#variable-search").addEventListener("input", () => this.filterVariables());
-    $("#add-variable").addEventListener("click", () => { this.draft.variables.push({ key: "", value: "", secret: true, enabled: true }); this.renderVariables(); $("#variables-table-body tr:last-child input").focus(); });
-    $("#environments-dialog").addEventListener("close", () => { this.draft = null; $("#variables-table-body").replaceChildren(); });
+    $("#add-variable").addEventListener("click", () => { this.draft.variables.push({ key: "", value: "", secret: true, enabled: true }); this.renderVariables(); this.updateEnvironmentDirty(); $("#variables-table-body tr:last-child input").focus(); });
+    const environmentDialog = $("#environments-dialog");
+    environmentDialog.addEventListener("cancel", event => { if (!this.discardEnvironmentEdits()) event.preventDefault(); });
+    environmentDialog.querySelector("[data-close-dialog]").addEventListener("click", event => { if (!this.discardEnvironmentEdits()) { event.preventDefault(); event.stopImmediatePropagation(); } }, true);
+    environmentDialog.addEventListener("close", () => { this.draft = null; this.environmentBaseline = null; $("#variables-table-body").replaceChildren(); });
   }
-  async load() {
-    const [github, environments, saved, mcps] = await Promise.all([this.api("/api/github"), this.api("/api/environments"), this.api("/api/preferences"), this.api("/api/mcps")]);
+  load(options) { return this.loading = this.loadSnapshot(options); }
+  async loadCurrent() {
+    let pending = this.load();
+    // Follow replacement requests already in flight, never poll/retry the API.
+    // Repeated account changes fail visibly instead of starting an unbounded loop.
+    for (let changes = 0; changes < 4; changes++) {
+      const loaded = await pending;
+      if (pending === this.loading) {
+        if (!loaded) throw new Error("Settings changed while loading. Reopen this dialog to retry.");
+        return;
+      }
+      pending = this.loading;
+    }
+    throw new Error("Settings changed while loading. Reopen this dialog to retry.");
+  }
+  async loadSnapshot({ validWhile = () => true } = {}) {
+    if (!this.state.config) throw new Error("Relay is still loading. Try again in a moment.");
+    const request = this.loadRequest = (this.loadRequest || 0) + 1;
+    const [github, environments, saved, mcps, accounts, registry] = await Promise.all([this.api("/api/github"), this.api("/api/environments"), this.api("/api/preferences"), this.api("/api/mcps"), this.state.config.features?.agentAccounts ? this.api("/api/agent-accounts") : { accounts: [] }, this.state.config.features?.companyRegistry ? this.api("/api/companies") : {}]);
+    if (request !== this.loadRequest || !validWhile()) return false;
+    const repositoryScope = JSON.stringify(github.connections || []);
+    if (this.repositoryScope !== repositoryScope) {
+      this.repositoryScope = repositoryScope; this.repositoryRequest++;
+      this.repositories = []; this.repositoryLoading = false; this.repositoryError = false;
+    }
     this.mcps = mcps.connections;
+    if (registry.companies) this.state.companies = registry.companies;
     this.github = github; this.environments = environments.environments; this.software = environments.software;
     this.preferences = saved.preferences;
-    if (!$("#new-chat-dialog").open) this.selected = structuredClone(saved.preferences.repositories || []);
+    this.selectionMemory = saved.selectionMemory === true;
+    this.projectAgents = saved.projectAgents || {};
+    this.accounts = accounts.accounts;
+    if (!this.draftReady) this.selected = structuredClone(saved.preferences.repositories || []).map(repo => {
+      const companyId = github.connections?.find(connection => connection.id === repo.githubConnectionId)?.companyId;
+      return { ...repo, ...(companyId ? { companyId } : {}) };
+    });
     $("#github-button").textContent = github.connected ? `GitHub · ${github.login}` : "Connect GitHub";
     $("#github-requirement").hidden = github.connected;
-    $("#repository-picker").hidden = !github.connected;
+    $("#repository-picker").hidden = !github.connected && !this.selected.length;
+    $("#repository-picker details").hidden = !github.connected;
     $("#create-chat-button").disabled = !github.connected;
     this.renderEnvironments();
+    this.renderRepositories();
+    if (this.draftReady) this.renderSelected();
+    return true;
   }
   renderEnvironments() {
     const selected = $("#environment-select").value || this.preferences?.environmentId;
     const company = companyForChat({ repositories: this.selected });
-    const available = this.environments.filter(env => !env.archived && scopeAllows(env, company));
+    // Repository defaults must not hide the environment needed to switch companies.
+    // Availability is checked when sending; an explicit switch scopes the draft.
+    const available = this.environments.filter(env => !env.archived && !env.scopeNeedsReview && environmentCompany(env));
+    const chosen = available.find(env => env.id === selected) || available.find(env => scopeAllows(env, company)) || available[0];
     $("#environment-select").replaceChildren(...available.map(env => option(env.id, env.name)));
-    if (available.some(env => env.id === selected)) $("#environment-select").value = selected;
-    if (!available.length) $("#environment-select").append(option("", `No environment for ${company || "unassigned chats"} · configure companies`));
+    if (chosen) $("#environment-select").value = chosen.id;
+    else $("#environment-select").append(option("", "No active environments · manage environments"));
+    this.renderAccounts();
   }
-  async openNew() {
+  selectedEnvironment() { return this.environments.find(env => env.id === $("#environment-select").value && !env.archived && !env.scopeNeedsReview && environmentCompany(env)); }
+  async changeEnvironment() {
+    const environment = this.selectedEnvironment();
+    if (!environment) { this.updateCreateAvailability(); return; }
+    const company = environment.companies?.length === 1 ? environment.companies[0] : null;
+    // A same-company environment switch keeps the selected model/account and
+    // waits for their complete restore, including a queued catalog request.
+    if (this.restoringSelection && this.selectionModels && company === this.selectionCompany) {
+      const current = this.selectionVersion;
+      await this.selectionModels.catch(() => {});
+      if (current !== this.selectionVersion) return;
+    }
+    const version = this.selectionVersion = (this.selectionVersion || 0) + 1;
+    this.setRestoringSelection(false);
+    if (this.selectionMemory && company && company !== (this.selectionCompany || companyForChat({ repositories: this.selected }))) {
+      await this.restoreSelection({ companyId: company }, { environmentId: environment.id });
+      return;
+    }
+    // Changing to a second environment of this company must not capture the
+    // temporary "Loading models" value or enable Send with a default model.
+    if (this.modelLoad) {
+      this.setRestoringSelection(true); this.updateCreateAvailability();
+      await this.modelLoad.catch(() => {});
+      if (version !== this.selectionVersion) return;
+      this.setRestoringSelection(false);
+    }
+    const previous = this.selected.length;
+    this.selected = this.selected.filter(repo => scopeAllows(environment, companyForChat({ repositories: [repo] })));
+    $("#repo-search").value = ""; $("#create-chat-error").textContent = "";
+    this.renderSelected(); this.renderRepositories();
+    if (this.selected.length !== previous) this.toast(`Switched to ${environment.name}. Repositories from other companies were removed from this draft; your message is kept.`);
+    return this.remember();
+  }
+  environmentSelectionError() {
+    const environment = this.selectedEnvironment();
+    if (!environment) return "Choose an active environment before sending.";
+    if (!this.selected.length && !scopeAllows(environment, null)) return `Choose a repository for “${environment.name}” before sending.`;
+    if (this.selected.some(repo => !scopeAllows(environment, companyForChat({ repositories: [repo] })))) return `The selected repositories are not available in “${environment.name}”. Choose another environment or remove them.`;
+    return "";
+  }
+  renderAccounts() {
+    const supported = this.state.config.features?.agentAccounts;
+    $("#connect-codex-button").hidden = !supported;
+    const select = $("#new-agent-account"), provider = $("#agent-select");
+    provider.hidden = Boolean(supported); provider.required = !supported; provider.disabled = Boolean(supported) || !provider.value;
+    provider.setAttribute("aria-label", supported ? "Agent type" : "Agent");
+    select.hidden = !supported; select.required = Boolean(supported);
+    const project = agentProjectKey({ repositories: this.selected });
+    const company = companyForChat({ repositories: this.selected }) || this.selectionCompany || null;
+    const explicit = this.restoredAccount?.key === JSON.stringify([company, project]);
+    const sameProject = this.accountProject === project;
+    const sameCompany = company === companyForChat(this.preferences);
+    const saved = explicit ? this.restoredAccount.id : sameCompany ? (!this.selectionMemory ? this.projectAgents?.[project]?.agentAccountId : null) || (project === agentProjectKey(this.preferences) ? this.preferences?.agentAccountId : null) : null;
+    const old = explicit ? saved : sameProject && sameCompany ? select.value || saved : saved;
+    const available = (this.accounts || []).filter(account => ["codex", "claude"].includes(account.provider) && account.status === "connected");
+    $("#agent-account-requirement").hidden = !supported || available.length > 0;
+    select.replaceChildren(option("", "Select an agent account"), ...available.map(account => option(account.id, agentAccountLabel(account))));
+    if (available.some(account => account.id === old)) select.value = old;
+    else if (!explicit && !old && available.length === 1) select.value = available[0].id;
+    this.accountProject = project;
+    select.disabled = !supported || !available.length;
+    if (supported) this.syncAccountAgent();
+    $("#agent-account-hint").textContent = !available.length
+      ? "Connect Codex or Claude using the settings button beside Agent."
+      : "Choose an account for this chat. Your choice is remembered for this project.";
+    this.updateCreateAvailability();
+    if (!provider.value || supported && !select.value) void this.modelPicker.setAgent(null);
+    else if (this.draftReady && supported && (this.modelPicker.agent !== provider.value || this.modelPicker.agentAccountId !== select.value)) void this.updateModels();
+  }
+  syncAccountAgent() {
+    const account = (this.accounts || []).find(account => account.id === $("#new-agent-account").value && account.status === "connected");
+    $("#agent-select").value = account?.provider || "";
+  }
+  updateCreateAvailability() {
+    const agent = $("#agent-select").value;
+    const needed = this.state.config.features?.agentAccounts && ["codex", "claude"].includes(agent);
+    const environmentError = this.environmentSelectionError();
+    $("#environment-selection-hint").textContent = environmentError;
+    $("#environment-selection-hint").hidden = !environmentError;
+    const staleModel = this.modelPicker?.model?.selectedOptions?.[0]?.disabled || this.modelPicker?.root?.dataset?.status === "error";
+    $("#create-chat-button").disabled = Boolean(this.restoringSelection || this.modelLoad || this.selectionRestoreError || staleModel) || Boolean(this.selected.length && !this.github?.connected) || Boolean(environmentError) || !agent || Boolean(needed && !$("#new-agent-account").value);
+  }
+  async updateModels(selected = {}) {
+    const agent = $("#agent-select").value;
+    const needed = this.state.config.features?.agentAccounts && ["codex", "claude"].includes(agent);
+    const agentAccountId = needed ? $("#new-agent-account").value : null;
+    const version = this.modelLoadVersion = (this.modelLoadVersion || 0) + 1;
+    await this.modelLoad?.catch(() => {});
+    if (version !== this.modelLoadVersion || $("#agent-select").value !== agent || needed && $("#new-agent-account").value !== agentAccountId) return;
+    const loading = this.modelLoad = this.modelPicker.setAgent(!agent || needed && !agentAccountId ? null : agent, { ...selected, agentAccountId }, { useDefaults: true });
+    this.updateCreateAvailability();
+    try { await loading; }
+    finally { if (this.modelLoad === loading) this.modelLoad = null; this.updateCreateAvailability(); }
+  }
+  async openNew(project, { validWhile = () => true } = {}) {
     $("#create-chat-error").textContent = "";
-    await this.load();
-    this.selected = structuredClone(this.preferences.repositories || []);
-    if (this.preferences.agent && [...$("#agent-select").options].some(o => o.value === this.preferences.agent)) $("#agent-select").value = this.preferences.agent;
-    this.modelPicker.key = null;
-    await this.modelPicker.setAgent($("#agent-select").value, this.preferences, { useDefaults: true });
+    await this.loadCurrent();
+    if (!this.draftReady) {
+      this.accountProject = undefined;
+      if (this.preferences.agent && [...$("#agent-select").options].some(o => o.value === this.preferences.agent)) $("#agent-select").value = this.preferences.agent;
+      this.modelPicker.key = null;
+      this.renderAccounts(); await this.updateModels(this.preferences);
+      this.draftReady = true;
+    }
     $("#repo-search").value = "";
     this.renderSelected();
+    $("#repository-picker .repository-picker-dropdown").open = false;
     if (this.github.connected) await this.loadRepositories();
+    if (this.selectionMemory && validWhile()) {
+      const companyId = project?.companyId || (!this.selectionCompany ? companyForChat({ repositories: this.selected }) : null);
+      if (companyId) await this.restoreSelection({ companyId, ...(project?.repository ? { repository: project.repository } : {}) }, { validWhile });
+    }
+  }
+  async restoreSelection(project, { environmentId, validWhile = () => true } = {}) {
+    const version = this.selectionVersion = (this.selectionVersion || 0) + 1;
+    this.setRestoringSelection(true); this.updateCreateAvailability();
+    try {
+      await this.preferenceQueue?.catch(() => {});
+      const query = new URLSearchParams({ company: project.companyId, ...(project.repository ? { repository: project.repository } : {}) });
+      const result = await this.api(`/api/preferences/restore?${query}`);
+      if (version !== this.selectionVersion || !validWhile()) return;
+      const saved = result.selection;
+      this.selectionRestoreError = Boolean(result.warnings?.length);
+      this.selected = structuredClone(saved.repositories || []);
+      this.selectionCompany = project.companyId;
+      this.restoredAccount = { key: JSON.stringify([project.companyId, agentProjectKey(saved)]), id: saved.agentAccountId || "" };
+      $("#environment-select").value = environmentId || saved.environmentId || "";
+      $("#agent-select").value = saved.agent || "";
+      this.accountProject = undefined;
+      this.renderSelected(); this.renderRepositories();
+      // No active environment is a blocking selection, not permission to pick
+      // an environment from a different company via renderEnvironments fallback.
+      if (!environmentId && !saved.environmentId) $("#environment-select").value = "";
+      const modelRestore = this.selectionModels = (async () => {
+        await this.modelPicker.saving?.catch(() => {});
+        if (version !== this.selectionVersion || !validWhile()) return;
+        await this.updateModels(saved);
+      })();
+      try { await modelRestore; }
+      finally { if (this.selectionModels === modelRestore) this.selectionModels = null; }
+      if (version !== this.selectionVersion || !validWhile()) return;
+      const unavailableEffort = saved.effort && ![...this.modelPicker.effort.options].some(option => option.value === saved.effort);
+      if (this.modelPicker.root?.dataset.status === "error" || this.modelPicker.model?.selectedOptions?.[0]?.disabled || unavailableEffort) {
+        this.selectionRestoreError = true;
+        result.warnings = [...(result.warnings || []), "Saved model options are unavailable. Choose an available model or retry this project."];
+      }
+      $("#repo-search").value = "";
+      $("#create-chat-error").textContent = (result.warnings || []).join(" ");
+    } catch (error) {
+      if (version !== this.selectionVersion || !validWhile()) return;
+      this.selected = []; this.selectionCompany = project.companyId;
+      this.selectionRestoreError = true;
+      this.restoredAccount = { key: JSON.stringify([project.companyId, null]), id: "" };
+      $("#agent-select").value = ""; this.renderSelected(); this.renderRepositories();
+      $("#environment-select").value = environmentId || "";
+      $("#create-chat-error").textContent = `Could not restore project settings: ${error.message}`;
+    } finally {
+      if (version === this.selectionVersion) {
+        this.setRestoringSelection(false); this.updateCreateAvailability();
+        if (validWhile()) {
+          window.dispatchEvent(new CustomEvent("relay-new-chat-selection-changed"));
+          if (!this.selectionRestoreError) void this.remember();
+        }
+      }
+    }
+  }
+  setRestoringSelection(busy) {
+    this.restoringSelection = busy;
+    for (const selector of ["#new-agent-account", "#agent-select", "#new-model-controls", "#repository-picker", "#selected-repositories"]) $(selector).inert = busy;
   }
   async loadRepositories(refresh = false) {
-    $("#repository-results").replaceChildren(el("p", "muted", "Loading repositories…"));
-    this.repositories = (await this.api(`/api/github/repositories${refresh ? "?refresh=1" : ""}`)).repositories;
-    this.renderRepositories();
+    const request = ++this.repositoryRequest;
+    this.repositoryLoading = true; this.repositoryError = false; this.renderRepositories();
+    try {
+      const { repositories } = await this.api(`/api/github/repositories${refresh ? "?refresh=1" : ""}`);
+      if (request !== this.repositoryRequest) return;
+      this.repositories = repositories;
+    } catch {
+      if (request !== this.repositoryRequest) return;
+      this.repositories = []; this.repositoryError = true;
+    } finally {
+      if (request === this.repositoryRequest) { this.repositoryLoading = false; this.renderRepositories(); }
+    }
   }
   renderRepositories() {
     const query = $("#repo-search").value.toLowerCase();
     const results = $("#repository-results"); results.replaceChildren();
-    for (const repo of this.repositories.filter(repo => repo.fullName.toLowerCase().includes(query))) {
+    const status = (text, { error = false, manage = false, retry = false } = {}) => {
+      const message = el("p", error ? "form-error" : "muted", text); message.id = "repository-status"; message.setAttribute("role", error ? "alert" : "status"); results.append(message);
+      if (manage) { const action = button("Manage GitHub accounts", () => this.openGitHub()); action.id = "repository-manage-github"; results.append(action); }
+      if (retry) { const action = button("Retry loading repositories", () => this.loadRepositories(true)); action.id = "repository-retry"; results.append(action); }
+    };
+    if (this.repositoryLoading) return status("Loading repositories…");
+    if (this.repositoryError) return status("Could not load repositories. Check your GitHub connection and retry.", { error: true, manage: true, retry: true });
+    const primaryCompany = companyForChat({ repositories: this.selected }), environment = this.selectedEnvironment();
+    // Legacy repository responses have no companyId; retain their old display
+    // behavior, with environment admission still checked in payload and server.
+    const scoped = this.repositories.filter(repo => (!primaryCompany || !repo.companyId || repo.companyId === primaryCompany) && (!environment || !repo.companyId || scopeAllows(environment, repo.companyId)));
+    for (const repo of scoped.filter(repo => repo.fullName.toLowerCase().includes(query))) {
       const label = el("label", "repository-option"); const input = el("input"); input.type = "checkbox"; input.checked = this.selected.some(item => item.fullName === repo.fullName && (!item.githubConnectionId || item.githubConnectionId === repo.githubConnectionId));
       input.addEventListener("change", () => {
-        if (input.checked) { this.selected = this.selected.filter(item => item.fullName !== repo.fullName); this.selected.push({ fullName: repo.fullName, branch: repo.defaultBranch, githubConnectionId: repo.githubConnectionId }); }
+        if (input.checked) { this.selected = this.selected.filter(item => item.fullName !== repo.fullName); this.selected.push({ fullName: repo.fullName, branch: repo.defaultBranch, githubConnectionId: repo.githubConnectionId, ...(repo.companyId ? { companyId: repo.companyId } : {}) }); }
         else this.selected = this.selected.filter(item => item.fullName !== repo.fullName);
         this.renderSelected(); this.renderRepositories(); this.remember();
       });
       label.append(input, el("span", "", repo.fullName), el("small", "", `${repo.private ? "Private" : "Public"}${repo.connectionName ? ` · ${repo.connectionName}` : ""}`)); results.append(label);
     }
-    if (!results.childElementCount) results.append(el("p", "muted", "No matching repositories. Check account permissions or refresh the list."));
+    if (!results.childElementCount) {
+      const unavailable = this.repositories.length && !scoped.length && environment;
+      status(unavailable ? `No repositories are available for “${environment.name}”. Check its GitHub connection or choose another environment.` : this.repositories.length ? "No repositories match your search." : "No repositories are available from your connected GitHub accounts. Check GitHub permissions or refresh the list.", { manage: Boolean(unavailable) || !this.repositories.length, retry: !this.repositories.length });
+    }
   }
   renderSelected() {
     this.renderEnvironments();
     const container = $("#selected-repositories"); container.replaceChildren();
     for (const [index, repo] of this.selected.entries()) {
-      const chip = el("div", "repository-chip"); chip.append(el("span", "", `${index === 0 ? "① " : ""}${repo.fullName}`));
+      const chip = el("div", "repository-chip"); chip.title = `${repo.fullName}${index === 0 ? " · Primary repository" : ""}`;
+      const name = el("span", "repository-name", `‹/› ${repo.fullName.split("/").at(-1)}`); chip.append(name);
       const branch = el("select"); branch.setAttribute("aria-label", `Branch for ${repo.fullName}`); branch.append(option(repo.branch, repo.branch));
       const loadBranches = async () => {
         try {
           const key = `${repo.githubConnectionId || "auto"}:${repo.fullName}`;
-          const branches = this.branchCache.get(key) || (await this.api(`/api/github/branches?repository=${encodeURIComponent(repo.fullName)}${repo.githubConnectionId ? `&connection=${encodeURIComponent(repo.githubConnectionId)}` : ""}`)).branches;
+          const branches = this.branchCache.get(key) || (await this.api(`/api/github/branches?repository=${encodeURIComponent(repo.fullName)}${repo.githubConnectionId ? `&connection=${encodeURIComponent(repo.githubConnectionId)}` : ""}&company=${encodeURIComponent(companyForChat({ repositories: this.selected }) || "")}`)).branches;
           this.branchCache.set(key, branches);
           branch.replaceChildren(...[...new Set([repo.branch, ...branches])].map(name => option(name, name))); branch.value = repo.branch;
         } catch (error) { this.toast(error.message); }
@@ -104,73 +350,113 @@ export class WorkspaceSettings {
       if (index) { const primary = button("↑", () => { this.selected.splice(index, 1); this.selected.unshift(repo); this.renderSelected(); this.remember(); }, "small-icon"); primary.setAttribute("aria-label", `Make ${repo.fullName} primary`); chip.append(primary); }
       const remove = button("×", () => { this.selected = this.selected.filter(item => item !== repo); this.renderSelected(); this.renderRepositories(); this.remember(); }, "small-icon"); remove.setAttribute("aria-label", `Remove ${repo.fullName}`); chip.append(remove); container.append(chip);
     }
-    $("#repository-group-hint").textContent = this.selected.length ? `Grouped under ${this.selected[0].fullName.replace("/", " → ")}. Use ↑ to choose another primary repository.` : "Select repositories. The first one determines the company and repository group.";
+    const company = companyForChat({ repositories: this.selected });
+    const label = this.state.companies?.find(entry => entry.id === company)?.name || company;
+    $("#repository-group-hint").textContent = this.selected.length ? `Grouped under ${label} → ${this.selected[0].fullName.split("/").at(-1)}. Use ↑ to choose another primary repository.` : "Select repositories. The first repository's GitHub connection determines the company.";
   }
-  payload() { if (!this.github?.connected) throw new Error("Connect GitHub first"); if (!this.selected.length) throw new Error("Select at least one repository"); return { agent: $("#agent-select").value, ...this.modelPicker.value(), environmentId: $("#environment-select").value, repositories: this.selected }; }
-  async remember() {
+  payload() {
+    if (this.restoringSelection || this.modelLoad) throw new Error("Wait for the project selection to finish loading");
+    if (this.selectionRestoreError || this.modelPicker?.model?.selectedOptions?.[0]?.disabled || this.modelPicker?.root?.dataset?.status === "error") throw new Error("Review the unavailable saved project options before sending");
+    if (this.selected.length && !this.github?.connected) throw new Error("Connect GitHub to use the selected repositories");
+    const environmentError = this.environmentSelectionError();
+    if (environmentError) throw new Error(environmentError);
+    const agent = $("#agent-select").value, agentAccountId = $("#new-agent-account").value;
+    if (!agent || this.state.config.features?.agentAccounts && ["codex", "claude"].includes(agent) && !agentAccountId) throw new Error("Connect and select an agent account first");
+    return { agent, ...(agentAccountId && ["codex", "claude"].includes(agent) ? { agentAccountId } : {}), ...this.modelPicker.value(), environmentId: $("#environment-select").value, repositories: this.selected };
+  }
+  async remember(modelSelection = {}) {
+    if (this.restoringSelection) return;
+    if (this.selected.length) this.selectionRestoreError = false;
     if (!$("#environment-select").value) return;
-    const selection = $("#new-chat-dialog").open ? { agent: $("#agent-select").value, ...this.modelPicker.value() } : { agent: this.preferences.agent || $("#agent-select").value, model: this.preferences.model || null, effort: this.preferences.effort || null };
-    const body = { ...selection, environmentId: $("#environment-select").value, repositories: structuredClone(this.selected) };
+    const selection = this.draftReady ? { agent: $("#agent-select").value, ...this.modelPicker.value() } : { agent: this.preferences.agent || $("#agent-select").value, model: this.preferences.model || null, effort: this.preferences.effort || null };
+    const body = { ...selection, ...modelSelection, environmentId: $("#environment-select").value, repositories: structuredClone(this.selected) };
+    body.agent ||= null;
+    delete body.ultracode; // Session mode is never inherited by another new chat.
+    if (this.state.config.features?.agentAccounts && ["codex", "claude"].includes(body.agent)) {
+      body.agentAccountId = this.draftReady ? $("#new-agent-account").value : this.preferences.agentAccountId;
+      if (!body.agentAccountId) { body.agent = null; body.model = null; body.effort = null; }
+    }
+    const project = agentProjectKey(body);
+    this.selectionCompany = companyForChat(body) || (this.selectedEnvironment()?.companies?.length === 1 ? this.selectedEnvironment().companies[0] : null);
+    this.restoredAccount = { key: JSON.stringify([this.selectionCompany, project]), id: body.agentAccountId || "" };
+    const remembered = { agent: body.agent, agentAccountId: body.agentAccountId };
+    const previous = this.projectAgents?.[project];
+    if (project && body.agentAccountId) this.projectAgents = { ...this.projectAgents, [project]: remembered };
     this.preferenceQueue = (this.preferenceQueue || Promise.resolve()).catch(() => {}).then(() => this.api("/api/preferences", { method: "PATCH", body: JSON.stringify(body) }));
-    try { await this.preferenceQueue; this.preferences = body; } catch (error) { this.toast(`Could not remember your selection: ${error.message}`); }
+    try {
+      await this.preferenceQueue; this.preferences = body;
+    } catch (error) {
+      if (this.projectAgents?.[project] === remembered) { if (previous) this.projectAgents[project] = previous; else delete this.projectAgents[project]; }
+      this.toast(`Could not remember your selection: ${error.message}`);
+    }
+    this.updateCreateAvailability();
   }
   async openGitHub() {
+    await this.githubAccounts.open();
+  }
+  companyEnvironments() { return this.environments.filter(env => this.settingsCompanyId === "__review__" ? env.scopeNeedsReview || !environmentCompany(env) : environmentAllows(env, this.settingsCompanyId)); }
+  async openEnvironments(id, companyId = null, { validWhile = () => true } = {}) {
+    const revision = this.environmentOpenRevision = (this.environmentOpenRevision || 0) + 1;
     try {
-      this.github = await this.api("/api/github");
-      $("#github-connections").replaceChildren(option("", "New connection"), ...(this.github.connections || []).map(connection => option(connection.id, `${connection.name} · ${scopeLabel(connection)}`)));
-      this.editGitHub(this.github.connections?.find(connection => connection.id === this.editingGitHub?.id) || this.github.connections?.[0]);
-      $("#github-local").hidden = !this.github.localAvailable; $("#github-oauth").hidden = !this.github.oauthAvailable;
-      $("#github-error").textContent = ""; $("#github-device-code").textContent = "";
-      if (!$("#github-dialog").open) $("#github-dialog").showModal();
-    } catch (error) { this.toast(error.message); }
+      await this.loadCurrent();
+      if (revision !== this.environmentOpenRevision || !validWhile()) return;
+      this.environmentScopedCompanyId = companyId;
+      const requested = this.environments.find(env => env.id === id);
+      this.settingsCompanyId = companyId ?? requested?.companies?.[0] ?? this.state.companies?.[0]?.id ?? this.environments[0]?.companies?.[0] ?? "";
+      if (!companyId && (requested?.scopeNeedsReview || requested && !environmentCompany(requested) || !this.settingsCompanyId)) this.settingsCompanyId = "__review__";
+      this.editEnvironment(this.companyEnvironments().find(env => env.id === id) || this.companyEnvironments()[0]);
+      $("#environments-dialog").dataset.companyScoped = String(Boolean(companyId));
+      companyContext($("#environments-dialog"), this.state.companies || [], this.settingsCompanyId);
+      $("#environment-company-filter").closest("label").hidden = Boolean(companyId);
+      $("#environments-dialog").showModal();
+    }
+    catch (error) { if (revision === this.environmentOpenRevision && validWhile()) this.toast(error.message); }
   }
-  editGitHub(connection) {
-    this.editingGitHub = connection || null; $("#github-connections").value = connection?.id || "";
-    $("#github-connection-name").value = connection?.name || "";
-    this.githubCompanies.set(connection || {}, knownCompanies(this.state, [...(this.github.connections || []), ...this.environments, ...(this.mcps || [])]));
-    $("#github-status").textContent = connection ? `${connection.connected ? `Signed in as ${connection.login}` : "Sign-in expired or disconnected"} · ${scopeLabel(connection)}${connection.scopeNeedsReview ? ". This legacy connection is blocked until you select and save its companies." : ""}` : "Add a separate saved connection for each company account. Credentials stay encrypted outside agent environments.";
-    $("#github-disconnect").hidden = !connection;
-    $("#github-save-scope").hidden = !connection;
-    $("#github-token").value = ""; $("#github-error").textContent = "";
+  discardEnvironmentEdits() { return !this.environmentSaving && (!this.environmentDirty() || confirm("Discard unsaved environment changes?")); }
+  captureEnvironmentFields() {
+    if (!this.draft) return;
+    Object.assign(this.draft, { name: $("#environment-name").value, variablesEnabled: $("#variables-enabled").checked,
+      setupScript: $("#environment-setup-script").value, archived: $("#environment-archived").checked });
   }
-  githubPayload() { return { id: this.editingGitHub?.id, revision: this.editingGitHub?.revision, name: $("#github-connection-name").value || "GitHub", ...this.githubCompanies.value() }; }
-  async connectGitHub(body, submitter) {
-    submitter.disabled = true; $("#github-error").textContent = "";
-    try { this.requireCompanyScopes(); const settings = this.githubPayload(); await this.api(settings.id ? `/api/github/connections/${settings.id}` : "/api/github", { method: settings.id ? "PATCH" : "POST", body: JSON.stringify({ ...settings, ...body }) }); $("#github-token").value = ""; this.branchCache.clear(); await this.load(); if ($("#new-chat-dialog").open) await this.loadRepositories(); $("#github-dialog").close(); }
-    catch (error) { $("#github-error").textContent = error.message; }
-    finally { submitter.disabled = false; }
+  environmentDirty() { this.captureEnvironmentFields(); return Boolean(this.draft && this.environmentBaseline !== JSON.stringify(this.draft)); }
+  updateEnvironmentDirty() {
+    $("#save-environment").disabled = Boolean(this.environmentSaving) || !this.environmentDirty();
+    if (!this.draft) return;
+    $("#environment-software-summary").textContent = `${this.draft.software.length} selected`;
+    $("#environment-variables-summary").textContent = this.draft.variablesEnabled ? `${this.draft.variables.length} ${this.draft.variables.length === 1 ? "variable" : "variables"}` : "Disabled";
+    $("#environment-setup-summary").textContent = this.draft.setupScript.trim() ? "Startup script configured" : "No startup script";
   }
-  async startDevice() {
-    try {
-      this.requireCompanyScopes();
-      clearTimeout(this.deviceTimer);
-      const flow = await this.api("/api/github/device", { method: "POST", body: JSON.stringify(this.githubPayload()) });
-      const link = el("a", "", "Open GitHub to authorize"); link.href = "https://github.com/login/device"; link.target = "_blank"; link.rel = "noopener noreferrer";
-      $("#github-device-code").replaceChildren(el("strong", "", flow.userCode), link);
-      const poll = async () => {
-        if (!$("#github-dialog").open) return;
-        try { const result = await this.api("/api/github/device/poll", { method: "POST", body: JSON.stringify({ id: flow.id }) });
-          if (result.pending) this.deviceTimer = setTimeout(poll, result.interval * 1000);
-          else { await this.load(); if ($("#new-chat-dialog").open) await this.loadRepositories(); $("#github-dialog").close(); }
-        } catch (error) { $("#github-error").textContent = error.message; }
-      };
-      this.deviceTimer = setTimeout(poll, flow.interval * 1000);
-    } catch (error) { $("#github-error").textContent = error.message; }
-  }
-  async openEnvironments(id) {
-    try { await this.load(); this.editEnvironment(this.environments.find(env => env.id === id) || this.environments[0]); $("#environments-dialog").showModal(); }
-    catch (error) { this.toast(error.message); }
+  showEnvironmentSection(section = null) {
+    $("#environment-overview").hidden = Boolean(section); $("#environment-editor-heading").hidden = !section;
+    const titles = { software: "Installed software", variables: "Environment variables", setup: "Setup script" };
+    for (const id of Object.keys(titles)) $("#environment-" + id + "-editor").hidden = id !== section;
+    $("#environment-editor-title").textContent = titles[section] || "";
+    this.updateEnvironmentDirty();
   }
   editEnvironment(environment) {
-    this.draft = structuredClone(environment || { name: "", backend: this.state.config.workerBackend, variablesEnabled: true, variables: [], software: [] });
+    this.draft = structuredClone(environment || { name: "", backend: this.state.config.workerBackend, variablesEnabled: true, variables: [], software: [], ...(this.settingsCompanyId && this.settingsCompanyId !== "__review__" ? { companies: [this.settingsCompanyId], allowUnassigned: false } : {}) });
     $("#environment-error").textContent = "";
-    $("#environment-tabs").replaceChildren(...this.environments.map(env => button(env.name, () => { if (confirm("Switch environments? Unsaved edits will be discarded.")) this.editEnvironment(env); }, `environment-tab${environment?.id === env.id ? " selected" : ""}`)));
+    $("#environment-save-status").textContent = "";
+    const companies = (this.state.companies || []).map(company => company.id);
+    const filter = $("#environment-company-filter");
+    filter.replaceChildren(...companies.map(id => option(id, this.state.companies?.find(company => company.id === id)?.name || id)));
+    if (!companies.length || this.settingsCompanyId === "__review__" || this.environments.some(env => env.scopeNeedsReview || !environmentCompany(env))) filter.append(option("__review__", "Needs company assignment"));
+    filter.value = this.settingsCompanyId || "";
+    const select = $("#environment-editor-select");
+    select.replaceChildren(...this.companyEnvironments().map(env => option(env.id, `${env.name}${env.archived ? " · Archived" : ""}`)));
+    if (!environment) select.append(option("", "New environment"));
+    select.value = environment?.id || "";
+    $("#environment-advanced").open = false;
     $("#environment-name").value = this.draft.name;
-    this.environmentCompanies.set(this.draft, knownCompanies(this.state, [...this.environments, ...this.mcps, ...(this.github.connections || [])]));
+    const companySelect = $("#environment-company");
+    companySelect.replaceChildren(option("", "Choose one company"), ...(this.state.companies || []).map(company => option(company.id, company.name || company.id)));
+    companySelect.value = this.draft.scopeNeedsReview ? "" : environmentCompany(this.draft) || "";
+    companySelect.disabled = Boolean(this.environmentScopedCompanyId);
+    $("#environment-company-review").hidden = !this.draft.scopeNeedsReview;
     this.renderEnvironmentMcps();
     $("#environment-setup-script").value = this.draft.setupScript || "";
     $("#environment-archived").checked = Boolean(this.draft.archived);
-    $("#environment-backend").textContent = `Worker: ${this.draft.backend} · changes apply on the next worker start${this.draft.scopeNeedsReview ? " · select companies to replace the old global scope" : ""}`;
+    $("#environment-backend").textContent = `Worker: ${this.draft.backend} · changes apply on the next worker start`;
     $("#variables-enabled").checked = this.draft.variablesEnabled;
     $("#delete-environment").hidden = !this.draft.id;
     $("#software-options").replaceChildren();
@@ -181,8 +467,14 @@ export class WorkspaceSettings {
       label.append(input, el("span", "", `${pkg.name} ${pkg.version}`), el("small", "", pkg.description)); $("#software-options").append(label);
     }
     $("#variable-search").value = ""; this.renderVariables();
+    this.captureEnvironmentFields(); this.environmentBaseline = JSON.stringify(this.draft); this.showEnvironmentSection();
   }
   renderEnvironmentMcps() {
+    if (this.state.config?.features?.companyMcpConnections) {
+      const allowed = this.mcps.filter(connection => connection.companyId && environmentAllows(this.draft, connection.companyId));
+      $("#environment-mcp-options").replaceChildren(...allowed.map(connection => el("p", "muted", `${connection.name} · ${connection.companyId}`)));
+      return;
+    }
     this.draft.mcpIds ||= [];
     $("#environment-mcp-options").replaceChildren(...this.mcps.map(connection => {
       const label = el("label", "checkbox-label"), input = el("input"); input.type = "checkbox"; input.checked = this.draft.mcpIds.includes(connection.id);
@@ -209,27 +501,33 @@ export class WorkspaceSettings {
         } catch (error) { $("#environment-error").textContent = error.message; }
       }); valueCell.append(value, reveal);
       const actions = el("td", "variable-actions"); const enabled = el("input"); enabled.type = "checkbox"; enabled.checked = variable.enabled; enabled.setAttribute("aria-label", `Variable ${index + 1} enabled`); enabled.addEventListener("change", () => { variable.enabled = enabled.checked; });
-      const remove = button("×", () => { this.draft.variables.splice(index, 1); this.renderVariables(); }, "small-icon"); remove.setAttribute("aria-label", `Delete variable ${index + 1}`); actions.append(enabled, remove);
+      const remove = button("×", () => { this.draft.variables.splice(index, 1); this.renderVariables(); this.updateEnvironmentDirty(); }, "small-icon"); remove.setAttribute("aria-label", `Delete variable ${index + 1}`); actions.append(enabled, remove);
       row.append(keyCell, typeCell, valueCell, actions); body.append(row);
     });
     this.filterVariables();
   }
   filterVariables() { const query = $("#variable-search").value.toLowerCase(); [...$("#variables-table-body").children].forEach((row, i) => { row.hidden = !this.draft.variables[i].key.toLowerCase().includes(query); }); }
   async saveEnvironment(event) {
-    event.preventDefault(); event.submitter.disabled = true;
-    this.draft.name = $("#environment-name").value; this.draft.variablesEnabled = $("#variables-enabled").checked;
-    Object.assign(this.draft, this.environmentCompanies.value());
-    this.draft.setupScript = $("#environment-setup-script").value; this.draft.archived = $("#environment-archived").checked;
+    event.preventDefault();
+    if (this.environmentSaving || !this.environmentDirty()) return;
+    if (!this.draft.name.trim()) { this.showEnvironmentSection(); $("#environment-name").focus(); return; }
+    this.environmentSaving = true; this.updateEnvironmentDirty(); $("#environment-error").textContent = "";
+    const fields = [...$("#environments-dialog").querySelectorAll("input, select, textarea, button")];
+    const disabled = fields.map(field => field.disabled); fields.forEach(field => { field.disabled = true; });
     try {
       this.requireCompanyScopes();
+      if (!environmentCompany(this.draft) || !this.state.companies?.some(company => company.id === environmentCompany(this.draft))) throw new Error("Choose one registered company before saving this environment.");
+      if (this.environmentScopedCompanyId && environmentCompany(this.draft) !== this.environmentScopedCompanyId) throw new Error("This editor belongs to another company. Reopen the environment in its company settings.");
       const { environment } = await this.api(this.draft.id ? `/api/environments/${this.draft.id}` : "/api/environments", { method: this.draft.id ? "PATCH" : "POST", body: JSON.stringify(this.draft) });
-      await this.load(); $("#environment-select").value = environment.id; await this.remember(); this.editEnvironment(environment); $("#environment-save-status").textContent = "Saved securely";
+      await this.load();
+      if (!environment.archived) { $("#environment-select").value = environment.id; await this.changeEnvironment(); }
+      this.environmentBaseline = JSON.stringify(this.draft); $("#environments-dialog").close(); this.toast("Environment saved");
     } catch (error) { $("#environment-error").textContent = error.message; }
-    finally { event.submitter.disabled = false; }
+    finally { fields.forEach((field, index) => { field.disabled = disabled[index]; }); this.environmentSaving = false; this.updateEnvironmentDirty(); }
   }
   async deleteEnvironment() {
     if (!confirm(`Delete environment “${this.draft.name}”?`)) return;
-    try { await this.api(`/api/environments/${this.draft.id}`, { method: "DELETE" }); await this.load(); this.editEnvironment(this.environments[0]); }
+    try { await this.api(`/api/environments/${this.draft.id}`, { method: "DELETE" }); await this.load(); this.editEnvironment(this.companyEnvironments()[0]); }
     catch (error) { $("#environment-error").textContent = error.message; }
   }
   requireCompanyScopes() { if (!this.state.config?.features?.companyScopes) throw new Error("Restart Relay to activate company-scoped settings before saving. This server still uses the old global settings."); }

@@ -7,7 +7,7 @@ export class JsonRpcProcess extends EventEmitter {
   #nextId = 1;
   #pending = new Map();
 
-  constructor({ command, args = [], spawnOptions = {}, isolation = "none", spawnFn = null, requestTimeoutMs = 30_000 }) {
+  constructor({ command, args = [], spawnOptions = {}, isolation = "none", spawnFn = null, requestTimeoutMs = 30_000, redactSecrets = value => value, deferAgentDeltaRedaction = false }) {
     super();
     this.command = command;
     this.args = args;
@@ -15,6 +15,8 @@ export class JsonRpcProcess extends EventEmitter {
     this.isolation = isolation;
     this.spawnFn = spawnFn;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.redactSecrets = redactSecrets;
+    this.deferAgentDeltaRedaction = deferAgentDeltaRedaction;
     this.child = null;
   }
 
@@ -30,8 +32,13 @@ export class JsonRpcProcess extends EventEmitter {
     const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     lines.on("line", (line) => this.#receive(line));
     child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => this.emit("stderr", redact(chunk)));
-    child.once("error", (error) => this.emit("error", error));
+    child.stderr.on("data", (chunk) => this.emit("stderr", redact(this.redactSecrets(chunk))));
+    child.once("error", (error) => {
+      for (const pending of this.#pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
+      this.#pending.clear();
+      if (!child.pid && this.child === child) this.child = null;
+      this.emit("error", error);
+    });
     child.once("exit", (code, signal) => {
       const error = new Error(`agent process exited (${code ?? signal ?? "unknown"})`);
       for (const pending of this.#pending.values()) {
@@ -87,9 +94,18 @@ export class JsonRpcProcess extends EventEmitter {
   }
 
   #receive(line) {
+    let delta;
+    // Only named-account adapters with stateful main/side/subagent sinks opt
+    // in. Redacting a complete short token in this frame could otherwise
+    // destroy the prefix needed to recognize a longer token across frames.
+    if (this.deferAgentDeltaRedaction) {
+      try { const raw = JSON.parse(line); if (raw.method === "item/agentMessage/delta" && typeof raw.params?.delta === "string") delta = raw.params.delta; } catch {}
+    }
+    line = this.redactSecrets(line);
     let message;
     try {
       message = JSON.parse(line);
+      if (delta !== undefined) message.params.delta = delta;
     } catch {
       this.emit("protocolError", new Error(`non-JSON app-server output: ${redact(line).slice(0, 500)}`));
       return;

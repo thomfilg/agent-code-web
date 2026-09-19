@@ -27,7 +27,9 @@ export class GoogleLogin {
     if (!this.google) return;
     try { localStorage.setItem("relay-auth-change", JSON.stringify({ userId: this.user?.id || null, at: Date.now() })); } catch { /* Storage may be disabled. Server-side checks still apply. */ }
     this.info = auth.google;
-    $("#relay-account-button").textContent = this.user?.email || "Google account";
+    $("#relay-account-button").textContent = (this.user?.name || this.user?.email || "?").slice(0, 1).toUpperCase();
+    $("#relay-account-button").title = this.user?.email || "Your Relay account";
+    $("#sidebar-user-name").textContent = this.user?.name || this.user?.email || "Your workspace";
     $("#relay-account-email").textContent = this.user?.email || "";
     $("#google-sign-in").disabled = !auth.google.configured;
     $("#google-setup").hidden = auth.google.configured;

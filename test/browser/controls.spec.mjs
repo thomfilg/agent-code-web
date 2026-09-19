@@ -21,14 +21,15 @@ test("compact mobile composer switches agents with Sol/Opus high defaults and pr
   await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("low");
   await page.getByLabel("Chat effort", { exact: true }).selectOption("high");
   await page.getByLabel("Choose effort", { exact: true }).click();
-  const dimensions = await page.locator(".composer").evaluate(node => ({ width: node.clientWidth, scroll: node.scrollWidth, height: node.clientHeight }));
+  const dimensions = await page.locator("#composer").evaluate(node => ({ width: node.clientWidth, scroll: node.scrollWidth, height: node.clientHeight }));
   expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.width + 1); expect(dimensions.height).toBeLessThan(140);
   await page.screenshot({ path: "test-results/compact-mobile-composer.png", fullPage: true });
   await page.getByLabel("Chat agent", { exact: true }).selectOption("mock");
 });
 
 test("PR bar opens colored diffs, shows CI counts/conflicts, and requires explicit GitHub auto-merge", async ({ page }) => {
-  await page.request.post("/api/github", { data: { method: "local", companies: ["acme", "other"] } });
+  const login = await (await page.request.post("/api/github/device", { data: { companyId: "acme" } })).json();
+  await expect.poll(async () => (await (await page.request.get("/api/github")).json()).connections.find(connection => connection.id === login.connection.id)?.connected).toBe(true);
   await page.goto("/");
   await page.getByRole("button", { name: "Open PR controls fixture", exact: true }).click();
   const bar = page.locator(".pull-request-bar");

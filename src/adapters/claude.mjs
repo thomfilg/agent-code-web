@@ -8,17 +8,21 @@ import { claudeUsage, claudeContext, claudeRateLimits, safeSessionDetails } from
 import { CLAUDE_PERMISSION_MODES, claudeConfigRequest, claudeSettingsChanges, inspectClaudeSettings, inspectNativeClaudeSettings, claudePermissionMode } from "../claude-settings.mjs";
 import { claudeFastRequest, claudeFastState, claudeFastCredential, claudeFastScope, checkClaudeFastAvailability, claudeFastUnavailable } from "../claude-fast.mjs";
 import { ClaudeTextStream } from "../claude-text-stream.mjs";
+import { SecretTextStream } from "../secret-text-stream.mjs";
+import { capabilityMcpServers } from "../worker-capabilities.mjs";
 import { claudeMcpRequest, CLAUDE_MCP_PRIVATE_ERROR, ClaudeControlChannel, runClaudeMcpCommand } from "../claude-mcp.mjs";
 import { ClaudeSession, claudeCallResult, CLAUDE_SCHEDULE_DIAGNOSTICS } from "../claude-session.mjs";
 import { claudePluginReloadRequest, reloadClaudePlugins, CLAUDE_PLUGIN_PRIVATE_ERROR } from "../claude-plugins.mjs";
 import { claudeDebugRequest, CLAUDE_DEBUG_PRIVATE_ERROR } from "../claude-debug.mjs";
 import { ClaudeWorkspaceTrust, claudeTrustProbe } from "../claude-workspace-trust.mjs";
+import { claudeCommandMetadata } from "../command-catalog.mjs";
 
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch, now = Date.now }) {
     this.chat = chat;
     this.store = store;
-    this.config = config;
+    this.nativeAuthMode = chat.agentAccountId ? "account" : config.claude.authMode;
+    this.config = chat.agentAccountId ? { ...config, claude: { ...config.claude, authMode: "account", providerKey: null, accountId: chat.agentAccountId, upstreamBaseUrl: "https://api.anthropic.com" } } : config;
     this.broker = broker;
     this.executor = executor;
     this.gatewayOrigin = executor?.gatewayOrigin || gatewayOrigin;
@@ -33,10 +37,33 @@ export class ClaudeAdapter {
     this.sendVersion = 0;
     this.fetchImpl = fetchImpl;
     this.now = now;
+    this.accountSecrets = new Set(executor?.capabilitySecrets || []);
+    if (chat.agentAccountId || this.accountSecrets.size) this.hooks = { ...hooks,
+      ...(hooks.onEvent ? { onEvent: event => hooks.onEvent(this.redactAccount(event)) } : {}),
+      ...(hooks.onLog ? { onLog: text => hooks.onLog(this.redactAccount(text)) } : {}),
+      ...(hooks.onRequest ? { onRequest: request => hooks.onRequest(this.redactAccount(request)) } : {}), ...(chat.agentAccountId ? { accountCredentials: async options => {
+      const credentials = await hooks.accountCredentials(options);
+      if (typeof credentials?.accessToken !== "string" || !credentials.accessToken || !credentials.accountId || !credentials.organizationId || credentials.expiresAt <= this.now()) throw Error("Reconnect this Claude account; no other credentials were used.");
+      this.accountSecrets.add(credentials.accessToken);
+      return credentials;
+    } } : {}) };
+  }
+
+  get privateProfile() { return this.config.claude.authMode !== "host"; }
+
+  redactAccount(value) {
+    if (this.nativeAuthMode !== "account" && !this.accountSecrets.size) return value;
+    let raw = JSON.stringify(value, (_key, item) => {
+      if (typeof item !== "string") return item;
+      for (const secret of [...this.accountSecrets].sort((a, b) => b.length - a.length)) item = item.replaceAll(secret, "[redacted]");
+      return item;
+    });
+    return JSON.parse(raw.replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, "[redacted]"));
   }
 
   async start() {
     const authMode = this.config.claude.authMode;
+    if (authMode === "account") await this.hooks.accountCredentials({});
     if (authMode === "gateway" && !this.config.claude.providerKey) {
       throw new Error("ANTHROPIC_API_KEY is required when CLAUDE_AUTH_MODE=gateway");
     }
@@ -61,7 +88,7 @@ export class ClaudeAdapter {
   }
 
   async workspaceTrust(action, input, binding, guard) {
-    if (this.config.claude.authMode !== "gateway") throw Error("Workspace trust requires this chat's private Claude profile. Shared host profiles remain locked.");
+    if (!this.privateProfile) throw Error("Workspace trust requires this chat's private Claude profile. Shared host profiles remain locked.");
     if (this.stopped || this.child || this.turnSession?.pending || this.isBackgroundBusy() || this.hasScheduledWork()) throw Object.assign(Error("Wait for native Claude work and schedules to finish before reviewing workspace trust."), { statusCode: 409 });
     this.assertCapability();
     if (!this.trustControls || this.trustControls.closed) this.trustControls = new ClaudeWorkspaceTrust({ workspace: this.workspace, now: this.now, open: async signal => {
@@ -75,8 +102,9 @@ export class ClaudeAdapter {
       }
       await ensureDirectory(neutral);
       await inspectClaudeSettings({ runtimeHome: neutral, executor: this.executor, isolation: this.config.processIsolation, signal }); check();
-      const env = await buildWorkerEnvironment({ chat: this.chat, store: this.store, runtimeHome: this.runtimeHome, provider: "anthropic", authMode: "gateway",
+      const env = await buildWorkerEnvironment({ chat: this.chat, store: this.store, runtimeHome: this.runtimeHome, provider: "anthropic", authMode: this.nativeAuthMode,
         capability: this.capability, gatewayOrigin: this.gatewayOrigin, ensureDirectory, environmentVariables: this.executor?.environmentVariables, environmentPath: this.executor?.environmentPath });
+      if (this.nativeAuthMode === "account") this.applyAccountEnvironment(env, await this.hooks.accountCredentials({}));
       await ensureDirectory(env.CLAUDE_CONFIG_DIR); check();
       // Use the existing chat capability. Issuing another would revoke a
       // retained application's owner. No user turn, hooks or MCP startup here.
@@ -118,7 +146,7 @@ export class ClaudeAdapter {
     }
   }
 
-  async send(text, { model, effort, resetEffort, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, onPermissionMode, mode = "accept_edits", systemPrompt } = {}) {
+  async send(text, { model, effort, resetEffort, ultracode, selectionCurrent, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, onPermissionMode, mode = "accept_edits", systemPrompt } = {}) {
     const version = this.sendVersion;
     const configuration = claudeConfigRequest(text);
     const settingsPrompt = configuration?.kind === "prompt";
@@ -131,17 +159,25 @@ export class ClaudeAdapter {
     // Keep its SDK input open so Stop can cancel the query and let it flush.
     const reviewRequest = /^\/code-review(?:\s|$)/.test(text.trimStart());
     const applicationRequest = /^\/(?:run|verify)(?:\s|$)/.test(text.trimStart());
-    const interactive = this.config.claude.authMode === "gateway" && Boolean(this.hooks.onRequest);
-    if (mcpRequest?.action && this.config.claude.authMode !== "gateway") throw new Error(CLAUDE_MCP_PRIVATE_ERROR);
-    if (pluginReload && this.config.claude.authMode !== "gateway") throw Error(CLAUDE_PLUGIN_PRIVATE_ERROR);
-    if (debugRequest && this.config.claude.authMode !== "gateway") throw Error(CLAUDE_DEBUG_PRIVATE_ERROR);
-    if (fastRequest && this.config.claude.authMode !== "gateway") throw new Error("Fast changes require a private Claude profile; shared host profiles remain locked until company/profile isolation is complete.");
-    if (configuration?.mutate && this.config.claude.authMode !== "gateway") throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
+    const interactive = this.privateProfile && Boolean(this.hooks.onRequest || this.hooks.accountCredentials);
+    if (ultracode === true && (!this.privateProfile || effort !== "xhigh")) throw new Error("Ultracode requires a private Claude session with xhigh effort.");
+    if (ultracode === true && (mcpRequest?.action || reviewRequest)) throw new Error("Ultracode confirmation is not supported for this native command yet. Select ordinary effort before running it; this chat's saved mode has not changed.");
+    // Normal private turns need false readback too, even without interactive
+    // permission hooks. Control-only MCP and native review retain their separate
+    // transports, never a second control channel over a managed logical turn.
+    const ultracodeSession = this.privateProfile && typeof ultracode === "boolean" && !mcpRequest?.action && !reviewRequest;
+    if (mcpRequest?.action && !this.privateProfile) throw new Error(CLAUDE_MCP_PRIVATE_ERROR);
+    if (pluginReload && !this.privateProfile) throw Error(CLAUDE_PLUGIN_PRIVATE_ERROR);
+    if (debugRequest && !this.privateProfile) throw Error(CLAUDE_DEBUG_PRIVATE_ERROR);
+    if (fastRequest && !this.privateProfile) throw new Error("Fast changes require a private Claude profile; shared host profiles remain locked until company/profile isolation is complete.");
+    if (configuration?.mutate && !this.privateProfile) throw new Error("Native settings changes require a private Claude profile. This worker uses a shared host profile; shared settings writes are locked until company/profile isolation is complete.");
     const nativeMode = Object.keys(CLAUDE_PERMISSION_MODES).find(key => CLAUDE_PERMISSION_MODES[key] === mode);
     if (!nativeMode) throw new Error("Unsupported Claude permission mode");
     if (this.child || this.pluginReload || this.settingsInspection || this.fastInspection || this.debugInspection || this.trustControls?.pending) throw new Error("A Claude turn is already running for this chat");
     if (this.stopped || (this.config.claude.authMode === "gateway" && !this.capability)) await this.start();
     this.assertCapability();
+
+    const accountCredentials = this.nativeAuthMode === "account" ? await this.hooks.accountCredentials({}) : null;
 
     const credential = claudeFastCredential(this.config.claude);
     const sameAccount = fastCredential === credential;
@@ -165,7 +201,7 @@ export class ClaudeAdapter {
     if (!pluginReload && (enableFast || fastMode === true && !heldCooldown)) {
       const controller = new AbortController(); this.fastInspection = controller;
       try {
-        availability = await checkClaudeFastAvailability(this.config.claude, { signal: controller.signal, fetchImpl: this.fetchImpl });
+        availability = await checkClaudeFastAvailability({ ...this.config.claude, ...(accountCredentials ? { accessToken: accountCredentials.accessToken } : {}) }, { signal: controller.signal, fetchImpl: this.fetchImpl });
         if (version !== this.sendVersion) throw new Error("Claude turn interrupted");
         if (!availability.enabled) throw Object.assign(new Error(claudeFastUnavailable(availability.disabledReason)), { nativeFast: { state: "off", disabledReason: availability.disabledReason } });
       } catch (error) {
@@ -185,7 +221,7 @@ export class ClaudeAdapter {
     // These native handlers create a resumable journal only on completion.
     // Preflight, startup and forced-stop failures must not retain a missing ID.
     const provisionalSession = isNew && (mcpRequest?.action || reviewRequest || applicationRequest || pluginReload || debugRequest);
-    if (isNew && !provisionalSession && !interactive && !settingsPrompt) {
+    if (isNew && !provisionalSession && !interactive && !settingsPrompt && !ultracodeSession) {
       this.sessionId = sessionId;
       await this.hooks.onSessionId?.(sessionId);
     }
@@ -204,6 +240,7 @@ export class ClaudeAdapter {
       environmentVariables: this.executor?.environmentVariables,
       environmentPath: this.executor?.environmentPath,
     });
+    if (accountCredentials) this.applyAccountEnvironment(env, accountCredentials);
     await ensureDirectory(env.CLAUDE_CONFIG_DIR);
     // Only this chat's uploaded files join its permitted working directories.
     // Do not grant access to the controller or other chats' runtime homes.
@@ -211,7 +248,7 @@ export class ClaudeAdapter {
     await ensureDirectory(uploads);
     // SDK sessions can clear effort natively. A startup environment override
     // would otherwise pin Auto and silently defeat all later picker changes.
-    const usesSession = interactive || applicationRequest || pluginReload || settingsPrompt || debugRequest || this.applicationSession && !this.applicationSession.ended;
+    const usesSession = interactive || ultracodeSession || applicationRequest || pluginReload || settingsPrompt || debugRequest || this.applicationSession && !this.applicationSession.ended;
     if (resetEffort && !usesSession) env.CLAUDE_CODE_EFFORT_LEVEL = "auto";
     if (usesSession && env.CLAUDE_CODE_EFFORT_LEVEL && !this.effortEnvironmentNotified) {
       this.hooks.onEvent?.({ type: "notice", text: "Claude's worker environment sets CLAUDE_CODE_EFFORT_LEVEL. It may override the web effort selection; use /effort status to check the effective native level." });
@@ -259,19 +296,22 @@ export class ClaudeAdapter {
       "--print",
       "--verbose",
       "--output-format", "stream-json",
-      ...(mcpRequest?.action || reviewRequest || interactive || pluginReload || settingsPrompt || debugRequest ? ["--input-format", "stream-json"] : []),
+      ...(mcpRequest?.action || reviewRequest || interactive || ultracodeSession || pluginReload || settingsPrompt || debugRequest ? ["--input-format", "stream-json"] : []),
       ...(interactive ? ["--permission-prompt-tool", "stdio"] : []),
-      ...(this.config.claude.authMode === "gateway" && usesSession ? CLAUDE_SCHEDULE_DIAGNOSTICS : []),
+      ...(this.privateProfile && usesSession ? CLAUDE_SCHEDULE_DIAGNOSTICS : []),
       "--include-partial-messages",
       "--permission-mode", nativeMode,
       "--prompt-suggestions", "false",
       "--add-dir", uploads,
       ...(systemPrompt ? ["--append-system-prompt", systemPrompt] : []),
-      ...(this.executor?.mcpServers && Object.keys(this.executor.mcpServers).length ? ["--mcp-config", JSON.stringify({ mcpServers: this.executor.mcpServers })] : []),
+      ...(this.executor?.mcpServers && Object.keys(this.executor.mcpServers).length ? ["--mcp-config", JSON.stringify({ mcpServers: capabilityMcpServers(this.executor.mcpServers, this.accountSecrets, env, "claude") })] : []),
       ...(isNew ? ["--session-id", sessionId] : ["--resume", sessionId]),
       ...(launchModel ? ["--model", launchModel] : []),
       ...(effort ? ["--effort", effort] : []),
-      ...(enableFast || typeof fastMode === "boolean" ? ["--settings", JSON.stringify({ fastMode: enableFast || fastMode && !heldCooldown })] : []),
+      ...(enableFast || typeof fastMode === "boolean" || typeof ultracode === "boolean" ? ["--settings", JSON.stringify({
+        ...(enableFast || typeof fastMode === "boolean" ? { fastMode: enableFast || fastMode && !heldCooldown } : {}),
+        ...(typeof ultracode === "boolean" ? { ultracode } : {}),
+      })] : []),
     ];
 
     if (version !== this.sendVersion) throw new Error("Claude turn interrupted");
@@ -311,7 +351,10 @@ export class ClaudeAdapter {
     try {
       if (this.applicationSession?.ended) this.applicationSession = null;
       const manage = launchArgs => {
-        const session = new ClaudeSession(spawn(launchArgs), args, env, event => this.backgroundEvent(event), {
+        const session = new ClaudeSession(spawn(launchArgs), args, env, event => {
+          if (this.stopped || ![this.turnSession, this.applicationSession].includes(session)) return;
+          return this.backgroundEvent(event);
+        }, {
           ...(interactive ? { requestHooks: this.hooks, cwd: this.workspace } : {}),
           onSchedulesChanged: () => {
             if (this.stopped || ![this.turnSession, this.applicationSession].includes(session)) return;
@@ -330,9 +373,9 @@ export class ClaudeAdapter {
         const launchArgs = args.includes("--input-format") ? args : [...args, "--input-format", "stream-json"];
         this.applicationSession = manage(launchArgs);
       }
-      managed = this.applicationSession || (interactive || pluginReload || settingsPrompt || debugRequest ? manage(args) : null);
+      managed = this.applicationSession || (interactive || ultracodeSession || pluginReload || settingsPrompt || debugRequest ? manage(args) : null);
       this.turnSession = managed;
-      child = managed ? await managed.open(args, env, { resetEffort }) : spawn(args);
+      child = managed ? await managed.open(args, env, { resetEffort, ultracode, selectionCurrent }) : spawn(args);
       if (version !== this.sendVersion) throw Error("Claude turn interrupted");
       this.assertCapability();
       if (settingsPrompt) beforeNativeSettings = await inspectNative(managed);
@@ -341,6 +384,7 @@ export class ClaudeAdapter {
         startedDebugCapture = !managed.debugLog || Boolean(managed.debugLog.error);
         try {
           await managed.enableDebug({ runtimeHome: this.runtimeHome, executor: this.executor, isolation: this.config.processIsolation, signal: controller.signal,
+            sanitize: value => this.redactAccount(value),
             onError: error => { if (!this.stopped && [this.applicationSession, this.turnSession].includes(managed)) this.hooks.onEvent?.({ type: "notice", text: error.message }); } });
           if (version !== this.sendVersion) throw Error("Claude turn interrupted");
           this.assertCapability();
@@ -352,7 +396,7 @@ export class ClaudeAdapter {
       }
       // No user input exists during SDK initialization/reset. Do not publish
       // a resume ID for a first turn that fails before those controls finish.
-      if (isNew && !provisionalSession && (interactive || settingsPrompt)) {
+      if (isNew && !provisionalSession && (interactive || settingsPrompt || ultracodeSession)) {
         await this.hooks.onSessionId?.(sessionId);
         this.sessionId = sessionId;
         if (version !== this.sendVersion) throw Error("Claude turn interrupted");
@@ -408,10 +452,12 @@ export class ClaudeAdapter {
     let mcpOutcome = null, mcpError = null;
     if (!mcpControl && !reviewControl) {
       const input = fastRequest ? "/fast on" : text;
-      child.stdin.end(interactive || settingsPrompt || debugRequest ? `${JSON.stringify({ type: "user", message: { role: "user", content: input } })}\n` : input);
+      child.stdin.end(interactive || ultracodeSession || settingsPrompt || debugRequest ? `${JSON.stringify({ type: "user", message: { role: "user", content: input } })}\n` : input);
     }
 
-    const output = new ClaudeTextStream(delta => this.hooks.onEvent?.({ type: "assistant_delta", delta }));
+    const output = new ClaudeTextStream(delta => this.hooks.onEvent?.({ type: "assistant_delta", delta }), this.nativeAuthMode === "account" || this.accountSecrets.size ? { secrets: this.accountSecrets } : {});
+    this.activeOutput = output;
+    const errorOutput = this.nativeAuthMode === "account" || this.accountSecrets.size ? new SecretTextStream(this.accountSecrets, { tokenPrefix: "sk-ant-" }) : null;
     let resultMessage = null;
     let nativeFast = null;
     const notifications = new Set();
@@ -431,8 +477,8 @@ export class ClaudeAdapter {
     };
     const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     lines.on("line", (line) => {
-      let event;
-      try { event = JSON.parse(line); } catch { return; }
+      let event, raw;
+      try { raw = JSON.parse(line); event = this.redactAccount(raw); } catch { return; }
       mcpControl?.accept(event);
       reviewControl?.accept(event);
       this.permissionMode(event);
@@ -447,7 +493,9 @@ export class ClaudeAdapter {
         && typeof event.tool_use_id === "string" && backgroundCandidates.has(event.tool_use_id)) {
         this.applicationSession = managed;
       }
-      if (!mcpControl) output.accept(event);
+      // Keep native text unchanged for stream deduplication. The text sink
+      // masks credentials across events before either SSE or saved output.
+      if (!mcpControl) output.accept(raw);
       if (event.type === "system" && event.subtype === "notification" && ["fast-mode-overage-rejected", "fast-mode-org-changed", "fast-mode-cooldown-started", "fast-mode-cooldown-expired", "stop-hook-error"].includes(event.key) && typeof event.text === "string" && !notifications.has(event.key)) {
         notifications.add(event.key);
         this.hooks.onEvent?.({ type: "notice", text: event.key === "stop-hook-error" ? "Claude reported a Stop-hook error. The completion check failed; use /goal to inspect any active goal or check the native hook settings." : redact(event.text).slice(0, 1500) });
@@ -463,8 +511,7 @@ export class ClaudeAdapter {
         if (usage) this.hooks.onEvent?.({ type: "context_usage", usage });
       }
       if (event.type === "system" && event.subtype === "init") {
-        this.hooks.onEvent?.({ type: "session_capabilities", connectors: (event.mcp_servers || []).map(server => ({ name: server.name, status: server.status })), slashCommands: event.slash_commands || [] });
-        this.hooks.onEvent?.({ type: "session_details", details: safeSessionDetails("claude", { cwd: this.workspace, model: event.model, cliVersion: event.claude_code_version }) });
+        this.sessionMetadata(event);
       }
       if (event.type === "assistant") {
         for (const block of event.message?.content || []) {
@@ -500,12 +547,14 @@ export class ClaudeAdapter {
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => {
-      stderr = `${stderr}${redact(chunk)}`.slice(-16_000);
+      stderr = `${stderr}${redact(errorOutput ? errorOutput.push(String(chunk)) : String(chunk))}`.slice(-16_000);
     });
 
     return new Promise((resolve, reject) => {
       let spawnFailed = false;
       child.once("error", (error) => {
+        output.finish(); errorOutput?.finish();
+        if (this.activeOutput === output) this.activeOutput = null;
         spawnFailed = true;
         if (provisionalSession) this.sessionId = null;
         if (reviewControl) this.reviewInterruption = null;
@@ -514,6 +563,8 @@ export class ClaudeAdapter {
         reject(error);
       });
       child.once("close", (code, signal) => { void (async () => {
+        output.finish(); stderr += errorOutput?.finish() || "";
+        if (this.activeOutput === output) this.activeOutput = null;
         finishObservation();
         // Query the actual merge before a one-shot SDK owner is closed. A
         // retained application owner stays alive; inspecting settings cannot
@@ -583,7 +634,7 @@ export class ClaudeAdapter {
             await this.disableFast(version);
             throw Object.assign(new Error(claudeFastUnavailable(nativeFast?.disabledReason)), { nativeFast: nativeFast || { state: "off" }, fastPreference: false, fastCooldown: null });
           }
-          resolve({ text: mcpOutcome?.text ?? output.text, status: "completed", compacted, ...(nativeSettings ? { nativeSettings } : {}), ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) });
+          resolve(this.redactAccount({ text: mcpOutcome?.text ?? output.text, status: "completed", compacted, ...(nativeSettings ? { nativeSettings } : {}), ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) }));
         } else {
           reject(Object.assign(new Error(`Claude worker exited ${code ?? signal}: ${redact(resultMessage?.result || stderr || "unknown error")}`), { nativeSettings, ...fastResult, ...(feedback && onFastConstraint ? { fastConstraintObserved: true } : {}) }));
         }
@@ -599,11 +650,57 @@ export class ClaudeAdapter {
     });
   }
 
+  async setPermissionMode(mode, guard = () => {}, onAcknowledged = () => {}) {
+    const nativeMode = Object.keys(CLAUDE_PERMISSION_MODES).find(key => CLAUDE_PERMISSION_MODES[key] === mode);
+    if (!nativeMode) throw Error("Unsupported Claude permission mode");
+    const session = this.turnSession || this.applicationSession;
+    if (!session) {
+      if (this.child) throw Object.assign(Error("This Claude transport cannot change permissions live. Wait for this turn to finish."), { statusCode: 409 });
+      return false;
+    }
+    const check = () => {
+      guard(); this.assertCapability();
+      if (this.stopped || session.ended || session.stopping || !session.initialized || session.pending
+        || ![this.turnSession, this.applicationSession].includes(session)) {
+        throw Object.assign(Error("Claude is starting or changed; retry the permission selection when ready."), { statusCode: 409 });
+      }
+    };
+    check();
+    try {
+      await session.control.request("set_permission_mode", { mode: nativeMode }, { onSuccess: result => {
+        if (result.mode !== nativeMode) throw Error("Claude did not confirm the selected permission mode");
+        check(); onAcknowledged();
+      } });
+      check();
+    } catch (error) {
+      // Never surface native errors containing private settings, or silently
+      // substitute bypassPermissions when Auto is unavailable.
+      if (error.statusCode) throw error;
+      throw Error("Claude could not confirm the permission change. Check account/model restrictions and retry; the selection was not saved.");
+    }
+    // Pending tools remain native-owned. A mode change is not Approve once.
+    // Native control_cancel_request removes prompts that Claude re-evaluates.
+    return true;
+  }
+
   async respond(requestId, payload) {
     const requests = this.turnSession?.requests || this.applicationSession?.requests;
     if (!requests || this.stopped) throw Object.assign(Error("Claude request is no longer active"), { statusCode: 409 });
     this.assertCapability();
     await requests.respond(requestId, payload);
+  }
+
+  applyAccountEnvironment(env, credentials) {
+    // Environments may configure build tools, never override the selected
+    // account with a project API key, custom provider or OAuth-token helper.
+    for (const key of Object.keys(env)) if (/^(?:ANTHROPIC_|CLAUDE_CODE_(?:OAUTH|USE_|API_KEY|PROVIDER_|HOST_AUTH|SKIP_FAST))/.test(key)) delete env[key];
+    env.CLAUDE_CODE_OAUTH_TOKEN = credentials.accessToken;
+    env.CLAUDE_CODE_ACCOUNT_UUID = credentials.accountId;
+    env.CLAUDE_CODE_ORGANIZATION_UUID = credentials.organizationId;
+    delete env.CLAUDE_CODE_USER_EMAIL;
+    if (credentials.email) env.CLAUDE_CODE_USER_EMAIL = credentials.email;
+    env.CLAUDE_CODE_ENTRYPOINT = "local-agent";
+    env.CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH = "1";
   }
 
   hasScheduledWork() {
@@ -628,18 +725,34 @@ export class ClaudeAdapter {
     catch { failed(); }
   }
 
+  sessionMetadata(event) {
+    const commands = claudeCommandMetadata(event.slash_commands);
+    this.hooks.onEvent?.({ type: "session_capabilities", ...(Array.isArray(event.mcp_servers) ? { connectors: event.mcp_servers.map(server => ({ name: server.name, status: server.status })) } : {}),
+      ...(commands ? { slashCommands: commands.map(command => command.name) } : {}) });
+    this.hooks.onEvent?.({ type: "session_details", details: safeSessionDetails("claude", { cwd: this.workspace, model: event.model, cliVersion: event.claude_code_version }) });
+  }
+
   backgroundEvent(event) {
+    const raw = event;
+    event = this.redactAccount(event);
     this.permissionMode(event);
+    if (!this.stopped && event.type === "command_catalog") {
+      const commands = claudeCommandMetadata(event.commands);
+      if (commands) return this.hooks.onEvent?.({ type: "command_catalog", commands });
+      return;
+    }
+    if (!this.stopped && event.type === "system" && event.subtype === "init") { this.sessionMetadata(event); return; }
     if (!this.stopped && event.type === "workspace_trust_notice") {
       this.hooks.onEvent?.({ type: "notice", text: "Claude is ignoring project permission grants because this workspace has not been trusted. Saving allow rules does not enable them. Open Chat actions → Workspace trust to review and explicitly trust this chat's private workspace; existing approval requirements remain in force." });
       return;
     }
     if (!this.stopped && event.type === "background_turn") { this.hooks.onEvent?.(event); return; }
     if (this.stopped || !["assistant", "stream_event", "result"].includes(event.type)) return;
-    this.backgroundOutput ||= new ClaudeTextStream(() => {});
-    this.backgroundOutput.accept(event);
+    this.backgroundOutput ||= new ClaudeTextStream(() => {}, this.nativeAuthMode === "account" || this.accountSecrets.size ? { secrets: this.accountSecrets } : {});
+    this.backgroundOutput.accept(raw);
     if (event.type === "assistant" && !event.parent_tool_use_id && event.message?.usage) this.backgroundRequest = event.message;
     if (event.type === "result") {
+      this.backgroundOutput.finish();
       this.hooks.onEvent?.({ type: "usage", usage: claudeUsage(event, this.backgroundRequest, randomUUID()) });
       const interrupted = event.relayWorkflowInterrupted === true;
       const failed = !interrupted && (event.is_error === true || Boolean(event.subtype && event.subtype !== "success"));
@@ -651,6 +764,8 @@ export class ClaudeAdapter {
   }
 
   async interrupt() {
+    this.activeOutput?.finish(); this.backgroundOutput?.finish();
+    this.backgroundOutput = null; this.backgroundRequest = null;
     this.sendVersion += 1;
     this.modeObserver = null;
     (this.turnSession?.requests || this.applicationSession?.requests)?.cancel();
@@ -676,6 +791,8 @@ export class ClaudeAdapter {
   }
 
   async stop() {
+    this.activeOutput?.finish(); this.backgroundOutput?.finish();
+    this.backgroundOutput = null; this.backgroundRequest = null;
     this.sendVersion += 1;
     this.modeObserver = null;
     this.settingsInspection?.abort();

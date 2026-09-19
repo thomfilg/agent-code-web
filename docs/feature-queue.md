@@ -1,23 +1,359 @@
 # Feature queue — original request order
 
-Active objective: implement **all** features requested in this conversation,
+## Current integration — company settings and composer, 2026-09-19
+
+The company-tab Settings hub, compact Chrome header, company-bound browser
+connections, company/project selection memory, pre-chat slash commands, hidden
+title metadata and exactly-one-company environments are integrated in the
+current candidate. They are **not newly published or accepted in production**.
+See the [combined validation and remaining gates](validation-2026-09-19-company-ui-integration.md).
+Historical checkpoints below retain their original evidence scope.
+
+Candidate `007d620` passed **1,396/1,396 Node** cases with all optional checks
+enabled and **157/157 browser** cases without retries. Separate official MCP
+account/configuration and preview HTTP/WS/SSE fixture checks passed. Failed
+intermediate runs, the still-unconfirmed clipboard telemetry hypothesis and
+the distinction from real account/deployment acceptance remain in the receipt.
+
+Ambiguous legacy environments require an explicit owner assignment; no stored
+variables, credentials or chats are moved automatically. Only agent accounts
+remain multi-company. Environment variables still take effect on worker start;
+Protected values are not exposed to the agent.
+
+Claude Ultracode is now an explicit per-chat mode, with worker-side native
+readback and no inheritance through project/company preferences. Ordinary xhigh
+does not enable it. The native MCP mutation and `/code-review` combinations
+remain unsupported, and actual selected-account workflow acceptance is still
+open; local protocol fixtures do not prove those gates.
+
+Two-minute process-preserving hibernation remains open. Its integrated foundation
+rejects unavailable opt-in admission and avoids destructive idle fallback; it
+does not implement reconnectable transport, image acceptance or resume. The
+production idle policy and automatic-deployment restrictions remain unchanged.
+
+## Settings UX — included in MVP, requested 2026-09-19
+
+- Implemented in source, pending publication: environment settings use the MCP
+  card pattern, with company and company-filtered environment selectors, then
+  Installed software / Environment variables / Setup script summary cards.
+  Only the selected editor is shown. Save stays visible, requires an actual
+  change and closes the modal after success; errors keep the draft open.
+- Implemented in source, pending publication: Browser connections fits its outer
+  dialog, including long profile labels and narrow viewports, without unnecessary
+  horizontal scrolling or desktop vertical scrolling. No sign-in or profile
+  changes are involved.
+- Existing grants and protected values are preserved; opening a settings card
+  does not change company access. This is presentation work, not a credential
+  migration or a claim that every remaining settings feature is finished.
+
+## Startup follow-up — requested 2026-09-19
+
+- **Implement now:** start the chat's EC2 machine in parallel with repository
+  preparation; wait for both before transferring the workspace or starting the
+  agent. Preserve cancellation, company/account checks and failed-start cleanup.
+- **Implement now:** show the actual startup stages and their elapsed times,
+  including concurrent stages, with completed timings retained for inspection.
+- Both immediate items are now implemented and locally tested, pending
+  publication. Upload/agent startup still waits for both preparation branches;
+  cancellation and failure cleanup retain the exact runtime lease.
+- **Post-MVP, explicitly deferred by the user:** Git and dependency caches
+  isolated by company, repository and environment version. Dependency reuse
+  must also respect the lockfile/toolchain; do not share credentials or editable
+  chat workspaces between chats or companies.
+- **Post-MVP, explicitly deferred by the user:** pre-prepared environments,
+  containing reusable software/dependencies only, without credentials, browser
+  sessions or another chat's changes. No cache/prebuild implementation is part
+  of the immediate startup change.
+
+## Current MVP audit — 2026-09-19
+
+**New user acceptance:** in the deployed g2i chat, the user requested assigned
+issues and reported a final result containing three tickets after five tool
+calls. This accepts the selected-chat Linear read as **user-observed**, not just
+discovery of tools or the controller verification button. The user also confirmed
+`/btw` worked while the main chat continued. No ticket contents are copied into
+this repository. See the [acceptance scope](validation-2026-09-19-linear-user-acceptance.md).
+
+**Pending publication:** native Codex MCP/dynamic tool events now retain sanitized
+arguments and error details, distinguish failed calls from missing results, and
+preserve those states in the saved activity timeline. The focused adapter and
+renderer checks are recorded in the [tool-result receipt](validation-2026-09-19-codex-tool-results.md).
+Candidate source `94860e7` subsequently passed the full **1,291-test Node suite**
+with no failures/skips and built successfully to immutable image digest
+`sha256:26585b5eee18cbdfd7cef9150e3c5a5ecdfd9ab98aa4e03cc437e08d765ff46b`.
+This correction is not deployed while the user tests Linear in the g2i chat;
+it does not establish that the live Linear read succeeded.
+
+**Publication update:** after the user renewed AWS access, build source `d9c0ce6`
+(runtime `8db8247`) was manually published at 13:03 UTC. Independent image/source
+hashes, readiness 200, anonymous chats 401 and all 13 deployed denial checks
+passed. The single worker was stopped before and after publication; none was
+interrupted or deleted. See the [publication receipt](validation-2026-09-19-mvp-publication.md).
+Authenticated selected-worker/provider acceptance remains open; the MVP is not
+complete and automatic deployment remains disabled.
+
+Latest integrated source `8db8247` closes warmed-runtime admission after failed
+account revocation and rechecks delayed native actions after Stop/Escape.
+Clean full verification passed **1,286 Node tests with zero failures/skips**,
+including all three normally optional native/Chrome cases, plus **25 browser
+tests without retries**. Real read-only GitHub clone/fetch now traverses the
+capability gateway across encrypted-database restart; the preview harness uses
+the current inline company chat flow. These are local acceptance results, not
+deployed-account acceptance. See the [integration receipt and open gates](validation-2026-09-19-mvp-integration.md).
+
+Follow-up source `28fed2d` fixes named-account disconnection/refresh races,
+durable retry state, sibling-worker revocation and safe deployment drain.
+The clean integrated check passed 142 distinct focused Node tests and all 19
+account browser cases without retries. Real read-only GitHub and installed
+Codex/Claude company-MCP discovery also passed within their isolated test scopes.
+This follow-up is now included in the publication recorded above; its earlier
+receipt describes the prepublication expired-session checkpoint.
+See the [integrated receipt and remaining gates](validation-2026-09-19-mvp-followup.md).
+
+Runtime `4c45f16` was published and independently verified at 00:07 UTC; PR #4
+includes its receipt at `1047a95`. Stop/Escape, working elapsed time/tool count,
+native message paragraphs and chronological inline action groups are published.
+The prior goal turn made verified progress: code, deployment and PR changed.
+
+This checkpoint supersedes stale status language in the historical entries below:
+
+| Required integration | Current evidence | Remaining product acceptance |
+| --- | --- | --- |
+| Google | User-reported cloud sign-in; callback issue resolved; anonymous entry/denials verified | Operator-observed authenticated reload/isolation |
+| Codex | User-reported connected account and successful deployed turns | Selected-account native conversation resume after worker restart; reconnect/revocation |
+| Claude | User-reported connected account and screenshots of responses/tool execution | Selected-account native conversation resume after worker restart; reconnect/revocation |
+| GitHub | Both company-bound product connections retained; repository selection/chat activity observed | Combined selected-product-connection worker clone/write/PR/restart |
+| Linear | g2i-only product binding; controller read plus user-reported selected-chat issue query with five tool calls and actual results | Same-connection read after a coordinated worker restart; independent operator observation not claimed |
+| AWS | Repeatable immutable deployment and recovery evidence; latest health/assets/denials matched | Combined authenticated product flows and authenticated remote-app HTTP/WS |
+
+The previous audit found expired `code-web` credentials while public readiness
+remained 200. The user subsequently renewed that session, enabling the guarded
+publication above. No authentication reset or company/connection migration was
+needed. Remaining authenticated product-flow checks are separate from readiness
+and the now-completed immutable rollout.
+
+The GitHub and real-CLI MCP smoke harnesses now exercise today's company-scoped
+production model; their passing isolated checks do not prove deployed selection.
+The [current consent/execution checklist](mvp-consent-checklist.md)
+uses inline chat, the combined account selector and automatic company MCPs;
+it no longer asks for removed company checkboxes or empty-message chat creation.
+Company-tab Settings and the compact browser header are now integrated in the
+candidate above. End-to-end hibernation and the unfinished doctor work remain
+undelivered. No complete-MVP claim is made.
+
+Environment selector correction (2026-09-18): remembered repositories must not
+hide another company's environment. Keep all active environments selectable;
+scope only the unsent repository draft on an explicit switch, preserve its text,
+and require a compatible repository before sending when unassigned access is not
+allowed. No company grant, existing chat or connection is changed by switching.
+See [the regression and publication receipt](validation-2026-09-18-environment-switch.md).
+Published runtime `83b391c`, independently verified at 22:51 UTC with no workers
+present or interrupted. No connection or company settings were migrated.
+
+Company/MCP refinement (2026-09-18): create a separate Companies page. Each
+company owns many MCP connections and at most one GitHub connection; a connection
+belongs to one company only. Agent accounts alone remain selectable across
+companies. MCPs open to company-filtered provider cards with status, then a detail
+view containing only that connection's settings. Hide transport/registration
+details under Advanced. Company assignment replaces the extra environment-MCP
+selection. Ambiguous legacy MCP/GitHub bindings require an explicit company;
+preserve encrypted credentials without duplicating them or guessing the mapping.
+See [the decision](adr/2026-09-18-company-connections.md) and
+[acceptance and publication receipt](validation-2026-09-18-company-chat.md).
+The user confirmed `thomfilg + 12-apps` as one Relay company, independent of
+GitHub repository owners. Runtime `8bc0760` passes 144 scoped Node tests and 18
+final browser tests; its immutable AWS image was published and independently
+verified at 21:38–21:42 UTC. The user requires separate
+chats per company and explicitly authorized deleting the existing mixed-company
+`future-pay / clickdown` chat. The guarded operator migration preserves both
+GitHub credentials, binds Linear only to g2i and creates a blank g2i environment
+without copying private settings from the combined company. The exact mixed chat
+and its worker/disk are removed; both GitHubs and both agent accounts remain
+connected. Live Linear verification passed with 79 tools and an authenticated
+read. Publication evidence, recovery limits and exact cleanup targets are
+recorded in the receipt above.
+
+New-chat refinement (2026-09-18): replace the creation modal with an inline
+page, with the message composer at the bottom, a compact environment / repository
+/ branch / `+` strip above it, and model/effort controls beside the combined
+agent-account selector. The first submission transitions to the conversation
+and shows preparation progress immediately. Keep the draft on failure. Existing
+conversations also expose repository addition in the compact strip, without
+creating another chat. Repository addition currently restarts the idle workspace;
+show that warning before committing and keep the primary repository unchanged.
+
+Account-selection refinement (2026-09-18): remove project/company assignment
+from Codex/Claude accounts. Every connected account owned by the signed-in user
+is available across their projects. Use one selector (`provider · account name ·
+email`) and remember its last explicit choice per user and primary repository,
+independently of branch and secondary repositories. This supersedes historical
+agent-account company restrictions below; ownership, provider identity,
+disconnection, environment and MCP controls remain enforced. These changes are
+under local acceptance, not yet published to AWS.
+
+Worker lifecycle follow-up (2026-09-18): the user requests explicit environment
+wake without an agent message and reports slow, silent chat deletion. A wake
+button with prompt-free asynchronous acquisition and immediate deletion feedback
+passes 1,209 Node cases (zero failures, three opt-in skips) and 15 final browser
+cases. Runtime `b89269a` is published; at 18:40 UTC independent checks confirmed
+the immutable running image, all five changed public assets, readiness and 13
+denial probes. No workers existed before/after rollout. See [scope and acceptance](validation-2026-09-18-runtime-controls.md).
+The user then chose **two-minute automatic hibernation, full stop only manually**,
+superseding their earlier fifteen-minute full stop. The choice is settled;
+compatible-image/process-resume acceptance is not. Production timers remain
+unchanged until that separate capability has passed its real acceptance gates.
+
+Shared Chrome follow-up (2026-09-18): user authorized proceeding on interaction
+lag, reload shortcuts and plain-text clipboard. The implementation now uses
+native compressed frames while interacting, idle high-DPI refinement, bounded
+input with motion coalescing, remote F5/Ctrl+R, and explicit Copy/Paste text.
+Runtime source `79d66cc` is committed/pushed to draft PR #4. Final local acceptance
+passed 1,202 Node cases (zero failures, three explicit opt-in skips) and 8/8 actual
+UI cases. The final synthetic comparison reduced command acknowledgement median
+from 170.9 to 6.6 ms and increased output from 4.6 to 29.9 frames/s; those numbers
+exclude network/model latency. After the user renewed AWS credentials, build
+source `28654d6` was published at 17:41 UTC: SSM Success/0, independently matched
+running image, readiness 200 and all three changed public assets matched the
+exact commit. All 13 deployed denial probes passed. The one running worker was
+stopped by this authorized manual rollout; no data or instance was deleted.
+Authenticated end-to-end AWS browser latency remains unmeasured. See
+[the measurements and limitations](validation-2026-09-18-browser-interaction.md).
+The separate perceived agent-chat lag is under diagnosis: messages traverse the
+controller and return over SSE, not a direct browser-to-worker connection. No
+real account prompt was sent and that incident is not claimed fixed.
+
+Deployment clarification (2026-09-18): today's manual setup/update may stop
+workers if necessary, explicitly authorized by the user. **When deployments
+become automatic, they must not bring down running instances.** Keep automatic
+rollout disabled until worker/task-preserving controller handoff and rollback
+are implemented and verified; do not carry today's interruption exception into
+automation. See [the continuity requirement](adr/2026-09-18-automatic-rollouts-preserve-workers.md).
+
+Latest chat follow-up (2026-09-18): incoming agent messages were not followed by
+the viewport. The defect was reproduced and a frontend fix now passes 14/14
+unit/window cases and 5/5 browser follow/navigation cases, preserving intentional
+manual scrollback and a stable Jump to latest during streaming and virtualized
+history. Runtime revision `e7689a7` was published to AWS under today's explicit
+interruption authorization: SSM Success/0, readiness 200 and all 11 changed
+public assets matched the exact commit in an independent check at 16:05 UTC.
+The 13 fixed deployed GitHub denial probes passed without provider/model calls.
+The final broad run was 1,187/1,188; its personal-Chrome consent case passed on
+an isolated rerun after explicit fixture startup readiness was added. Preserve
+that distinction rather than reporting a fully green single broad run; the
+original intermittent transport error is not causally diagnosed.
+This refines item 26, not permission to inject messages in the user's real chat.
+The earlier controls report was clarified as intermittent:
+normally the controls respond, but in that instance none did. It remains open;
+the expected stopping-state restrictions alone do not establish its cause.
+
+Follow-up source acceptance (2026-09-18): checkpoints `317c82d` and `27a3e12`
+are pushed. The full Node suite passed 1,166/1,166 before the final frontend
+command-cache callback; that delta passed 14/14 focused cases. Claude model and
+command browser checks passed 49 distinct cases (47 on the initial run plus
+two startup-only failures passing after explicit fixture readiness). The
+incoming-message follow fix has focused acceptance as described above.
+See [the scoped evidence and remaining limits](validation-2026-09-18-chat-ui.md).
+The later deployment receipt is in that evidence document. Neither fixture
+acceptance nor deployment confirms real-account Fable availability.
+
+Source checkpoint (2026-09-18, 15:24 UTC; rollout still pending): GitHub's extra
+company gate is removed, existing connections need no migration, and the
+default duplicate footer is hidden with observed branches in the PR strip.
+Official Playwright MCP reproduced and helped fix a startup race in New chat;
+the final disposable flow now lists GitHub repositories without a company form,
+keeps explicit agent/environment access, selects both providers and creates one
+empty Codex chat. Zero real consents/model prompts were generated. Evidence:
+1,132/1,132 full Node tests before subsequent targeted startup/Claude changes;
+17/17 startup/footer units; 46 browser cases across GitHub, account onboarding,
+scope preservation, footer/preview and early New chat; mobile/desktop inspected.
+Claude command initialization and selected-account metadata reuse passed a
+separate 125/125 focused suite and independent source review. Fable cold-start
+discovery is still being finalized; Ultracode is a separate next commit.
+
+Active objective: implement **all MVP** features requested in this conversation,
 one at a time, in original order unless an explicit priority update below says
-otherwise. New reports append without interrupting the current item. Repeated
+otherwise. New reports append without interrupting the current item and stay
+outside the MVP unless the user explicitly includes them or clarifies an
+existing MVP requirement. Repeated
 reports remain evidence that an earlier fix needs verification, not permission
 to skip it. Queued work proceeds under the existing implementation authorization;
 adding an item does not require another request to resume in-scope work.
-The latest request is to update this document with the MVP release gate below;
-this documentation change does not implement or deploy those items.
+Execution update (2026-09-18): the user authorized six hours of parallel agent
+work, tested commits/pushes/PRs per feature, and compatible product decisions
+recorded as ADRs. Interactive consent tests can await the user's return while
+other MVP implementation proceeds. The user explicitly permitted copying local
+GitHub/Claude credentials into isolated test profiles, not adding host-account
+imports to the product. Non-MVP implementation still waits for a manually
+verified complete MVP. This supersedes the earlier sequential-execution
+constraint below; see [ADR 0001](adr/0001-parallel-mvp-validation.md).
+The documentation-only MVP checkpoint was merged in PR #3. Implementation has
+resumed under the persistent MVP goal: finish one feature, test it (request
+user-only consent where necessary), commit/push, then take the next feature.
 
 This queue supersedes the narrower gap list in `remaining-goal.md`. Existing
 source changes are retained, but are not treated as deployed merely because
 tests pass. Deployment and external-account verification remain explicit gates.
+
+Latest GitHub clarification (2026-09-18): connecting a GitHub account makes all
+repositories that GitHub permits available to its owning Relay user, without
+another company form. Remove the GitHub-only allowlist; existing records work
+without migration or reconnect. User ownership, explicit connections, provider
+denials and selected-repository/branch worker grants remain enforced. Agent,
+environment and MCP scopes are unchanged. This supersedes GitHub company-step
+requirements and the historical 14:11 receipt below; see the
+[decision](adr/2026-09-18-github-provider-permissions.md). This refinement is
+implemented, fixture-tested and published in runtime `e7689a7`; the exact
+deployment receipt is linked above.
+
+Composer refinement (2026-09-18, item 14): remove the redundant default footer
+containing model/effort, context and branch. Keep model controls and the context
+ring; show the branch in the PR/repository strip, including before a PR exists.
+Deliberately configured custom status lines remain available. This is included
+in the verified `e7689a7` publication.
+
+Claude model-list correction (2026-09-18): the user's installed native model
+menu includes Fable and a version-disabled Fable 5.1; Relay omits both and shows
+two Default choices. Align discovery/rendering with actual CLI/account options,
+remove duplicate default entries, and retain disabled-option reasons rather
+than inventing support. Native bootstrap/list refresh, duplicate removal and
+disabled reasons are implemented, fixture-tested and published in `e7689a7`.
+Actual Fable availability for the user's account remains unverified; no model
+prompt is authorized by this report.
+
+Ultracode clarification (2026-09-18): the user requests the missing Ultracode
+option. Inspection of the installed Claude 2.1.222 identifies a separate native
+`ultracode` setting combining xhigh effort with workflow orchestration, not an
+extra member of `supportedEffortLevels`. Implement the actual mode and its
+capability checks; relabeling xhigh alone would not satisfy this request.
+
+Claude runtime reports (2026-09-18): the command picker returns no matches for
+`/goal`; investigate the installed native command catalog and its advertised
+web capabilities rather than claiming all commands are absent from one query.
+The user also reports disabled composer controls after background Docker/pnpm
+tasks. Reproduce the actual transition and distinguish expected temporary
+switch/stop restrictions from a stuck state. The native command metadata and
+cold-cache refresh fixes are tested and published in `e7689a7`. The intermittent
+all-controls report remains open; no cause is inferred from the screenshot or
+expected stopping-state restrictions.
+
+User-reported AWS acceptance (2026-09-18, 14:45 UTC): the user confirmed
+“funcionou” with a deployed screenshot of a Personal Codex/Luna chat under
+`12-apps/future-pay`, a user message and the agent response. This establishes
+user-reported deployed chat creation and Codex response in addition to earlier
+Google/Codex/Claude login confirmation. It does not establish Claude execution,
+worker restart/resume, Linear consent or authenticated preview acceptance.
 
 Delivery instruction (2026-09-16): when the current feature work is verified,
 create or update its PR and push the reviewed work so it is saved remotely.
 Preserve unrelated changes; do not treat this as permission to merge, deploy,
 restart live services or alter live user data/accounts. This delivery step does
 not reorder the feature queue.
+
+Restart authorization (2026-09-17): the user explicitly said not to ask again
+and, subsequently, to restart Relay whenever needed. Preserve existing data,
+check for active work before a controlled restart, and use the configured
+Doppler project. This authorizes necessary Relay restarts, not OAuth consent,
+automatic real model prompts or an AWS deployment.
 
 Priority clarification (2026-09-17): finish and test already-started work before
 starting an unimplemented feature. Work on one complete feature at a time,
@@ -31,11 +367,14 @@ work and preserve its unfinished test changes. Then return to the remaining
 original queue; new requests still append at the end. The old count conflated
 implementation tests with usable delivery: item 09 is a technical answer, and
 the other **17 were reopened for delivery acceptance**, not newly discovered
-defects. After the saved-data acceptance of item 01 below, the current total is
+defects. After the saved-data acceptance of item 01 below, the historical total was
 **45 items: 1 delivered, 1 answered and 43 not fully delivered** (16 priority
 re-audits, the previous 24 open items, two authentication requests and the AWS
 deployment request below). The new MVP gate is a release requirement, not a
-claim that these open items have been completed.
+claim that these open items have been completed. There are now **46 recorded
+requests** including account deletion; current delivery acceptance is tracked
+per row. The latest activation/evidence below supersedes historical status
+claims without turning fixture coverage into real-account acceptance.
 
 For each reopened item, verify its full acceptance condition on current code,
 then verify the applicable deployed UI/backend/native integration. Preserve real
@@ -52,8 +391,11 @@ environment, preference and encryption-check records were unchanged. That
 database already contained zero chats before this activation. The earlier
 510-message acceptance remains historical evidence, not the current chat count;
 this activation did not delete those messages. No worker or real model turn
-was started. Codex/Claude are still disabled, and neither Google sign-in nor a
-saved GitHub/MCP connection establishes successful provider onboarding.
+was started. The subsequent authorized Codex activation below now serves the
+named-account onboarding UI. The user has since connected the named Personal
+Codex account; a consented real turn and chat/account resume still need checking.
+Claude was still unimplemented at that historical checkpoint. Neither Google sign-in nor a saved
+GitHub/MCP connection establishes successful provider onboarding.
 Do not silently adopt host credentials or count native integration gates as
 passed. Tests run one suite at a time with inherited two-CPU affinity and
 nice 10. This correction supersedes historical completion/count statements;
@@ -61,6 +403,376 @@ their test evidence remains useful but is not deployment proof. Authentication
 is the current prerequisite; item 20's unfinished doctor work stays paused.
 
 ## MVP release gate — 2026-09-17
+
+Previous publication (2026-09-18 14:11 UTC, superseded by the 16:05 receipt above):
+the repository/account onboarding fix `f271d7e` was published at immutable digest
+`aa59e99face500213d3f04b554b0567d4c2c7f7670376fcc47b10ef28ecfcfc8`.
+The single safe-drain rollout completed Success / exit 0; independent public
+readiness and exact source-byte checks of all three changed frontend assets
+passed. Account/company permissions were not changed. The UI-fix tests and
+remaining product-acceptance gates are detailed below.
+
+Previous checkpoint (2026-09-18 13:06 UTC): AWS served immutable revision
+`6bf9524` / digest `b8b04eccd0a1a5841656868871e7666e553ebef12b760caef8aa74175d261d78`.
+The rollout and a second same-digest compatible rollback baseline completed
+healthy, both independently Success / exit 0. The final exact host audit
+confirmed current/previous image/configuration, zero container restarts and no
+remaining acceptance container/session/command; public readiness stayed healthy
+across observations almost six minutes apart. Local runtime `f0e57ca` uses the same application sources, with 12
+readable encrypted records and a byte-identical credential file after cold
+checkpoint `checkpoint-eDMBUp`. No user account was authorized or chat created
+in either live deployment for these checks.
+
+Final integrated regression: **1122/1122**, zero failures/cancellations/skips,
+with both native-GitHub and official-MCP guest-UI opt-ins, two-CPU sequential
+execution. The separate seven-file Python infrastructure-operator regression
+passed 52/52 with mocked AWS/Docker boundaries. Cold preview opening now returns
+bounded 202 progress, waits for the
+worker before bootstrap, and cannot auto-restart via stale polling after Stop.
+The full official-MCP UI/API/bootstrap/HTTP/WS/SSE/revocation fixture passed
+with deliberately blocked acquisition, plus the independent review and 10 UI
+browser checks. The real isolated CloudFront lifecycle and exact cleanup also
+passed; none of those fixtures establish authenticated deployed app traffic.
+
+The published Google entry/anonymous denials and real WSS transport checks
+passed again. Actual Google initiation at 13:04 UTC still returned
+`redirect_uri_mismatch`. The user subsequently confirmed registering the cloud
+origin/callback while retaining localhost; a fresh official-MCP check at
+13:19 UTC reached Google without detecting that error or Error 400. It did not
+observe a visible email field at its sampling point and did not complete login;
+all browser/client/transport and private transient cleanup was confirmed.
+At 13:54 UTC the user confirmed cloud Google login and connecting both Claude
+and Codex. Record these as **user-reported product acceptance**, not automated
+authenticated browser or model-turn evidence. A subsequent screenshot confirms
+both connected accounts are scoped to `12-apps` and `thomfilg`.
+
+The user then reported a blocked new-chat account picker with no repository
+selected. Root cause: company-scoped accounts are filtered against the currently
+unassigned chat, while the UI incorrectly suggests reconnecting and puts
+repository selection after its dependent fields. A repository-first flow with
+accurate guidance and the requested settings icon beside Agent is implemented
+below; company access is not widened. GitHub company setup/repository access,
+Linear consent, successful deployed chat creation, selected-account execution/resume and authenticated deployed
+transport/app acceptance remain open. The MVP is **not complete**. Test totals do not close
+the historical priority re-audits or change the number of recorded requests.
+
+The additional empty-repository report was confirmed against the deployed
+owner's saved metadata at 14:01 UTC: one connected GitHub connection, zero
+allowed companies. An owner-bound PostgreSQL read-only diagnostic made no
+provider requests or record changes. The existing backend intentionally returns
+no repositories before explicit company permission; the correction below adds
+a clear company-access setup action in place of the misleading generic
+search-empty message. No company is selected or authorized automatically.
+
+The UI correction is committed and pushed as `f271d7e`: repository selection
+precedes the company-dependent account picker; the requested settings icon
+beside Agent opens account management without the large connection button.
+The repository picker distinguishes missing GitHub company access, loading
+failure, no available repositories and search misses, with explicit setup/retry
+actions and stale-response protection. Reopening one incomplete GitHub setup
+shows known company suggestions from agent accounts but checks none for the
+user; several incomplete accounts require an explicit choice. Create remains
+disabled until repository, eligible agent account and environment are selected.
+
+Verification of this patch: **35/35 targeted backend tests**, **18/18 account
+browser tests** and **3/3 GitHub browser tests**, sequential on CPUs 0–1 at nice
+10. The official-MCP disposable fixture exercised the real local APIs and UI
+through explicit GitHub company permission, repository retrieval, both provider
+account selectors, explicit environment company access and one empty Codex chat.
+It sent zero model prompts and used zero real provider consents. Widths 320,
+390 and 1600 fit; root visually inspected the 390-pixel screenshot. Independent
+source review passed. The prior 1122-test full regression is the earlier release
+baseline, not a newly executed full suite on this frontend patch. Publication
+receipts belong in the [deployment status](aws-deployment.md).
+See [current deployment receipts](aws-deployment.md) and
+[preview operation limits](app-preview-operations.md).
+
+Earlier verification checkpoint (2026-09-18 12:40 UTC): the full integrated suite on
+`62bd880` passed **1097/1097**, with zero failures, cancellations or skips in
+255.4 seconds. Native GitHub and official-MCP guest UI were enabled; execution
+was sequential on CPUs 0–1 at nice 10. The subsequent bootstrap-cleanup and
+pinned host-launcher checks passed **8 Node tests** and **8 Python tests**
+separately; 414 committed JavaScript modules passed syntax checks. These are
+test counts, not a count of delivered feature requests.
+
+The local controller was restarted from `da848d4` after an idle-work check and
+cold private checkpoint `checkpoint-a8XZOv`. Its credential file matches that
+checkpoint byte-for-byte and all 12 encrypted records remain readable. No
+record was written by the verification, no production user/chat was fabricated,
+and no provider consent or model prompt occurred. AWS still runs the immutable
+revision in the activation receipt below until a later rollout is recorded.
+
+The real isolated controller-role CloudFront lifecycle passed at 12:47 UTC:
+one address created, ready state verified and revalidated from its durable
+record, access revoked, distribution deleted and exact operator container
+removed. Root independently confirmed a complete inventory with the temporary
+distribution absent. This closes only the provider/IAM lifecycle primitive,
+not Google consent, a controller reboot or authenticated app HTTP/WS/SSE.
+See [the receipt and its limits](preview-host-acceptance.md).
+
+Continuation checkpoint (2026-09-18 12:25 UTC): the user renewed autonomous
+work for two hours, ending at 13:39:52 UTC (10:39:52 São Paulo). The isolated
+remote-app preview now has committed controller routing, persistent
+owner/chat/port CloudFront assignments, trusted-Relay browser bootstrap,
+explicit Open app UI and runtime/logout revocation. These changes are pushed
+on the integration branch, with component PRs 30–34. Runtime `14050df` is now
+deployed on AWS; local runtime `5487358` has identical application sources.
+The reviewed infrastructure change set added only the opt-in controller preview
+IAM policy; it replaced no controller or data volume. The narrow configuration
+update preserved all credentials and unrelated settings. A second same-digest
+rollout retained a preview-aware rollback container. The old dormant-preview
+description below is historical, not the current activation state. Actual AWS
+preview lifecycle and authenticated app-traffic acceptance remain open.
+
+New evidence: 29 focused controller/auth/config/runtime checks and an independent
+35-test review passed. Actual local HTTP/WS integration verifies cookie and host
+isolation, no browser-to-agent messages, immediate logout/Stop revocation,
+foreign-origin denial before worker acquisition, and deploy-drain protection
+during an incomplete bootstrap request. A separate official Playwright MCP
+browser run proved that an active hostile app service worker cannot intercept
+the trusted Relay-origin bootstrap; blocked third-party cookies fail closed.
+The full local UI-to-server browser acceptance passed through real HTTP/WS/SSE
+and revocation, with observed child cleanup and no prompts; root repeated it
+after all runtime fixes. Integrated regression passed 1083/1083 without skips
+or failures, plus 18 metadata-operator checks. These fixture checks do not replace
+Google/provider consent in the deployed product. The AWS Google callback still
+needs the user's console configuration. Public AWS login entry/denial/transport
+checks passed again after rollout; see [deployment receipts](aws-deployment.md).
+
+The authorized local restart preserved twelve readable encrypted records and
+the credential file byte-for-byte against its cold private checkpoint
+`checkpoint-4fMMFh`. There were zero chats and pending agent sign-ins before
+restart. No account was authorized or message sent; this is not a claim that
+every encrypted row was byte-compared against the archive.
+
+Historical local activation (2026-09-18 09:50 UTC): the integrated Codex/Claude,
+GitHub/Linear, scoped worker Git/PR gateway and account-deletion version is active
+on `http://localhost:8787` (revision `1f79d26`, same runtime as AWS `3a0b7b3`
+plus three integration tests). A cold private checkpoint preceded
+the restart; all 12 encrypted records remain readable and the credential file
+matches the pre-restart archive byte-for-byte. This restart did not compare
+every encrypted row's bytes against that archive.
+Personal and umg are disconnected; fresh consent and the authorized real-turn/
+resume gate are still open. The older connected-Personal checkpoint above is
+historical. Startup reused already-loaded Doppler `code-web/dev` settings in
+memory, not a fresh download or a new token. The old private login bus closed;
+future fresh Doppler CLI operations may require sign-in again. No account was
+authorized or chat created by the restart. Official Playwright MCP verified the
+live local login page at 1600/390/320 pixels and anonymous chat access denial.
+AWS provisioning is now explicitly authorized for profile `code-web`, account
+`456808212788`, region `us-east-2`. Stack `agent-relay-mvp` reached
+`CREATE_COMPLETE`; the private controller booted with its encrypted data volume
+and CloudFront assigned `https://d20atclccf8cku.cloudfront.net`. CodeBuild built
+the pinned application image successfully. Actual HTTPS rollout now responds
+with database-backed `/readyz` 200 and denies anonymous `/api/chats` with 401.
+Official Playwright MCP verified the Google entry screen at 1600, 390 and 320
+pixels without horizontal overflow. Google cloud consent remains pending the
+new callback registration; no production account or chat was fabricated.
+
+AWS checkpoint (2026-09-18 09:51 UTC):
+
+- Current deployed application: revision `3a0b7b3c17956393a7c9f6e36dc1a5bc80a05edb`,
+  immutable digest `sha256:53cb37a8c558548bb256d90f1e840cc0a5aa9b80512f6fa13ef02022e401bad8`.
+  CodeBuild `44d1e375-b925-4486-83fd-320772a16a33` used exact source object
+  version `tgNLJ1YJT7RnPo9WGChbzhx6HBGY5Of5`; deploy SSM
+  `563c63a5-8029-4f29-b76d-862374aaa6c5` completed healthy (independently
+  confirmed Success/exit 0). Thirteen fixed
+  negative Git/MCP requests passed through CloudFront, including anonymous,
+  unissued-capability, browser-origin, unsupported path/method/query checks.
+  Their exact public error bodies and no-store headers were checked, not just
+  HTTP status. This behavior-only receipt is paired with that immutable rollout;
+  it does not prove authenticated GitHub access. Readiness 200, anonymous SSE
+  401, and real WSS 101/bidirectional frames/expected rejection 1008 passed again.
+  No account imports, external provider writes, model prompts or test users.
+- Integrated regression at the exact published revision passed **1016/1016**,
+  no skips/failures (223.0 seconds). Both opt-ins were enabled: native GitHub
+  environment/configuration probes and official-MCP guest UI. Single test
+  process at a time, CPUs 0–1 and nice 10.
+- The final full run including three grant-to-proxy integration fixtures, two
+  canonical OAuth-origin fixtures and nine public-login operator fixtures passed
+  **1030/1030**, no failures/skips (230.5 seconds), with the same opt-ins and
+  CPU limits. These later changes add tests/operator verification, not deployed
+  application behavior. The reviewed login operator also ran through official
+  MCP against AWS at 10:10 UTC: all three public entry widths passed, Google
+  returned the callback mismatch, and actual MCP child closure plus private
+  transient-file removal were confirmed. No credentials or consent were entered.
+- The generic HTTP lifecycle fix now covers early responses outside the Git
+  gateway too. A completed response closes only its own unfinished input after
+  flushing; complete keepalive, gated authenticated saves and live SSE remain
+  intact. The raw half-open regression observes the actual server socket close
+  even when the client deliberately never sends FIN. Malformed request URLs
+  return a fixed 400 instead of escaping the asynchronous request handler.
+- Reviewed preview grants, TCP transport and HTTP/SSE/WS proxy foundations are
+  present but **dormant**. Scoped revocation, byte/time/fanout limits and exact
+  child cleanup have offline coverage; three later true grant-to-proxy fixtures
+  passed independently (SSE sibling isolation, WS expiry and no-spawn denial).
+  No preview router/bootstrap, permanent hostname registry, provisioner or UI
+  activates them. Gate 45 remains open, including service-worker/bootstrap
+  isolation and real deployed app HTTP/WS acceptance.
+- Official Playwright MCP rechecked the actual newly deployed Google entry
+  screen and anonymous chat denial at 1600/390/320 pixels on both cloud and
+  local origins, without horizontal overflow; root inspected the cloud mobile
+  screenshot. The initial post-click diagnostic failed because its MCP sandbox
+  lacked the global URL constructor, not because Relay failed. The corrected
+  check at 09:59 UTC reached `accounts.google.com` and observed Google's actual
+  `redirect_uri_mismatch` / Error 400: the new cloud callback is not accepted by
+  the OAuth client. No identity, password or provider consent was supplied.
+  The repeated 09:59 UTC read-only cleanup audit found only the intended controller
+  running for this deployment, no active acceptance SSM sessions on it, and no
+  remaining native-acceptance-tagged volumes. The controller, NAT and retained
+  storage remain billable; this is not a claim that AWS resources were torn down.
+
+- Cold backup/restore passed on the actual encrypted EBS volume. Snapshot
+  `snap-08d0e108e9596b5df` is retained; a distinct restored volume matched both
+  encrypted records and zero attachments, was unmounted and removed, and the
+  original controller recovered. This small empty-account dataset is not a
+  claim of large-volume recovery testing. Run `775be65e-3184-4822-b9f1-7e919d96d076`.
+- The earlier reviewed application update through revision `f0692eb` passed in AWS
+  (immutable digest `sha256:d00cf873d34af1676f52b954fc06218f265326c9c172003f51f957a16feb9bb1`). Integration
+  tests passed 783/783, plus 21 isolated-native/SSH tests.
+- Controlled failed-rollout recovery passed on the actual controller. The
+  candidate inherited the exact current filesystem, deliberately exited 1 and
+  failed readiness. The shared engine restored the exact original container,
+  configuration and mounts, verified the persistent EBS volume, and removed
+  the failed candidate. The operator did not update secrets or delete application
+  data; this test did not compare database fingerprints across restart. Run
+  `91246861-681f-485c-b85f-4b9051b071a4`, SSM
+  `88faada5-24b1-493e-bb78-22cd1df09fde`; independent public checks again returned
+  readiness 200 and anonymous chats 401. The older previous-container slot was
+  consumed under the normal single-slot rollout policy.
+- Worker AMI `ami-0511b35c0d21d5ee0` failed fresh credential/metadata acceptance.
+  The next bake, `ami-01358e3a58d2e7d20`, passed all identity, native-version,
+  SSM-removal, network/metadata and heartbeat checks, but still failed the
+  credential audit: `unexpectedAuthorizedKeys=1`, all other categories zero.
+  Exact location/content was not exposed. The finalizer's missing cleanup of
+  the agent SSH directory was corrected; neither old image is accepted.
+  Latest probe SSM `0b25c656-3777-471b-9c8a-28ead4b954e9`; disposable worker
+  `i-063b80e4d84599b35` and its encrypted volume were confirmed removed.
+- Worker admission now requires the exact private/pinned image to bear a
+  `verified-v1` acceptance marker, written only after fresh boot, stop/start
+  and confirmed disposable-instance/volume cleanup. The 64 focused tests pass.
+  CloudFormation change set `worker-ami-acceptance-20260918` reached
+  `UPDATE_COMPLETE`, modifying only the controller's IAM policy (no replacements)
+  to deny launches of unaccepted images. Controller runtime admission is now
+  deployed in revision `6de71bb`, digest
+  `sha256:16a165a5b7011473034737d13a9489acabcb69e1975252898abaca6aef03a6b4`,
+  deploy SSM `e5b40bf3-d94f-456f-a5b7-1212d4634cce`, readiness 200/chats 401.
+- Replacement AMI `ami-06f979453243f2fc1` passed actual fresh-boot and stop/start
+  acceptance, including credential absence, disabled metadata/no role, private
+  network, native versions, distinct/stable machine and SSH identity, heartbeat
+  and persisted sentinel. Verification `ad2783e5-b450-4642-91d9-04273e8c8bc2`;
+  fresh SSM `bb67ba23-4175-4a1c-aada-39b5e4e38430`, resumed SSM
+  `afd39ae5-d4c7-4196-b77d-1fed32f6697b`. Exact verification VM and encrypted
+  volume were removed before marking the image accepted. Builder
+  `i-088ce2690e3b8923e` is terminated with zero remaining bake-tagged volumes.
+  The image-only configuration publication preserved every credential/other
+  setting; a rollout of the prior healthy app established the accepted-image
+  rollback baseline before the new runtime rollout.
+- Actual isolated native Claude acceptance passed on the accepted AWS image:
+  two Haiku turns returned OK and retained the first turn's context, with the
+  same account identity. Run `bc21e4dc-52aa-4234-b2f8-87c1f2ab61fd`, worker
+  `i-0676589cf2c450529`. Only the explicitly authorized host access token was
+  copied into the disposable test profile (no refresh token or product account
+  import). Source credentials were unchanged; the remote profile and SSM session
+  were cleaned up, and the exact VM plus its encrypted volume were confirmed
+  removed. Reported cost upper bound: USD 0.014650. This proves the native AWS
+  turn/resume path, not fresh product browser consent or selected-product-account
+  onboarding. Guest Chrome and public workspace transfer are separate checks below.
+- Actual public workspace transfer passed on a separate accepted AWS worker:
+  run `1d6404c4-a76d-4293-a56e-1ae94f6ff712`, VM `i-02c330d1779ba2526`.
+  The unchanged product `Ec2Executor.prepare` cloned/uploaded the fixed public
+  repository, matched the remote Git HEAD, kept `.git/config` credential-free,
+  and preserved a remote sentinel on the second prepare. Fixture and SSM cleanup
+  passed; VM and one encrypted volume were confirmed removed. This used an
+  isolated local controller and no provider credentials/model turns. It does
+  not test deployed-controller admission, private GitHub selection or stop/start.
+- Actual AWS guest Chrome now passed after the fixture's initial Live wait was
+  made explicitly bounded at 45 seconds instead of MCP's five-second default,
+  with safe diagnostics and strict process-exit confirmation. Run
+  `1d452529-ac01-42a6-86cc-bf3322b2b069`, VM `i-0c48a75efb1ede65b`: all six
+  presets (320/390/640/834/1280/1920 widths) at DPR 2, exact sharp pixels, same
+  tab/document, mouse/keyboard, SSE-driven canvas update, viewer presence,
+  renderer namespace/seccomp and Chrome Stop passed. No sandbox check was
+  weakened. Fixture and SSM were cleaned; VM plus encrypted volume removal was
+  observed. Zero provider credential reads, model turns or transcript messages.
+  Root visually inspected the md/xlg screenshots. This used the real AWS guest
+  with an isolated local controller, not authenticated deployed CloudFront UI.
+  The prior failed attempt's exact VM/disk were also confirmed removed.
+- Scoped GitHub worker smart HTTP and PR MCP are integrated, with independent
+  review, native no-model environment/argv checks, and actual GitHub push plus
+  PR edit/create acceptance using authorized isolated local credentials. PR22
+  itself was created through the new MCP tool (one attempt, no retry). No product
+  account was imported. The full regression exposed legacy source-only chat and
+  malformed test-selection compatibility cases; source-only history now restores
+  an empty repository selection without inferring any account. Explicit malformed
+  selections still fail closed. Old selected-repository records without saved
+  connection IDs require explicit reselection in a new chat, not a silent fallback.
+  An independent review also found incomplete HTTP bodies could hold shutdown;
+  one bounded, revocable request lease and exact socket closure now cover them.
+  The corrected runtime passed 948/948 sequential tests, including both native
+  configuration-only probes and the official-MCP guest UI fixture; the four new
+  deployed-denial probe tests passed separately. The immutable publication and
+  deployed negative behavior checks are recorded in the current checkpoint above.
+- The cloud Google callback, confirmed registered by the user at the latest
+  13:19 UTC checkpoint, is
+  `https://d20atclccf8cku.cloudfront.net/api/auth/callback/google`.
+  Fresh product consent for Codex/Claude/GitHub/Linear, selected-account execution,
+  and deployed authenticated transports remain explicit open gates.
+- Deployed WSS transport passed a real 101 upgrade and bidirectional frames,
+  followed by the expected unauthenticated rejection/close 1008 on the existing
+  extension endpoint. No pairing, database user, Chrome or model was started.
+  Protected SSE correctly returns 401 anonymously; SSE 200/heartbeat and an
+  authenticated live-browser session still require a legitimate Google session.
+- Official Playwright MCP also exercised disposable account fixtures: missing
+  agent onboarding, separately scoped Personal/Company login links, deleting
+  pending Company consent, and completing Claude's returned-code flow. Screen
+  widths 320/390/1600 fit. This is UX evidence, not real provider authorization.
+- The fresh integrated browser regression passed **28/28** isolated fixtures:
+  Codex/Claude accounts 16, Google 4, GitHub/company scopes 4 and Linear 4.
+  Suites ran sequentially with one browser worker, CPUs 0–1 and nice 10.
+- The subsequent full backend regression at `3a3adb3` passed **833/833**, with
+  no skips or failures, one test process at a time on CPUs 0–1/nice 10. It
+  includes local integration/operator fixtures, not real AWS or model calls.
+- The earlier integrated run at `e22fd45` passed **859/859**, no skips or failures,
+  with the opt-in official-MCP guest UI test enabled in that same sequential
+  run (175.9 seconds, CPUs 0–1/nice 10). Separate finalizer Python checks passed
+  10/10, including real shell fixtures. The new AMI bake uses that revision;
+  these passing local checks are separate from the AWS boot acceptance above.
+
+Parallel implementation checkpoint (2026-09-18):
+
+- Claude: native manual-code ceremony, per-user named accounts, account-bound
+  models/runtime and access-only worker renewal implemented. Independent review
+  found and fixed cancellation-during-save and refresh-rotation durability races.
+  Agent suite: 649 backend, 14 browser; final focused 41 regressions. Two expressly
+  authorized isolated real Haiku turns returned OK, with native session resume;
+  host credentials remained unchanged. Product browser consent remains open.
+- GitHub: private native `gh auth login`, URL/code, explicit company scope and
+  selected connection for repository/clone/PR/check operations implemented;
+  PAT/host-import onboarding removed. Agent checks: 42 backend, 13 browser.
+  Authorized isolated host-account read/clone/PR tests passed; a fresh user
+  consent through the product remains open. Reconnect/stale-401 race fixed.
+- Linear: OAuth/DCR/PKCE, attempt-bound UI success, cancellation rollback and
+  read-only workspace verification implemented (37 backend, 4 browser).
+  Live provider metadata was inspected, but real OAuth and selected-environment
+  authenticated reads still require user consent. Fixture reads are not that gate.
+- AWS: controller template/image/readiness/drain, private deployment-scoped
+  worker baker, separate Doppler `code-web/stg_aws_mvp` secrets and immutable
+  build/deploy scripts implemented. Actual HTTPS rollout and cold backup/restore
+  and controlled failed-rollout recovery pass as recorded above. Fresh/resumed
+  worker image acceptance passed; deployed authenticated integration checks
+  remain open.
+- Account deletion: reviewed backend/UI implementation removes a selected
+  account without deleting its conversations. Integrated focused checks: 18
+  deletion/API tests and 20 account/Google browser tests passed. Current local
+  and AWS application versions include it; real accounts/data were not deleted
+  for acceptance. The MCP fixture deletion is recorded separately above.
+- Shared AWS CI: reviewed engine is pinned to `12-apps/ci` commit `848182b` in
+  draft PR #98; its remote checks passed. Relay's opt-in, manual consumer is in
+  PR #8 and integrated into PR #4. It remains disabled; no CI IAM role or GitHub
+  environment has been activated.
+- All integrated auth changes are saved in PR #4; feature PRs #5/#6/#7 retain
+  their separate review/evidence. Existing unfinished doctor edits are untouched.
 
 The user explicitly requires working **Codex, Claude, GitHub and Linear
 authentication**, plus **a script to deploy Relay on AWS**, before the MVP is
@@ -72,14 +784,19 @@ mock or unauthenticated MCP handshake does not satisfy this gate.
 
 | Required integration | End-to-end acceptance | Queue items / current gap |
 | --- | --- | --- |
-| Codex | Detect missing authentication; show a working Connect action and the supported native browser authorization URL/code. Complete sign-in from the user's browser, select a named account for the chat, run a consented real turn and resume that account after restart. Surface expired/revoked access and reconnect without falling back to the host CLI | 43/44: provider-login UI, account-bound flow and real acceptance unfinished |
-| Claude | The same complete onboarding and reconnect path, using Claude's supported native authentication flow. The selected named personal/company account must actually be used for a consented real turn and restored after restart | 43/44: provider-login UI, account-bound flow and real acceptance unfinished |
-| GitHub | Authenticate from Relay; identify the connected account and explicitly allowed companies/repositories; list, select and clone an authorized repository and read its PR/check status. Handle denied/revoked access without borrowing another connection or the host's `gh` identity | 21: a saved legacy connection exists; current onboarding, company scope and live runtime acceptance remain open |
-| Linear | Complete real browser OAuth, discover tools and perform a non-mutating authenticated workspace read through the selected agent/environment. Support independent g2i and 12-apps connections, including the same MCP name, with no cross-company credential fallback | 02/03/04/10/21: configuration/discovery evidence is not completed OAuth or runtime acceptance |
-| AWS deployment | A documented, repeatable script deploys the complete application at a stable HTTPS URL, validates readiness, preserves data across updates and supports rollback; verify all four integrations on the deployed application | 45: reference review and requirements only; no complete controller deployment or live AWS acceptance |
+| Codex | Detect missing authentication; show a working Connect action and the supported native browser authorization URL/code. Complete sign-in from the user's browser, select a named account for the chat, run a consented real turn and resume that account after restart. Surface expired/revoked access and reconnect without falling back to the host CLI | 43/44: implementation and local/AWS activation passed; 16 account-browser fixtures pass jointly with Claude. Personal/umg are disconnected; fresh product consent and selected-account real turn/resume remain open |
+| Claude | The same complete onboarding and reconnect path, using Claude's supported native authentication flow. The selected named personal/company account must actually be used for a consented real turn and restored after restart | 43/44: implementation, local/AWS activation, reviewed regressions and authorized isolated real turn/resume passed locally and on a fresh accepted AWS worker. Fresh product browser consent and selected-product-account execution remain open |
+| GitHub | Native `gh auth login` in a private profile returns URL/code. No token entry, host import or second company step. All repositories GitHub permits for the user-owned connection are available; worker fetch/push/PR access stays bound to selected repositories/branches. Denied/revoked access never borrows another connection | 21: native onboarding and worker gateway active; removal of redundant GitHub company gate in progress. User-reported deployed Codex chat creation passed; full selected-connection clone/write/restart acceptance remains separate |
+| Linear | Complete real browser OAuth, discover tools and perform a non-mutating authenticated workspace read through the selected agent/environment. Support independent g2i and 12-apps connections, including the same MCP name, with no cross-company credential fallback | 02/03/04/10/21: OAuth/DCR/PKCE, scoped environment integration and fixture workspace-read checks implemented and activated. Four browser fixtures pass; real browser consent and selected-environment authenticated workspace read remain open |
+| AWS deployment | A documented, repeatable script deploys the complete application at a stable HTTPS URL, validates readiness, preserves data across updates and supports rollback; verify all four integrations on the deployed application | 45: authorized infrastructure, HTTPS rollout, backup/restore, failed-rollout recovery, fresh/resumed worker, isolated native Claude, real guest Chrome and public workspace upload passed. Product integration consent/selected-account execution, authenticated deployed transports, combined selected-GitHub→EC2 acceptance and remote app forwarding remain open |
 
 Common authentication acceptance:
 
+- Product clarification (2026-09-17): Relay is a multi-user product, not a
+  personal terminal wrapper. All four login flows must be user-owned, including
+  the administrator's; host-credential import and other single-user-only options
+  must not appear in the product onboarding. Keep local development fixtures
+  separate from the deployed multi-user interface.
 - Keep multiple named Codex and Claude accounts per Relay user, including
   personal and company accounts. Make the selected account and availability
   explicit; enforce user/company boundaries in the backend, not only the UI.
@@ -90,6 +807,14 @@ Common authentication acceptance:
   successful connection. Configure the provider's client ID/secret and allowed
   callback where required; do not assume dynamic registration is supported or
   show “Saved” as proof of authenticated access.
+- GitHub onboarding clarification (2026-09-17): request only the inputs needed
+  for native `gh auth login`, then display the authorization URL and code.
+  Keep the first screen simple; optional naming can follow authentication.
+  The 2026-09-18 clarification removes the GitHub company step.
+  Remove both personal-access-token entry
+  and the host-login import button. Use a separate private `gh` profile for each
+  Relay account; do not switch or reuse the developer's active global account.
+  This refines the already-required GitHub MVP login, not a new parallel feature.
 - Keep controller-managed secrets encrypted at rest and out of browser
   responses, logs, source control and build artifacts. Describe the actual
   native CLI credential delivery boundary: local workers share the host
@@ -106,8 +831,9 @@ The user permits adding reusable AWS support to `12-apps/ci` if appropriate.
 Reference review found only DigitalOcean and Cloudflare in that repository's
 current `main` vendor registry; there is no registered AWS deployment adapter.
 Use its vendor-extension pattern for the shared AWS implementation, with a thin
-Relay-specific consumer. This is planned work, not an assertion that AWS is
-already supported by the shared workflows.
+Relay-specific consumer. That was the original implementation plan. The pinned
+shared engine is now implemented and exercised by the operator deployment
+recorded above; the proposed CI workflow remains opt-in, unmerged and inactive.
 
 - **In `12-apps/ci`:** add a reusable AWS adapter, vendor registration and
   explicitly enabled caller job, off by default. Consume the already-built
@@ -185,20 +911,20 @@ References inspected for this request:
 | 18 | `/plan` works from the web composer | Reopened for delivery: prior task/read-only, busy-queue and failure-preservation checks; current provider runtime configuration and deployed acceptance pending |
 | 19 | Send now on individual queued messages, retaining the rest | Reopened for delivery: prior interruption/FIFO, Stop race, retry, attachment and draft checks; current deployed acceptance pending |
 | 20 | `/goal` and every available native/installed slash command work, without unsupported-terminal placeholders | Paused for the user's priority delivery re-audit of 01–14/16–19; preserve doctor MCP work, then resume remaining gaps in `command-support.md`; provider runtime/deployed native acceptance pending |
-| 21 | GitHub, environments and MCPs have explicit multi-company availability; no credential fallback/crossover, including secondary repos | MVP requirement: working GitHub login plus company-scoped GitHub/Linear use. Relay scope tests pass; audit inherited host-CLI credentials/config too; live onboarding, migration and scope acceptance pending |
+| 21 | GitHub follows provider permissions without an extra company step; agents, environments and MCPs retain company availability. No cross-user credential fallback, including secondary repos | MVP refinement in progress: remove legacy GitHub-only gate while retaining explicit connections and exact repository/branch worker grants. Historical company-save requirement superseded; full integration acceptance tracked separately |
 | 22 | Resize sidebar, chat and third-column panels | Existing source; dedicated interaction verification pending |
-| 23 | Shared Chrome viewport presets: xxs, xs, sm, md, lg, xlg | Existing source; pending ordered verification |
-| 24 | Resizing changes the actual viewport correctly, without stretching or needing a new tab | Source fixes exist; live worker verification pending |
+| 23 | Shared Chrome viewport presets: xxs, xs, sm, md, lg, xlg | All six passed on an actual isolated AWS guest at DPR 2; authenticated deployed-product acceptance remains open |
+| 24 | Resizing changes the actual viewport correctly, without stretching or needing a new tab | Actual isolated AWS guest passed same-tab/document resizing and revisit with preserved input; authenticated deployed-product acceptance remains open |
 | 25 | Paste cropped/copied images and files into the focused composer | Existing source; pending ordered verification |
 | 26 | Long chats mount a bounded message subset, retaining history navigation and reducing DOM memory | Source/tests exist; full verification pending, including intermittent Jump to latest detachment during automatic paging |
 | 27 | Auto mode handles the reported local IPC/tool approval without manual prompts | Source policy fix exists; exact native/live case unverified |
 | 28 | Remove invented rendering messages; do not inject browser activity into agent context; use official Playwright MCP when requested | Earlier checkpoint retained 241 tagged records; no cleanup completion is claimed from the later empty-database checkpoint. Official dependency installed, integration not implemented |
-| 29 | Sharp, non-opaque browser output at every viewport, including sm/md/lg/xlg, after resizing | Source high-DPI fixes exist; live worker verification pending |
-| 30 | Visible chat tabs and browser interaction pause idle sleep/countdown | Source/tests exist; live verification pending |
+| 29 | Sharp, non-opaque browser output at every viewport, including sm/md/lg/xlg, after resizing | Actual isolated AWS guest passed exact DPR-2 sharp pixels at all six sizes; md/xlg screenshots visually inspected. Authenticated deployed-product acceptance remains open |
+| 30 | Visible chat tabs and browser interaction pause idle sleep/countdown | Source/tests and actual isolated AWS guest viewer-presence checks passed; full deployed idle/countdown acceptance remains open |
 | 31 | Attachment images are clickable to inspect before and after sending | Existing source; pending ordered verification |
-| 32 | Direct native-browser app URLs per chat, preserving port/path; remote HTTP and WebSocket forwarding too | Local aliases implemented; remote forwarding pending |
+| 32 | Direct native-browser app URLs per chat, preserving port/path; remote HTTP and WebSocket forwarding too | Local aliases and remote forwarding implemented with isolated HTTP/WS lifecycle checks; authenticated deployed-product traffic remains pending |
 | 33 | Compact always available; send native `/compact`, queue while busy, retain draft, no misleading Claude/idle tooltip | Source, FIFO, browser and real-CLI/local-stub checks passed; provider runtime/deployed native acceptance pending |
-| 34 | Hide internal `<relay-title>` metadata from streamed/saved responses; no bogus HTML previews | Queued; cause inspected, fix not started |
+| 34 | Hide internal `<relay-title>` metadata from streamed/saved responses; no bogus HTML previews | Shared bounded live/final parser implemented, including manual names and tool-boundary cases; 54 focused Node cases passed. Integrated candidate, pending publication |
 | 35 | Notify the agent when PR checks fail; if the container is stopped when checks pass, wake it and deliver a GitHub event message | New report appended; not started |
 | 36 | Subscribe to GitHub PR/check/auto-merge events for prompt UI status updates, with polling as a reconciliation fallback | New report appended after clarification; not started |
 | 37 | Composer attachments use one row of image thumbnails and file cards above the text, matching the supplied screenshots. Every card is clickable: large image preview; scrollable text-file preview with filename, size and line count, for both draft and sent attachments | New report appended and clarified with image + file examples; not started |
@@ -207,11 +933,145 @@ References inspected for this request:
 | 40 | Search across messages the user wrote and the AI's final answers, with conversation/result navigation. Do not store or index reasoning/chain-of-thought for this feature; exclude tool activity and intermediate responses from results | New feature appended after saved prompts; search-screen reference received; not started |
 | 41 | Deleting a worker/container must preserve the chat and its messages outside disposable storage; only explicit chat deletion removes the conversation. Reproduce actual container deletion independently of stop/restart, using disposable fixtures | New data-loss report appended; item 05 stop/restart verification does not establish container-deletion safety; not started |
 | 42 | Explore and implement a third-column panel showing the main agent's active secondary agents, with native status and supported conversation details. Selecting a secondary agent opens a popup/composer for prompts addressed to that agent, including while it is working; retain accessible keyboard navigation and keep the main agent/conversation independent. Investigate actual Claude Code/Claude web and Codex capabilities, reusing item 20's Codex descendant-navigation work where applicable. Do not invent child sessions or claim unsupported native messaging/steering | Codex feasibility confirmed read-only: descendant listing, status and direct input/steering are available, with experimental API caveats. Claude capability investigation and the requested both-provider panel/popup remain queued, not implemented |
-| 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | MVP blocker: native CLI commands/documentation investigated; no live authorization and no finished provider-login UI. Global prototype was not activated; implement account-bound flows under the Relay user |
-| 44 | Authenticate Relay users with Google using `@12-apps/auth`; persist data privately per user and support multiple named Claude/Codex accounts (personal/company), explicitly selected per chat with no credential fallback | Partially implemented, not delivered: Google/shared-package integration and per-user boundary tests pass; real Google sign-in completed by the user. Multiple native provider accounts, token/profile synchronization and selection remain MVP blockers |
-| 45 | Provide a repeatable AWS deployment script for the complete Relay application, following future-pay's deployment guidance; add reusable AWS support to `12-apps/ci` and keep Relay a thin application-specific consumer | MVP blocker: references reviewed and acceptance criteria recorded above. Shared registry currently has only DigitalOcean/Cloudflare; existing Relay EC2 worker scaffolding is not a complete controller deployment. No AWS provisioning or deployment performed |
+| 43 | Detect missing agent authentication; show Codex and Claude sign-in actions and browser authorization URLs instead of an empty agent picker | Both providers' native onboarding is implemented and active, with account-scoped progress/link/code/retry UX. Integrated fixtures pass. Personal/umg need fresh consent; selected-account real turn/resume remains open. No global profile is imported |
+| 44 | Authenticate Relay users with Google using `@12-apps/auth`; persist data privately per user and support multiple named Claude/Codex accounts (personal/company), explicitly selected per chat with no credential fallback | Google identity and both providers' named accounts are implemented and active locally/AWS. Persistence, isolation, explicit binding and access-only renewal pass automated checks. Fresh product consent, selected-account real turns and deployed restart/resume remain open |
+| 45 | Provide a repeatable AWS deployment script for the complete Relay application, following future-pay's deployment guidance; add reusable AWS support to `12-apps/ci` and keep Relay a thin application-specific consumer | Shared engine and Relay operators implemented. Authorized HTTPS/readiness/anonymous denial, backup/restore, failed-rollout recovery, fresh/resumed worker, isolated native Claude, real guest Chrome and public workspace upload passed. Product consent/selected-account runtime, authenticated deployed transports, combined selected-GitHub→EC2 and remote app forwarding remain open; MVP is not complete |
+| 46 | Delete a saved agent account, separately from disconnecting it; confirm the specific account, remove its stored credentials, prevent other-user deletion, and retain conversations without silently selecting another account | Implemented as the requested account-lifecycle refinement and active locally/AWS. Exact-account deletion, cancellation, cross-user denial and conversation retention pass backend/browser fixtures. No real user account was deleted for acceptance |
 
 ## Verification ledger
+
+- Codex post-consent correction (2026-09-18): the user confirmed OpenAI approved
+  login while Relay failed verification. Reproduced with installed Codex 0.154.0
+  and a loopback OAuth issuer: `account/login/completed` success can precede
+  account-cache readiness, despite an existing native credential file. Added
+  bounded null-only account-read retries after matching native consent, plus
+  safe final-verification diagnostics. No host credentials are adopted and
+  credential-file validation stays strict. The regression failed before and
+  passed after the fix. **33/33 focused account/server** and **14/14 browser**
+  tests passed; **five real-executable fixture logins** passed, including four
+  transient-null reads. Zero real tokens, real consent or model turns in this
+  smoke. User consent and the authorized real-turn/resume gate remain pending.
+  The local controller was no longer running when work resumed; activation
+  with the existing database is the next step, not assumed completed.
+
+- Codex reconnection refinement (2026-09-17): replaced reopening the saved
+  account's name/company form with a one-click Reconnect action inside its card.
+  It retains the exact account ID and access scope, shows immediate progress,
+  hides stale errors during the attempt and renders a failure only once. New
+  account creation keeps explicit company selection, with extra company inputs
+  and the longer access/storage explanation behind expandable controls.
+  **13/13 account/Google browser tests** and **28/28 focused account/server tests**
+  passed; **15/15 account/client tests** passed again after final message hardening.
+  The new browser regression covers failure, retry, original scope preservation,
+  no duplicate account and no repeated form. Reviewed the shorter dialog capture.
+  The reported login failed about 15 seconds after entering pending state;
+  the previous client applied a 15-second deadline to initialization and code
+  issuance and discarded the underlying stage. An isolated native probe with
+  the live configuration succeeded (8.3-second initialization, 0.55-second code
+  issuance), so the historical failure's exact cause is not proven. Both startup
+  stages now have separate bounded 60-second deadlines and fixed stage-specific
+  errors; native tokens, codes, URLs and raw error strings are never forwarded.
+  A second native probe succeeded with the new deadlines (6.9-second initialization,
+  0.57-second code issuance), then cancelled and removed its private profile.
+  Neither probe granted consent or submitted a model prompt.
+  The user authorized “Responda apenas OK” through Personal. A restart preflight
+  detected its live pending login and stopped before touching the server/data.
+  That flow then expired without completion, and its native process exited.
+  After verifying no remaining pending logins or chats, Relay was restarted
+  with this version through Doppler. Backup `relay-before-reconnect-HscGUw` was
+  verified offline; all **12 then-existing encrypted record payloads** and the
+  credential file remained byte-for-byte unchanged. Both named accounts were
+  disconnected before and after the restart; no previous credentials were
+  restored from backups. Google remains configured, anonymous account access
+  remains 401, and the served account/picker/style files match the source.
+  Personal must complete fresh user consent before the already-authorized
+  real-turn/resume check. No real model prompt has been submitted.
+  The two final mobile/reconnect browser checks also passed after message
+  wording was shortened for a multi-user product.
+  At this historical checkpoint the separate Delete account request was
+  appended as item 46 and was not implemented. The later integrated account
+  deletion implementation and current acceptance status supersede that note.
+
+- Codex sign-in UX follow-up (2026-09-17): Add account now explicitly expands
+  or collapses a focused form and retains the unsent name/company selection.
+  Submission immediately displays Connecting and disables duplicate requests.
+  Each account card owns its sign-in status, link/code and Copy/Cancel controls;
+  reopening the dialog automatically restores pending details. Previously,
+  the backend could announce pending before code issuance, while the UI treated
+  missing details as "Sign-in is not pending" and ignored still-pending poll
+  updates. That transition is now handled, with stale-response guards and
+  independent account controls. All **12 account/Google browser scenarios** have
+  passing runs, and **25/25 focused account/server checks** pass, with one
+  worker/two CPUs/nice 10.
+  Cases cover slow issuance/reload, distinct simultaneous codes, copy/open,
+  cancellation races, failure/retry, draft retention and mobile layout. Reviewed
+  mobile and multi-account screenshots. These tests use offline consent fixtures.
+  The user's separate real Personal sign-in is confirmed by their screenshot and
+  a read-only encrypted-record check; the verifier printed no credentials and
+  made no account writes. A subsequent browser run exposed a server-teardown
+  race: an already accepted request could finish its asynchronous owner lookup
+  after stream cleanup and then open a new SSE stream. Four deterministic
+  regressions failed before the fix and passed afterward; API dispatch now
+  rejects these late requests while restarting. Two later full browser runs
+  each passed 11/12 and hit Chromium's `ERR_NETWORK_CHANGED` before fixture
+  consent (on `/api/auth` and `/api/auth/csrf`, respectively). These were not
+  clean full-suite passes; the affected cancellation scenario subsequently
+  passed **two consecutive isolated reruns**. No assertion or authentication
+  requirement was relaxed.
+  Under the user's standing authorization, Relay was then restarted through
+  Doppler with the same settings after checking for active chats/pending consent.
+  The offline backup `relay-before-codex-ux-K5wRZH` was verified before startup.
+  All **13 encrypted record payloads** and the credential file remained identical,
+  Personal stayed connected, Google was configured and anonymous account access
+  remained 401. The database had zero chats before and after this restart.
+  Real model execution and chat/account resume after restart remain open; no
+  real prompt was submitted automatically.
+
+- Authorized Codex activation (2026-09-17): stopped the original Relay and
+  embedded PostgreSQL cleanly, copied both the control database/credential
+  directory and application data into the private local backup
+  `relay-before-codex-WlhgAG`, and verified the copies before restarting.
+  Relay now runs the current branch at `http://localhost:8787` through the
+  repository's Doppler launcher (`code-web/dev`), with the same data paths,
+  PostgreSQL port 55438, namespace isolation, no mock provider, CPU affinity
+  0–1 and nice 10. All **10 encrypted record payloads** and the local credential
+  file retained identical fingerprints; all records decrypt successfully.
+  Google reports configured, the served account module matches the current
+  source, and anonymous account API access returns 401. These are live backend
+  and static-serving checks, not a claim of authenticated UI acceptance.
+  At that checkpoint, user consent, a consented real turn and account/chat
+  resume after restart were still open. The later UX follow-up above confirms
+  Personal account consent. No model turn or account authorization was performed
+  automatically.
+
+- Codex native follow-up (2026-09-17): the production controller client and
+  installed Codex 0.154.0 successfully requested a real device-code URL/code
+  from the native service, then cancelled the flow. Both account reads stayed
+  unsigned-in, no credential file was created, and the private temporary
+  profile was removed. No consent was granted and no model turn was sent.
+  PR #4 is saved remotely as a draft; its GitGuardian check passed, with no
+  GitHub Actions test runs configured/reported. The original live Relay
+  process on `localhost:8787` is still running unchanged; restart permission
+  and the real consent/turn/resume acceptance remain pending.
+
+- Codex named-account implementation checkpoint (2026-09-17): **621/621 full
+  backend tests** passed, with no skips. A final consent-binding audit then
+  passed **44/44 focused tests**, including one new regression preventing
+  approval/feedback/logout/desktop records from crossing named accounts.
+  **7/7 account/Google browser checks** and **8/8 existing model-controls browser
+  regressions** passed; all 30 changed JavaScript files passed syntax checks.
+  Runs used one test worker, CPU affinity 0–1 and nice 10. The account browser
+  checks exercise offline consent, two users, personal/company accounts,
+  explicit chat selection, mobile cancellation and disconnected access.
+  The installed Codex 0.154.0 accepted a fictitious external-token login and
+  completed account/read and logout without creating worker `auth.json`;
+  this transport check used no real credentials and sent zero model turns.
+  No real Codex OAuth authorization or paid-account execution is claimed.
+  The live `localhost:8787` backend has not been restarted with this feature;
+  user consent, a separately authorized minimal turn and live restart/resume
+  remain release gates. See [codex-accounts.md](codex-accounts.md) for storage
+  boundaries and the acceptance steps. The unfinished doctor changes remain
+  paused and are excluded from this feature's commit.
 
 - MVP scope update (2026-09-17): recorded Codex, Claude, GitHub and Linear
   authentication as mandatory end-to-end gates and appended AWS delivery as

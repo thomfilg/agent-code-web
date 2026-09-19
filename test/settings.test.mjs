@@ -36,21 +36,23 @@ test("real PostgreSQL encrypts settings and reloads credentials and preferences 
 });
 test("protected variables never enter worker env; public values and toggles do; concurrent revisions conflict", async t => {
   const root = await temporaryDirectory(t); const records = new MemoryRecords(); const environments = new Environments(records);
-  const env = await environments.save({ name: "Staging", backend: "local", allowUnassigned: true, variables: [{ key: "SERVICE_TOKEN", value: "protected-123", secret: true }, { key: "APP_REGION", value: "test-region", secret: false }, { key: "DISABLED", value: "hidden", secret: false, enabled: false }] });
+  await environments.companies.save({ id: "fixture", name: "Fixture" });
+  const chat = { repositories: [{ fullName: "fixture/project" }] };
+  const env = await environments.save({ name: "Staging", backend: "local", companies: ["fixture"], variables: [{ key: "SERVICE_TOKEN", value: "protected-123", secret: true }, { key: "APP_REGION", value: "test-region", secret: false }, { key: "DISABLED", value: "hidden", secret: false, enabled: false }] });
   assert.equal(env.variables[0].value, undefined);
-  const profile = await environments.runtime(env.id);
+  const profile = await environments.runtime(env.id, chat);
   const worker = await buildWorkerEnvironment({ chat: { id: "x" }, store: { runtimeHome: () => root }, provider: "openai", authMode: "gateway", capability: "temporary-capability", gatewayOrigin: "http://localhost", environmentVariables: profile.variables });
   assert.equal(worker.SERVICE_TOKEN, undefined); assert.equal(worker.APP_REGION, "test-region"); assert.equal(worker.DISABLED, undefined);
   const results = await Promise.allSettled([environments.save({ ...env, variablesEnabled: false }, env.id), environments.save({ ...env, name: "Lost update" }, env.id)]);
   assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
-  assert.deepEqual((await environments.runtime(env.id)).variables, {});
+  assert.deepEqual((await environments.runtime(env.id, chat)).variables, {});
   const latest = await environments.get(env.id);
   await assert.rejects(environments.save({ ...latest, variables: [{ key: "OPENAI_API_KEY", value: "override" }] }, env.id), /managed by Agent Relay/);
   await assert.rejects(environments.save({ ...latest, variables: [{ key: "SERVICE_TOKEN", secret: false }] }, env.id), /Re-enter/);
 });
 test("GitHub validates access, redacts credentials, preserves primary order and detects revocation", async () => {
   const records = new MemoryRecords(); let revoked = false;
-  const gh = new GitHubConnection({ records, config: { localConnection: true, apiBase: "https://api.github.com" }, localToken: async () => "fixture-github-token",
+  const gh = new GitHubConnection({ records, config: { apiBase: "https://api.github.com" },
     fetchImpl: async (url, options) => {
       assert.equal(options.headers.authorization, "Bearer fixture-github-token");
       if (revoked) return Response.json({}, { status: 401 });
@@ -62,7 +64,7 @@ test("GitHub validates access, redacts credentials, preserves primary order and 
     },
   });
   assert.equal((await gh.status()).connected, false);
-  const status = await gh.connect({ method: "local", companies: ["first", "second"] }); assert.equal(status.token, undefined);
+  const status = await gh.connect({ token: "fixture-github-token", companies: ["first", "second"] }); assert.equal(status.token, undefined);
   const repos = await gh.resolveSelections([{ fullName: "Second/web", branch: "develop" }, { fullName: "First/api" }]);
   assert.equal(repos[0].fullName, "Second/web"); assert.equal(repos[0].branch, "develop");
   assert.equal(repos[0].cloneUrl.includes("fixture-github-token"), false);

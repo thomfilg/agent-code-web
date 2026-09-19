@@ -1,14 +1,18 @@
 import { EventEmitter } from "node:events";
+import { browserSelectionExpression } from "./browser-clipboard.mjs";
+import { sendBrowserFrame } from "./browser-frames.mjs";
+import { companyForChat } from "../public/company-scope.js";
+import { validCompanyId } from "./companies.mjs";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 const digest = value => createHash("sha256").update(String(value)).digest("hex");
 const failure = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const equal = (a, b) => typeof a === "string" && typeof b === "string" && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
-const allowedActions = new Set(["status", "navigate", "reload", "back", "forward", "mouse", "key", "text", "resize", "dialog", "screenshot", "snapshot", "click", "fill", "evaluate", "watch"]);
+const allowedActions = new Set(["status", "navigate", "reload", "back", "forward", "mouse", "key", "text", "resize", "dialog", "screenshot", "snapshot", "click", "fill", "evaluate", "watch", "copy"]);
 
 export class BrowserConnections extends EventEmitter {
-  constructor({ records, store, ttlMs = 3600000, now = Date.now }) {
-    super(); this.records = records; this.store = store; this.ttlMs = ttlMs; this.now = now;
+  constructor({ records, store, ttlMs = 3600000, now = Date.now, validateCompany = null }) {
+    super(); this.records = records; this.store = store; this.ttlMs = ttlMs; this.now = now; this.validateCompany = validateCompany;
     this.pairings = new Map(); this.bridges = new Map(); this.grants = new Map(); this.epochs = new Map(); this.sequence = 0; this.locks = new Map();
   }
   async locked(id, operation) {
@@ -16,9 +20,15 @@ export class BrowserConnections extends EventEmitter {
     const result = previous.then(operation), tail = result.catch(() => {}); this.locks.set(id, tail);
     try { return await result; } finally { if (this.locks.get(id) === tail) this.locks.delete(id); }
   }
-  async list(user) {
+  async requireCompany(user, companyId) {
+    if (!validCompanyId(companyId)) throw failure("Choose a registered company before pairing or sharing Chrome");
+    if (!this.validateCompany) throw failure("Company registry is unavailable", 409);
+    await this.validateCompany(user, companyId);
+  }
+  async list(user, { companyId, includeLegacy = false } = {}) {
     if (!user) return [];
-    return (await this.records.list("browser-connection")).filter(c => c.ownerId === user.id).map(c => ({ id: c.id, name: c.name, createdAt: c.createdAt,
+    if (companyId !== undefined) await this.requireCompany(user, companyId);
+    return (await this.records.list("browser-connection")).filter(c => c.ownerId === user.id && (companyId === undefined || c.companyId === companyId || includeLegacy && !c.companyId)).map(c => ({ id: c.id, name: c.name, companyId: c.companyId || null, createdAt: c.createdAt,
       paired: Boolean(c.tokenHash), online: Boolean(this.bridges.get(c.id)?.ready), tabSelected: Boolean(this.bridges.get(c.id)?.tabSelected),
       sharedChatId: this.bridges.get(c.id)?.active?.chatId || null }));
   }
@@ -29,14 +39,27 @@ export class BrowserConnections extends EventEmitter {
   }
   async pair(user, input) {
     if (!user) throw failure("Sign in to your private browser account first", 401);
+    await this.requireCompany(user, input.companyId);
+    if (input.allowUnassigned === true || input.companies?.length > 1) throw failure("A Chrome connection belongs to exactly one company");
     const name = String(input.name || "My Chrome").trim();
     if (!name || name.length > 80) throw failure("Connection name must contain 1–80 characters");
     if ((await this.list(user)).length >= 20) throw failure("Keep at most 20 browser connections");
     for (const [key, pending] of this.pairings) if (pending.expiresAt <= this.now()) this.pairings.delete(key);
     const id = `browser_${randomUUID()}`, code = randomBytes(24).toString("base64url"), expiresAt = this.now() + 5 * 60000;
-    await this.records.put("browser-connection", id, { id, ownerId: user.id, name, tokenHash: null, extensionId: null, createdAt: this.now() });
+    await this.records.put("browser-connection", id, { id, ownerId: user.id, name, companyId: input.companyId || null, tokenHash: null, extensionId: null, createdAt: this.now() });
     this.pairings.set(digest(code), { id, ownerId: user.id, expiresAt });
     return { id, code, expiresAt };
+  }
+  async assign(id, user, companyId) {
+    return this.locked(id, async () => {
+      const connection = await this.owned(id, user);
+      await this.requireCompany(user, companyId);
+      if (connection.companyId && connection.companyId !== companyId) throw failure("Remove and pair this profile again to move it to another company", 409);
+      if (this.bridges.get(id)?.active) throw failure("Turn off sharing before assigning this profile to a company", 409);
+      await this.records.put("browser-connection", id, { ...connection, companyId });
+      const bridge = this.bridges.get(id); if (bridge) bridge.connection = { ...connection, companyId };
+      return { id, companyId };
+    });
   }
   async remove(id, user) {
     return this.locked(id, async () => {
@@ -49,8 +72,17 @@ export class BrowserConnections extends EventEmitter {
     });
   }
   changed(chatId) { this.epochs.set(chatId, (this.epochs.get(chatId) || 0) + 1); this.emit("changed", chatId); }
-  info(chatId, user) {
+  bindingCurrent(grant) {
+    const chat = this.store.get(grant.chatId);
+    return Boolean(chat && !chat.archived && chat.ownerId === grant.ownerId && validCompanyId(grant.companyId) && companyForChat(chat) === grant.companyId && grant.bridge.connection.companyId === grant.companyId);
+  }
+  currentGrant(chatId) {
     const grant = this.grants.get(chatId);
+    if (grant && !this.bindingCurrent(grant)) { void this.revokeChat(chatId); return null; }
+    return grant;
+  }
+  info(chatId, user) {
+    const grant = this.currentGrant(chatId);
     return { enabled: Boolean(grant?.active && grant.ownerId === user?.id), connectionId: grant && grant.ownerId === user?.id ? grant.connectionId : null,
       privateChat: Boolean(this.store.get(chatId)?.ownerId), user: user ? { id: user.id, username: user.username } : null };
   }
@@ -59,18 +91,22 @@ export class BrowserConnections extends EventEmitter {
     if (!user || chat?.ownerId !== user.id) throw failure("Make this chat private to your account before sharing signed-in Chrome", 409);
     if (chat.archived) throw failure("Unarchive this chat before sharing Chrome", 409);
     const grant = await this.locked(connectionId, async () => {
-      await this.owned(connectionId, user); const bridge = this.bridges.get(connectionId);
+      const connection = await this.owned(connectionId, user); const bridge = this.bridges.get(connectionId);
+      if (!connection.companyId || connection.companyId !== companyForChat(chat)) throw failure("Choose a browser connection belonging to this chat's company", 403);
+      await this.requireCompany(user, connection.companyId);
+      const current = this.store.get(chatId);
+      if (!current || current.archived || current.ownerId !== user.id || companyForChat(current) !== connection.companyId) throw failure("The chat changed before Chrome sharing could start", 409);
       if (user.expiresAt && user.expiresAt <= this.now()) throw failure("Sign in again before sharing Chrome", 401);
       if (!bridge?.ready || !bridge.tabSelected) throw failure("Open the Chrome extension and reconnect first", 409);
       if (bridge.active && bridge.active.chatId !== chatId) throw failure("This Chrome connection is shared with another chat. Turn that sharing off first.", 409);
       if (this.grants.has(chatId)) throw failure("Chrome is already shared or switching. Turn sharing off before choosing another connection.", 409);
-      const grant = { id: randomBytes(24).toString("base64url"), connectionId, ownerId: user.id, chatId, bridge, active: false, viewers: new Set(), state: { running: true, mode: "personal", tabs: [] } };
+      const grant = { id: randomBytes(24).toString("base64url"), connectionId, companyId: connection.companyId, ownerId: user.id, chatId, bridge, active: false, viewers: new Set(), state: { running: true, mode: "personal", tabs: [] } };
       this.grants.set(chatId, grant); bridge.active = grant; this.changed(chatId); return grant;
     });
     try {
-      if (this.grants.get(chatId) !== grant) throw failure("Chrome sharing was cancelled", 409);
+      if (this.currentGrant(chatId) !== grant) throw failure("Chrome sharing was cancelled", 409);
       grant.state = { ...await this.request(grant.bridge, "authorize", { chatTitle: chat.title }, grant), mode: "personal" };
-      if (this.grants.get(chatId) !== grant) throw failure("Chrome sharing was cancelled", 409);
+      if (this.currentGrant(chatId) !== grant) throw failure("Chrome sharing was cancelled", 409);
       grant.active = true;
       grant.timer = setTimeout(() => { void this.revokeChat(chatId); }, Math.min(this.ttlMs, user.expiresAt ? user.expiresAt - this.now() : this.ttlMs)); grant.timer.unref?.();
       this.changed(chatId);
@@ -99,21 +135,21 @@ export class BrowserConnections extends EventEmitter {
     });
   }
   async command(chatId, action, params = {}) {
-    const grant = this.grants.get(chatId);
+    const grant = this.currentGrant(chatId);
     if (!grant?.active) throw failure("Signed-in Chrome sharing is not enabled", 409);
     if (["newTab", "selectTab", "closeTab"].includes(action)) throw failure("Personal Chrome shares only its separate automation tab, never your existing tabs. Navigate this tab or switch to guest Chrome.");
     if (!allowedActions.has(action)) throw failure("Unsupported personal browser action");
-    const result = await this.request(grant.bridge, action, params, grant);
-    if (!grant.active || this.grants.get(chatId) !== grant) throw failure("Signed-in browser access revoked");
+    const result = await this.request(grant.bridge, action === "copy" ? "evaluate" : action, action === "copy" ? { expression: browserSelectionExpression } : params, grant);
+    if (!grant.active || this.currentGrant(chatId) !== grant) throw failure("Signed-in browser access revoked");
     return result;
   }
   async attachViewer(chatId, socket) {
-    const grant = this.grants.get(chatId);
+    const grant = this.currentGrant(chatId);
     if (!grant?.active) throw failure("Signed-in Chrome sharing is not enabled");
     grant.viewers.add(socket);
     this.emit("viewers", chatId);
     const send = value => { if (socket.readyState === 1) socket.send(JSON.stringify(value)); };
-    send({ event: "status", value: grant.state });
+    send({ event: "status", value: { ...grant.state, clipboard: true } });
     let pending = 0;
     socket.on("message", data => {
       let input; try { input = JSON.parse(data); } catch { socket.close(1008, "Invalid input"); return; }
@@ -175,8 +211,12 @@ export class BrowserConnections extends EventEmitter {
       }
       const grant = bridge.active;
       if (!grant?.active || message.grantId !== grant.id || !["status", "frame", "dialog"].includes(message.event)) return;
+      if (this.currentGrant(grant.chatId) !== grant) return;
       if (message.event === "status") grant.state = { ...message.value, mode: "personal" };
-      for (const viewer of grant.viewers) if (viewer.readyState === 1 && viewer.bufferedAmount < 2 * 1024 * 1024) viewer.send(JSON.stringify({ event: message.event, value: message.event === "status" ? grant.state : message.value }));
+      for (const viewer of grant.viewers) if (viewer.readyState === 1) {
+        if (message.event === "frame") sendBrowserFrame(viewer, message.value);
+        else viewer.send(JSON.stringify({ event: message.event, value: message.event === "status" ? { ...grant.state, clipboard: true } : message.value }));
+      }
     });
     socket.once("close", () => {
       clearTimeout(deadline); clearInterval(heartbeat);

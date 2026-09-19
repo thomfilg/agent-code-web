@@ -11,7 +11,7 @@ export class ChromeBrowser extends EventEmitter {
   constructor({ executable = "google-chrome", profile = null } = {}) {
     super(); this.executable = executable; this.profile = profile;
     this.pending = new Map(); this.sequence = 0; this.viewport = { width: 1280, height: 800 }; this.watching = false;
-    this.layoutQueue = Promise.resolve(); this.captureVersion = 0; this.lastCaptureAt = 0;
+    this.layoutQueue = Promise.resolve(); this.captureVersion = 0; this.lastFrameAt = 0;
   }
   async start() {
     this.directory = this.profile || await mkdtemp(path.join(os.tmpdir(), "relay-chrome-"));
@@ -56,7 +56,13 @@ export class ChromeBrowser extends EventEmitter {
     }
     if (message.method === "Page.screencastFrame") {
       void this.call("Page.screencastFrameAck", { sessionId: message.params.sessionId }, message.sessionId).catch(() => {});
-      if (this.watching && message.sessionId === this.sessionId) this.requestFrame();
+      if (this.watching && !this.dialogOpen && !this.capturing && message.sessionId === this.sessionId) {
+        const { data, metadata } = message.params;
+        // Frames from a stopped stream can arrive after a resize. Never label
+        // an old bitmap with the new CSS viewport or draw over an idle refine.
+        if (metadata?.timestamp < this.streamStartedAt || metadata?.deviceWidth !== this.viewport.width || metadata?.deviceHeight !== this.viewport.height) return;
+        this.streamFrame(data);
+      }
     }
     if (message.sessionId === this.sessionId) {
       if (message.method === "Page.javascriptDialogOpening") { this.dialogOpen = true; this.emit("dialog", message.params); }
@@ -85,7 +91,7 @@ export class ChromeBrowser extends EventEmitter {
     const { targetInfos } = await this.call("Target.getTargets");
     return targetInfos.filter(tab => tab.type === "page").map(tab => ({ id: tab.targetId, title: tab.title.slice(0, 300), url: tab.url.slice(0, 4000) }));
   }
-  async status() { return { running: !this.failed, tabId: this.tabId, tabs: await this.tabs(), viewport: this.viewport, mode: "guest", captureVersion: 2 }; }
+  async status() { return { running: !this.failed, tabId: this.tabId, tabs: await this.tabs(), viewport: this.viewport, mode: "guest", captureVersion: 3 }; }
   updateLayout(action) {
     const pending = this.layoutQueue.then(action);
     this.layoutQueue = pending.catch(() => {}); return pending;
@@ -121,37 +127,51 @@ export class ChromeBrowser extends EventEmitter {
     return this.viewport;
   }
   watch(enabled) { return this.updateLayout(() => this.setWatching(enabled)); }
+  streamFrame(data) {
+    if (data === this.pendingStream?.data || !this.pendingStream && data === this.lastStreamData) return;
+    this.pendingStream = { data, mimeType: "image/jpeg", ...this.viewport };
+    this.requestFrame();
+    if (this.streamTimer) return;
+    const startedAt = this.streamStartedAt;
+    const flush = () => {
+      this.streamTimer = null; const frame = this.pendingStream; this.pendingStream = null;
+      if (!frame || !this.watching || this.capturing || this.dialogOpen || this.streamStartedAt !== startedAt || frame.data === this.lastStreamData) return;
+      this.lastFrameAt = Date.now(); this.lastStreamData = frame.data; this.emit("frame", frame);
+    };
+    const delay = Math.max(0, 32 - (Date.now() - this.lastFrameAt));
+    if (delay) this.streamTimer = setTimeout(flush, delay); else flush();
+  }
   async setWatching(enabled) {
     this.watching = Boolean(enabled);
-    this.captureVersion++; clearTimeout(this.captureTimer); this.captureTimer = null; this.frameRequested = false;
+    this.captureVersion++; clearTimeout(this.captureTimer); this.captureTimer = null;
+    clearTimeout(this.streamTimer); this.streamTimer = null; this.pendingStream = null; this.lastStreamData = null;
     await this.page("Page.stopScreencast").catch(() => {});
     if (this.watching) {
-      // CDP screencasts downsample to 1x even with a high-DPI viewport. Use them
-      // only as repaint notifications; transmit native-resolution PNG captures.
-      await this.page("Page.startScreencast", { format: "png", maxWidth: this.viewport.width, maxHeight: this.viewport.height, everyNthFrame: 1 });
+      // Use Chrome's compressed stream while interacting. Full-resolution PNG
+      // is an idle refinement, not a prerequisite for every input or repaint.
+      this.lastFrameAt = 0; this.lastStreamData = null; this.streamStartedAt = Date.now() / 1000;
+      await this.page("Page.startScreencast", { format: "jpeg", quality: 75, maxWidth: this.viewport.width, maxHeight: this.viewport.height, everyNthFrame: 1 });
       this.requestFrame();
     }
     return { watching: this.watching };
   }
   requestFrame() {
     if (!this.watching || this.closing || this.dialogOpen) return;
-    this.frameRequested = true;
-    if (this.captureTimer || this.capturing) return;
+    const version = ++this.captureVersion;
+    clearTimeout(this.captureTimer);
     this.captureTimer = setTimeout(() => {
-      this.captureTimer = null; this.frameRequested = false; this.capturing = true;
-      this.lastCaptureAt = Date.now();
+      this.captureTimer = null;
       // Chrome temporarily adjusts its surface during capture. Serialize with
       // viewport changes and input so its cleanup cannot undo a later resize.
       void this.updateLayout(async () => {
-        if (!this.watching || this.closing || this.dialogOpen) return;
-        const version = this.captureVersion, viewport = { ...this.viewport };
-        const { data } = await this.page("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
-        if (this.watching && !this.closing && version === this.captureVersion) { this.captureError = null; this.emit("frame", { data, mimeType: "image/png", ...viewport }); }
-      }).catch(error => { this.captureError = error.message; }).finally(() => {
-        this.capturing = false;
-        if (this.frameRequested) this.requestFrame();
-      });
-    }, Math.max(0, 100 - (Date.now() - this.lastCaptureAt)));
+        if (!this.watching || this.closing || this.dialogOpen || this.interactions || version !== this.captureVersion) return;
+        const viewport = { ...this.viewport }; this.capturing = true;
+        try {
+          const { data } = await this.page("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+          if (this.watching && !this.closing && version === this.captureVersion) { this.captureError = null; this.emit("frame", { data, mimeType: "image/png", ...viewport }); }
+        } finally { this.capturing = false; }
+      }).catch(error => { this.captureError = error.message; });
+    }, 350);
   }
   async evaluate(expression) {
     if (typeof expression !== "string" || expression.length > 30000) throw new Error("Invalid browser expression");
@@ -160,6 +180,12 @@ export class ChromeBrowser extends EventEmitter {
     return result.result?.value ?? null;
   }
   async command(action, params = {}) {
+    const input = ["mouse", "key", "text", "navigate", "reload", "back", "forward"].includes(action);
+    if (input) { this.interactions = (this.interactions || 0) + 1; this.requestFrame(); }
+    try { return await this.dispatchCommand(action, params); }
+    finally { if (input) { this.interactions--; this.requestFrame(); } }
+  }
+  async dispatchCommand(action, params = {}) {
     switch (action) {
       case "status": return this.status();
       case "watch": return this.watch(params.enabled);
@@ -172,7 +198,7 @@ export class ChromeBrowser extends EventEmitter {
         if (result.errorText) throw new Error(result.errorText);
         return { url: url.href };
       }
-      case "reload": await this.updateLayout(() => this.page("Page.reload")); return {};
+      case "reload": await this.updateLayout(() => this.page("Page.reload", { ignoreCache: params.ignoreCache === true })); return {};
       case "back": case "forward": {
         const history = await this.page("Page.getNavigationHistory");
         const entry = history.entries[history.currentIndex + (action === "back" ? -1 : 1)];
@@ -231,7 +257,7 @@ export class ChromeBrowser extends EventEmitter {
   async stop() {
     if (this.closing) return this.stopping;
     this.closing = true;
-    this.watching = false; this.captureVersion++; clearTimeout(this.captureTimer);
+    this.watching = false; this.captureVersion++; clearTimeout(this.captureTimer); clearTimeout(this.streamTimer); this.pendingStream = null; this.lastStreamData = null;
     this.stopping = (async () => {
       clearTimeout(this.tabsTimer);
       if (this.child?.pid && this.child.exitCode === null && !this.child.signalCode) {
@@ -250,8 +276,14 @@ export class ChromeBrowser extends EventEmitter {
 export async function runBrowserWorker() {
   const browser = new ChromeBrowser({ executable: process.env.AGENT_CHROME_BIN || "google-chrome" });
   const send = message => { if (!process.stdout.destroyed) process.stdout.write(JSON.stringify(message) + "\n"); };
+  let latestFrame = null, writingFrame = false;
+  const flushFrame = () => {
+    if (writingFrame || !latestFrame || process.stdout.destroyed) return;
+    const value = latestFrame; latestFrame = null; writingFrame = true;
+    process.stdout.write(JSON.stringify({ event: "frame", value }) + "\n", () => { writingFrame = false; flushFrame(); });
+  };
   for (const type of ["status", "dialog", "closed"]) browser.on(type, value => send({ event: type, value }));
-  browser.on("frame", value => { if (process.stdout.writableLength < 2 * 1024 * 1024) send({ event: "frame", value }); });
+  browser.on("frame", value => { latestFrame = value; flushFrame(); });
   const close = async () => { await browser.stop(); process.exit(0); };
   process.once("SIGTERM", close); process.once("SIGINT", close);
   try { send({ event: "ready", value: await browser.start() }); }
