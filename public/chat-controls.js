@@ -35,8 +35,16 @@ export class ChatControls {
     $("#open-workspace").addEventListener("click", () => this.workspace());
     $("#show-connectors").addEventListener("click", () => this.connectors());
     document.querySelectorAll("[data-agent-mode]").forEach(node => node.addEventListener("click", async () => {
-      try { const { chat } = await this.api(`/api/chats/${this.state.active.id}/mode`, { method: "PATCH", body: JSON.stringify({ mode: node.dataset.agentMode }) }); this.updated(chat); $("#mode-menu").open = false; }
+      if (this.modeChanging) return;
+      const chatId = this.state.active.id;
+      this.modeChanging = true;
+      document.querySelectorAll("[data-agent-mode]").forEach(button => { button.disabled = true; });
+      try {
+        const { chat } = await this.api(`/api/chats/${chatId}/mode`, { method: "PATCH", body: JSON.stringify({ mode: node.dataset.agentMode }) });
+        if (this.state.active?.id === chatId) { this.updated(chat); $("#mode-menu").open = false; }
+      }
       catch (error) { this.toast(error.message); }
+      finally { this.modeChanging = false; document.querySelectorAll("[data-agent-mode]").forEach(button => { button.disabled = false; }); }
     }));
     $("#add-attachments").addEventListener("click", () => $("#attachment-input").click());
     $("#attachment-input").addEventListener("change", event => this.attach(event.target.files));

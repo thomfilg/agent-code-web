@@ -36,6 +36,7 @@ function transport(f) {
   f.respond = packet => {
     let response = {};
     if (packet.request.subtype === "initialize" && f.initializeSnapshot) response = f.initializeSnapshot;
+    if (packet.request.subtype === "set_permission_mode") response = f.modeAck ?? { mode: packet.request.mode };
     if (f.mcp && packet.request.subtype === "mcp_toggle" && f.refuse !== "mcp_toggle") {
       f.mcp.find(server => server.name === packet.request.serverName).status = packet.request.enabled ? "connected" : "disabled";
     }
@@ -652,6 +653,62 @@ test("workflow completion racing stop_task also waits for cancellation of its ne
   f.emit({ type: "result", session_id: f.nativeSession, origin: { kind: "task-notification" }, subtype: "error_during_execution", is_error: true });
   await stopping; assert.equal(f.adapter.isBackgroundBusy(), false); assert.equal(f.child.exitCode, null);
   assert.equal(f.inputs.length, 1); assert(!f.events.some(event => event.type === "background_response" && event.failed));
+});
+
+test("Manual to Auto changes the active Claude session through native control, never auto-approves a pending tool", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Inspect the fixture", { mode: "default" }); await nativeTurnStarted(f);
+  f.emit({ type: "control_request", request_id: "pending-bash", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "grep example fixture.txt" } } });
+  await waitFor(() => f.requests.length === 1);
+  f.hold = "set_permission_mode";
+  let acknowledged = false;
+  const changing = f.adapter.setPermissionMode("auto").then(value => { acknowledged = value; });
+  await waitFor(() => f.controls.some(packet => packet.request.subtype === "set_permission_mode"));
+  assert.equal(acknowledged, false);
+  const packet = f.controls.find(packet => packet.request.subtype === "set_permission_mode");
+  assert.deepEqual(packet.request, { subtype: "set_permission_mode", mode: "auto" });
+  f.respond(packet); await changing;
+  assert.equal(acknowledged, true); assert.equal(f.launches.length, 1); assert.equal(f.inputs.length, 1);
+  assert.deepEqual(f.permissionReplies || [], [], "Selecting Auto is not an allow reply or a bypass");
+  f.emit({ type: "control_cancel_request", request_id: "pending-bash" });
+  await assert.rejects(f.adapter.respond(f.requests[0].requestId, { decision: "accept" }), /no longer active/);
+  f.complete(); await running;
+});
+
+test("live permission controls reject unavailable, unsupported and stopped native sessions", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  await assert.rejects(f.adapter.setPermissionMode("bypassPermissions"), /Unsupported/);
+  assert.equal(await f.adapter.setPermissionMode("auto"), false, "An idle adapter does not launch a process to change defaults");
+  const running = f.adapter.send("Held turn", { mode: "default" }); await nativeTurnStarted(f);
+  f.refuse = "set_permission_mode";
+  await assert.rejects(f.adapter.setPermissionMode("auto"), /could not confirm/);
+  f.refuse = null;
+  for (const modeAck of [{}, { mode: "default" }]) {
+    f.modeAck = modeAck;
+    await assert.rejects(f.adapter.setPermissionMode("auto"), /could not confirm/);
+  }
+  f.modeAck = null; f.hold = "set_permission_mode";
+  const count = f.controls.length;
+  const changed = f.adapter.setPermissionMode("auto"), rejected = assert.rejects(changed, /confirm|starting or changed/);
+  const stopped = assert.rejects(running, /interrupted/);
+  await waitFor(() => f.controls.length > count);
+  await f.adapter.stop(); await rejected; await stopped;
+  assert.deepEqual(f.permissionReplies || [], []);
+});
+
+test("permission acknowledgement ordering survives status frames in the same stdout chunk", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const observed = []; let acknowledged = false;
+  const running = f.adapter.send("Held turn", { mode: "default", onPermissionMode: mode => observed.push({ mode, acknowledged }) });
+  await nativeTurnStarted(f); f.hold = "set_permission_mode";
+  const changing = f.adapter.setPermissionMode("auto", () => {}, () => { acknowledged = true; });
+  await waitFor(() => f.controls.some(packet => packet.request.subtype === "set_permission_mode"));
+  const packet = f.controls.find(packet => packet.request.subtype === "set_permission_mode");
+  const status = permissionMode => ({ type: "system", subtype: "status", status: null, session_id: f.nativeSession, permissionMode });
+  f.child.stdout.write([status("plan"), { type: "control_response", response: { subtype: "success", request_id: packet.request_id, response: { mode: "auto" } } }, status("default")].map(event => JSON.stringify(event) + "\n").join(""));
+  await changing;
+  assert.deepEqual(observed, [{ mode: "plan", acknowledged: false }, { mode: "default", acknowledged: true }]);
+  f.complete(); await running;
 });
 
 test("private ordinary turns use live native approvals and close their transport after the reply", async t => {
