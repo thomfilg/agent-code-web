@@ -3,7 +3,7 @@
 This branch builds on the historically unwired proxy receipt in
 `official-browser-mcp-policy-validation.md`. That receipt's nine passing tests
 apply to its original partition, not to this new integration. New integration
-validation is recorded below; independent review is pending. Do not infer
+validation and independent review are recorded below. Do not infer
 deployment approval from this note.
 
 ## Actual caller and ownership
