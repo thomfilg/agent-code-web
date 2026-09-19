@@ -36,6 +36,17 @@ function gatewayArgs(origin) {
   ];
 }
 
+function safeToolJson(value) {
+  if (value == null) return "";
+  // Transport already strips known account/capability credentials. Tool arguments
+  // can also contain user-supplied credentials under structured secret keys.
+  return redact(JSON.stringify(value, (key, field) => {
+    const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+    return /^(?:password|passwd|authorization|proxyauthorization|cookie|setcookie|apikey|secret|clientsecret|token|accesstoken|refreshtoken|idtoken|bearertoken|sessiontoken|credentials)$/.test(normalized)
+      ? "[redacted]" : field;
+  }, 2));
+}
+
 function safeToolEvent(item, state) {
   if (!item || typeof item !== "object") return null;
   if (item.type === "commandExecution") {
@@ -61,13 +72,23 @@ function safeToolEvent(item, state) {
     };
   }
   if (item.type === "mcpToolCall" || item.type === "dynamicToolCall") {
+    const completed = state === "completed";
+    const result = item.type === "mcpToolCall"
+      ? (item.result == null ? null : { content: item.result.content, structuredContent: item.result.structuredContent })
+      : item.contentItems;
+    // MCP _meta is provider-internal metadata, not the user-visible tool result.
+    const error = typeof item.error?.message === "string" ? redact(item.error.message) : "";
+    const output = completed ? [safeToolJson(result), error ? `Error: ${error}` : ""].filter(Boolean).join("\n") : "";
     return {
       type: "tool",
       tool: item.type,
       state,
       itemId: item.id,
       title: redact(item.tool || item.name || "Tool call"),
-      output: state === "completed" ? redact(JSON.stringify(item.result ?? item.contentItems ?? "")).slice(-16_000) : "",
+      input: safeToolJson(item.arguments).slice(0, 16_000),
+      output: output.slice(-16_000),
+      failed: completed && (item.status === "failed" || item.error != null || item.success === false),
+      resultMissing: completed && result == null && !error,
     };
   }
   return null;
