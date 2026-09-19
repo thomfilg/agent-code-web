@@ -95,3 +95,84 @@ acceptance. Personal projection must enforce target/frame/session ownership and
 exclude other tabs, browser-global profile APIs and credentials. This receipt
 does not establish controller restart recovery, hibernation, production
 availability, or complete official-tool coverage.
+
+## Next implementation: single-tab personal CDP projection (plan only)
+
+Ownership must follow the **individual active sharing grant**, not the paired
+profile. Existing source seams, inspected read-only against the integration:
+
+- `BrowserConnections.enable/currentGrant/request/accept/revokeChat` in
+  `src/browser-connections.mjs` own the grant, bridge, pending requests and
+  immediate invalidation. Add a private grant-scoped projection transport here;
+  do not expose a generic `chrome.*` RPC or a profile CDP URL.
+- `authorize`, `cdp`, `chrome.debugger.onEvent` and `revoke` in
+  `chrome-extension/worker.js` already own the extension-created automation tab.
+  Extend this boundary with independently validated method/argument routing and
+  scoped events. Never enumerate or attach unrelated existing tabs.
+- `SharedBrowsers.handle` in `src/shared-browser.mjs` is the eventual outer MCP
+  gateway. Its trusted context provider would attach matching Playwright only to
+  the projected connection. The `personal.on("changed")` listener in
+  `src/server.mjs` must immediately fence the matching proxy. Current personal
+  `bindingCurrent` checks owner/company/chat, but not the named agent account,
+  environment or their revisions: integration must add those authority checks
+  before granting this path. Pairing credentials stay on the controller and
+  extension, never in model tools or the worker.
+
+The pinned Playwright core bundle contains a reference extension `BrowserModel`
+and `ExtensionProtocolV2`. They illustrate CDP session mechanics but are **not a
+safe policy to reuse**: the reference model tracks all known tabs, auto-attaches
+them, and forwards browser-global commands through any attached tab. Stock
+official extension mode is therefore not this implementation plan.
+
+The projection needs a minimal virtual browser root that synthesizes version and
+sole-target discovery/attachment. Virtual target/session IDs map immutably to the
+one grant and extension-owned tab. A descendant OOPIF session may enter the map
+only through a verified extension event from an already-authorized parent;
+foreign targets and worker/service-worker/shared-worker targets remain denied.
+Every command, result and event must validate the current grant generation.
+
+Do not forward browser-global APIs: cookie/storage/profile access, arbitrary
+target discovery/attachment, target or context creation, browser shutdown,
+downloads/filesystem configuration, or operations on other tabs. Unsupported
+commands must fail explicitly; a synthetic acknowledgement is appropriate only
+for a documented compatibility operation with no real side effect, never as an
+excuse to claim a requested security policy was enforced.
+
+Actual pinned Chromium attachment initializes page/frame state, runtime worlds,
+lifecycle events, network observation and auto-attachment. A strict per-method
+parameter policy must cover those required operations without unrestricted
+domain forwarding. Frame/context/object/session handles require ownership maps;
+network headers, cookie metadata, console payloads and unrelated events must not
+leak through initialization or event forwarding. Bound pending requests, event
+buffers and results; never log raw private payloads.
+
+Playwright's internal page evaluation is needed for locators and snapshots. It
+must remain a private trusted-adapter operation; the personal outer
+`browser_evaluate` tool remains denied. This is not a guarantee against reading
+secrets visibly rendered in the explicitly authorized webpage. The extension's
+existing Relay-hostname navigation/subresource protection remains authoritative:
+Playwright must not disable or bypass its Fetch interception. Similarly,
+screencast ownership must not silently move away from the user's shared viewport.
+
+The first usable acceptance slice must call the **actual official MCP** through
+the normal product gateway against a disposable extension-authorized tab, while
+other test tabs and fake profile data remain inaccessible. Required evidence:
+
+1. Snapshot, click, typing and navigation act on the same tab the user sees;
+   discovery does not create or authorize a tab.
+2. Direct unsafe tool names and forbidden CDP methods fail; foreign target,
+   frame, context, object and session IDs cannot escape the ownership maps.
+3. Popups, OOPIF transitions, redirects and Relay-hostname subresources preserve
+   containment and existing protection; unsupported targets fail closed.
+4. Account/company/environment/attempt changes, grant revoke, and bridge loss
+   synchronously fence dispatch and stale results, close the projected link and
+   detach only the authorized automation tab. No reconnect grants access again,
+   retries a mutation, or falls back to guest/host Chrome.
+5. A disposable multi-tab profile with seeded fake cookies/storage verifies the
+   isolation boundary without using any real personal profile or credential.
+6. Selected Codex and Claude product callers use the official gateway successfully
+   under explicit acceptance consent; a standalone harness is not completion.
+
+This plan changes neither current Chrome grants nor product routing. Real CDP
+compatibility under these restrictions is still an implementation and acceptance
+gate. Personal execution remains unavailable in this partition until it passes.
