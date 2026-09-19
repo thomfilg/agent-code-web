@@ -8,7 +8,8 @@ const node = (tag, text, className = "") => { const value = document.createEleme
 
 export class AgentThreadsPanel {
   constructor({ api, getChat, toast, onPreview }) {
-    Object.assign(this, { api, getChat, toast, onPreview }); this.version = 0; this.drafts = new Map(); this.requests = new Map();
+    Object.assign(this, { api, getChat, toast, onPreview }); this.version = 0; this.chatEpoch = 0;
+    this.drafts = new Map(); this.draftEdits = new Map(); this.requests = new Map();
     this.panel = $("#agents-panel"); this.input = $("#agents-input"); this.messages = $("#agents-messages"); this.picker = $("#agents-picker");
     this.list = $("#agents-list"); this.dialog = $("#agent-conversation-dialog");
     $("#close-agent-conversation").onclick = () => this.dialog.close();
@@ -25,7 +26,10 @@ export class AgentThreadsPanel {
     $("#agents-latest").onclick = () => this.select(this.selected).catch(error => toast(error.message));
     $("#agents-form").onsubmit = event => { event.preventDefault(); void this.send(); };
     $("#agents-stop").onclick = () => this.action("stop").catch(error => toast(error.message));
-    this.input.oninput = () => this.saveDraft();
+    this.input.oninput = () => {
+      if (this.selected) this.draftEdits.set(this.key(), (this.draftEdits.get(this.key()) || 0) + 1);
+      this.saveDraft();
+    };
     this.input.onkeydown = event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); void this.send(); } };
   }
   key(id = this.selected) { return `${this.scope}:${this.snapshot?.rootThreadId}:${id}`; }
@@ -37,6 +41,7 @@ export class AgentThreadsPanel {
     const scope = JSON.stringify([chat?.id, chat?.ownerId, chat?.agent, chat?.agentAccountId, chat?.environmentId, chat?.workspace, companyForChat(chat || {})]);
     const identity = `${scope}:${chat?.agentSessionId}`;
     if (this.identity === identity) return;
+    this.chatEpoch++;
     if (this.scope === scope && !this.nativeRoot) { this.nativeRoot = chat?.agentSessionId; this.identity = identity; return; }
     this.saveDraft(); this.version++; this.identity = identity; this.chatId = chat?.id;
     this.scope = scope; this.dialog.close();
@@ -51,57 +56,64 @@ export class AgentThreadsPanel {
     this.snapshot = snapshot; this.render();
   }
   async refresh() {
-    const chatId = this.chatId, identity = this.identity, previous = this.snapshot;
+    const chatId = this.chatId, epoch = this.chatEpoch, previous = this.snapshot;
     if (!chatId || !["codex", "claude"].includes(this.getChat()?.agent)) return;
     try {
       const snapshot = await this.api(`/api/chats/${chatId}/subagents`);
-      if (identity === this.identity && (previous === this.snapshot || snapshot.epoch === this.snapshot?.epoch)) this.update(snapshot, chatId);
+      if (epoch === this.chatEpoch && (previous === this.snapshot || snapshot.epoch === this.snapshot?.epoch)) this.update(snapshot, chatId);
     } catch { /* Opening reports errors; SSE reconnect can retry safely. */ }
   }
   async open() {
-    const chatId = this.chatId, identity = this.identity, version = ++this.version, previous = this.snapshot;
+    const chatId = this.chatId, epoch = this.chatEpoch, version = ++this.version, previous = this.snapshot;
     if (!chatId) throw new Error("Select a chat first");
     openSidePanel("agents");
     const snapshot = await this.api(`/api/chats/${chatId}/subagents`);
-    if (identity !== this.identity || version !== this.version) return;
+    if (epoch !== this.chatEpoch || version !== this.version) return;
     if (previous === this.snapshot || snapshot.epoch === this.snapshot?.epoch) this.update(snapshot, chatId);
     if (!this.panel.hidden) (this.list.querySelector("button") || $("#agents-refresh")).focus();
   }
   async connect() {
-    const chatId = this.chatId, identity = this.identity;
+    const chatId = this.chatId, epoch = this.chatEpoch, previous = this.snapshot;
     if (this.connecting) return;
     this.connecting = true; this.render();
-    try { const snapshot = await this.api(`/api/chats/${chatId}/subagents`, { method: "POST" }); if (identity === this.identity) this.update(snapshot, chatId); }
+    try {
+      const snapshot = await this.api(`/api/chats/${chatId}/subagents`, { method: "POST" });
+      if (epoch === this.chatEpoch && (previous === this.snapshot || snapshot.epoch === this.snapshot?.epoch)) this.update(snapshot, chatId);
+    }
     finally { this.connecting = false; this.render(); }
   }
   async select(id, cursor = null) {
     this.saveDraft();
     if (!id) { this.selected = null; this.hide(); return; }
-    const chatId = this.chatId, version = ++this.version;
+    const chatId = this.chatId, version = ++this.version, epoch = this.snapshot?.epoch;
     this.selected = id; this.page = null; this.input.value = this.drafts.get(this.key(id)) || ""; this.render();
     if (!this.dialog.open) this.dialog.showModal();
     if (!this.snapshot?.awake) return; // Cached messages do not wake a worker.
     const result = await this.action("select", { cursor });
-    if (this.chatId !== chatId || this.selected !== id || version !== this.version) return;
+    if (this.chatId !== chatId || this.selected !== id || version !== this.version || epoch !== this.snapshot?.epoch) return;
     if (cursor) this.page = result.page;
     this.render(); if (!cursor) { this.messages.scrollTop = this.messages.scrollHeight; (this.agent === "claude" ? $("#close-agent-conversation") : this.input).focus(); }
   }
   async action(action, payload = {}) {
-    const chatId = this.chatId, identity = this.identity, threadId = this.selected, rootThreadId = this.snapshot?.rootThreadId;
+    const chatId = this.chatId, epoch = this.chatEpoch, previous = this.snapshot, threadId = this.selected, rootThreadId = this.snapshot?.rootThreadId;
     if (!threadId || !rootThreadId) throw new Error("Choose an agent thread first");
     const result = await this.api(`/api/chats/${chatId}/subagents/${action}`, { method: "POST", body: JSON.stringify({ ...payload, threadId, rootThreadId }) });
-    if (identity === this.identity) this.update(result, chatId); return result;
+    if (epoch === this.chatEpoch && (previous === this.snapshot || result.epoch === this.snapshot?.epoch)) this.update(result, chatId); return result;
   }
   async send() {
-    const text = this.input.value.trim(), key = this.key();
+    const text = this.input.value.trim(), key = this.key(), edit = this.draftEdits.get(key) || 0;
     if (!text || this.sending || !this.current() || !this.snapshot?.awake || this.agent === "claude" || this.current().canAcceptDirectInput === false) return;
     let attempt = this.requests.get(key);
     if (!attempt || attempt.text !== text) { attempt = { text, requestId: crypto.randomUUID() }; this.requests.set(key, attempt); }
     this.sending = true; this.render();
     try {
       await this.action("messages", attempt);
-      if (this.drafts.get(key)?.trim() === text) this.drafts.set(key, "");
-      if (this.key() === key && this.input.value.trim() === text) { this.input.value = ""; this.saveDraft(); }
+      // Equal text is not necessarily the submitted draft: the user may have
+      // returned to this chat and typed it again while the receipt was pending.
+      if ((this.draftEdits.get(key) || 0) === edit) {
+        if (this.drafts.get(key)?.trim() === text) this.drafts.set(key, "");
+        if (this.key() === key && this.input.value.trim() === text) { this.input.value = ""; this.saveDraft(); }
+      }
       this.requests.delete(key);
     } catch (error) { this.toast(error.message); }
     finally { this.sending = false; this.render(); }
