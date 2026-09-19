@@ -30,3 +30,11 @@ Focused browser: 6/6 passed (25.4 s), no retries, covering older-message jumps, 
 That native run passed with 12 loopback requests, including its original run/verify/Stop/resume assertions. Actual native result frames were observed, not manufactured by the test.
 
 Final compatibility: **163/163 passed**, zero skipped/cancelled, 34.1 s, across message search, Claude sessions, Codex message boundaries, Codex import files/runtime, runtime manager, message window and follow behavior. This includes the final defensive Codex interrupt-request guard and all eight search tests. No whole-application suite or production deployment is claimed by this component receipt.
+
+### Integration follow-up: coherent live snapshots and keyboard focus
+
+The larger integrated browser run exposed two failing search cases: the test injected synthetic messages into HTTP responses while leaving SSE attached to the canonical empty fixture chat. Trace records confirm real event streams opened after HTTP navigation, but do not retain their event bodies; an exact observed SSE revision is therefore not claimed. The fixture now supplies the same chat snapshot through both transports and waits for a snapshot on the newly opened EventSource, not a reconnect count from its predecessor.
+
+A source review also identified that replacing the transcript DOM discarded the focused message article. The narrow renderer fix restores only that article's same-chat/message focus when the browser has fallen back to the body; nested controls and the composer keep their independent focus behavior. No pre-fix failing focus run is claimed. The regression deliberately delivers another live snapshot after the jumped-to message becomes visible and retains viewport, focus, draft and no-wake/no-send assertions; another case moves to the composer first and proves the snapshot does not steal focus.
+
+The updated seven-case search browser suite passed **7/7**, 14.6 s. Both original failing jump cases then passed three explicit repetitions each: **6/6**, 15.3 s. Both runs used one worker and zero retries. This follow-up changes only transcript focus behavior and test fixtures; the earlier backend/native provenance receipts remain separately scoped.

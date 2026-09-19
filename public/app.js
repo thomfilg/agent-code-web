@@ -180,6 +180,11 @@ function renderMessages() {
   renderWorkingStatus();
   if (!state.active) return;
   const changedChat = messageWindow.chatId !== state.active.id;
+  // Search and message navigation focus the article itself. Keep that exact
+  // anchor through live rerenders, without capturing nested links/buttons or
+  // stealing focus from the composer (tool controls restore their own focus).
+  const focusedMessage = !changedChat && document.activeElement?.matches(".message") && elements.messages.contains(document.activeElement)
+    ? { chatId: state.active.id, messageId: document.activeElement.dataset.messageId } : null;
   const render = messageFollow.begin({ reset: changedChat });
   const oldTop = elements.messages.getBoundingClientRect().top;
   const anchor = [...elements.messages.querySelectorAll(".message")].find(n => n.getBoundingClientRect().bottom > oldTop + 10);
@@ -204,6 +209,10 @@ function renderMessages() {
   }
   toolActivity.restoreInlineFocus();
   messageNavigator.update();
+  if (focusedMessage?.chatId === state.active.id && document.activeElement === document.body) {
+    const retained = [...elements.messages.querySelectorAll(".message")].find(element => element.dataset.messageId === focusedMessage.messageId);
+    if (retained) { retained.tabIndex = -1; retained.focus({ preventScroll: true }); }
+  }
   if (!render.follow && anchorId) {
     const retained = [...elements.messages.querySelectorAll(".message")].find(n => n.dataset.messageId === anchorId);
     if (retained) elements.messages.scrollTop += retained.getBoundingClientRect().top - elements.messages.getBoundingClientRect().top - anchorOffset;
