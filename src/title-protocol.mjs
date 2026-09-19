@@ -45,28 +45,73 @@ export function titlePrompt(prompt) {
 }
 
 export function extractTitle(text) {
-  const match = /^\s*<relay-title>([^\r\n]*?)<\/relay-title>\s*\n?/i.exec(text);
-  if (!match) return { text, title: null };
-  const title = match[1].trim().replace(/[\x00-\x1f<>]/g, "").slice(0, 120);
-  return { text: text.slice(match[0].length), title: title || null };
+  const output = { text: "", title: null };
+  const stream = new TitleStream(event => {
+    if (event.type === "title") output.title = event.title;
+    else output.text += event.delta;
+  });
+  stream.delta(text); stream.flush(); return output;
 }
 
+const titleOpen = "<relay-title>";
+const titleLine = /^<relay-title>([^<>\r\n]*)<\/relay-title>[ \t]*(?:\r?\n)?$/i;
+const titleLimit = 1000;
+
+// Reserved metadata is a standalone line, not an arbitrary tag in prose or a
+// quoted/code example. Keep only a bounded possible metadata prefix; ordinary
+// text is emitted on every delta, including lines without a trailing newline.
 export class TitleStream {
-  constructor(emit) { this.emit = emit; this.buffer = ""; this.decided = false; }
+  constructor(emit) {
+    Object.assign(this, { emit, buffer: "", line: "", lineOverflow: false, fence: null, inlineTicks: 0, lineInline: 0, tickRun: 0, escaped: false });
+  }
+  visible(text) {
+    for (const char of text) {
+      if (this.line.length + char.length <= titleLimit) this.line += char; else this.lineOverflow = true;
+      if (char === "`" && !this.escaped && !this.fence) this.tickRun++;
+      else {
+        if (this.tickRun) { if (!this.inlineTicks) this.inlineTicks = this.tickRun; else if (this.inlineTicks === this.tickRun) this.inlineTicks = 0; this.tickRun = 0; }
+        this.escaped = char === "\\" && !this.escaped;
+      }
+      if (char === "\n") {
+        const fence = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)/.exec(this.line);
+        if (fence) {
+          if (!this.fence && !this.lineInline) { this.fence = { char: fence[1][0], length: fence[1].length }; this.inlineTicks = 0; }
+          else if (this.fence && !this.lineOverflow && fence[1][0] === this.fence.char && fence[1].length >= this.fence.length && !fence[2].trim()) this.fence = null;
+        }
+        this.line = ""; this.lineOverflow = false; this.escaped = false; this.lineInline = this.inlineTicks;
+      }
+    }
+    if (text) this.emit({ type: "assistant_delta", delta: text });
+  }
+  metadata() {
+    const match = titleLine.exec(this.buffer);
+    if (!match) return false;
+    const title = match[1].trim().replace(/[\x00-\x1f]/g, "").slice(0, 120);
+    if (title) this.emit({ type: "title", title });
+    this.buffer = ""; this.line = ""; this.lineOverflow = false; return true;
+  }
   delta(delta) {
-    if (this.decided) return this.emit({ type: "assistant_delta", delta });
-    this.buffer += delta;
-    const trimmed = this.buffer.trimStart().toLowerCase();
-    if (trimmed.startsWith("<relay-title>") && !trimmed.includes("</relay-title>") && this.buffer.length < 1000) return;
-    if ("<relay-title>".startsWith(trimmed) && this.buffer.length < 1000) return;
-    this.flush();
+    let ready = "";
+    const drain = () => { if (ready) this.visible(ready); ready = ""; };
+    for (const char of delta) {
+      // Update line context before deciding whether a tag may start here.
+      if (char === "<") drain();
+      if (this.buffer || char === "<" && !this.fence && !this.inlineTicks && !this.tickRun && /^ {0,3}$/.test(this.line)) {
+        drain(); this.buffer += char;
+        if (char === "\n" && this.metadata()) continue;
+        const lower = this.buffer.toLowerCase();
+        const candidate = this.buffer.endsWith("\r") ? this.buffer.slice(0, -1) : this.buffer;
+        if (this.buffer.length <= titleLimit && !this.buffer.includes("\n") && (titleOpen.startsWith(lower) || lower.startsWith(titleOpen) && (!lower.includes("</relay-title>") || titleLine.test(candidate)))) continue;
+        this.visible(this.buffer); this.buffer = "";
+      } else {
+        ready += char;
+        // A newline changes fence/quote context for the next line.
+        if (char === "\n") drain();
+      }
+    }
+    drain();
   }
   flush() {
-    if (this.decided) return;
-    this.decided = true;
-    const { text, title } = extractTitle(this.buffer);
-    if (title) this.emit({ type: "title", title });
-    if (text) this.emit({ type: "assistant_delta", delta: text });
-    this.buffer = "";
+    if (this.buffer && !this.metadata()) { this.visible(this.buffer); this.buffer = ""; }
   }
 }
