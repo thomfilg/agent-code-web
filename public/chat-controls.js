@@ -1,4 +1,5 @@
 import { openSidePanel, closeSidePanel } from "./side-panels.js";
+import { attachmentPreview, droppedFiles, fileSize, isAttachmentImage } from "./attachment-view.js";
 const $ = selector => document.querySelector(selector);
 const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
 function button(label, action, cls) { const node = el("button", label, cls); node.type = "button"; node.addEventListener("click", action); return node; }
@@ -21,7 +22,10 @@ export function branchesWithoutPullRequests(chat) {
 
 export class ChatControls {
   constructor(options) {
-    Object.assign(this, options); this.drafts = new Map(); this.hiddenPRs = new Set(); this.uploads = new Map();
+    Object.assign(this, options); this.drafts = new Map(); this.hiddenPRs = new Set(); this.uploads = new Map(); this.fileCache = new Map(); this.observedThumbnails = new Set(); this.preparing = new Map();
+    this.thumbnailObserver = new IntersectionObserver(entries => {
+      for (const entry of entries) if (entry.isIntersecting) { this.thumbnailObserver.unobserve(entry.target); this.observedThumbnails.delete(entry.target); void entry.target.loadThumbnail?.(); }
+    });
     $("#copy-chat-link").addEventListener("click", () => this.copy(`${location.origin}/#chat=${this.state.active.id}`, "Private chat link copied"));
     $("#view-changes").addEventListener("click", () => this.showChanges());
     $("#close-diff").addEventListener("click", () => closeSidePanel("diff"));
@@ -48,12 +52,27 @@ export class ChatControls {
     }));
     $("#add-attachments").addEventListener("click", () => $("#attachment-input").click());
     $("#attachment-input").addEventListener("change", event => this.attach(event.target.files));
-    $("#message-input").addEventListener("paste", event => {
+    $("#new-add-attachments").addEventListener("click", () => $("#attachment-input").click());
+    for (const selector of ["#message-input", "#initial-prompt"]) $(selector).addEventListener("paste", event => {
       const files = [...(event.clipboardData?.files || [])];
       if (!files.length) for (const item of event.clipboardData?.items || []) if (item.kind === "file") { const file = item.getAsFile(); if (file) files.push(file); }
       if (!files.length) return; // Leave text and unsupported OS file paths alone.
       event.preventDefault(); void this.attach(files);
     });
+    window.addEventListener("relay-new-chat-selection-changed", () => this.renderAttachments());
+    $("#environment-select").addEventListener("change", () => queueMicrotask(() => this.renderAttachments()));
+    const dropZone = $(".main");
+    const hasFiles = event => [...(event.dataTransfer?.types || [])].includes("Files");
+    const resetDrop = () => { this.dropDepth = 0; dropZone.classList.remove("attachment-drop-active"); };
+    dropZone.addEventListener("dragenter", event => { if (!hasFiles(event)) return; event.preventDefault(); this.dropDepth = (this.dropDepth || 0) + 1; if (this.draftKey()) dropZone.classList.add("attachment-drop-active"); });
+    dropZone.addEventListener("dragover", event => { if (hasFiles(event)) { event.preventDefault(); event.dataTransfer.dropEffect = this.draftKey() ? "copy" : "none"; } });
+    dropZone.addEventListener("dragleave", event => { if (hasFiles(event) && --this.dropDepth <= 0) resetDrop(); });
+    dropZone.addEventListener("drop", event => {
+      if (!hasFiles(event)) return;
+      event.preventDefault(); resetDrop();
+      try { void this.attach(droppedFiles(event.dataTransfer)); } catch (error) { this.toast(error.message); }
+    });
+    window.addEventListener("dragend", resetDrop); window.addEventListener("blur", resetDrop);
     // An action may replace its own DOM before the click bubbles here. The
     // dispatch path still identifies the menu that was actually clicked.
     document.addEventListener("click", event => document.querySelectorAll(".control-menu[open]").forEach(menu => { if (!event.composedPath().includes(menu)) menu.open = false; }));
@@ -284,7 +303,9 @@ export class ChatControls {
     try { const info = await this.api(`/api/chats/${this.state.active.id}/session-info`); $("#controls-content").replaceChildren(el("p", "Worker-reported MCP status. Save connections in the sidebar’s MCP connections section, then select them in this chat’s environment. Changes apply on the next worker start.", "muted"), ...(info.connectors?.length ? info.connectors.map(server => el("p", `${server.name} · ${server.status}`)) : [el("p", "No connector information reported yet.")])); }
     catch (error) { $("#controls-content").replaceChildren(el("p", error.message, "form-error")); }
   }
-  attachments() { return this.drafts.get(this.state.active?.id) || []; }
+  newDraftKey() { return `new:${this.newDraftScope?.() || "unassigned"}`; }
+  draftKey() { return this.state.active?.id || (this.state.page !== "companies" && !this.state.creatingChat ? this.newDraftKey() : null); }
+  attachments() { return this.drafts.get(this.draftKey()) || []; }
   addDraftAttachment(chatId, file) {
     const draft = this.drafts.get(chatId) || [];
     if (draft.some(item => item.id === file.id)) return;
@@ -292,9 +313,36 @@ export class ChatControls {
     this.drafts.set(chatId, [...draft, file]); this.renderAttachments();
   }
   attachmentButton(file, { chatId = this.state.active?.id, messageId } = {}) {
+    const draftKey = chatId || this.draftKey();
     const label = file.workspaceContext ? `${file.workspaceContext.path || "Workspace"}${file.workspaceContext.range ? `:${file.workspaceContext.range.start.line}–${file.workspaceContext.range.end.line}` : ""}` : file.name;
-    const open = button(label, () => this.openAttachment(file, { chatId, messageId, trigger: open }), "attachment-open");
+    const open = button(undefined, () => this.openAttachment(file, { chatId, draftKey, messageId, trigger: open }), "attachment-open");
+    const icon = el("span", isAttachmentImage(file) ? "Image" : (file.name.split(".").at(-1) || "FILE").slice(0, 6).toUpperCase(), "attachment-icon"); icon.setAttribute("aria-hidden", "true");
+    const info = el("span", undefined, "attachment-info"); info.append(el("strong", label), el("small", `${file.appReference ? "App reference" : fileSize(file.size)}${file.local ? " · Draft" : ""}`));
+    open.append(icon, info);
+    if (isAttachmentImage(file)) {
+      open.classList.add("attachment-image-card");
+      open.loadThumbnail = async () => {
+        try {
+          const full = await this.loadAttachment(file, chatId);
+          if (!open.isConnected || (chatId ? this.state.active?.id !== chatId : this.draftKey() !== draftKey)) return;
+          const img = document.createElement("img"); img.alt = ""; img.decoding = "async"; img.src = attachmentPreview(full).source;
+          img.onerror = () => img.remove(); icon.replaceChildren(img);
+        } catch { /* The clickable card remains usable when a thumbnail fails. */ }
+      };
+      this.thumbnailObserver.observe(open);
+      this.observedThumbnails.add(open);
+    }
     open.setAttribute("aria-label", `Preview ${file.name}`); open.title = `Preview ${file.name}`; return open;
+  }
+  async loadAttachment(file, chatId) {
+    if (file.data !== undefined) return file;
+    const key = `${chatId}:${file.id}`;
+    if (!this.fileCache.has(key)) {
+      if (this.fileCache.size >= 12) this.fileCache.delete(this.fileCache.keys().next().value);
+      const request = this.api(`/api/chats/${chatId}/attachments/${file.id}`).then(result => result.attachment);
+      this.fileCache.set(key, request); request.catch(() => this.fileCache.delete(key));
+    }
+    return this.fileCache.get(key);
   }
   async openAttachment(file, context) {
     if (file.appReference) {
@@ -304,28 +352,28 @@ export class ChatControls {
     }
     const version = this.attachmentPreviewVersion = (this.attachmentPreviewVersion || 0) + 1;
     try {
-      const attachment = file.previewSource ? file : (await this.api(`/api/chats/${context.chatId}/attachments/${file.id}`)).attachment;
-      if (this.state.active?.id !== context.chatId || this.attachmentPreviewVersion !== version) return;
-      const image = /^image\/(png|jpeg|webp|gif|avif)$/.test(attachment.mime || "");
-      let source;
-      if (image) source = attachment.previewSource || `data:${attachment.mime};base64,${attachment.data}`;
-      else if (/^(?:text\/|application\/(?:json|xml))/.test(attachment.mime || "") || /\.(?:txt|md|json|csv|log|html|svg|js|ts|css)$/i.test(attachment.name)) {
-        source = new TextDecoder().decode(Uint8Array.from(atob(attachment.data), char => char.charCodeAt(0)));
-      } else { this.toast("Preview is available for images and text files."); return; }
-      this.preview.open({ ...context, source, format: image ? "image" : "text", title: attachment.name });
+      const attachment = await this.loadAttachment(file, context.chatId);
+      if ((context.chatId ? this.state.active?.id !== context.chatId : this.draftKey() !== context.draftKey) || this.attachmentPreviewVersion !== version) return;
+      this.preview.open({ ...context, ...attachmentPreview(attachment), title: attachment.name });
     } catch (error) { this.toast(error.message); }
   }
   renderAttachments() {
-    const root = $("#attachment-chips"); root.replaceChildren(...this.attachments().map(file => {
-      const chip = el("span", undefined, "attachment-chip"), remove = button("×", () => { this.drafts.set(this.state.active.id, this.attachments().filter(item => item.id !== file.id)); this.renderAttachments(); }, "small-icon");
+    for (const card of this.observedThumbnails) if (!card.isConnected) { this.thumbnailObserver.unobserve(card); this.observedThumbnails.delete(card); }
+    const key = this.draftKey(), root = $(this.state.active ? "#attachment-chips" : "#new-attachment-chips");
+    if (!this.state.active && this.state.page !== "companies") this.preview.setChat(this.newDraftKey());
+    const signature = JSON.stringify([key, this.attachments().map(file => [file.id, file.local]), this.uploads.has(key)]);
+    if (root.dataset.signature === signature) return;
+    root.dataset.signature = signature;
+    root.replaceChildren(...this.attachments().map(file => {
+      const chip = el("span", undefined, "attachment-chip"), remove = button("×", () => { this.drafts.set(key, (this.drafts.get(key) || []).filter(item => item.id !== file.id)); this.renderAttachments(); }, "small-icon");
       remove.setAttribute("aria-label", `Remove ${file.name}`); chip.append(this.attachmentButton(file), remove); return chip;
     }));
-    if (this.uploads.has(this.state.active?.id)) root.append(el("span", "Uploading…", "muted"));
+    if (this.uploads.has(key)) { const loading = el("span", "Adding files…", "muted"); loading.setAttribute("role", "status"); root.append(loading); }
   }
   clearAttachments(chatId, sentIds) { if (sentIds) this.drafts.set(chatId, (this.drafts.get(chatId) || []).filter(file => !sentIds.includes(file.id))); else this.drafts.delete(chatId); this.renderAttachments(); }
   async waitForUploads(chatId) { while (this.uploads.has(chatId)) await this.uploads.get(chatId); }
   attach(files) {
-    const chatId = this.state.active?.id; if (!chatId) return;
+    const chatId = this.draftKey(); if (!chatId || this.state.creatingChat || this.state.openingNewChat || this.state.active?.archived || this.state.deletingChats?.has(chatId)) return;
     const list = [...files];
     return this.queueUpload(chatId, () => this.uploadFiles(chatId, list));
   }
@@ -338,16 +386,34 @@ export class ChatControls {
   }
   async uploadFiles(chatId, files) {
     for (const file of files) {
+      if (!(file instanceof File) || !file.name?.trim() || file.name.length > 200 || file.webkitRelativePath) { this.toast("Choose individual files with names of up to 200 characters, not folders."); continue; }
       const draft = this.drafts.get(chatId) || [];
       if (draft.length >= 10 || draft.reduce((sum, item) => sum + item.size, 0) + file.size > 20 * 1024 * 1024) { this.toast("Attach up to 10 files and 20 MB per message"); break; }
       if (file.size > 5 * 1024 * 1024) { this.toast(`${file.name}: maximum file size is 5 MB`); continue; }
       try {
-        const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1]); reader.onerror = reject; reader.readAsDataURL(file); });
-        const result = await this.api(`/api/chats/${chatId}/attachments`, { method: "POST", body: JSON.stringify({ name: file.name, mime: file.type, data }) });
-        const previewSource = /^image\/(png|jpeg|webp|gif|avif)$/.test(file.type) ? `data:${file.type};base64,${data}` : undefined;
-        this.drafts.set(chatId, [...(this.drafts.get(chatId) || []), { ...result.attachment, ...(previewSource ? { previewSource } : {}) }]); this.renderAttachments();
+        const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1]); reader.onerror = () => reject(new Error(`${file.name}: the file could not be read. Choose it again.`)); reader.readAsDataURL(file); });
+        const local = { id: `local_${crypto.randomUUID()}`, local: true, name: file.name, mime: file.type, size: file.size, data };
+        this.drafts.set(chatId, [...(this.drafts.get(chatId) || []), local]); this.renderAttachments();
+        if (!chatId.startsWith("new:")) await this.prepareAttachments(chatId);
       } catch (error) { this.toast(error.message); }
     }
     $("#attachment-input").value = "";
+  }
+  moveNewAttachments(key, chatId) { this.drafts.set(chatId, this.drafts.get(key) || []); this.drafts.delete(key); this.renderAttachments(); }
+  prepareAttachments(chatId) {
+    if (this.preparing.has(chatId)) return this.preparing.get(chatId);
+    const task = this.uploadLocalAttachments(chatId).finally(() => this.preparing.delete(chatId));
+    this.preparing.set(chatId, task); return task;
+  }
+  async uploadLocalAttachments(chatId) {
+    let file;
+    while ((file = (this.drafts.get(chatId) || []).find(file => file.local))) {
+      const { attachment } = await this.api(`/api/chats/${chatId}/attachments`, { method: "POST", body: JSON.stringify({ name: file.name, mime: file.mime, data: file.data }) });
+      this.drafts.set(chatId, (this.drafts.get(chatId) || []).map(current => current.id === file.id ? attachment : current));
+      if (this.fileCache.size >= 12) this.fileCache.delete(this.fileCache.keys().next().value);
+      this.fileCache.set(`${chatId}:${attachment.id}`, Promise.resolve({ ...attachment, data: file.data }));
+      this.renderAttachments();
+    }
+    return this.drafts.get(chatId) || [];
   }
 }

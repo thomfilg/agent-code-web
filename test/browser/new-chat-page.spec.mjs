@@ -1,15 +1,15 @@
 import { test, expect } from "@playwright/test";
 
 async function fixture(page) {
-  const repositories = ["Acme/api", "Acme/web", "Other/library"].map(fullName => ({ fullName, branch: "main", defaultBranch: "main", githubConnectionId: "github-fixture" }));
+  const repositories = ["Acme/api", "Acme/web", "Other/library"].map(fullName => ({ fullName, branch: "main", defaultBranch: "main", companyId: "acme", githubConnectionId: "github-fixture" }));
   let preferences = { agent: "mock", environmentId: "env-fixture", repositories: [] };
   const calls = { create: [], messages: [], repositories: [] };
   const chat = { id: "chat_new-page-fixture", title: "First message", agent: "mock", status: "stopped", workspace: "/fixture", repositories: [], environmentId: "env-fixture", messages: [], revision: 1, updatedAt: new Date().toISOString() };
   const f = { calls, chat, failCreate: false, failMessage: false, failRepository: false, gate: null, messageGate: null };
-  await page.route("**/api/github", route => route.fulfill({ json: { connected: true, login: "fixture", connections: [{ id: "github-fixture", connected: true }] } }));
+  await page.route("**/api/github", route => route.fulfill({ json: { connected: true, login: "fixture", connections: [{ id: "github-fixture", companyId: "acme", connected: true }] } }));
   await page.route("**/api/github/repositories*", route => route.fulfill({ json: { repositories } }));
   await page.route("**/api/github/branches?*", route => route.fulfill({ json: { branches: ["main", "dev"] } }));
-  await page.route("**/api/environments", route => route.fulfill({ json: { environments: [{ id: "env-fixture", name: "Development", companies: ["acme", "other"], allowUnassigned: true }], software: [] } }));
+  await page.route("**/api/environments", route => route.fulfill({ json: { environments: [{ id: "env-fixture", name: "Development", companyId: "acme", companies: ["acme"], allowUnassigned: false }], software: [] } }));
   await page.route("**/api/preferences", route => { if (route.request().method() === "PATCH") preferences = route.request().postDataJSON(); return route.fulfill({ json: { preferences } }); });
   await page.route("**/api/chats", async route => {
     if (route.request().method() !== "POST") return route.continue();
@@ -97,16 +97,18 @@ test("mobile draft and picker fit 320px without a modal or horizontal overflow",
   await expect(page.locator("#initial-prompt")).toHaveValue("An unsent draft");
 });
 
-test("repositories are optional and draft Enter respects IME and Shift+Enter", async ({ page }) => {
+test("company-scoped draft requires a repository and Enter respects IME and Shift+Enter", async ({ page }) => {
   const f = await fixture(page);
-  await page.route("**/api/github", route => route.fulfill({ json: { connected: false, connections: [] } }));
-  await page.reload(); await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", false);
   await page.locator("#initial-prompt").fill("Scratch task");
+  await page.locator("#initial-prompt").press("Enter");
+  expect(f.calls.create).toHaveLength(0); await expect(page.locator("#create-chat-button")).toBeDisabled();
+  await expect(page.locator("#environment-selection-hint")).toContainText("Choose a repository");
+  await choose(page); await expect(page.locator("#create-chat-button")).toBeEnabled();
   await page.locator("#initial-prompt").dispatchEvent("keydown", { key: "Enter", isComposing: true, bubbles: true });
   await page.locator("#initial-prompt").dispatchEvent("keydown", { key: "Enter", repeat: true, bubbles: true });
   await page.locator("#initial-prompt").dispatchEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true });
   expect(f.calls.create).toHaveLength(0);
   await page.locator("#initial-prompt").press("Shift+Enter"); await expect(page.locator("#initial-prompt")).toHaveValue("Scratch task\n");
   await page.locator("#initial-prompt").press("Enter"); await expect(page.locator("#conversation")).toBeVisible();
-  expect(f.calls.create).toHaveLength(1); expect(f.calls.create[0].repositories).toEqual([]);
+  expect(f.calls.create).toHaveLength(1); expect(f.calls.create[0].repositories.map(repo => repo.fullName)).toEqual(["Acme/api"]);
 });
