@@ -10,7 +10,8 @@ await (await app.resources.forOwner(null)).companies.save({ id: "12-apps", name:
 const originalFetch = app.manager.mcps.fetch;
 app.manager.mcps.fetch = (url, options) => {
   const parsed = new URL(url);
-  return originalFetch(parsed.origin === "https://mcp.linear.app" ? new URL(parsed.pathname + parsed.search, fixture.origin) : url, options);
+  if (parsed.username || parsed.password || !["https://mcp.linear.app", fixture.origin].includes(parsed.origin)) throw new Error("Linear browser fixture blocks endpoints outside its isolated MCP service");
+  return originalFetch(new URL(parsed.pathname + parsed.search, fixture.origin), { ...options, redirect: "manual" });
 };
 const close = async () => { await app.stop(); await fixture.close(); await rm(root, { recursive: true, force: true }); process.exit(); };
 process.on("SIGTERM", close); process.on("SIGINT", close);

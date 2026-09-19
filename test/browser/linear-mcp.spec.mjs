@@ -1,10 +1,17 @@
+import { openSettingsSection, switchSettingsCompany } from "./settings-navigation.mjs";
 import { test, expect } from "@playwright/test";
+
+test.beforeAll(async ({ baseURL }) => {
+  // The general browser fixture does not redirect controller-side Linear
+  // discovery. Fail before any UI/API action instead of contacting a provider.
+  expect(baseURL, "Use --config playwright.linear.config.mjs for the isolated OAuth fixture").toBe("http://127.0.0.1:8894");
+});
 
 async function create(page, name) {
   await page.goto("/");
   if (page.viewportSize().width < 700) await page.getByRole("button", { name: "Open chats", exact: true }).click();
-  await page.getByRole("button", { name: "MCP connections", exact: true }).click();
-  await page.locator("#mcp-company-filter").selectOption("12-apps");
+  await openSettingsSection(page, "MCP connections");
+  await switchSettingsCompany(page, "MCP connections", "12-apps");
   await page.locator("#mcp-presets").getByRole("button", { name: /^Linear/ }).click();
   if (await page.locator("#mcp-delete").isVisible()) await page.locator("#mcp-add-another").click();
   await page.locator("#mcp-name").fill(name);
@@ -34,11 +41,12 @@ test("Linear consent shows its company, defaults to read and verifies without a 
   await expect(popup.getByRole("heading", { name: "MCP connected" })).toBeVisible();
   await expect(page.locator("#mcp-connection-status")).toContainText("Connected · 1 tools");
   await page.getByLabel("Close MCP connections").click();
-  await page.getByRole("button", { name: "Environments", exact: true }).click();
+  await openSettingsSection(page, "Environments");
+  await page.locator("#environment-advanced summary").click();
   await page.locator("#environment-companies").getByRole("checkbox", { name: "12-apps", exact: true }).check();
   await expect(page.locator("#environment-mcp-options")).toContainText("linear-browser-read · 12-apps");
   await expect(page.locator("#environment-mcp-options input")).toHaveCount(0);
-  await page.getByRole("button", { name: "Save environment", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Save environment", exact: true })).toBeDisabled();
   const { connections } = await (await page.request.get("/api/mcps")).json();
   const connection = connections.find(c => c.name === "linear-browser-read");
   expect(connection.health.workspaceRead.tool).toBe("list_teams"); expect(connection.oauthScopes).toBe("read");

@@ -1,3 +1,4 @@
+import { openSettingsSection, switchSettingsCompany } from "./settings-navigation.mjs";
 import { test, expect } from "@playwright/test";
 
 test("GitHub native login belongs to one company and exposes its provider-authorized repositories", async ({ page, request }) => {
@@ -7,7 +8,7 @@ test("GitHub native login belongs to one company and exposes its provider-author
   await expect(page.getByRole("button", { name: "Use this server’s gh login" })).toHaveCount(0);
   await expect(page.locator("#github-access-form, #github-companies")).toHaveCount(0);
   await expect(page.locator("#github-rename-form")).toBeHidden();
-  await page.locator("#github-company-filter").selectOption("acme");
+  await switchSettingsCompany(page, "GitHub", "acme");
   let release;
   const held = new Promise(resolve => { release = resolve; });
   await page.route("**/api/github/device", async route => { await held; await route.continue(); });
@@ -27,11 +28,11 @@ test("GitHub native login belongs to one company and exposes its provider-author
   await page.locator("#repository-results").getByRole("checkbox", { name: /Acme\/api/ }).check();
   await expect(page.locator("#repository-results .repository-option")).toHaveCount(3);
   await expect(page.locator("#repository-results")).toContainText("Other/library");
-  await page.locator("#github-button").click();
+  await openSettingsSection(page, "GitHub", "acme");
   await page.locator("#github-account-list").getByRole("button", { name: "Edit", exact: true }).click();
   await page.locator("#github-connection-name").fill("GitHub native test");
   await page.locator("#github-save-name").click(); await expect(page.locator("#github-dialog")).not.toBeVisible();
-  await page.reload(); await page.locator("#github-button").click(); await page.locator("#github-company-filter").selectOption("acme");
+  await page.reload(); await openSettingsSection(page, "GitHub"); await switchSettingsCompany(page, "GitHub", "acme");
   const card = page.locator("#github-account-list section").filter({ hasText: "GitHub native test" });
   await expect(card).toContainText("Signed in as browser-fixture"); await expect(card).toContainText("Company: acme");
   await expect(page.locator("#github-rename-form")).toBeHidden();
@@ -56,7 +57,7 @@ test("legacy GitHub accounts require a single explicit company assignment withou
   await page.goto("/"); await page.locator("#new-chat-button").click();
   await expect(page.locator("#repository-results")).toContainText("allowed-0/project"); await expect(page.locator("#repository-results")).toContainText("allowed-1/project");
   await expect(page.locator("#repository-results")).not.toContainText("no companies");
-  await page.locator("#github-button").click();
+  await openSettingsSection(page, "GitHub");
   await expect(page.locator("#github-access-form, #github-companies")).toHaveCount(0); await expect(page.locator("#github-rename-form")).toBeHidden();
   await expect(page.getByRole("button", { name: /company access/i })).toHaveCount(0);
   await expect(page.locator("#github-account-list section")).toHaveCount(2);
@@ -69,11 +70,11 @@ test("legacy GitHub accounts require a single explicit company assignment withou
 });
 
 test("GitHub cancellation, reload and failure preserve a retryable account without another login form", async ({ page }) => {
-  await page.goto("/"); await page.locator("#github-button").click(); await page.locator("#github-new").click();
+  await page.goto("/"); await openSettingsSection(page, "GitHub"); await page.locator("#github-new").click();
   const pending = page.locator("#github-account-list section").filter({ hasText: "TEST-CODE" });
   await pending.getByRole("button", { name: "Cancel sign-in", exact: true }).click();
   await expect(page.locator("#github-account-list")).toContainText("GitHub sign-in cancelled");
-  await page.reload(); await page.locator("#github-button").click();
+  await page.reload(); await openSettingsSection(page, "GitHub");
   const card = page.locator("#github-account-list section").filter({ hasText: "GitHub sign-in cancelled" });
   await expect(card.getByRole("button", { name: "Reconnect", exact: true })).toBeVisible();
   await expect(page.locator("#github-rename-form")).not.toBeVisible();

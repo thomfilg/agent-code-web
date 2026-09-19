@@ -1,3 +1,4 @@
+import { openSettingsSection, switchSettingsCompany } from "./settings-navigation.mjs";
 import { test as base, expect } from "@playwright/test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createAgentWebServer } from "../../src/server.mjs";
@@ -36,14 +37,22 @@ test("Google sign-in, reload and sign-out work in a real browser without grantin
   await page.keyboard.press("Escape"); await expect(page.locator("#login-dialog")).toBeVisible();
   await page.getByRole("button", { name: "Continue with Google" }).click();
   await page.getByRole("link", { name: "Continue as fixture account" }).click();
-  await expect(page.getByRole("button", { name: "Your Relay account" })).toHaveText("owner@example.com");
+  await expect(page.getByRole("button", { name: "Your Relay account" })).toHaveAttribute("title", "owner@example.com");
+  await expect(page.locator("#sidebar-user-name")).toHaveText("Relay Owner");
   await expect(page.locator("#login-dialog")).toBeHidden();
   await page.reload(); await expect(page.getByRole("button", { name: "Your Relay account" })).toBeVisible();
-  await page.getByRole("button", { name: "Browser connections", exact: true }).click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const companyForm = page.locator("#settings-company-form");
+  await companyForm.getByLabel("Company name", { exact: true }).fill("Fixture company");
+  await companyForm.getByLabel("Company identifier", { exact: true }).fill("fixture");
+  await companyForm.getByRole("button", { name: "Save company", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Fixture company", exact: true })).toBeVisible();
+  await openSettingsSection(page, "Browser connections");
   await expect(page.locator("#browser-account-name")).toHaveText("Signed in as owner@example.com");
   await expect(page.locator("#browser-account-form")).toBeHidden();
   await expect(page.locator("#browser-connection-list")).toContainText("No Chrome profiles paired");
   await page.locator("#browser-connections-close").click();
+  await page.getByLabel("Close settings", { exact: true }).click();
   await page.getByRole("button", { name: "Your Relay account" }).click();
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Sign in to Agent Relay" })).toBeVisible();
@@ -82,6 +91,7 @@ test("a second user's browser cannot see the owner's chat and account switching 
   const legacy = await relay.app.store.create({ title: "Owner transcript", agent: "mock" });
   await interceptGoogle(page, relay); await page.goto(relay.url);
   await page.getByRole("button", { name: "Continue with Google" }).click(); await page.getByRole("link", { name: "Continue as fixture account" }).click();
+  await page.getByRole("button", { name: "Open Owner transcript", exact: true }).click();
   await expect(page.locator("#chat-title")).toHaveText("Owner transcript");
   const other = await browser.newContext();
   try {
@@ -89,11 +99,11 @@ test("a second user's browser cannot see the owner's chat and account switching 
     await interceptGoogle(member, relay, { sub: "member", email: "member@example.com", email_verified: true });
     await member.goto(relay.url + `/#chat=${legacy.id}`);
     await member.getByRole("button", { name: "Continue with Google" }).click(); await member.getByRole("link", { name: "Continue as fixture account" }).click();
-    await expect(member.getByRole("button", { name: "Your Relay account" })).toHaveText("member@example.com");
+    await expect(member.getByRole("button", { name: "Your Relay account" })).toHaveAttribute("title", "member@example.com");
     await expect(member.locator("#chat-list")).not.toContainText("Owner transcript");
     expect((await member.request.get(relay.url + `/api/chats/${legacy.id}`)).status()).toBe(404);
     const anotherOwnerTab = await page.context().newPage();
-    await anotherOwnerTab.goto(relay.url); await expect(anotherOwnerTab.locator("#chat-title")).toHaveText("Owner transcript");
+    await anotherOwnerTab.goto(relay.url + `/#chat=${legacy.id}`); await expect(anotherOwnerTab.locator("#chat-title")).toHaveText("Owner transcript");
     await page.getByRole("button", { name: "Your Relay account" }).click(); await page.getByRole("button", { name: "Sign out", exact: true }).click();
     await expect(page.locator("#login-dialog")).toBeVisible();
     await expect(anotherOwnerTab.locator("#login-dialog")).toBeVisible();

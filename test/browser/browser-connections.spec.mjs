@@ -1,3 +1,4 @@
+import { openSettingsSection, switchSettingsCompany } from "./settings-navigation.mjs";
 import { test, expect } from "@playwright/test";
 
 async function expectNoHorizontalOverflow(dialog) {
@@ -18,7 +19,7 @@ for (const paired of [false, true]) test(`signed-in browser settings wrap ${pair
   ] : [] } }));
   await page.setViewportSize({ width: 1280, height: 960 });
   await page.goto("/");
-  await page.locator("#browser-connections-button").click();
+  await openSettingsSection(page, "Browser connections");
   const dialog = page.locator("#browser-connections-dialog");
   await expect(dialog).toContainText("Signed in as browser-layout@example.test");
   if (paired) await expect(dialog.locator(".browser-connection-row")).toContainText("Connected · agent access off");
