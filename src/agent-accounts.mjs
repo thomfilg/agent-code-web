@@ -41,6 +41,13 @@ export class AgentAccounts {
   }
   list(ownerId) { return [...this.metadata.values()].filter(item => item.ownerId === ownerId).map(item => publicAccount(this.visible(item))); }
   checkDisconnect(id, provider) { if (this.disconnecting.has(id)) throw fail(reconnectError(provider), 409); }
+  assertConnected(ownerId, id, provider) {
+    owner(ownerId);
+    const record = this.metadata.get(id);
+    if (!record || record.ownerId !== ownerId || this.removing.has(id)) throw fail("Agent account not found", 404);
+    if (record.provider !== provider) throw fail("Choose an account for the selected agent");
+    if (this.disconnecting.has(id) || this.flows.has(id) || record.status !== "connected") throw fail(reconnectError(provider), 409);
+  }
   hasConnected(ownerId, provider) { return this.list(ownerId).some(item => item.provider === provider && item.status === "connected"); }
   async locked(id, action) {
     const prior = this.locks.get(id) || Promise.resolve();
