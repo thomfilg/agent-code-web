@@ -23,7 +23,7 @@ export class WorkspaceSettings {
       if (repositoryMenu.open) $("#repo-search").focus();
     });
     $("#refresh-repositories").addEventListener("click", () => this.loadRepositories(true).catch(error => toast(error.message)));
-    $("#environment-select").addEventListener("change", () => this.changeEnvironment());
+    $("#environment-select").addEventListener("change", () => this.changeEnvironment().catch(error => toast(error.message)));
     $("#agent-select").addEventListener("change", async () => { this.renderAccounts(); await this.updateModels(); this.remember(); });
     $("#new-agent-account").addEventListener("change", async () => {
       this.syncAccountAgent();
@@ -83,6 +83,7 @@ export class WorkspaceSettings {
     if (registry.companies) this.state.companies = registry.companies;
     this.github = github; this.environments = environments.environments; this.software = environments.software;
     this.preferences = saved.preferences;
+    this.selectionMemory = saved.selectionMemory === true;
     this.projectAgents = saved.projectAgents || {};
     this.accounts = accounts.accounts;
     if (!this.draftReady) this.selected = structuredClone(saved.preferences.repositories || []).map(repo => {
@@ -112,9 +113,31 @@ export class WorkspaceSettings {
     this.renderAccounts();
   }
   selectedEnvironment() { return this.environments.find(env => env.id === $("#environment-select").value && !env.archived); }
-  changeEnvironment() {
+  async changeEnvironment() {
     const environment = this.selectedEnvironment();
     if (!environment) { this.updateCreateAvailability(); return; }
+    const company = environment.companies?.length === 1 ? environment.companies[0] : null;
+    // A same-company environment switch keeps the selected model/account and
+    // waits for their complete restore, including a queued catalog request.
+    if (this.restoringSelection && this.selectionModels && company === this.selectionCompany) {
+      const current = this.selectionVersion;
+      await this.selectionModels.catch(() => {});
+      if (current !== this.selectionVersion) return;
+    }
+    const version = this.selectionVersion = (this.selectionVersion || 0) + 1;
+    this.setRestoringSelection(false);
+    if (this.selectionMemory && company && company !== (this.selectionCompany || companyForChat({ repositories: this.selected }))) {
+      await this.restoreSelection({ companyId: company }, { environmentId: environment.id });
+      return;
+    }
+    // Changing to a second environment of this company must not capture the
+    // temporary "Loading models" value or enable Send with a default model.
+    if (this.modelLoad) {
+      this.setRestoringSelection(true); this.updateCreateAvailability();
+      await this.modelLoad.catch(() => {});
+      if (version !== this.selectionVersion) return;
+      this.setRestoringSelection(false);
+    }
     const previous = this.selected.length;
     this.selected = this.selected.filter(repo => scopeAllows(environment, companyForChat({ repositories: [repo] })));
     $("#repo-search").value = ""; $("#create-chat-error").textContent = "";
@@ -137,14 +160,17 @@ export class WorkspaceSettings {
     provider.setAttribute("aria-label", supported ? "Agent type" : "Agent");
     select.hidden = !supported; select.required = Boolean(supported);
     const project = agentProjectKey({ repositories: this.selected });
+    const company = companyForChat({ repositories: this.selected }) || this.selectionCompany;
+    const explicit = this.restoredAccount?.key === JSON.stringify([company, project]);
     const sameProject = this.accountProject === project;
-    const saved = this.projectAgents?.[project]?.agentAccountId || (project === agentProjectKey(this.preferences) ? this.preferences?.agentAccountId : null);
-    const old = sameProject ? select.value || saved : saved || select.value;
+    const sameCompany = company === companyForChat(this.preferences);
+    const saved = explicit ? this.restoredAccount.id : sameCompany ? (!this.selectionMemory ? this.projectAgents?.[project]?.agentAccountId : null) || (project === agentProjectKey(this.preferences) ? this.preferences?.agentAccountId : null) : null;
+    const old = explicit ? saved : sameProject && sameCompany ? select.value || saved : saved;
     const available = (this.accounts || []).filter(account => ["codex", "claude"].includes(account.provider) && account.status === "connected");
     $("#agent-account-requirement").hidden = !supported || available.length > 0;
     select.replaceChildren(option("", "Select an agent account"), ...available.map(account => option(account.id, agentAccountLabel(account))));
     if (available.some(account => account.id === old)) select.value = old;
-    else if (!old && available.length === 1) select.value = available[0].id;
+    else if (!explicit && !old && available.length === 1) select.value = available[0].id;
     this.accountProject = project;
     select.disabled = !supported || !available.length;
     if (supported) this.syncAccountAgent();
@@ -165,16 +191,22 @@ export class WorkspaceSettings {
     const environmentError = this.environmentSelectionError();
     $("#environment-selection-hint").textContent = environmentError;
     $("#environment-selection-hint").hidden = !environmentError;
-    $("#create-chat-button").disabled = Boolean(this.selected.length && !this.github?.connected) || Boolean(environmentError) || !agent || Boolean(needed && !$("#new-agent-account").value);
+    const staleModel = this.modelPicker?.model?.selectedOptions?.[0]?.disabled || this.modelPicker?.root?.dataset?.status === "error";
+    $("#create-chat-button").disabled = Boolean(this.restoringSelection || this.modelLoad || this.selectionRestoreError || staleModel) || Boolean(this.selected.length && !this.github?.connected) || Boolean(environmentError) || !agent || Boolean(needed && !$("#new-agent-account").value);
   }
-  updateModels(selected = {}) {
+  async updateModels(selected = {}) {
     const agent = $("#agent-select").value;
     const needed = this.state.config.features?.agentAccounts && ["codex", "claude"].includes(agent);
     const agentAccountId = needed ? $("#new-agent-account").value : null;
+    const version = this.modelLoadVersion = (this.modelLoadVersion || 0) + 1;
+    await this.modelLoad?.catch(() => {});
+    if (version !== this.modelLoadVersion || $("#agent-select").value !== agent || needed && $("#new-agent-account").value !== agentAccountId) return;
+    const loading = this.modelLoad = this.modelPicker.setAgent(!agent || needed && !agentAccountId ? null : agent, { ...selected, agentAccountId }, { useDefaults: true });
     this.updateCreateAvailability();
-    return this.modelPicker.setAgent(!agent || needed && !agentAccountId ? null : agent, { ...selected, agentAccountId }, { useDefaults: true });
+    try { await loading; }
+    finally { if (this.modelLoad === loading) this.modelLoad = null; this.updateCreateAvailability(); }
   }
-  async openNew() {
+  async openNew(project, { validWhile = () => true } = {}) {
     $("#create-chat-error").textContent = "";
     await this.loadCurrent();
     if (!this.draftReady) {
@@ -188,6 +220,67 @@ export class WorkspaceSettings {
     this.renderSelected();
     $("#repository-picker .repository-picker-dropdown").open = false;
     if (this.github.connected) await this.loadRepositories();
+    if (this.selectionMemory && validWhile()) {
+      const companyId = project?.companyId || (!this.selectionCompany ? companyForChat({ repositories: this.selected }) : null);
+      if (companyId) await this.restoreSelection({ companyId, ...(project?.repository ? { repository: project.repository } : {}) }, { validWhile });
+    }
+  }
+  async restoreSelection(project, { environmentId, validWhile = () => true } = {}) {
+    const version = this.selectionVersion = (this.selectionVersion || 0) + 1;
+    this.setRestoringSelection(true); this.updateCreateAvailability();
+    try {
+      await this.preferenceQueue?.catch(() => {});
+      const query = new URLSearchParams({ company: project.companyId, ...(project.repository ? { repository: project.repository } : {}) });
+      const result = await this.api(`/api/preferences/restore?${query}`);
+      if (version !== this.selectionVersion || !validWhile()) return;
+      const saved = result.selection;
+      this.selectionRestoreError = Boolean(result.warnings?.length);
+      this.selected = structuredClone(saved.repositories || []);
+      this.selectionCompany = project.companyId;
+      this.restoredAccount = { key: JSON.stringify([project.companyId, agentProjectKey(saved)]), id: saved.agentAccountId || "" };
+      $("#environment-select").value = environmentId || saved.environmentId || "";
+      $("#agent-select").value = saved.agent || "";
+      this.accountProject = undefined;
+      this.renderSelected(); this.renderRepositories();
+      // No active environment is a blocking selection, not permission to pick
+      // an environment from a different company via renderEnvironments fallback.
+      if (!environmentId && !saved.environmentId) $("#environment-select").value = "";
+      const modelRestore = this.selectionModels = (async () => {
+        await this.modelPicker.saving?.catch(() => {});
+        if (version !== this.selectionVersion || !validWhile()) return;
+        await this.updateModels(saved);
+      })();
+      try { await modelRestore; }
+      finally { if (this.selectionModels === modelRestore) this.selectionModels = null; }
+      if (version !== this.selectionVersion || !validWhile()) return;
+      const unavailableEffort = saved.effort && ![...this.modelPicker.effort.options].some(option => option.value === saved.effort);
+      if (this.modelPicker.root?.dataset.status === "error" || this.modelPicker.model?.selectedOptions?.[0]?.disabled || unavailableEffort) {
+        this.selectionRestoreError = true;
+        result.warnings = [...(result.warnings || []), "Saved model options are unavailable. Choose an available model or retry this project."];
+      }
+      $("#repo-search").value = "";
+      $("#create-chat-error").textContent = (result.warnings || []).join(" ");
+    } catch (error) {
+      if (version !== this.selectionVersion || !validWhile()) return;
+      this.selected = []; this.selectionCompany = project.companyId;
+      this.selectionRestoreError = true;
+      this.restoredAccount = { key: JSON.stringify([project.companyId, null]), id: "" };
+      $("#agent-select").value = ""; this.renderSelected(); this.renderRepositories();
+      $("#environment-select").value = environmentId || "";
+      $("#create-chat-error").textContent = `Could not restore project settings: ${error.message}`;
+    } finally {
+      if (version === this.selectionVersion) {
+        this.setRestoringSelection(false); this.updateCreateAvailability();
+        if (validWhile()) {
+          window.dispatchEvent(new CustomEvent("relay-new-chat-selection-changed"));
+          if (!this.selectionRestoreError) void this.remember();
+        }
+      }
+    }
+  }
+  setRestoringSelection(busy) {
+    this.restoringSelection = busy;
+    for (const selector of ["#new-agent-account", "#agent-select", "#new-model-controls", "#repository-picker", "#selected-repositories"]) $(selector).inert = busy;
   }
   async loadRepositories(refresh = false) {
     const request = ++this.repositoryRequest;
@@ -256,6 +349,8 @@ export class WorkspaceSettings {
     $("#repository-group-hint").textContent = this.selected.length ? `Grouped under ${label} → ${this.selected[0].fullName.split("/").at(-1)}. Use ↑ to choose another primary repository.` : "Select repositories. The first repository's GitHub connection determines the company.";
   }
   payload() {
+    if (this.restoringSelection || this.modelLoad) throw new Error("Wait for the project selection to finish loading");
+    if (this.selectionRestoreError || this.modelPicker?.model?.selectedOptions?.[0]?.disabled || this.modelPicker?.root?.dataset?.status === "error") throw new Error("Review the unavailable saved project options before sending");
     if (this.selected.length && !this.github?.connected) throw new Error("Connect GitHub to use the selected repositories");
     const environmentError = this.environmentSelectionError();
     if (environmentError) throw new Error(environmentError);
@@ -264,15 +359,19 @@ export class WorkspaceSettings {
     return { agent, ...(agentAccountId && ["codex", "claude"].includes(agent) ? { agentAccountId } : {}), ...this.modelPicker.value(), environmentId: $("#environment-select").value, repositories: this.selected };
   }
   async remember(modelSelection = {}) {
+    if (this.restoringSelection) return;
+    if (this.selected.length) this.selectionRestoreError = false;
     if (!$("#environment-select").value) return;
     const selection = this.draftReady ? { agent: $("#agent-select").value, ...this.modelPicker.value() } : { agent: this.preferences.agent || $("#agent-select").value, model: this.preferences.model || null, effort: this.preferences.effort || null };
     const body = { ...selection, ...modelSelection, environmentId: $("#environment-select").value, repositories: structuredClone(this.selected) };
-    if (!body.agent) return;
+    body.agent ||= null;
     if (this.state.config.features?.agentAccounts && ["codex", "claude"].includes(body.agent)) {
       body.agentAccountId = this.draftReady ? $("#new-agent-account").value : this.preferences.agentAccountId;
-      if (!body.agentAccountId) return;
+      if (!body.agentAccountId) { body.agent = null; body.model = null; body.effort = null; }
     }
     const project = agentProjectKey(body);
+    this.selectionCompany = companyForChat(body) || (this.selectedEnvironment()?.companies?.length === 1 ? this.selectedEnvironment().companies[0] : null);
+    this.restoredAccount = { key: JSON.stringify([this.selectionCompany, project]), id: body.agentAccountId || "" };
     const remembered = { agent: body.agent, agentAccountId: body.agentAccountId };
     const previous = this.projectAgents?.[project];
     if (project && body.agentAccountId) this.projectAgents = { ...this.projectAgents, [project]: remembered };
@@ -283,6 +382,7 @@ export class WorkspaceSettings {
       if (this.projectAgents?.[project] === remembered) { if (previous) this.projectAgents[project] = previous; else delete this.projectAgents[project]; }
       this.toast(`Could not remember your selection: ${error.message}`);
     }
+    this.updateCreateAvailability();
   }
   async openGitHub() {
     await this.githubAccounts.open();

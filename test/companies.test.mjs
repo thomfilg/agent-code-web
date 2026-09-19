@@ -156,6 +156,17 @@ test("chat admission and preferences use the registered company rather than GitH
   const loaded = (await (await fetch(`${url}/api/preferences`)).json()).preferences;
   assert.equal(loaded.environmentId, isolated.id); assert.deepEqual(loaded.repositories, []);
   const chatCount = app.store.list().length;
+  const restored = await fetch(`${url}/api/preferences/restore?company=personal-projects&repository=thomfilg%2Fapp`);
+  assert.equal(restored.status, 200);
+  const restoredSelection = (await restored.json()).selection;
+  assert.equal(restoredSelection.environmentId, environment.id);
+  assert.equal(restoredSelection.repositories[0].companyId, "personal-projects");
+  assert.equal(restoredSelection.repositories[0].branch, "main");
+  assert.equal(restoredSelection.agent, "mock");
+  assert.equal(app.store.list().length, chatCount, "Restoring options never creates a chat or starts its worker");
+  assert.equal(app.store.get(created.id).status, "stopped");
+  const unfinished = await fetch(`${url}/api/preferences/restore?company=other`);
+  assert.equal(unfinished.status, 200); assert.deepEqual((await unfinished.json()).selection.repositories, []);
   const denied = await fetch(`${url}/api/chats`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(draft) });
   assert.equal(denied.status, 403); assert.equal(app.store.list().length, chatCount);
   assert.equal((await environments.get(isolated.id)).allowUnassigned, false);

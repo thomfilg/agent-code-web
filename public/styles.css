@@ -320,6 +320,9 @@ details[open] > .group-heading::before { transform: rotate(90deg); }
 .chat-status-icon.idle .status-dot { background: transparent; border: 1px solid currentColor; }
 .chat-status-icon.archived { color: #62675e; }
 .chat-status-icon.archived .status-dot { border-radius: 1px; }
+.project-new-chat { opacity: 0; }
+.repository-group > summary:hover .project-new-chat, .repository-group > summary:focus-within .project-new-chat { opacity: 1; }
+@media (hover: none), (max-width: 760px) { .project-new-chat { opacity: 1; } }
 .automatic-status { padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
 #organize-status { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
 #organize-pull-requests { display: grid; gap: 6px; font-size: 12px; }
