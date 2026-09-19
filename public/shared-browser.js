@@ -11,6 +11,13 @@ export class SharedBrowserPanel {
     this.pendingCommands = new Map(); this.resizeQueue = Promise.resolve(); this.resizeVersion = 0;
     this.input = new BrowserInputQueue((action, params) => this.request(action, params));
     this.getBackend = getBackend;
+    this.tools = $("#browser-tools");
+    this.tools.addEventListener("keydown", event => {
+      if (event.key !== "Escape" || !this.tools.open) return;
+      event.preventDefault(); event.stopPropagation(); this.tools.open = false; this.tools.querySelector("summary").focus();
+    });
+    document.addEventListener("pointerdown", event => { if (this.tools.open && !this.tools.contains(event.target)) this.tools.open = false; });
+    this.tools.addEventListener("focusout", event => { if (event.relatedTarget && !this.tools.contains(event.relatedTarget)) this.tools.open = false; });
     $("#browser-open-app").onclick = () => openApp({ address: $("#browser-address").value });
     $("#browser-copy-text").onclick = () => this.copyText();
     $("#browser-paste-text").onclick = () => this.pasteText();
@@ -86,7 +93,7 @@ export class SharedBrowserPanel {
       this.interact("key", { type: type === "keydown" ? "keyDown" : "keyUp", key: event.key, code: event.code, keyCode: event.keyCode,
         modifiers: modifiers(event), ...(type === "keydown" && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1 ? { text: event.key } : {}) });
     });
-    document.addEventListener("relay-panel-changed", () => { if (this.panel.hidden) this.disconnect(); });
+    document.addEventListener("relay-panel-changed", () => { if (this.panel.hidden) { this.tools.open = false; this.disconnect(); } });
     window.addEventListener("pagehide", () => this.disconnect());
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") { this.resumeVisible = Boolean(this.socket); this.disconnect(); }
@@ -100,7 +107,7 @@ export class SharedBrowserPanel {
     openSidePanel("browser"); this.panel.classList.remove("expanded"); $("#expand-browser").setAttribute("aria-pressed", "false");
     this.connect();
   }
-  close() { closeSidePanel("browser"); this.disconnect(); }
+  close() { this.tools.open = false; closeSidePanel("browser"); this.disconnect(); }
   accessChanged() { this.disconnect(); if (!this.panel.hidden) this.connect(); }
   disconnect() {
     const socket = this.socket; this.socket = null; socket?.close(); this.connected = false;
