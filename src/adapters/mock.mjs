@@ -26,7 +26,7 @@ export class MockAdapter {
         this.hooks.onEvent?.({ type: "assistant_delta", delta: chunk });
       }
       this.hooks.onEvent?.({ type: "tool", tool: "workspace", state: "completed", itemId: "mock_tool", title: "Inspect workspace", output: "Mock inspection complete" });
-      return { text: assembled, status: "completed" };
+      return { text: assembled, status: "completed", finalAnswer: { source: "mock-final-answer", text: assembled } };
     } finally {
       this.running = false;
     }

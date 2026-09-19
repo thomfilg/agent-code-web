@@ -3,6 +3,7 @@ import { open } from "node:fs/promises";
 import path from "node:path";
 import { newId, redact } from "./utils.mjs";
 import { extractResponse } from "./response-protocol.mjs";
+import { finalAnswerMeta } from "./message-search.mjs";
 
 // Native history remains in the private session bundle. This is its visible
 // transcript, never a reconstruction of private reasoning or system prompts.
@@ -23,8 +24,9 @@ export function importedTranscript(thread) {
           else if (part.type === "skill" || part.type === "mention") text.push(part.name || "[Imported reference]");
           else throw new Error("This imported message contains an unsupported content type; its native history was retained");
         }
-        message = { role: "user", kind: "message", text: text.join("\n"), ...(attachments.length ? { attachments } : {}) };
-      } else if (["agentMessage", "plan", "exitedReviewMode"].includes(item.type)) message = { role: "assistant", agent: "codex", kind: "message", text: extractResponse(String(item.type === "exitedReviewMode" ? item.review || "" : item.text || ""), false).text };
+        message = { role: "user", kind: "message", text: text.join("\n"), meta: { authorship: "user" }, ...(attachments.length ? { attachments } : {}) };
+      } else if (["agentMessage", "plan", "exitedReviewMode"].includes(item.type)) message = { role: "assistant", agent: "codex", kind: "message", text: extractResponse(String(item.type === "exitedReviewMode" ? item.review || "" : item.text || ""), false).text,
+        ...(item.type === "agentMessage" && item.phase === "final_answer" && turn.status === "completed" ? { meta: finalAnswerMeta({ source: "codex-final-answer", text: item.text }, "codex") } : {}) };
       else if (["reasoning", "contextCompaction", "enteredReviewMode"].includes(item.type)) continue;
       else {
         const title = item.type === "commandExecution" ? String(item.command || "Shell command") : item.type === "fileChange" ? `${item.changes?.length || 0} file changes` : String(item.tool || item.type || "Native tool");

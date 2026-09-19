@@ -22,6 +22,7 @@ import { codexFeedbackPolicy } from "../codex-feedback.mjs";
 import { codexLogoutPolicy, logoutHash } from "../codex-logout.mjs";
 import { inspectCodexAuthFile } from "../codex-auth-files.mjs";
 import { planProgress } from "../tab-title.mjs";
+import { captureCodexFinal, codexFinalAnswer } from "../message-search.mjs";
 
 const toml = (value) => JSON.stringify(value);
 
@@ -788,6 +789,7 @@ export class CodexAdapter {
       if (current.goalRun && current.awaitingContinuation) {
         clearTimeout(current.continuationTimer); current.awaitingContinuation = false;
         current.text = ""; current.finalText = ""; current.outputRedactor = null;
+        current.searchAnswers = new Map();
         current.agentMessageId = undefined; current.pendingAgentMessageId = undefined; current.agentMessageIds = new Set();
         this.hooks.onEvent?.({ type: "goal_turn_started" });
       }
@@ -814,6 +816,10 @@ export class CodexAdapter {
     if ((method === "item/started" || method === "item/completed") && params.item) {
       if (method === "item/started" && params.item.type === "agentMessage" && this.current) this.current.pendingAgentMessageId = params.item.id;
       if (method === "item/completed" && params.item.type === "agentMessage" && this.current) {
+        captureCodexFinal(this.current, params, this.threadId, text => {
+          const filter = new SecretTextStream(this.credentialSecrets);
+          return redact(filter.push(text) + filter.finish());
+        });
         const id = params.item.id ?? this.current.pendingAgentMessageId ?? "legacy-message";
         // Some transports deliver only a completed message. Keep that block
         // too, without appending a second copy of already-streamed text.
@@ -837,7 +843,7 @@ export class CodexAdapter {
       const status = params.turn?.status || "completed";
       this.#finishOutput(current);
       if (status === "completed" && current.goalRun) {
-        this.hooks.onEvent?.({ type: "goal_turn_completed", text: current.text || current.finalText });
+        this.hooks.onEvent?.({ type: "goal_turn_completed", text: current.text || current.finalText, finalAnswer: codexFinalAnswer(current, params, this.threadId) });
         current.awaitingContinuation = true;
         if (!current.activatingGoal && this.goal?.status !== "active") this.#finishGoalRun();
         // If the native dispatcher suppresses a continuation, release the idle
@@ -849,7 +855,7 @@ export class CodexAdapter {
       current.resolveStarted?.(null);
       clearTimeout(current.timer);
       clearTimeout(current.continuationTimer);
-      if (status === "completed") current.resolveTurn({ text: current.reviewText || current.text || current.finalText, status });
+      if (status === "completed") current.resolveTurn({ text: current.reviewText || current.text || current.finalText, status, finalAnswer: codexFinalAnswer(current, params, this.threadId) });
       else current.rejectTurn(new Error(`Codex turn ended with status ${status}`));
       return;
     }

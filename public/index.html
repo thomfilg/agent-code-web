@@ -31,6 +31,7 @@
           <kbd>⌘ K</kbd>
         </button>
 
+        <button type="button" class="secondary-button message-search-trigger" id="message-search-button">Search messages</button>
         <div class="sidebar-heading"><span class="sidebar-label">Conversations</span><button class="small-icon" id="add-group-button" aria-label="Create custom group" title="Create custom group">＋</button></div>
         <label class="sidebar-sort"><span class="sr-only">Sort chats</span><select id="chat-sort"></select></label>
         <span class="sidebar-sync" id="sidebar-sync" role="status"></span>
@@ -479,6 +480,13 @@
     </dialog>
     <dialog id="relay-account-dialog"><section class="dialog-card compact"><div class="dialog-heading"><h2>Your Relay account</h2><button type="button" class="icon-button" id="relay-account-close" aria-label="Close account">×</button></div><p id="relay-account-email" class="relay-account-email"></p><p class="muted">Your conversations, GitHub connections, environments and MCP connections are private to this account. Signing out revokes personal Chrome access; it does not delete conversations.</p><button type="button" class="secondary-button full" id="relay-sign-out">Sign out</button><p class="form-error" id="relay-account-error" role="alert"></p></section></dialog>
 
+    <dialog id="message-search-dialog" aria-labelledby="message-search-title"><section class="dialog-card message-search-card">
+      <div class="dialog-heading"><h2 id="message-search-title">Search messages</h2><button type="button" class="icon-button" id="message-search-close" aria-label="Close message search">×</button></div>
+      <form id="message-search-form"><label><span class="sr-only">Search saved messages</span><input id="message-search-query" type="search" maxlength="200" autocomplete="off" placeholder="Search what you wrote and final answers…" required></label>
+        <select id="message-search-role" aria-label="Search in"><option value="all">Messages and answers</option><option value="user">Your messages</option><option value="assistant">Final answers</option></select><button type="submit" class="primary-button">Search</button></form>
+      <p id="message-search-coverage" class="muted">Only user messages and explicitly identified final answers are searched. Older or unclassified answers, tools and intermediate output are excluded.</p>
+      <p id="message-search-status" role="status"></p><ul id="message-search-results"></ul><button type="button" class="secondary-button" id="message-search-more" hidden>More results</button>
+    </section></dialog>
     <section id="saved-prompts-picker" class="saved-prompts-picker" aria-labelledby="saved-prompts-heading" hidden>
       <div class="saved-prompts-heading"><strong id="saved-prompts-heading">Saved prompts</strong><button type="button" id="saved-prompt-add" class="secondary-button">+ Prompt</button></div>
       <p id="saved-prompts-context" class="muted"></p>
