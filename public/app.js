@@ -461,7 +461,7 @@ async function resolveRequest(payload, target) {
   finally { controls.forEach(control => { control.disabled = false; }); }
 }
 
-async function openNewChat({ closeSidebar = true } = {}) {
+async function openNewChat({ closeSidebar = true, project } = {}) {
   if (!state.newChatReady) { toast("Relay is still loading. Try again in a moment."); return; }
   if (state.creatingChat || state.openingNewChat) return;
   const selection = state.selection = (state.selection || 0) + 1;
@@ -471,7 +471,7 @@ async function openNewChat({ closeSidebar = true } = {}) {
   if (closeSidebar) elements.sidebar.classList.remove("open");
   $("#create-chat-error").textContent = "";
   state.openingNewChat = true; $("#new-chat-fields").disabled = true; $("#new-chat-status").textContent = "Loading accounts and repositories…";
-  try { await workspaceSettings.openNew(); renderSecurityHint(); if (state.selection === selection) $("#initial-prompt").focus(); }
+  try { await workspaceSettings.openNew(project, { validWhile: () => state.selection === selection }); renderSecurityHint(); if (state.selection === selection) $("#initial-prompt").focus(); }
   catch (error) { $("#create-chat-error").textContent = error.message; }
   finally { state.openingNewChat = false; $("#new-chat-fields").disabled = false; $("#new-chat-status").textContent = ""; }
 }
@@ -919,7 +919,7 @@ $("#delete-button").addEventListener("click", () => {
 });
 $("#open-sidebar").addEventListener("click", () => elements.sidebar.classList.add("open"));
 $("#close-sidebar").addEventListener("click", () => elements.sidebar.classList.remove("open"));
-const sidebar = new ChatSidebar({ state, api, select: selectChat, remove: deleteChat, toast, agentLabel,
+const sidebar = new ChatSidebar({ state, api, select: selectChat, remove: deleteChat, toast, agentLabel, newProject: project => openNewChat({ project }),
   updated: chat => {
     updateChatSummary(chat);
     if (state.active?.id === chat.id) { state.active = { ...state.active, ...chat }; renderActive(); }
