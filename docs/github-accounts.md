@@ -2,16 +2,21 @@
 
 ## Sign in
 
-Open **GitHub connections → Add GitHub connection**. Relay immediately shows
+Register the intended company, then open **GitHub connections → Add GitHub
+connection** and select that company. Relay immediately shows
 Connecting, then places the code, authorization link and cancel action inside
 that connection's card. Open GitHub, enter the code and approve the desired
 account. After success, all repositories that GitHub permits that identity to
-access are available immediately. Naming is optional. Choose repositories and
-that connection when creating a conversation. Previously saved connections
-also work without a second Relay company form or a new sign-in.
+access are available immediately within that company's chats. Naming is optional.
+Choose repositories and that connection when creating a conversation. A company
+can group repositories from multiple GitHub owners (for example a personal
+account and its organization); a repository owner is not a Relay company.
 
-Multiple independent connections are supported. Name edits are revision
-checked. Connections belong only to their signed-in Relay user; GitHub controls
+Multiple independent connections are supported, with exactly one saved GitHub
+connection per company. A chat cannot combine repositories bound to different
+companies. Existing unassigned connections are preserved but need an explicit
+company assignment; that does not require new GitHub consent. Name edits are
+revision checked. Connections belong only to their signed-in Relay user; GitHub controls
 repository and branch permissions, including secondary repositories.
 A missing/revoked/ambiguous connection never borrows another
 account's credentials. Reconnect operates on the saved account, not a repeated
@@ -31,9 +36,20 @@ or server-login import is needed. The global CLI account is never switched.
 The native temporary-profile and same-OS-user boundary are documented in
 [the native-login ADR](adr/0001-native-github-accounts.md). The
 [provider-permissions decision](adr/2026-09-18-github-provider-permissions.md)
-supersedes the earlier GitHub company allowlist. Agent, environment and MCP
-scopes are unchanged. Workers still receive revocable access only to their
+removed the earlier repository-owner allowlist. The later single-company
+connection model chooses which saved identity a chat may use; it does not add
+a GitHub organization authorization form. Only agent accounts can span companies.
+Workers still receive revocable access only to their
 selected repositories and branches, not every listed repository.
+
+## Current company-bound read-only acceptance (2026-09-19)
+
+The [refreshed real-account receipt](validation-2026-09-19-github-company-smoke.md)
+passed listing, clone, PR/check reads and encrypted restart using the production
+`Companies` service, including local cross-company and cross-user denials.
+This isolated, explicitly authorized local-credential test does **not** prove
+browser consent, the selected AWS product connection, worker gateway access,
+push/PR creation, or native agent resume.
 
 ## Historical validation (2026-09-18, before provider-permissions refinement)
 
