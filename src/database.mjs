@@ -2,6 +2,15 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import pg from "pg";
+import { admissionRecordKind, assertAttemptFence, canonical, leaseFailure, recordLockKey, revision, scopeRecords, synchronousTransition, workerTransportKey } from "./worker-lease-scope.mjs";
+
+const admissionSnapshot = values => Object.fromEntries(["chat", "account", "disconnection", "company", "environment"].map((key, index) => [key, values[index]]));
+function expectedRevision(actual, expected) { if (!revision(expected) || actual !== expected) throw leaseFailure("CAS_CONFLICT"); }
+function attemptId(id) { if (!/^[a-f0-9]{64}$/.test(id || "")) throw leaseFailure("IDENTITY_INVALID"); return id; }
+function nextAttempt(previous, next, scope) {
+  if (!next || canonical(next.binding?.scope) !== canonical(scope) || previous && canonical(previous.binding) !== canonical(next.binding)) throw leaseFailure("IMMUTABLE_BINDING");
+  return next;
+}
 
 export class RecordCipher {
   constructor(key) {
@@ -30,6 +39,10 @@ export class EncryptedRecords {
     await this.pool.query(`CREATE TABLE IF NOT EXISTS relay_records (
       kind TEXT NOT NULL, id TEXT NOT NULL, payload BYTEA NOT NULL,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(kind, id))`);
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS relay_worker_state (
+      kind TEXT NOT NULL CHECK(kind IN ('attempt','transport')), id TEXT NOT NULL,
+      revision BIGINT NOT NULL CHECK(revision > 0), payload BYTEA NOT NULL,
+      PRIMARY KEY(kind,id))`);
     if (!await this.get("system", "encryption-check")) await this.put("system", "encryption-check", { ok: true });
   }
   async get(kind, id) {
@@ -41,21 +54,143 @@ export class EncryptedRecords {
     return result.rows.map(row => this.cipher.open(kind, row.id, row.payload));
   }
   async put(kind, id, value) {
-    await this.pool.query(`INSERT INTO relay_records(kind,id,payload) VALUES($1,$2,$3)
+    const write = client => client.query(`INSERT INTO relay_records(kind,id,payload) VALUES($1,$2,$3)
       ON CONFLICT(kind,id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=now()`, [kind, id, this.cipher.seal(kind, id, value)]);
+    if (admissionRecordKind(kind)) await this.#transaction([recordLockKey(kind, id)], write);
+    else await write(this.pool);
     return structuredClone(value);
   }
-  async delete(kind, id) { await this.pool.query("DELETE FROM relay_records WHERE kind=$1 AND id=$2", [kind, id]); }
+  async delete(kind, id) {
+    const remove = client => client.query("DELETE FROM relay_records WHERE kind=$1 AND id=$2", [kind, id]);
+    if (admissionRecordKind(kind)) await this.#transaction([recordLockKey(kind, id)], remove);
+    else await remove(this.pool);
+  }
+  async #transaction(keys, action, requireCommit = false) {
+    // Existing offline maintenance injects an already checked-out client and
+    // owns its outer transaction. Never commit/rollback that transaction here.
+    // Lease/ledger APIs require ownership of COMMIT before returning a grant.
+    if (typeof this.pool.release === "function") {
+      if (requireCommit) throw leaseFailure("COMMIT_OWNERSHIP_REQUIRED");
+      for (const key of [...new Set(keys)].sort()) await this.pool.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [key]);
+      return action(this.pool);
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Stable order, including keys whose rows do not exist yet. The same
+      // locks in scope put/delete close the absent-disconnection-marker race.
+      for (const key of [...new Set(keys)].sort()) await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [key]);
+      const result = await action(client);
+      await client.query("COMMIT"); return result;
+    } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; }
+    finally { client.release(); }
+  }
+  async #workerGet(client, kind, id) {
+    const result = await client.query("SELECT revision,payload FROM relay_worker_state WHERE kind=$1 AND id=$2", [kind, id]);
+    const row = result.rows[0];
+    return row ? { revision: Number(row.revision), value: this.cipher.open(`worker:${kind}`, id, row.payload) } : { revision: 0, value: null };
+  }
+  async #workerPut(client, kind, id, row, value) {
+    const next = row.revision + 1;
+    if (!revision(next)) throw leaseFailure("REVISION_EXHAUSTED");
+    const payload = this.cipher.seal(`worker:${kind}`, id, value);
+    const result = row.revision ? await client.query("UPDATE relay_worker_state SET revision=$3,payload=$4 WHERE kind=$1 AND id=$2 AND revision=$5", [kind, id, next, payload, row.revision])
+      : await client.query("INSERT INTO relay_worker_state(kind,id,revision,payload) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING", [kind, id, next, payload]);
+    if (result.rowCount !== 1) throw leaseFailure("CAS_CONFLICT");
+    return { revision: next, value: structuredClone(value) };
+  }
+  async workerAttemptGet(id) { return this.#workerGet(this.pool, "attempt", attemptId(id)); }
+  async workerAttemptTransaction({ attemptId: id, expectedRevision: expected, scope }, transition) {
+    attemptId(id); const refs = scopeRecords(scope);
+    return this.#transaction([recordLockKey("worker-attempt", id), ...refs.map(([kind, key]) => recordLockKey(kind, key))], async client => {
+      const row = await this.#workerGet(client, "attempt", id); expectedRevision(row.revision, expected);
+      const values = [];
+      for (const [kind, key] of refs) {
+        const result = await client.query("SELECT payload FROM relay_records WHERE kind=$1 AND id=$2", [kind, key]);
+        values.push(result.rows[0] ? this.cipher.open(kind, key, result.rows[0].payload) : null);
+      }
+      const now = Number((await client.query("SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now")).rows[0].now);
+      const value = synchronousTransition(transition, { ...row, records: admissionSnapshot(values), now });
+      return value === undefined ? row : this.#workerPut(client, "attempt", id, row, nextAttempt(row.value, value, scope));
+    }, true);
+  }
+  async workerTransportTransaction(request, transition) {
+    const { attemptId: id, processId, expectedRevision: expected } = request, key = workerTransportKey(id, processId);
+    return this.#transaction([recordLockKey("worker-attempt", id), recordLockKey("worker-transport", key)], async client => {
+      const attempt = (await this.#workerGet(client, "attempt", id)).value;
+      const now = Number((await client.query("SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now")).rows[0].now);
+      assertAttemptFence(attempt, request, now);
+      const row = await this.#workerGet(client, "transport", key); expectedRevision(row.revision, expected);
+      const value = synchronousTransition(transition, row);
+      return value === undefined ? row : this.#workerPut(client, "transport", key, row, value);
+    }, true);
+  }
+  async workerTransportGet(request) {
+    const { attemptId: id, processId } = request, key = workerTransportKey(id, processId);
+    return this.#transaction([recordLockKey("worker-attempt", id), recordLockKey("worker-transport", key)], async client => {
+      const attempt = (await this.#workerGet(client, "attempt", id)).value;
+      const now = Number((await client.query("SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint AS now")).rows[0].now);
+      assertAttemptFence(attempt, request, now); return this.#workerGet(client, "transport", key);
+    }, true);
+  }
   async close() { await this.pool.end(); }
 }
 
 // Explicitly injected in unit tests; never a fallback when PostgreSQL fails.
 export class MemoryRecords {
-  constructor() { this.rows = new Map(); this.kind = "memory-test"; }
+  constructor() { this.rows = new Map(); this.kind = "memory-test"; this.workerRows = new Map(); this.workerLocks = new Map(); }
   async get(kind, id) { return structuredClone(this.rows.get(`${kind}/${id}`) || null); }
   async list(kind) { return [...this.rows.entries()].filter(([k]) => k.startsWith(`${kind}/`)).map(([, v]) => structuredClone(v)); }
-  async put(kind, id, value) { this.rows.set(`${kind}/${id}`, structuredClone(value)); return structuredClone(value); }
-  async delete(kind, id) { this.rows.delete(`${kind}/${id}`); }
+  async put(kind, id, value) {
+    const write = () => { this.rows.set(`${kind}/${id}`, structuredClone(value)); return structuredClone(value); };
+    return admissionRecordKind(kind) ? this.#locked([recordLockKey(kind, id)], write) : write();
+  }
+  async delete(kind, id) {
+    const remove = () => { this.rows.delete(`${kind}/${id}`); };
+    return admissionRecordKind(kind) ? this.#locked([recordLockKey(kind, id)], remove) : remove();
+  }
+  async #locked(keys, action) {
+    const releases = [];
+    try {
+      for (const key of [...new Set(keys)].sort()) {
+        const prior = this.workerLocks.get(key) || Promise.resolve(); let release;
+        const held = new Promise(resolve => { release = resolve; });
+        const tail = prior.then(() => held); this.workerLocks.set(key, tail);
+        await prior; releases.push(() => { release(); if (this.workerLocks.get(key) === tail) this.workerLocks.delete(key); });
+      }
+      return await action();
+    } finally { for (const release of releases.reverse()) release(); }
+  }
+  #workerGet(kind, id) { return structuredClone(this.workerRows.get(`${kind}/${id}`) || { revision: 0, value: null }); }
+  #workerPut(kind, id, row, value) {
+    if (!revision(row.revision + 1)) throw leaseFailure("REVISION_EXHAUSTED");
+    const next = { revision: row.revision + 1, value: structuredClone(value) }; this.workerRows.set(`${kind}/${id}`, next); return structuredClone(next);
+  }
+  async workerAttemptGet(id) { return this.#workerGet("attempt", attemptId(id)); }
+  async workerAttemptTransaction({ attemptId: id, expectedRevision: expected, scope }, transition) {
+    attemptId(id); const refs = scopeRecords(scope);
+    return this.#locked([recordLockKey("worker-attempt", id), ...refs.map(([kind, key]) => recordLockKey(kind, key))], () => {
+      const row = this.#workerGet("attempt", id); expectedRevision(row.revision, expected);
+      const values = refs.map(([kind, key]) => structuredClone(this.rows.get(`${kind}/${key}`) || null));
+      const value = synchronousTransition(transition, { ...row, records: admissionSnapshot(values), now: Date.now() });
+      return value === undefined ? row : this.#workerPut("attempt", id, row, nextAttempt(row.value, value, scope));
+    });
+  }
+  async workerTransportTransaction(request, transition) {
+    const { attemptId: id, processId, expectedRevision: expected } = request, key = workerTransportKey(id, processId);
+    return this.#locked([recordLockKey("worker-attempt", id), recordLockKey("worker-transport", key)], () => {
+      assertAttemptFence(this.#workerGet("attempt", id).value, request, Date.now());
+      const row = this.#workerGet("transport", key); expectedRevision(row.revision, expected);
+      const value = synchronousTransition(transition, row);
+      return value === undefined ? row : this.#workerPut("transport", key, row, value);
+    });
+  }
+  async workerTransportGet(request) {
+    const { attemptId: id, processId } = request, key = workerTransportKey(id, processId);
+    return this.#locked([recordLockKey("worker-attempt", id), recordLockKey("worker-transport", key)], () => {
+      assertAttemptFence(this.#workerGet("attempt", id).value, request, Date.now()); return this.#workerGet("transport", key);
+    });
+  }
   async close() {}
 }
 
