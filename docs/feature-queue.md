@@ -26,6 +26,14 @@ is unchanged from the 1,547-test candidate. Production publication remains
 pending authorization; this does not claim recovery of the live stuck chat. See the
 [events/search receipt](validation-2026-09-19-events-search-integration.md).
 
+The subsequent independent guest-browser review found three publication
+blockers: queued mutations after revocation, uncertain projection cleanup,
+and command starvation under continuous bounded events. Fixes and compatibility
+revalidation remain pending; the isolated starvation proof confirms a defect,
+not acceptance. A separate installed-Claude native-child smoke passed, but does
+not complete the agents-panel UI or live-account gates. See the
+[review evidence and boundaries](validation-2026-09-19-guest-browser-review.md).
+
 Runtime follow-up candidate `188282e` passed **1,464/1,464 Node** cases with
 optional checks enabled and **40/40 targeted browser** cases without retries.
 It includes the Claude ambient-workflow cancellation fix, fatal-exit transcript
