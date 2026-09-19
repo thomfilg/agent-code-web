@@ -33,11 +33,13 @@ function runCapture(command, args, { input = null, env = process.env, timeoutMs 
 }
 
 class LocalExecutor {
-  constructor({ chat, store, config, gatewayOrigin }) {
+  constructor({ chat, store, config, gatewayOrigin, browserTransport }) {
     this.workspace = chat.workspace;
     this.runtimeHome = store.runtimeHome(chat.id);
     this.gatewayOrigin = gatewayOrigin;
     this.config = config;
+    this.chat = chat;
+    this.browserTransport = browserTransport;
     this.metadata = { backend: "local", isolation: config.processIsolation };
   }
 
@@ -48,6 +50,7 @@ class LocalExecutor {
   // Chrome keeps its native renderer sandbox. Mapping the launcher to UID 0
   // inside the CLI PID namespace would force disabling that sandbox.
   spawnBrowser(command, args, options) {
+    if (this.browserTransport) return this.browserTransport.spawnBrowser(this.chat, command, args, options);
     return spawnWorker(command, args, { ...options, isolation: "none" });
   }
 
@@ -57,14 +60,15 @@ class LocalExecutor {
 }
 
 class LocalBackend {
-  constructor({ store, config, gatewayOrigin }) {
+  constructor({ store, config, gatewayOrigin, browserTransport }) {
     this.store = store;
     this.config = config;
     this.gatewayOrigin = gatewayOrigin;
+    this.browserTransport = browserTransport;
   }
 
   async acquire(chat) {
-    return new LocalExecutor({ chat, store: this.store, config: this.config, gatewayOrigin: this.gatewayOrigin });
+    return new LocalExecutor({ chat, store: this.store, config: this.config, gatewayOrigin: this.gatewayOrigin, browserTransport: this.browserTransport });
   }
 
   async sleep() {}
@@ -415,7 +419,11 @@ export class Ec2Backend {
   }
 }
 
-export function createWorkerBackend({ store, config, gatewayOrigin, commandRunner }) {
+export function createWorkerBackend({ store, config, gatewayOrigin, commandRunner, browserTransport }) {
+  // Programmatic, local synthetic validation only. No configuration flag or
+  // HTTP input can bypass the missing production service/cgroup admission.
+  if (browserTransport && (config.workerBackend !== "local" || !config.enableMock || browserTransport.admission !== "local-validation"
+    || typeof browserTransport.spawnBrowser !== "function")) throw new Error("Reconnectable browser transport is only admitted for explicit local validation");
   if (config.workerBackend === "ec2") return new Ec2Backend({ store, config, commandRunner });
-  return new LocalBackend({ store, config, gatewayOrigin });
+  return new LocalBackend({ store, config, gatewayOrigin, browserTransport });
 }
