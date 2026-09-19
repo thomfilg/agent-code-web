@@ -139,9 +139,10 @@ test("changed scope rejects restored import state and deleting a chat removes on
   const f = await fixture(t); await f.request("imports/start", f.input(await f.review())); await f.app.manager.stop(f.chat.id);
   // Valid selected repository admission must reach the distinct native-import
   // scope guard; malformed GitHub metadata would fail earlier for another reason.
-  await f.records.put("connection", "github", { id: "github", token: "synthetic-import-scope-github", revision: 1, companies: ["new-company"] });
+  await f.app.manager.github.companies.save({ id: "import-company", name: "Import company" });
+  await f.records.put("connection", "github", { id: "github", token: "synthetic-import-scope-github", revision: 1, companyId: "import-company" });
   f.app.manager.github.fetch = async () => { throw Error("Unexpected external GitHub request in import scope fixture"); };
-  await f.app.store.update(f.chat.id, { repositories: [{ id: 31, githubConnectionId: "github", owner: "new-company", name: "repo", fullName: "new-company/repo" }] });
+  await f.app.store.update(f.chat.id, { repositories: [{ id: 31, githubConnectionId: "github", companyId: "import-company", owner: "new-company", name: "repo", fullName: "new-company/repo" }] });
   const response = await f.request(); assert.equal(response.status, 409); assert.match((await response.json()).error, /another scope/);
   await f.records.put("native-import", "other-chat", { marker: "retain" });
   await f.app.manager.remove(f.chat.id); assert.equal(await f.records.get("native-import", f.chat.id), null); assert.deepEqual(await f.records.get("native-import", "other-chat"), { marker: "retain" });

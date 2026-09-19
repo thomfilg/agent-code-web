@@ -47,6 +47,7 @@ function remainingAssistantText(runtime, text) {
   const published = (runtime.assistantText || "").slice(0, runtime.assistantPublishedLength || 0);
   return published && text.startsWith(published.trimEnd()) ? text.slice(published.length).replace(/^\n+/, "") : text;
 }
+const runtimeAccountBinding = chat => JSON.stringify([chat.ownerId || null, chat.agent, chat.agentAccountId || null]);
 
 export class RuntimeManager extends EventEmitter {
   #runtimes = new Map();
@@ -68,6 +69,23 @@ export class RuntimeManager extends EventEmitter {
   #workerWakes = new Map();
   #awakeWorkers = new Set();
   #workerIdleTimers = new Map();
+
+  #assertNativeAccount(chatId, expectedRuntime = null) {
+    const chat = this.store.get(chatId);
+    if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    if (chat.agentAccountId && ["codex", "claude"].includes(chat.agent)) this.agentAccounts.assertConnected(chat.ownerId, chat.agentAccountId, chat.agent);
+    const runtime = this.#runtimes.get(chatId);
+    if (expectedRuntime && runtime !== expectedRuntime) throw Object.assign(new Error("The native worker stopped or changed before this action could run."), { statusCode: 409 });
+    if (runtime?.revoked) throw Object.assign(new Error("This worker has been stopped or revoked. Retry stopping it before resuming."), { statusCode: 409 });
+    if (runtime && runtime.accountBinding !== runtimeAccountBinding(chat)) throw Object.assign(new Error("The selected agent account changed; reconnect this worker before continuing."), { statusCode: 409 });
+  }
+
+  async #nativeRuntime(chatId) {
+    this.#assertNativeAccount(chatId);
+    const runtime = this.#runtimes.get(chatId) || await this.#start(chatId);
+    this.#assertNativeAccount(chatId, runtime);
+    return runtime;
+  }
 
   async enqueue(chatId, rawText, attachmentIds = []) {
     const text = clampText(rawText, 100_000, "message");
@@ -249,6 +267,7 @@ export class RuntimeManager extends EventEmitter {
     this.feedback = new CodexFeedback(store, config);
     this.logout = new CodexLogout(store, config);
     this.sideChats = new SideChats({
+      authorize: chatId => this.#assertNativeAccount(chatId),
       fork: (chatId, hooks) => this.#forkSide(chatId, hooks),
       prepare: (chatId, text, ids, first) => this.#prepareSide(chatId, text, ids, first),
       publish: (chatId, snapshot) => this.#emit(chatId, { type: "side_chat_updated", ...snapshot }, false),
@@ -265,10 +284,11 @@ export class RuntimeManager extends EventEmitter {
     this.#switching.add(chatId);
     const version = this.#lifecycleVersions.get(chatId) || 0;
     try {
-      const runtime = this.#runtimes.get(chatId) || await this.#start(chatId);
+      const runtime = await this.#nativeRuntime(chatId);
       if (version !== (this.#lifecycleVersions.get(chatId) || 0)) throw new Error("Side chat cancelled because the worker stopped");
       if (!runtime.adapter.forkSide) throw new Error("This worker does not support temporary side chats");
       clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
+      this.#assertNativeAccount(chatId, runtime);
       return await runtime.adapter.forkSide(hooks);
     } finally { this.#switching.delete(chatId); void this.#drainQueue(chatId); }
   }
@@ -284,7 +304,7 @@ export class RuntimeManager extends EventEmitter {
     this.#switching.add(chatId);
     const version = this.#lifecycleVersions.get(chatId) || 0;
     try {
-      const runtime = this.#runtimes.get(chatId) || await this.#start(chatId);
+      const runtime = await this.#nativeRuntime(chatId);
       if (version !== (this.#lifecycleVersions.get(chatId) || 0)) throw new Error("Agent action cancelled because the worker stopped");
       const agents = runtime.adapter.agents;
       if (!agents) throw new Error("This worker does not support native agent navigation");
@@ -293,6 +313,7 @@ export class RuntimeManager extends EventEmitter {
       if (action === "messages" && (runtime.adapter.featureControls?.changing || runtime.adapter.featureControls?.needsRefresh)) throw Object.assign(new Error("Refresh /experimental to finish reconciling the feature change before sending to an agent"), { statusCode: 409 });
       if (action === "messages" && (runtime.adapter.memoryControls?.changing || runtime.adapter.memoryControls?.needsRefresh)) throw Object.assign(new Error("Refresh /memories to finish reconciling the memory change before sending to an agent"), { statusCode: 409 });
       if (action === "messages") await this.#assertImportReady(chatId);
+      this.#assertNativeAccount(chatId, runtime);
       if (action !== "refresh" && input.rootThreadId !== this.store.get(chatId)?.agentSessionId) throw Object.assign(new Error("The native session changed; reopen the agent picker"), { statusCode: 409 });
       clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
       if (action === "refresh") return await agents.refresh();
@@ -314,12 +335,13 @@ export class RuntimeManager extends EventEmitter {
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const check = () => {
       guard();
+      this.#assertNativeAccount(chatId);
       const current = this.store.get(chatId);
       if (version !== (this.#lifecycleVersions.get(chatId) || 0) || !current || current.agent !== chat.agent || companyForChat(current) !== companyForChat(chat) || current.ownerId !== chat.ownerId) throw Object.assign(new Error("The app request was cancelled because the chat changed or stopped"), { statusCode: 409 });
       return current;
     };
     try {
-      const runtime = this.#runtimes.get(chatId) || await this.#start(chatId);
+      const runtime = await this.#nativeRuntime(chatId);
       check();
       if (!runtime.adapter.apps) throw new Error("This worker does not support native apps; update its Codex CLI");
       clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
@@ -381,6 +403,7 @@ export class RuntimeManager extends EventEmitter {
     const scope = value => JSON.stringify([value.ownerId, value.environmentId, value.workspace, value.repositories, companyForChat(value), value.agentAccountId || null]), initialScope = scope(chat);
     const check = async () => {
       await guard(); const current = this.store.get(chatId);
+      this.#assertNativeAccount(chatId);
       if (!current || current.archived || current.agent !== "claude" || this.config.claude.authMode !== "gateway" && !current.agentAccountId || scope(current) !== initialScope || version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(Error("Workspace trust review is no longer current because the chat changed or stopped. If you submitted confirmation, trust may already have been saved; inspect again."), { statusCode: 409 });
     };
     let reviewedRuntime;
@@ -393,6 +416,7 @@ export class RuntimeManager extends EventEmitter {
       reviewedRuntime = runtime; runtime.trustReviewing = true;
       clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
       const binding = JSON.stringify([actor, version, initialScope, runtime.executor?.workspace || chat.workspace, runtime.executor?.runtimeHome || this.store.runtimeHome(chatId)]);
+      this.#assertNativeAccount(chatId, runtime);
       const result = await runtime.adapter.workspaceTrust(action, input, binding, check); await check(); return result;
     } finally { if (reviewedRuntime) reviewedRuntime.trustReviewing = false; this.#switching.delete(chatId); await this.refreshActivity(chatId); void this.#drainQueue(chatId); }
   }
@@ -449,6 +473,7 @@ export class RuntimeManager extends EventEmitter {
     const originalScope = scope(chat);
     const check = () => {
       guard(); const current = this.store.get(chatId);
+      this.#assertNativeAccount(chatId);
       if (version !== (this.#lifecycleVersions.get(chatId) || 0) || !current || current.archived || current.agent !== "codex" || scope(current) !== originalScope) throw Object.assign(new Error("The feedback request was cancelled because the chat changed or stopped"), { statusCode: 409 });
     };
     try {
@@ -477,10 +502,11 @@ export class RuntimeManager extends EventEmitter {
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const check = () => {
       guard(); const current = this.store.get(chatId);
+      this.#assertNativeAccount(chatId);
       if (version !== (this.#lifecycleVersions.get(chatId) || 0) || !current || current.archived || current.agent !== chat.agent || current.ownerId !== chat.ownerId || current.environmentId !== chat.environmentId || companyForChat(current) !== companyForChat(chat) || mutation && current.agentSessionId !== input.threadId) throw Object.assign(new Error("The import request was cancelled because the chat changed or stopped"), { statusCode: 409 });
     };
     try {
-      const runtime = this.#runtimes.get(chatId) || await this.#start(chatId); check();
+      const runtime = await this.#nativeRuntime(chatId); check();
       const service = runtime.adapter.importControls;
       if (!service) throw new Error("Native import requires encrypted operation storage and a supported Codex worker");
       if (mutation && (runtime.busy || this.sideChats.busy(chatId))) throw Object.assign(new Error("Wait for the agents to be idle before importing"), { statusCode: 409 });
@@ -523,6 +549,7 @@ export class RuntimeManager extends EventEmitter {
       const chat = await this.store.create({ title: selected.title.slice(0, 120), ownerId: source.ownerId, agent: "codex", agentAccountId: source.agentAccountId, source: source.source, repositories: source.repositories,
         environmentId: source.environmentId, environmentName: source.environmentName, model: source.model, effort: source.effort, modelSelectionSet: source.modelSelectionSet, autoTitle: false }, async target => {
         targetId = target.id;
+        guard();
         await snapshotWorkspace({ executor: runtime.executor, source: runtime.executor?.workspace || source.workspace, destination: target.workspace, signal: action.controller.signal }); guard();
         const images = await copyImportedImages(imported.messages, runtime.executor?.workspace || source.workspace, target.workspace, guard);
         const attached = await this.attachments.importTranscript(target.id, images.messages); guard();
@@ -562,10 +589,11 @@ export class RuntimeManager extends EventEmitter {
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const check = () => {
       guard(); const current = this.store.get(chatId);
+      this.#assertNativeAccount(chatId);
       if (version !== (this.#lifecycleVersions.get(chatId) || 0) || !current || current.archived || current.agent !== chat.agent || current.ownerId !== chat.ownerId || companyForChat(current) !== companyForChat(chat) || (mutation && current.agentSessionId !== input.threadId)) throw Object.assign(new Error(`The ${kind} request was cancelled because the chat changed or stopped`), { statusCode: 409 });
     };
     try {
-      const runtime = this.#runtimes.get(chatId) || await this.#start(chatId); check();
+      const runtime = await this.#nativeRuntime(chatId); check();
       const service = { plugin: runtime.adapter.plugins, hook: runtime.adapter.hookControls, feature: runtime.adapter.featureControls, memory: runtime.adapter.memoryControls }[kind];
       if (!service) throw new Error(`This worker does not support native ${label}; update its Codex CLI`);
       const other = [["plugins", runtime.adapter.plugins], ["hooks", runtime.adapter.hookControls], ["experimental", runtime.adapter.featureControls], ["memories", runtime.adapter.memoryControls], ["import", runtime.adapter.importControls]].find(([, candidate]) => candidate !== service && candidate?.needsRefresh);
@@ -582,11 +610,13 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async #prepareSide(chatId, text, attachmentIds, first) {
+    this.#assertNativeAccount(chatId);
     const chat = this.store.get(chatId), runtime = this.#runtimes.get(chatId);
     if (!chat || !runtime || chat.archived) throw new Error("The side chat's worker is not available");
     const files = this.attachments ? await this.attachments.resolve(chatId, attachmentIds) : [];
     const settings = this.models ? await this.models.turnSettings(chat) : {};
     const materialized = files.length ? await this.attachments.materialize(chat, runtime.executor, files) : [];
+    this.#assertNativeAccount(chatId, runtime);
     const workspace = runtime.executor?.workspace || chat.workspace;
     const attached = attachmentPrompt(materialized, workspace);
     const prompt = first ? handoffPrompt({ ...chat, messages: [...chat.messages, {}] }, text + attached) : text + attached;
@@ -1185,7 +1215,7 @@ export class RuntimeManager extends EventEmitter {
       if (source.environmentId) await (await this.servicesFor(source)).environments.runtime(source.environmentId, source);
       signal.throwIfAborted();
       action.workspaceOnly = !source.agentSessionId && !source.nativeForkSessionId;
-      runtime = action.workspaceOnly ? { executor: await this.browserExecutor(source.id) } : this.#runtimes.get(source.id) || await this.#start(source.id);
+      runtime = action.workspaceOnly ? { executor: await this.browserExecutor(source.id) } : await this.#nativeRuntime(source.id);
       signal.throwIfAborted();
       if (!action.workspaceOnly && !runtime.adapter.forkSession) throw new Error("This worker does not support persistent native forks");
       clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
@@ -1193,6 +1223,8 @@ export class RuntimeManager extends EventEmitter {
       const copy = await this.store.create({ title, ownerId: source.ownerId || ownerId, agent: source.agent, agentAccountId: source.agentAccountId, model: source.model, effort: source.effort, modelSelectionSet: source.modelSelectionSet,
         source: source.source, repositories: source.repositories, environmentId: source.environmentId, environmentName: source.environmentName, autoTitle: false }, async target => {
         targetId = target.id;
+        signal.throwIfAborted();
+        if (!action.workspaceOnly) this.#assertNativeAccount(source.id, runtime);
         try { bundle = action.workspaceOnly ? null : await runtime.adapter.forkSession(runtime.executor?.workspace || source.workspace); }
         catch (error) {
           // Opening an empty worker can assign an ID without materializing a
@@ -1337,10 +1369,13 @@ export class RuntimeManager extends EventEmitter {
     this.#emit(chatId, { type: "turn_started", messageId: assistantMessageId });
 
     try {
+      this.#assertNativeAccount(chatId, runtime);
       if (turn.cancelled) return;
       if (commandAction?.type === "compact") {
         if (!runtime.adapter.compact) throw new Error("This worker does not expose native compaction. Update its Codex CLI.");
         await this.#setStatus(chatId, "running", "Compacting context", null);
+        if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
+        this.#assertNativeAccount(chatId, runtime);
         await runtime.adapter.compact(); await runtime.eventQueue;
         if (turn.cancelled || runtime.generation !== generation) return;
         const message = await this.store.appendMessage(chatId, { role: "system", kind: "notice", text: "Context compacted." });
@@ -1366,7 +1401,9 @@ export class RuntimeManager extends EventEmitter {
       }
       if (commandAction?.type === "goal") {
         if (commandAction.action !== "get") await this.store.update(chatId, { forkGoalPending: false });
+        if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
         if (!runtime.adapter.goalAction) throw new Error("This Codex worker does not expose goal controls. Update its CLI to a version with thread/goal support.");
+        this.#assertNativeAccount(chatId, runtime);
         if (!["set", "resume"].includes(commandAction.action)) await runtime.adapter.goalAction(commandAction.action, commandAction.objective);
       }
       if (commandAction && !commandAction.prompt && commandAction.type !== "review") {
@@ -1396,7 +1433,10 @@ export class RuntimeManager extends EventEmitter {
       const claude = currentChat.agent === "claude";
       const modeState = { original: currentChat, mode: currentChat.mode, revision: currentChat.modeSettingsRevision };
       const modeActive = () => !turn.cancelled && runtime.generation === generation && this.#runtimes.get(chatId) === runtime;
-      const send = () => runtime.adapter.send(claude ? raw : metadata ? responsePrompt(prompt, automaticTitle) : prompt, {
+      const send = () => {
+        if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) throw Object.assign(new Error("Turn cancelled before native dispatch"), { name: "AbortError" });
+        this.#assertNativeAccount(chatId, runtime);
+        return runtime.adapter.send(claude ? raw : metadata ? responsePrompt(prompt, automaticTitle) : prompt, {
         ...settings, ...explicitContext, appReferences: appReferencesForTurn(currentChat, files, companyForChat(currentChat)), ...(skill ? { skills: [skill] } : {}),
         ...(commandAction?.type === "review" ? { reviewTarget: commandAction.target } : {}),
         ...(commandAction?.type === "goal" ? { goalDirective: commandAction } : currentChat.forkGoalPending && currentChat.mode !== "plan" && commandAction?.type !== "review" ? { goalDirective: { action: "resume", fork: true } } : {}),
@@ -1411,6 +1451,7 @@ export class RuntimeManager extends EventEmitter {
             runtime.eventQueue = runtime.eventQueue.then(() => this.#retainClaudeFastConstraint(chatId, value, settingsChat));
           } } : {}),
         mode: currentChat.mode || "accept_edits", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) });
+      };
       const checkConfiguration = () => {
         if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) throw Object.assign(new Error("Settings command cancelled"), { name: "AbortError" });
       };
@@ -1540,6 +1581,10 @@ export class RuntimeManager extends EventEmitter {
     let stopped = false;
     try {
     this.#lifecycleVersions.set(chatId, (this.#lifecycleVersions.get(chatId) || 0) + 1);
+    // Storage failure must not leave a warmed native RPC reusable. Keep the
+    // reference for retry cleanup, but invalidate admission before any await.
+    const stoppingRuntime = this.#runtimes.get(chatId);
+    if (stoppingRuntime) stoppingRuntime.revoked = true;
     this.#awakeWorkers.delete(chatId);
     clearTimeout(this.#workerIdleTimers.get(chatId)); this.#workerIdleTimers.delete(chatId);
     this.previewActivity.revokeChat(chatId);
@@ -1605,9 +1650,10 @@ export class RuntimeManager extends EventEmitter {
     this.#switching.add(chatId);
     const version = this.#lifecycleVersions.get(chatId) || 0;
     try {
-      const runtime = this.#runtimes.get(chatId) || await this.#start(chatId);
+      const runtime = await this.#nativeRuntime(chatId);
       if (version !== (this.#lifecycleVersions.get(chatId) || 0)) throw new Error("Goal action cancelled because the chat was stopped");
       if (!runtime.adapter.goalAction) throw new Error("This worker does not support goal controls");
+      this.#assertNativeAccount(chatId, runtime);
       await runtime.adapter.goalAction(action);
       await this.store.update(chatId, { forkGoalPending: false });
       if (!runtime.busy) await this.#scheduleIdleStop(chatId, runtime);
@@ -1630,6 +1676,7 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async respond(chatId, requestId, input = {}) {
+    this.#assertNativeAccount(chatId);
     const chat = this.store.get(chatId);
     const runtime = this.#runtimes.get(chatId);
     if (!chat || !runtime) throw Object.assign(new Error("chat runtime is not active"), { statusCode: 404 });
@@ -1799,7 +1846,7 @@ export class RuntimeManager extends EventEmitter {
       adapter = this.adapterFactory
         ? this.adapterFactory({ chat, hooks, executor, restoreFork: forkRecord && !forkRecord.initialized ? forkRecord.bundle : null, savedAgentThreads })
         : new Adapter({ chat, store: this.store, config: this.config, broker: this.broker, gatewayOrigin: this.gatewayOrigin, executor, hooks, restoreFork: forkRecord && !forkRecord.initialized ? forkRecord.bundle : null, savedAgentThreads });
-      runtime = { adapter, executor, forkContext, busy: false, idleTimer: null, generation: 0, eventQueue: Promise.resolve() };
+      runtime = { adapter, executor, forkContext, accountBinding: runtimeAccountBinding(chat), busy: false, idleTimer: null, generation: 0, eventQueue: Promise.resolve() };
       this.#runtimes.set(chatId, runtime);
       await adapter.start();
       checkCancelled();

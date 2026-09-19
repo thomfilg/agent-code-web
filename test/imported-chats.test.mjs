@@ -61,9 +61,10 @@ async function fixture(t, { legacySource = false } = {}) {
   const { url } = await app.start(); t.after(() => app.stop()); const source = await app.manager.createChat({ agent: "codex", title: "Import destination" });
   // Complete saved selection, as resolveSelections returns in the product.
   // Keep real scoped gateway admission active; no provider request is needed.
-  await app.records.put("connection", "github", { id: "github", token: "synthetic-import-github", revision: 1, companies: ["12-apps"] });
+  await app.manager.github.companies.save({ id: "fixture-company", name: "Fixture company" });
+  await app.records.put("connection", "github", { id: "github", token: "synthetic-import-github", revision: 1, companyId: "fixture-company" });
   app.manager.github.fetch = async () => { throw new Error("Unexpected external GitHub request in import fixture"); };
-  await app.store.update(source.id, { agentSessionId: rootThreadId, repositories: [{ id: 31, githubConnectionId: "github", owner: "12-apps", name: "future-pay", fullName: "12-apps/future-pay" }] });
+  await app.store.update(source.id, { agentSessionId: rootThreadId, repositories: [{ id: 31, githubConnectionId: "github", companyId: "fixture-company", owner: "12-apps", name: "future-pay", fullName: "12-apps/future-pay" }] });
   if (legacySource) {
     const saved = app.store.get(source.id); delete saved.repositories;
     saved.source = path.join(root, "original-source");
