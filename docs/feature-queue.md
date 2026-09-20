@@ -92,8 +92,13 @@ open; local protocol fixtures do not prove those gates.
 
 Two-minute process-preserving hibernation remains open. The candidate includes
 worker-owned process transport, durable lease authority and a locally wired
-Shared Chrome link-reconnection slice. The latter proves same-controller link
-recovery with disposable Chrome, not controller restart or EC2 suspend/resume.
+Shared Chrome reconnection slice. The latter now proves link recovery and an
+explicit fresh-controller-lifetime takeover at a quiescent durable RPC boundary
+with the same disposable Chrome/renderer. It refuses unresolved mutating RPCs
+without replacement or implicit termination. This is still an injected local
+facade reconstruction, not an actual control-plane process-exit or EC2
+suspend/resume result; see the
+[controller recovery receipt](validation-2026-09-20-browser-controller-recovery.md).
 Lifecycle partition 1 is now integrated: intent/result/generation, exact worker
 identity, sanitized controller-lease descriptors, `created`/`started`/`inspected`
 receipts, exact cleanup outcomes and restart-to-unknown reconciliation persist

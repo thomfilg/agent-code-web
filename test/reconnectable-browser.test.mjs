@@ -61,23 +61,26 @@ test("normal SharedBrowsers path reconnects disposable real Chrome with durable 
     await mkdir(chat.workspace, { recursive: true, mode: 0o700 });
     await mkdir(store.runtimeHome(chat.id), { recursive: true, mode: 0o700 });
     const contexts = [], f = { chat, contexts, issueGate: null, spawnGate: null, issued: 0 };
-    const browserTransport = createLocalBrowserTransport({ watchLeaseMs: 1000, openAttempt: async selected => {
+    const initialLifetime = randomUUID();
+    const browserTransport = createLocalBrowserTransport({ watchLeaseMs: 1000, controllerLifetimeId: initialLifetime, openAttempt: async selected => {
       assert.equal(selected.id, chat.id);
       const directory = await mkdtemp(path.join(root, "attempt-"));
       const identity = { deploymentId: "local-fixture", ownerId, chatId: chat.id, workerId: "local-worker", provider: "codex", accountId, attemptId: randomUUID() };
-      let supervisor;
+      let supervisor, activeAdmission;
       const authority = new WorkerLeaseAuthority({ records, deploymentId: identity.deploymentId, bootForWorker: () => bootId,
         invalidateLease: id => supervisor?.invalidateLease(id) });
       const binding = await authority.prepare(identity), controllerId = "controller-fixture";
       const claim = await authority.claim(binding, controllerId), admitted = authority.forAttempt(binding, controllerId);
+      activeAdmission = admitted;
       const socketPath = path.join(directory, "process.sock");
-      supervisor = await new WorkerProcessSupervisor({ socketPath, expectedIdentity: identity, authorize: request => admitted.authorize(request) }).listen();
+      supervisor = await new WorkerProcessSupervisor({ socketPath, expectedIdentity: identity, authorize: request => activeAdmission.authorize(request) }).listen();
       let ledgerWrites = 0;
       const ledgerRecords = { workerTransportGet: request => records.workerTransportGet(request), workerTransportTransaction: async (...args) => {
         if (++ledgerWrites === 2 && f.failLaunchCommit) throw Error("synthetic launch receipt commit failure");
         return records.workerTransportTransaction(...args);
       } };
       const context = { boundary: "local-validation", identity, binding, claim, records: ledgerRecords, socketPath, authority, admitted, supervisor,
+        replaceAdmission: next => { activeAdmission = next; },
         issueLease: async () => { ++f.issued; await f.issueGate?.(); return admitted.issue(); }, renewLease: id => admitted.renew(id),
         dispose: async ({ failed }) => {
           if (context.disposed) return;
@@ -105,6 +108,31 @@ test("normal SharedBrowsers path reconnects disposable real Chrome with durable 
     f.open = async () => {
       const entry = await f.browsers.ensure(chat.id); f.entry = entry; f.child = entry.browser.child; f.context = contexts.at(-1);
       return entry;
+    };
+    f.restartController = async () => {
+      const previous = f.context;
+      f.child.detach(); await until(() => f.child.detached);
+      clearInterval(f.entry.browser.heartbeat); clearTimeout(f.entry.idleTimer);
+      const controllerId = `controller-${randomUUID()}`;
+      const authority = new WorkerLeaseAuthority({ records, deploymentId: previous.identity.deploymentId, bootForWorker: () => bootId,
+        invalidateLease: id => previous.supervisor.invalidateLease(id) });
+      const row = await records.workerAttemptGet(previous.claim.attemptId);
+      const claim = await authority.takeover(previous.binding, controllerId, { expectedRevision: row.revision });
+      const admitted = authority.forAttempt(previous.binding, controllerId); previous.replaceAdmission(admitted);
+      const context = { ...previous, claim, authority, admitted, disposed: false,
+        issueLease: async () => { ++f.issued; return admitted.issue(); }, renewLease: id => admitted.renew(id),
+        dispose: async ({ failed }) => {
+          if (context.disposed) return;
+          if (failed) await ownerCleanup(context); else await context.supervisor.close();
+          await admitted.revoke(); context.disposed = true;
+        } };
+      contexts.push(context);
+      const resumedTransport = createLocalBrowserTransport({ watchLeaseMs: 1000, controllerLifetimeId: randomUUID(), openAttempt: async selected => {
+        assert.equal(selected.id, chat.id); return context;
+      } });
+      const resumedBackend = createWorkerBackend({ store, config, gatewayOrigin: "http://127.0.0.1", browserTransport: resumedTransport });
+      f.browsers = new SharedBrowsers({ store, config, acquire: selected => resumedBackend.acquire(store.get(selected)) });
+      return f.open();
     };
     return f;
   }
@@ -140,6 +168,51 @@ test("normal SharedBrowsers path reconnects disposable real Chrome with durable 
     await until(async () => { try { const raw = await readFile(`/proc/${before.processIdentity.chromePid}/stat`, "utf8"); return raw.slice(raw.lastIndexOf(") ") + 2).startsWith("Z "); } catch { return true; } });
   });
 
+  await t.test("a fresh controller adopts the exact quiescent browser process without replacing Chrome or replaying input", async t => {
+    const f = await fixture(t); await f.open();
+    await f.browsers.command(f.chat.id, "navigate", { url: websiteUrl });
+    await f.browsers.command(f.chat.id, "evaluate", { expression: "window.controllerRestartSentinel='same-renderer'; window.controllerRestartCount=0; 'ready'" });
+    const before = await f.browsers.command(f.chat.id, "status"), receipt = f.child.receipt;
+    clearInterval(f.entry.browser.heartbeat);
+    await f.entry.browser.heartbeatPending?.catch(() => {});
+    await f.child.outputQueue; await f.child.inputQueue; await f.child.storageQueue;
+    await until(async () => {
+      const ledger = (await records.workerTransportGet(f.child.storageRequest)).value;
+      return !ledger.input && ledger.rpcs.length === 0 && ledger.inbox.length === 0 && ledger.committedOutputSeq === ledger.appliedOutputSeq;
+    });
+    const supervisor = f.context.supervisor, inputBefore = supervisor.processes.get("shared-chrome").inputSeq;
+    const recovered = await f.restartController();
+    assert.equal(recovered.browser.child.recovered, true);
+    assert.deepEqual(recovered.browser.child.receipt, receipt);
+    assert.equal(supervisor.processes.size, 1); assert.equal(supervisor.processes.get("shared-chrome").commandPid, receipt.pid);
+    const after = await f.browsers.command(f.chat.id, "status");
+    assert.deepEqual(after.processIdentity, before.processIdentity);
+    assert.equal(await f.browsers.command(f.chat.id, "evaluate", { expression: "window.controllerRestartSentinel" }), "same-renderer");
+    assert.equal(await f.browsers.command(f.chat.id, "evaluate", { expression: "++window.controllerRestartCount" }), 1);
+    assert.equal(supervisor.processes.get("shared-chrome").inputSeq > inputBefore, true, "only fresh recovery/status commands advance input");
+    await f.browsers.stop(f.chat.id); assert.equal(supervisor.processes.get("shared-chrome").groupCleaned, true);
+  });
+
+  await t.test("a fresh controller refuses an unresolved mutating RPC and preserves the exact process for explicit Stop", async t => {
+    const f = await fixture(t); await f.open();
+    await f.browsers.command(f.chat.id, "navigate", { url: websiteUrl });
+    await f.browsers.command(f.chat.id, "evaluate", { expression: "window.takeoverMutation=0" });
+    const original = f.child.client.writeInput.bind(f.child.client);
+    f.child.client.writeInput = async (...args) => {
+      if (!args[1].toString().includes("window.takeoverMutation++")) return original(...args);
+      await original(...args); f.child.detach(); throw Error("synthetic lost mutation acknowledgement");
+    };
+    await assert.rejects(f.browsers.command(f.chat.id, "evaluate", { expression: "window.takeoverMutation++; new Promise(resolve=>setTimeout(()=>resolve(window.takeoverMutation),500))" }), /unknown|lost/i);
+    await f.child.inputQueue; await f.child.storageQueue;
+    const ledger = (await records.workerTransportGet(f.child.storageRequest)).value;
+    assert.equal(ledger.rpcs.some(rpc => rpc.mutating), true);
+    const supervisor = f.context.supervisor, entry = supervisor.processes.get("shared-chrome"), inputBefore = entry.inputSeq;
+    await assert.rejects(f.restartController(), /quiescent|mutating/i);
+    assert.equal(supervisor.processes.size, 1); assert.equal(entry.inputSeq, inputBefore);
+    assert.equal(entry.exited, false, "failed takeover does not silently terminate or replace the retained process");
+    await f.browsers.stop(f.chat.id); assert.equal(entry.groupCleaned, true);
+  });
+
   await t.test("disconnected capture expires locally and only an actual viewer re-enables it", async t => {
     const f = await fixture(t); await f.open(); const viewer = new Viewer();
     await f.browsers.attach(f.chat.id, viewer); await until(() => viewer.frames.length > 1);
@@ -168,11 +241,7 @@ test("normal SharedBrowsers path reconnects disposable real Chrome with durable 
     await f.browsers.command(f.chat.id, "navigate", { url: websiteUrl });
     await f.browsers.command(f.chat.id, "evaluate", { expression: "window.mutations=0" });
     const original = f.child.client.writeInput.bind(f.child.client);
-    let mutatingId, mutationReply, output = "";
-    f.child.stdout.on("data", chunk => {
-      output += chunk; const lines = output.split("\n"); output = lines.pop();
-      for (const line of lines) { const message = JSON.parse(line); if (message.id === mutatingId) mutationReply = message.value; }
-    });
+    let mutatingId;
     f.child.client.writeInput = async (...args) => {
       if (!args[1].toString().includes("window.mutations++")) return original(...args);
       mutatingId = JSON.parse(args[1].toString()).id;
@@ -184,7 +253,13 @@ test("normal SharedBrowsers path reconnects disposable real Chrome with durable 
     const ledger = (await records.workerTransportGet(f.child.storageRequest)).value;
     assert.equal(ledger.input.unknown, true); assert.equal(ledger.input.mutating, true);
     await assert.rejects(f.browsers.command(f.chat.id, "status"), /unknown|previous|Stop/i);
-    await until(() => mutationReply === 1);
+    await until(() => f.context.supervisor.processes.get("shared-chrome").records.some(record => {
+      if (record.channel !== "stdout") return false;
+      return Buffer.from(record.data, "base64").toString().split("\n").some(line => {
+        if (!line) return false;
+        const message = JSON.parse(line); return message.id === mutatingId && message.value === 1;
+      });
+    }));
     assert.equal(f.context.supervisor.processes.get("shared-chrome").inputSeq, ledger.nextInputSeq - 1, "no browser command was replayed or silently appended");
     await f.browsers.stop(f.chat.id); assert.equal(f.context.supervisor.processes.get("shared-chrome").groupCleaned, true);
   });

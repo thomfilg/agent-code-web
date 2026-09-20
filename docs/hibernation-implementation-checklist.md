@@ -61,6 +61,15 @@ Files: [ssh-worker-launcher.mjs](../src/ssh-worker-launcher.mjs),
 
 This is mandatory continuity work, not an optional enhancement after release.
 
+Partial implementation evidence: the local injected Shared Chrome path now
+reconstructs a fresh application facade at a quiescent durable boundary and
+persists logical RPC completion separately from transport input acknowledgement.
+It preserves the same disposable Chrome/renderer and refuses takeover when a
+mutating RPC is unresolved. This does not check any partition item because EC2
+wiring, Node/native-agent ownership, actual controller-process exit and remote
+suspend/resume remain open. See the
+[controller recovery receipt](validation-2026-09-20-browser-controller-recovery.md).
+
 ### 3. Resume authorization and revocation
 
 Files: [agent-accounts.mjs](../src/agent-accounts.mjs),

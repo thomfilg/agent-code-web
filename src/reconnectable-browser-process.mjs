@@ -2,13 +2,27 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { createHash, randomUUID } from "node:crypto";
 import { WorkerProcessTransport } from "./worker-process-transport.mjs";
-import { MAX_INPUT_BYTES } from "./worker-transport-wire.mjs";
+import { MAX_INPUT_BYTES, safeId } from "./worker-transport-wire.mjs";
 
 const processId = "shared-chrome", controllerLifetime = randomUUID();
 const hash = value => createHash("sha256").update(value).digest("hex");
 const unavailable = message => new Error(`Browser reconnect: ${message}`);
+const sameReceipt = (left, right) => Boolean(left && right)
+  && ["protocol", "supervisorInstanceId", "processId", "processInstanceId", "pid", "startedAt"].every(key => left[key] === right[key])
+  && JSON.stringify(left.groupAnchor) === JSON.stringify(right.groupAnchor);
+const acceptedMatchesLedger = (ledger, accepted) => {
+  if (!Number.isSafeInteger(accepted) || accepted < 0) return false;
+  if (!ledger.input) return accepted === ledger.nextInputSeq - 1;
+  if (ledger.input.mutating || ledger.input.chunks !== 1 || !Number.isInteger(ledger.input.sent) || ledger.input.sent < 0 || ledger.input.sent > 1) return false;
+  return accepted <= ledger.nextInputSeq - 1 && accepted >= Math.max(0, ledger.nextInputSeq - 2);
+};
 function cleanupFailure(context) {
   const error = unavailable("startup cleanup is unconfirmed; retry Stop before opening another browser");
+  Object.defineProperty(error, "retryBrowserCleanup", { value: () => context.dispose({ failed: true }) });
+  return error;
+}
+function recoveryFailure(context, message) {
+  const error = unavailable(`${message}; the retained process was not replaced. Use Stop to clean it up explicitly`);
   Object.defineProperty(error, "retryBrowserCleanup", { value: () => context.dispose({ failed: true }) });
   return error;
 }
@@ -17,8 +31,9 @@ const readOnly = packet => packet.action === "status" || packet.action === "tran
 
 // Explicitly injected local validation only. No environment flag, HTTP field,
 // SSH fallback or marker boolean can admit this as production hibernation.
-export function createLocalBrowserTransport({ openAttempt, watchLeaseMs = 3000 }) {
-  if (typeof openAttempt !== "function" || !Number.isInteger(watchLeaseMs) || watchLeaseMs < 1000 || watchLeaseMs > 10000) throw unavailable("invalid coordinator");
+export function createLocalBrowserTransport({ openAttempt, watchLeaseMs = 3000, controllerLifetimeId = controllerLifetime }) {
+  if (typeof openAttempt !== "function" || !Number.isInteger(watchLeaseMs) || watchLeaseMs < 1000 || watchLeaseMs > 10000
+    || !safeId(controllerLifetimeId)) throw unavailable("invalid coordinator");
   return {
     admission: "local-validation",
     async spawnBrowser(chat, command, args, options) {
@@ -36,7 +51,7 @@ export function createLocalBrowserTransport({ openAttempt, watchLeaseMs = 3000 }
         catch { throw cleanupFailure(context); }
         throw unavailable("an admitted named-account attempt and durable inbox are required");
       }
-      const child = new ReconnectableBrowserProcess(context, watchLeaseMs);
+      const child = new ReconnectableBrowserProcess(context, watchLeaseMs, controllerLifetimeId);
       await child.start({ command, args, cwd: options.cwd, env: { ...options.env, RELAY_BROWSER_WATCH_LEASE_MS: String(watchLeaseMs) } });
       return child;
     },
@@ -46,8 +61,9 @@ export function createLocalBrowserTransport({ openAttempt, watchLeaseMs = 3000 }
 // This is deliberately a BrowserProcess-specific facade, not a general fake
 // ChildProcess. Remote PIDs exist ONLY in receipts; no local kill(pid) fallback.
 export class ReconnectableBrowserProcess extends EventEmitter {
-  constructor(context, watchLeaseMs) {
+  constructor(context, watchLeaseMs, lifetime = controllerLifetime) {
     super(); this.context = context; this.watchLeaseMs = watchLeaseMs;
+    this.controllerLifetime = lifetime;
     this.stdout = new PassThrough(); this.stderr = new PassThrough(); this.stdin = new EventEmitter();
     this.exitCode = null; this.signalCode = null; this.detached = true; this.epoch = 0;
     this.outputQueue = Promise.resolve(); this.inputQueue = Promise.resolve(); this.storageQueue = Promise.resolve();
@@ -85,19 +101,56 @@ export class ReconnectableBrowserProcess extends EventEmitter {
   }
   async start(spec) {
     const epoch = ++this.epoch;
+    let recovering = false;
     try {
       this.client = await this.connection(epoch);
-      await this.update(({ value }) => {
-        if (value) throw unavailable("controller/browser reconstruction is not supported by this local slice");
-        return { lifetime: controllerLifetime, state: "launching", receipt: null, nextInputSeq: 1, input: null, committedOutputSeq: 0, appliedOutputSeq: 0, inbox: [] };
-      });
-      this.receipt = await this.client.launch(processId, spec);
-      await this.update(({ value }) => ({ ...value, receipt: this.receipt, state: "running" }));
-      await this.client.attach(this.receipt, 0); this.detached = false; this.renew();
+      const saved = (await this.context.records.workerTransportGet(this.storageRequest)).value;
+      if (!saved) {
+        await this.update(({ value }) => {
+          if (value) throw unavailable("another controller initialized the browser transport");
+          return { schema: 2, lifetime: this.controllerLifetime, state: "launching", receipt: null, nextInputSeq: 1, input: null, rpcs: [], committedOutputSeq: 0, appliedOutputSeq: 0, inbox: [] };
+        });
+        this.receipt = await this.client.launch(processId, spec);
+        await this.update(({ value }) => ({ ...value, receipt: this.receipt, state: "running" }));
+        await this.client.attach(this.receipt, 0);
+      } else {
+        recovering = true;
+        if (saved.lifetime === this.controllerLifetime) throw recoveryFailure(this.context, "a second facade in the same controller lifetime was refused");
+        if (saved.schema !== 2 || saved.state !== "running" || !sameReceipt(saved.receipt, saved.receipt) || saved.receipt.processId !== processId
+          || !Number.isSafeInteger(saved.nextInputSeq) || saved.nextInputSeq < 1 || !Array.isArray(saved.rpcs)
+          || saved.rpcs.some(rpc => rpc?.mutating !== false)
+          || saved.input && (saved.input.mutating || saved.input.chunks !== 1)
+          || !Number.isSafeInteger(saved.committedOutputSeq) || saved.committedOutputSeq < 0
+          || saved.appliedOutputSeq !== saved.committedOutputSeq || !Array.isArray(saved.inbox) || saved.inbox.length) {
+          throw recoveryFailure(this.context, "the durable browser ledger is not at a quiescent recovery boundary");
+        }
+        const observed = await this.client.inspect(processId);
+        if (observed.state !== "running" || !sameReceipt(saved.receipt, observed)) throw recoveryFailure(this.context, "the worker process no longer matches the exact durable identity");
+        if (!acceptedMatchesLedger(saved, observed.inputAcceptedThrough)) throw recoveryFailure(this.context, "the worker input cursor does not match the durable ledger");
+        if (observed.outputCommittedThrough > saved.committedOutputSeq || observed.outputProducedThrough < saved.committedOutputSeq) {
+          throw recoveryFailure(this.context, "the worker output cursor does not match the durable ledger");
+        }
+        this.receipt = saved.receipt;
+        const attached = await this.client.attach(this.receipt, saved.committedOutputSeq);
+        if (!sameReceipt(this.receipt, attached) || attached.state !== "running"
+          || attached.inputAcceptedThrough !== observed.inputAcceptedThrough) throw recoveryFailure(this.context, "the attached worker process changed during recovery");
+        await this.update(({ value }) => {
+          if (value.lifetime !== saved.lifetime || value.state !== "running"
+            || JSON.stringify(value.input) !== JSON.stringify(saved.input) || JSON.stringify(value.rpcs) !== JSON.stringify(saved.rpcs)
+            || value.committedOutputSeq !== value.appliedOutputSeq || value.inbox?.length || !sameReceipt(value.receipt, saved.receipt)) {
+            throw unavailable("durable browser ledger changed during recovery");
+          }
+          return { ...value, lifetime: this.controllerLifetime, nextInputSeq: attached.inputAcceptedThrough + 1, input: null, rpcs: [] };
+        });
+        this.recovered = true;
+      }
+      this.detached = false; this.renew();
     } catch (error) {
       // The coordinator owns this exact attempt, including failed/late launch
       // cleanup. Never fall back to killing a number in the controller PID space.
       this.client?.disconnect();
+      if (recovering && typeof error.retryBrowserCleanup === "function") throw error;
+      if (recovering) throw recoveryFailure(this.context, error?.message || "controller recovery failed");
       try { await this.context.dispose({ failed: true }); }
       catch { throw cleanupFailure(this.context); }
       throw error;
@@ -128,14 +181,18 @@ export class ReconnectableBrowserProcess extends EventEmitter {
         this.check(epoch); this.client = client;
         if (this.storageFailed) throw unavailable("private inbox persistence failed; explicit Stop is required");
         const ledger = (await this.context.records.workerTransportGet(this.storageRequest)).value;
-        if (!ledger || ledger.lifetime !== controllerLifetime) throw unavailable("controller restart recovery is not implemented");
+        if (!ledger || ledger.lifetime !== this.controllerLifetime) throw unavailable("controller ownership changed");
         if (this.storageFailed) throw unavailable("private inbox persistence failed; explicit Stop is required");
         const receipt = await client.attach(this.receipt, ledger.committedOutputSeq); this.check(epoch);
         await this.update(({ value }) => {
           if (receipt.inputAcceptedThrough >= value.nextInputSeq) throw unavailable("unexpected remote input identity");
           // Only read-only heartbeat/status operations may reconcile a lost
           // acknowledgement. A mutating command is never replayed or inferred.
-          if (value.input?.unknown && !value.input.mutating && value.input.chunks === 1) return { ...value, nextInputSeq: receipt.inputAcceptedThrough + 1, input: null };
+          if (value.rpcs?.some(rpc => rpc.mutating)) throw unavailable("a previous mutating browser action has unknown outcome; use Stop instead of replaying it");
+          if (value.input?.unknown && !value.input.mutating && value.input.chunks === 1) {
+            return { ...value, nextInputSeq: receipt.inputAcceptedThrough + 1, input: null, rpcs: [] };
+          }
+          if (!value.input && value.rpcs?.length) return { ...value, rpcs: [] };
           return value;
         });
         this.detached = false; this.renew();
@@ -155,7 +212,10 @@ export class ReconnectableBrowserProcess extends EventEmitter {
     const chunks = Math.ceil(data.length / MAX_INPUT_BYTES), digest = hash(data);
     await this.update(({ value }) => {
       if (value.input) throw unavailable("a previous action has unknown outcome; use Stop instead of replaying it");
-      return { ...value, input: { commandId: packet.id, digest, data: data.toString("base64"), mutating: !readOnly(packet), chunks, sent: 0, unknown: false } };
+      const rpcs = Array.isArray(value.rpcs) ? value.rpcs : [];
+      if (rpcs.length >= 100 || rpcs.some(rpc => rpc.commandId === packet.id)) throw unavailable("browser RPC ledger is full or duplicated");
+      const rpc = { commandId: packet.id, digest, mutating: !readOnly(packet), state: "sending" };
+      return { ...value, rpcs: [...rpcs, rpc], input: { commandId: packet.id, digest, data: data.toString("base64"), mutating: rpc.mutating, chunks, sent: 0, unknown: false } };
     });
     try {
       for (let offset = 0; offset < data.length; offset += MAX_INPUT_BYTES) {
@@ -166,10 +226,23 @@ export class ReconnectableBrowserProcess extends EventEmitter {
         this.check(epoch);
         await this.client.writeInput(reserved.input.seq, data.subarray(offset, offset + MAX_INPUT_BYTES));
       }
-      await this.update(({ value }) => ({ ...value, input: null }));
+      await this.update(({ value }) => ({ ...value, input: null,
+        rpcs: value.rpcs.map(rpc => rpc.commandId === packet.id ? { ...rpc, state: "accepted" } : rpc) }));
     } catch (error) {
       await this.update(({ value }) => ({ ...value, input: { ...value.input, unknown: true } })).catch(() => { this.storageFailed = true; });
       throw unavailable("action outcome may be unknown; it was not replayed. Stop is available.");
+    }
+  }
+  async commandSettled(commandId) {
+    try {
+      await this.update(({ value }) => {
+        if (!Array.isArray(value.rpcs) || !value.rpcs.some(rpc => rpc.commandId === commandId)) throw unavailable("browser RPC acknowledgement was not reserved");
+        return { ...value, rpcs: value.rpcs.filter(rpc => rpc.commandId !== commandId) };
+      });
+    } catch (error) {
+      this.storageFailed = true; this.client?.disconnect();
+      this.emit("transportFault", { message: "Private browser RPC acknowledgement could not be retained; reconnect is blocked. Stop the browser explicitly." });
+      throw error;
     }
   }
   async output(frame, client) {

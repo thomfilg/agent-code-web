@@ -31,8 +31,13 @@ export class BrowserProcess extends EventEmitter {
       if (message.id) {
         const item = this.pending.get(message.id); if (!item) return;
         this.pending.delete(message.id); clearTimeout(item.timer);
-        try {item.onResponse?.(message);} catch(error) {item.reject(error);return;}
-        message.error ? item.reject(new Error(message.error)) : item.resolve(message.value); return;
+        const deliver = () => {
+          try {item.onResponse?.(message);} catch(error) {item.reject(error);return;}
+          message.error ? item.reject(new Error(message.error)) : item.resolve(message.value);
+        };
+        if (this.child.commandSettled) void this.child.commandSettled(message.id).then(deliver, error => item.reject(error));
+        else deliver();
+        return;
       }
       if (["status", "ready"].includes(message.event)) this.state = message.value;
       if(message.event==='chromeStopped'&&message.value?.stopped===true){this.chromeStopped=true;this.resolveChromeStopped();}
@@ -50,7 +55,13 @@ export class BrowserProcess extends EventEmitter {
       for (const item of this.pending.values()) { clearTimeout(item.timer); item.reject(new Error("Browser connection was lost; the action outcome may be unknown. It was not replayed.")); }
       this.pending.clear(); this.emit("status", this.state);
     });
-    this.startHeartbeat();
+    if (child.recovered) {
+      clearTimeout(this.timer);
+      void this.dispatch("status").then(value => {
+        if (this.error) return;
+        this.state = value; this.resolveReady(value); this.startHeartbeat();
+      }, error => this.fail(error));
+    } else this.startHeartbeat();
   }
   startHeartbeat() {
     clearInterval(this.heartbeat);

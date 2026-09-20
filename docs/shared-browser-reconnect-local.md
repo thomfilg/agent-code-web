@@ -60,6 +60,9 @@ reconnect to a socket that has already closed.
 The ledger stores the launch receipt, input intent/hash/sequence, output committed
 cursor, and bounded raw output chunks awaiting projection. Command intent is
 persisted before input; output chunks are persisted before acknowledgement.
+Ledger schema 2 also retains each browser RPC until its response has been
+durably acknowledged by the controller facade. A transport write acknowledgement
+alone is not treated as completion of the logical browser action.
 Projected raw chunks are compacted, never retained as an unbounded history or
 written into diagnostic logs. A logical command is bounded to 128 KiB; unprojected
 output retention is bounded to 2 MiB.
@@ -70,12 +73,23 @@ Stop. Non-mutating status/watch-heartbeat uncertainty may reconcile its sequence
 against the newly fenced supervisor receipt without repeating the old command.
 This is conservative: it does not guess whether a click/evaluation succeeded.
 
-**This slice proves connection-link recovery with the same controller process
-alive, not controller restart recovery.** The same BrowserProcess/readline parser
-retains partial JSON/UTF-8 and request identity through the detach. Reconstructing
-a new controller/browser facade from the ledger is rejected, not silently treated
-as resumed. Durable native Codex/Claude adapter state and restart recovery remain
-separate prerequisites for full process-preserving rollout and hibernation.
+The local slice now also supports an explicit new-controller takeover at a safe
+durable boundary. A new `SharedBrowsers`/`BrowserProcess` facade must present a
+new controller lifetime and lease generation, inspect the exact saved supervisor,
+process, PID/start and group-anchor receipt, and attach at the durable output
+cursor. It then obtains fresh state using a read-only `status` RPC. It does not
+relaunch Chrome or synthesize the one-shot original `ready` event. Read-only RPC
+uncertainty may be discarded after cursor reconciliation; an unresolved mutating
+RPC, unapplied durable output, malformed/old ledger, changed process identity or
+same-lifetime duplicate facade is refused. The retained process is not silently
+replaced or terminated; explicit Stop remains the cleanup path.
+
+This is still a local injected validation boundary, not production controller
+restart recovery. The test creates a fresh authority/controller lifetime and
+fresh application facades against PostgreSQL and the retained supervisor inside
+one test runner. Worker service/cgroup installation, remote attachment and an
+actual control-plane process-exit application test remain prerequisites. Durable
+native Codex/Claude adapter reconstruction is also separate.
 
 Local integration tests exercise real disposable Chrome and PostgreSQL through
 the normal caller path, including PID/page-memory continuity, expired capture,
@@ -119,5 +133,15 @@ repository, EC2 or production control plane was used.
 
 Remaining acceptance gates are unchanged: independently owned supervisor service
 and cgroup, trusted remote tunnel/image admission, service-owner cleanup after
-scope revocation, controller restart reconstruction, native agent adapters, and
-actual suspend/resume continuity. `hibernationAdmission` remains unavailable.
+scope revocation, actual control-plane process-exit reconstruction, native agent
+adapters, and actual suspend/resume continuity. `hibernationAdmission` remains
+unavailable.
+
+## New-controller recovery increment — 2026-09-20
+
+Source and tests are recorded in
+[the focused validation receipt](validation-2026-09-20-browser-controller-recovery.md).
+The new cases preserve the exact helper and Chrome/renderer identities plus page
+memory across a new authority/controller lifetime, and prove that an unresolved
+mutating RPC refuses takeover without creating, terminating or sending another
+command to the retained process.
