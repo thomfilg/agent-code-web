@@ -139,8 +139,8 @@
                   <button type="button" class="saved-prompts-trigger" data-saved-prompts aria-label="Saved prompts" aria-controls="saved-prompts-picker" aria-expanded="false" title="Saved prompts">▤</button>
                   <div class="draft-agent-picker" id="new-agent-account-field"><select id="agent-select" aria-label="Agent" required></select><select id="new-agent-account" aria-label="Agent" hidden><option value="">Select an agent account</option></select><button type="button" class="small-icon" id="connect-codex-button" aria-label="Manage agent accounts" title="Manage agent accounts" hidden>⚙</button></div>
                   <select id="new-mode-select" aria-label="New chat permission mode" title="Permission mode">
-                    <option value="auto">Auto</option>
-                    <option value="accept_edits" selected>Edits</option>
+                    <option value="auto" selected>Auto</option>
+                    <option value="accept_edits">Edits</option>
                     <option value="plan">Plan</option>
                   </select>
                   <div class="model-controls compact-model-controls" id="new-model-controls"><select class="model-select" aria-label="New chat model" title="Model"></select><select class="effort-select" aria-label="New chat effort" title="Effort"></select><p class="model-note" role="status"></p></div>
@@ -204,7 +204,7 @@
                     <button type="button" id="slash-commands">Slash commands</button>
                     <button type="button" id="show-connectors">Connectors</button>
                   </div></details>
-                  <details class="control-menu upward" id="mode-menu"><summary id="mode-label" aria-label="Agent mode">Edits</summary><div class="control-popover">
+                  <details class="control-menu upward" id="mode-menu"><summary id="mode-label" aria-label="Agent mode">Auto</summary><div class="control-popover">
                     <p class="menu-caption">Mode · applies next turn</p>
                     <button type="button" data-agent-mode="auto">Auto<small>Provider-managed approvals</small></button>
                     <button type="button" data-agent-mode="accept_edits">Accept edits<small>Allow workspace edits; commands may need approval</small></button>

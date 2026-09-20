@@ -129,7 +129,9 @@ test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers ap
   assert.equal((await adapter.compact()).status, "completed");
   await adapter.send("default mode", { model: "fixture-gpt" });
   assert.equal(turnParams.collaborationMode.mode, "default"); assert.equal(turnParams.sandboxPolicy.type, "workspaceWrite");
-  assert.equal(turnParams.approvalsReviewer, "user");
+  assert.equal(turnParams.approvalsReviewer, "auto_review");
+  await adapter.send("explicit edits", { model: "fixture-gpt", mode: "accept_edits" });
+  assert.equal(turnParams.approvalsReviewer, "user"); assert.equal(turnParams.approvalPolicy, "on-request");
   await adapter.send("automatic reviews", { model: "fixture-gpt", mode: "auto" });
   assert.equal(turnParams.approvalsReviewer, "auto_review"); assert.equal(turnParams.approvalPolicy, "on-request"); assert.equal(turnParams.sandboxPolicy.type, "workspaceWrite");
   await adapter.stop();
@@ -177,7 +179,8 @@ test("Claude adapter parses stream-json and retains its resume id", async (t) =>
   assert.ok(events.some((event) => event.type === "tool" && event.tool === "Read" && event.state === "completed" && event.output === "fixture.txt"));
   const settings = JSON.parse((await adapter.send("inspect-settings", { model: "sonnet", effort: "low" })).text);
   assert.equal(settings.model, "sonnet"); assert.equal(settings.effort, "low");
-  assert.equal(settings.mode, "acceptEdits");
+  assert.equal(settings.mode, "auto");
+  assert.equal(JSON.parse((await adapter.send("inspect-settings", { mode: "accept_edits" })).text).mode, "acceptEdits");
   for (const mode of ["plan", "auto"]) assert.equal(JSON.parse((await adapter.send("inspect-settings", { mode })).text).mode, mode);
   const reset = JSON.parse((await adapter.send("inspect-settings", { model: "default", resetEffort: true })).text);
   assert.equal(reset.model, "default"); assert.equal(reset.effort, null); assert.equal(reset.environmentEffort, "auto");

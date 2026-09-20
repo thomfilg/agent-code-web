@@ -167,7 +167,7 @@ export class ClaudeAdapter {
     }
   }
 
-  async send(text, { model, effort, resetEffort, ultracode, selectionCurrent, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, onPermissionMode, mode = "accept_edits", systemPrompt } = {}) {
+  async send(text, { model, effort, resetEffort, ultracode, selectionCurrent, fastMode, fastCredential, fastState, fastCooldown, onFastConstraint, onPermissionMode, mode = "auto", systemPrompt } = {}) {
     const version = this.sendVersion;
     const configuration = claudeConfigRequest(text);
     const settingsPrompt = configuration?.kind === "prompt";

@@ -596,7 +596,7 @@ export class CodexAdapter {
     if (this.rpc !== rpc || this.threadId !== threadId || this.intentionalStop || !result || typeof result !== "object") throw new Error("The native approval connection changed");
   }
 
-  async send(text, { model, effort, mode = "accept_edits", images = [], skills = [], appReferences = [], additionalContext = {}, goalDirective = null, reviewTarget = null, serviceTier, personality } = {}) {
+  async send(text, { model, effort, mode = "auto", images = [], skills = [], appReferences = [], additionalContext = {}, goalDirective = null, reviewTarget = null, serviceTier, personality } = {}) {
     this.assertInputReady();
     if (!this.rpc) await this.start();
     this.assertImportReady();

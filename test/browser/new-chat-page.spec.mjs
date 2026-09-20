@@ -61,7 +61,7 @@ test("new chat is inline, workspace chips are compact, and first send shows prog
     await expect(page.locator("#chat-workspace-strip")).toContainText("api");
     await expect.poll(() => f.calls.messages.length).toBe(1); expect(f.calls.messages[0].text).toBe("Build the dashboard");
     f.messageGate.resolve();
-    await page.locator("#new-chat-button").click(); await expect(page.locator("#new-mode-select")).toHaveValue("accept_edits");
+    await page.locator("#new-chat-button").click(); await expect(page.locator("#new-mode-select")).toHaveValue("auto");
     expect(errors).toEqual([]);
   } finally { f.gate.resolve(); f.messageGate.resolve(); }
 });

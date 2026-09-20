@@ -2,15 +2,16 @@
 
 ## Reported gap
 
-The new-chat composer had no permission-mode selection. Every new chat was
-persisted as `accept_edits`, so a user could select Auto only after the chat and
-worker lifecycle already existed. This did not invalidate the acknowledged live
-Claude mode-switch path, but it made the first turn structurally incapable of
-starting in the user's explicit Auto selection.
+The new-chat composer originally had no permission-mode selection. A later
+follow-up exposed the selector but still defaulted every independent draft to
+`accept_edits`. The user's reported approval card showed that this remained an
+easy way to launch a native process in the wrong initial policy. New chats must
+start in Auto unless the user explicitly chooses another mode.
 
 ## Integrated behavior
 
-- New chat exposes Auto, Edits and Plan beside the agent/model controls.
+- New chat exposes Auto, Edits and Plan beside the agent/model controls, with
+  Auto selected by default in both the browser and server.
 - The selected mode is included in the single chat-creation request, validated
   against the selected agent before a chat directory or record is created, and
   persisted with that chat.
@@ -19,16 +20,17 @@ starting in the user's explicit Auto selection.
   best-effort `set_permission_mode` call. Codex receives `mode: auto` and keeps
   its existing automatic-review policy.
 - A mode is local to the unsent chat draft. Creation failures retain it for the
-  retry; after successful creation the next independent new-chat draft resets
-  to Edits rather than silently inheriting Auto or Plan.
+  retry; after successful creation the next independent draft resets to Auto.
+  Backend/store/adapter fallbacks also use Auto, so direct API creation and
+  legacy records missing a mode cannot silently become Edits.
 - Existing active-Claude changes retain their stricter behavior: Relay waits for
   the native acknowledgement, does not restart the process, and does not turn a
   mode change into an allow response for a pending tool.
 
 ## Verification
 
-- `test/commands.test.mjs`: explicit Auto persists into the first turn and an
-  unsupported mode creates no chat.
+- `test/commands.test.mjs`: omitted mode defaults to Auto on the first turn and
+  an unsupported mode creates no chat.
 - `test/claude-session.test.mjs`: the first Claude launch carries native Auto
   before input; active Manual-to-Auto still uses the acknowledged native control
   without approving a pending Bash request.
@@ -43,8 +45,12 @@ starting in the user's explicit Auto selection.
   its prior version; its final version was therefore repeated separately:
   **7/7 passed**. The final browser file was also repeated: **5/5 passed**.
 
-No selected product account, provider model turn, live approval, credential,
-worker restart or production chat was used by these tests.
+The default-Auto follow-up passed 190 focused Node tests and all 5 new-chat
+browser cases. The complete Node run passed 1,648 tests with 4 skips; its one
+timing-sensitive reconnectable-browser case failed under full-suite load, then
+passed both in isolation and in the complete 14-case file. No selected product
+account, provider model turn, live approval, credential, worker restart or
+production chat was used by these tests.
 
 ## Remaining acceptance
 

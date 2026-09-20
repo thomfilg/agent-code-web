@@ -399,7 +399,7 @@ export class RuntimeManager extends EventEmitter {
       clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
       const result = action === "refresh" ? await agents.refresh()
         : action === "select" ? await agents.select(input.threadId, input.cursor)
-        : action === "messages" ? await agents.send(input.threadId, input, chat.mode || "accept_edits")
+        : action === "messages" ? await agents.send(input.threadId, input, chat.mode || "auto")
         : action === "stop" ? await agents.interrupt(input.threadId)
         : await agents.respond(input.threadId, input.requestId, input);
       this.#assertNativeAccount(chatId, runtime);
@@ -707,7 +707,7 @@ export class RuntimeManager extends EventEmitter {
     const workspace = runtime.executor?.workspace || chat.workspace;
     const attached = attachmentPrompt(materialized, workspace);
     const prompt = first ? handoffPrompt({ ...chat, messages: [...chat.messages, {}] }, text + attached) : text + attached;
-    return { prompt, settings: { ...settings, ...(chat.agent === "claude" ? { ultracode: false } : {}), ...contextForTurn(files, workspace), appReferences: appReferencesForTurn(chat, files, companyForChat(chat)), mode: chat.mode || "accept_edits", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) } };
+    return { prompt, settings: { ...settings, ...(chat.agent === "claude" ? { ultracode: false } : {}), ...contextForTurn(files, workspace), appReferences: appReferencesForTurn(chat, files, companyForChat(chat)), mode: chat.mode || "auto", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) } };
   }
 
   async servicesFor(chat) { return this.resources ? this.resources.forOwner(chat?.ownerId) : { environments: this.environments, github: this.github, mcps: this.mcps }; }
@@ -1372,7 +1372,7 @@ export class RuntimeManager extends EventEmitter {
     const allowed = this.availableAgents(ownerId).filter((agent) => agent.enabled).map((agent) => agent.id);
     const agent = input.agent || allowed[0];
     if (!allowed.includes(agent)) throw new Error(`agent is not enabled: ${agent}`);
-    const mode = input.mode ?? "accept_edits";
+    const mode = input.mode ?? "auto";
     if (!permissionModes(agent).includes(mode)) throw new Error("Choose a permission mode supported by this agent");
     const title = input.title ? clampText(input.title, 120, "title") : agent === "mock" ? "New mock conversation" : "New conversation";
     if (this.resources && !this.resources.isLegacy(ownerId) && input.source) throw new Error("Server-local workspace sources are private to the server owner");
@@ -1732,7 +1732,7 @@ export class RuntimeManager extends EventEmitter {
             if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
             runtime.eventQueue = runtime.eventQueue.then(() => this.#retainClaudeFastConstraint(chatId, value, settingsChat));
           } } : {}),
-        mode: currentChat.mode || "accept_edits", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) });
+        mode: currentChat.mode || "auto", images: materialized.filter(file => /^image\/(png|jpeg|webp|gif)$/.test(file.mime)).map(file => file.path) });
       };
       const checkConfiguration = () => {
         if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) throw Object.assign(new Error("Settings command cancelled"), { name: "AbortError" });
