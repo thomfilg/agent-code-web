@@ -26,9 +26,48 @@ test("hibernation is an explicit 2-minute policy, not an enabling capability or 
   assert.equal(loadConfig({}).idlePolicy, "stop"); assert.equal(loadConfig({}).idleTimeoutMs, 300000);
   const config = loadConfig({ AGENT_IDLE_POLICY: "hibernate", AGENT_WORKER_BACKEND: "ec2", AGENT_EC2_GATEWAY_ORIGIN: "https://fixture.invalid" });
   assert.equal(config.idlePolicy, "hibernate"); assert.equal(config.idleTimeoutMs, 120000);
+  const overridden = loadConfig({ AGENT_IDLE_POLICY: "hibernate", AGENT_WORKER_BACKEND: "ec2", AGENT_EC2_GATEWAY_ORIGIN: "https://fixture.invalid", AGENT_IDLE_TIMEOUT_MS: "180000" });
+  assert.equal(overridden.idleTimeoutMs, 180000);
   assert.throws(() => loadConfig({ AGENT_IDLE_POLICY: "hibernate" }), /requires EC2/);
   assert.throws(() => loadConfig({ AGENT_IDLE_POLICY: "restart" }), /must be one of/);
   assert.deepEqual(hibernationAdmission(), { available: false, backend: false, transport: false, image: false, reason: hibernationAdmission().reason });
+});
+
+test("the exact 120-second idle boundary resets for every visible tab and starts only after the last tab leaves", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse("2026-09-20T12:00:00.000Z") });
+  const f = await fixture(t), worker = { backend: "ec2", instanceId: "i-12000000", imageId: "ami-12000000", launchTime: "2026-09-20T11:59:00.000Z", bootId: "f".repeat(64) };
+  f.config.idlePolicy = "hibernate"; f.config.idleTimeoutMs = 120000;
+  f.manager.workerBackend.suspensionAdmission = async () => ({ backend: true, transport: true, image: true });
+  f.manager.workerBackend.acquire = async (_chat, options) => ({ metadata: worker, acquisitionReceipt: { mutation: options.action === "resume" ? "started" : "inspected", worker } });
+  f.manager.workerBackend.hibernate = async () => { f.calls.hibernate++; return { instanceId: worker.instanceId, hibernated: true }; };
+  f.manager.adapterFactory = () => ({ start: async () => {}, send: async () => { f.calls.send++; return { text: "Fixture response" }; },
+    isBackgroundBusy: () => false, hasScheduledWork: () => false,
+    prepareTransportSuspend: async () => ({ retained: true, processId: "native-agent",
+      capabilities: { provider: { provider: "openai", token: `cap_${"t".repeat(43)}`, credentialHash: "1".repeat(64) } } }),
+    detachTransportForSuspend: async () => ({ detached: true, processId: "native-agent" }), stop: async () => {} });
+  const flush = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
+  const first = "tab-fixture-0000001", second = "tab-fixture-0000002";
+
+  await f.manager.send(f.chat.id, "Start the exact idle clock");
+  assert.equal(f.store.get(f.chat.id).idleDeadlineAt, "2026-09-20T12:02:00.000Z");
+  t.mock.timers.tick(119999); await flush(); assert.equal(f.calls.hibernate, 0);
+
+  await f.manager.setPresence(f.chat.id, { clientId: first, active: true });
+  await f.manager.setPresence(f.chat.id, { clientId: second, active: true });
+  await f.manager.setPresence(f.chat.id, { clientId: first, active: false });
+  t.mock.timers.tick(1); await flush();
+  assert.equal(f.calls.hibernate, 0); assert.equal(f.store.get(f.chat.id).idleKeepAwakeReason, "tab");
+
+  await f.manager.setPresence(f.chat.id, { clientId: second, active: false });
+  assert.equal(f.store.get(f.chat.id).idleDeadlineAt, "2026-09-20T12:04:00.000Z");
+  await f.store.update(f.chat.id, { queuePaused: true, queuedMessages: [{ id: "queued_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", text: "Do not replay me", attachmentIds: [], createdAt: new Date().toISOString() }] });
+  t.mock.timers.tick(119999); await flush(); assert.equal(f.calls.hibernate, 0);
+  t.mock.timers.tick(1); await flush();
+  assert.equal(f.calls.hibernate, 1); assert.equal(f.store.get(f.chat.id).suspension.status, "hibernated");
+  assert.deepEqual(f.store.get(f.chat.id).queuedMessages.map(item => item.text), ["Do not replay me"]);
+  const waking = await f.manager.wake(f.chat.id); await waking.completion;
+  assert.equal(f.calls.send, 1); assert.equal(f.store.get(f.chat.id).queuePaused, true);
+  assert.deepEqual(f.store.get(f.chat.id).queuedMessages.map(item => item.text), ["Do not replay me"]);
 });
 
 test("unsupported policy rejects wake before acquire, repository credentials or any agent prompt", async t => {
@@ -189,6 +228,69 @@ test("manual Stop resumes a hibernated worker only to terminate its retained nat
   assert.equal(f.store.get(f.chat.id).suspension.browserRetained, false);
   assert.equal(f.store.get(f.chat.id).status, "stopped");
   assert.equal(await f.store.records.get("hibernation-capabilities", f.chat.id), null);
+});
+
+for (const action of ["stop", "remove"]) test(`${action} racing a retained-worker resume finishes exact cleanup without resurrecting the native owner`, async t => {
+  const f = await fixture(t), worker = { backend: "ec2", instanceId: "i-23456789", imageId: "ami-23456789", launchTime: "2026-09-20T12:00:00.000Z", bootId: "e".repeat(64) };
+  const resumeStarted = Promise.withResolvers(), resumeGate = Promise.withResolvers();
+  let released = 0, retainedStops = 0, destroyed = 0;
+  f.config.idlePolicy = "hibernate";
+  f.manager.workerBackend.suspensionAdmission = async () => ({ backend: true, transport: true, image: true });
+  f.manager.workerBackend.acquire = async (_chat, options) => {
+    if (options.action === "resume") {
+      options.onMutation({ mutation: "started", worker, release: async () => { released++; } });
+      resumeStarted.resolve(); await resumeGate.promise;
+    }
+    return { metadata: worker, acquisitionReceipt: { mutation: options.action === "resume" ? "started" : "inspected", worker },
+      stopRetainedAgent: async () => { retainedStops++; } };
+  };
+  f.manager.workerBackend.hibernate = async () => ({ instanceId: worker.instanceId, hibernated: true });
+  f.manager.workerBackend.destroy = async () => { destroyed++; };
+  f.manager.adapterFactory = () => ({ start: async () => {}, send: async () => ({ text: "Fixture response" }),
+    isBackgroundBusy: () => false, hasScheduledWork: () => false,
+    prepareTransportSuspend: async () => ({ retained: true, processId: "native-agent",
+      capabilities: { provider: { provider: "openai", token: `cap_${"r".repeat(43)}`, credentialHash: "2".repeat(64) } } }),
+    detachTransportForSuspend: async () => ({ detached: true, processId: "native-agent" }), stop: async () => {} });
+
+  await f.manager.send(f.chat.id, "Retain a worker for the resume race");
+  await f.manager.hibernate(f.chat.id);
+  const wake = await f.manager.wake(f.chat.id); await resumeStarted.promise;
+  const closing = action === "stop" ? f.manager.stop(f.chat.id) : f.manager.remove(f.chat.id);
+  resumeGate.resolve();
+  await assert.rejects(wake.completion, { name: "AbortError" });
+  await closing;
+
+  assert.equal(released, 1); assert.equal(retainedStops, 0);
+  assert.equal(f.calls.sleep, 0); assert.equal(destroyed, action === "remove" ? 1 : 0);
+  assert.equal(await f.store.records.get("hibernation-capabilities", f.chat.id), null);
+  if (action === "remove") assert.equal(f.store.get(f.chat.id), null);
+  else assert.equal(f.store.get(f.chat.id).suspension.nativeRetained, false);
+});
+
+for (const [label, patch] of [
+  ["selected account", { agentAccountId: "account_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }],
+  ["company repository", { workspaceReady: true, repositories: [{ id: 1, fullName: "other-company/project", githubConnectionId: "github_other", branch: "main" }] }],
+]) test(`a changed ${label} cannot resume or replace a retained native process`, async t => {
+  const f = await fixture(t), worker = { backend: "ec2", instanceId: "i-34567890", imageId: "ami-34567890", launchTime: "2026-09-20T12:00:00.000Z", bootId: "d".repeat(64) };
+  let starts = 0, nativeSends = 0, acquisitions = 0;
+  f.config.idlePolicy = "hibernate";
+  f.manager.workerBackend.suspensionAdmission = async () => ({ backend: true, transport: true, image: true });
+  f.manager.workerBackend.acquire = async (_chat, options) => { acquisitions++; return { metadata: worker, acquisitionReceipt: { mutation: options.action === "resume" ? "started" : "inspected", worker } }; };
+  f.manager.workerBackend.hibernate = async () => ({ instanceId: worker.instanceId, hibernated: true });
+  f.manager.adapterFactory = () => { starts++; return { start: async () => {}, send: async () => { nativeSends++; return { text: "Fixture response" }; },
+    isBackgroundBusy: () => false, hasScheduledWork: () => false,
+    prepareTransportSuspend: async () => ({ retained: true, processId: "native-agent",
+      capabilities: { provider: { provider: "openai", token: `cap_${"s".repeat(43)}`, credentialHash: "3".repeat(64) } } }),
+    detachTransportForSuspend: async () => ({ detached: true, processId: "native-agent" }), stop: async () => {} }; };
+
+  await f.manager.send(f.chat.id, "Create the retained scope");
+  await f.manager.hibernate(f.chat.id);
+  await f.store.update(f.chat.id, patch);
+  await f.manager.send(f.chat.id, "This must not reach or replace the retained process");
+
+  assert.equal(starts, 1); assert.equal(nativeSends, 1); assert.equal(acquisitions, 1);
+  assert.match(f.store.get(f.chat.id).messages.at(-1).text, /retained native process no longer matches/i);
+  assert(await f.store.records.get("hibernation-capabilities", f.chat.id));
 });
 
 test("native resume restores exact private MCP, GitHub, Browser and provider capabilities without exposing them in chat", async t => {

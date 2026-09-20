@@ -86,6 +86,13 @@ test("MCP hibernation restores the exact worker token only while every selected 
   await records.put("mcp", connection.id, { ...await mcps.get(connection.id), revision: connection.revision + 1 });
   await assert.rejects(mcps.resumeRuntime("retained-chat", [connection.id], "https://relay.example", {}, snapshot), /changed/);
 
+  const removedConnection = await mcps.save({ name: "removed", allowUnassigned: true, type: "http", url: "https://removed.example/mcp" });
+  await mcps.runtime("removed-chat", [removedConnection.id], "https://relay.example");
+  const removedSnapshot = mcps.suspendRuntime("removed-chat");
+  mcps.revokeChat("removed-chat");
+  await records.delete("mcp", removedConnection.id);
+  await assert.rejects(mcps.resumeRuntime("removed-chat", [removedConnection.id], "https://relay.example", {}, removedSnapshot), /not found/);
+
   const empty = await mcps.runtime("empty-chat", [], "https://relay.example"), emptySnapshot = mcps.suspendRuntime("empty-chat");
   assert.deepEqual(empty, {}); assert.deepEqual(emptySnapshot, { schema: 1, token: null, connections: [] });
   assert.deepEqual(await mcps.resumeRuntime("empty-chat", [], "https://relay.example", {}, emptySnapshot), {});

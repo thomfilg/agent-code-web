@@ -88,7 +88,7 @@ Files: [agent-accounts.mjs](../src/agent-accounts.mjs),
 - [x] Prove disconnect/removal/expiry while hibernated remains fail-closed after
   reconnect and controller restart, including failed persistence and failed
   worker cleanup. Keep unrelated accounts usable and retries visible.
-- [ ] Test late credential refresh, stale RPC responses, account selection change,
+- [x] Test late credential refresh, stale RPC responses, account selection change,
   company/MCP removal, and concurrent Stop/Delete during resume.
 - [x] Establish safe handling of the WIP resume-before-full-stop interval: no
   resumed revoked work may gain provider or company access before cleanup.
@@ -117,12 +117,13 @@ Files: [runtime-manager.mjs](../src/runtime-manager.mjs) `#scheduleIdleStop`,
   workspace, agent, and explicit wake requests.
 - [x] Show real hibernating/hibernated/resuming/failed states and actual timing;
   do not show "ready" until resume/authorization/transport checks succeed.
-- [ ] Use fake clocks to verify the 120-second boundary, activity immediately
+- [x] Use fake clocks to verify the 120-second boundary, activity immediately
   before expiry, visibility changes, multiple viewers, queued messages and
   Stop/Delete racing the suspend operation. Never count a Node development
   server's existence alone as an active model turn.
-- [ ] Verify effective deployment configuration, including explicit
-  `AGENT_IDLE_TIMEOUT_MS` overrides. Do not change production flags yet.
+- [x] Verify parser defaults and explicit `AGENT_IDLE_TIMEOUT_MS` overrides.
+- [ ] Verify the effective deployed configuration. Do not change production
+  flags yet.
 
 ### 5. Image, watchdog and acceptance promotion
 

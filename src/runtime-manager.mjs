@@ -2066,9 +2066,20 @@ export class RuntimeManager extends EventEmitter {
     else {
       await this.sideChats.close(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Side stop warning: ${errorMessage(error)}` }));
       if (retainedNative) {
-        const retainedExecutor = await (stoppingExecutor || this.#executors.get(chatId));
-        if (typeof retainedExecutor?.stopRetainedAgent !== "function") throw new Error("Retained native-agent cleanup is unavailable; the worker was not stopped");
-        await retainedExecutor.stopRetainedAgent();
+        const pendingRetained = stoppingExecutor || this.#executors.get(chatId);
+        let retainedExecutor;
+        try { retainedExecutor = await pendingRetained; }
+        catch (error) {
+          // Stop aborts a concurrent resume. Its attempt-owned release may have
+          // already stopped the exact VM before the executor could be returned;
+          // in that case no live native owner remains to terminate. Any
+          // unconfirmed release is still a hard cleanup failure.
+          if (!pendingRetained?.workerReleased) throw error;
+        }
+        if (retainedExecutor) {
+          if (typeof retainedExecutor.stopRetainedAgent !== "function") throw new Error("Retained native-agent cleanup is unavailable; the worker was not stopped");
+          await retainedExecutor.stopRetainedAgent();
+        }
       }
     }
     await this.browsers?.stop(chatId);
