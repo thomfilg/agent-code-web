@@ -79,9 +79,8 @@ Stop; watchdog policy; and the dedicated hibernation verifier's cleanup/tagging
 rules. The complete local suite must remain green on the final commit.
 
 Local evidence is not AWS evidence. Remaining activation work is to authenticate
-the scoped operator profile, replace or prove the current Ubuntu 24.04 worker
-base against AWS's documented supported hibernation images (the current list
-names Ubuntu 22.04.2 but not 24.04), bake a fresh candidate, run
+the scoped operator profile, resolve and verify the current regional Canonical
+Ubuntu 22.04 base selected by the candidate-only baker, bake a fresh candidate, run
 `verify-worker-hibernation.mjs`, exercise the application through
 real hibernate/resume and controller replacement without paid prompts or user
 profiles, then publish the accepted AMI/config through the normal reviewed

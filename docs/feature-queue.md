@@ -96,10 +96,10 @@ controller recovery of Codex/Claude/Shared Chrome, encrypted capability
 continuity with scope revalidation, non-destructive automatic idle paths,
 explicit retained-process Stop, image/watchdog admission, and a dedicated
 disposable hibernation verifier. Local focused and complete regression suites
-are the source gates. The current worker baker pins Ubuntu 24.04 while AWS's
-current documented supported Ubuntu hibernation list stops at 22.04.2; the
-candidate base/recipe must first use a documented supported image or obtain
-equivalent provider evidence. A freshly baked candidate then still needs real AWS
+are the source gates. The hibernation baker now requires official Canonical
+Ubuntu 22.04 amd64, converts Noble-only package names and enforces root capacity
+above RAM in line with AWS's current documented prerequisites. A freshly baked
+candidate still needs real AWS
 hibernate/resume plus application/controller-replacement acceptance before the
 production idle policy can change; admission remains fail-closed without that
 image marker. Automatic-deployment restrictions remain unchanged.

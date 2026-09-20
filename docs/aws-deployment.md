@@ -46,11 +46,11 @@ The two-minute hibernation/manual-only full stop policy is still not activated
 by this release. Its source path and dedicated verifier are implemented, but it
 still needs a freshly baked candidate, real process-resume/application proof,
 the exact acceptance marker and a separately reviewed deployment configuration.
-The current worker baker pins Ubuntu 24.04. AWS's current hibernation prerequisite
-list names Ubuntu 22.04.2, 20.04 and older supported releases, but not 24.04, so
-the candidate base/recipe must be moved to a documented supported image or
-separately proven supported before a billable probe; do not treat package
-installation alone as provider support. See
+The hibernation candidate now requires an official Canonical Ubuntu 22.04 amd64
+base, converts Noble-only `t64` package names for Jammy, and sizes the root disk
+above instance RAM. This matches the newest Ubuntu x86 release in AWS's current
+documented support list; the actual regional AMI/config still requires the
+scoped live preflight before a billable probe. See
 [EC2 hibernation prerequisites](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/hibernating-prerequisites.html).
 
 Previous application publication (2026-09-18 17:41 UTC): build source `28654d6`

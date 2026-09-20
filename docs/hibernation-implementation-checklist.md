@@ -139,8 +139,11 @@ part of the committed baseline used by this document.
 - [x] Integrate the inspected WIP only after scoped source review. Keep candidate
   image status distinct from ordinary acceptance and application continuity
   acceptance; no manual tag may substitute for missing evidence.
-- [ ] Verify supported launch/image/disk configuration against authoritative
-  current provider requirements before any separately authorized cloud probe.
+- [x] Constrain the candidate source against authoritative current provider
+  requirements: official Canonical Ubuntu 22.04 amd64, supported T3 family,
+  encrypted gp3 root, launch-time hibernation, and root capacity above RAM.
+- [ ] Revalidate the selected regional AMI, instance type and effective disk
+  configuration through the scoped AWS account before the billable cloud probe.
 - [x] Reconcile the orphan watchdog and post-resume heartbeat with the new policy;
   neither may silently full-stop a worker or immediately rehibernate a newly
   resumed machine based on elapsed wall-clock suspension time.

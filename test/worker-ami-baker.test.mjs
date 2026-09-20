@@ -16,6 +16,7 @@ function fixture({ commandFailed = false, neverStops = false, foreignBuilder = f
   let terminationRequested = false;
   let terminationPolls = 0;
   let invocationPolls = 0;
+  const sourceImageId = baseOverride.ImageId || "ami-aaaaaaaaaaaaaaaaa";
   const infrastructureTags = [{ Key: "AgentRelayDeployment", Value: "relay-fixture" }, { Key: "ManagedBy", Value: "12-apps-ci" }];
   const role = { RoleName: "fixture-builder-role", Arn: "arn:aws:iam::123456789012:role/fixture-builder-role", Tags: infrastructureTags, ...roleOverride };
   const run = async args => {
@@ -29,7 +30,7 @@ function fixture({ commandFailed = false, neverStops = false, foreignBuilder = f
     if (args.includes("get-role")) return JSON.stringify(role);
     if (args.includes("list-attached-role-policies")) return JSON.stringify([{ PolicyArn: "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" }, ...(extraPolicy ? [{ PolicyArn: "AdministratorAccess" }] : [])]);
     if (args.includes("list-role-policies")) return "[]";
-    if (args.includes("describe-images")) return JSON.stringify(args.includes(imageId) ? { ImageId: imageId, State: "available" } : { ImageId: "ami-aaaaaaaaaaaaaaaaa", State: "available", Architecture: "x86_64", OwnerId: "099720109477", Name: "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-fixture", ...baseOverride });
+    if (args.includes("describe-images")) return JSON.stringify(args.includes(imageId) ? { ImageId: imageId, State: "available" } : { ImageId: sourceImageId, State: "available", Architecture: "x86_64", VirtualizationType: "hvm", RootDeviceType: "ebs", OwnerId: "099720109477", Name: "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-fixture", ...baseOverride });
     if (args.includes("describe-key-pairs")) return JSON.stringify([{ KeyName: "relay-fixture-worker", Tags: infrastructureTags, PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestFixturePublicKeyOnly fixture", ...keyOverride }]);
     if (args.includes("run-instances")) {
       tags = JSON.parse(args[args.indexOf("--tag-specifications") + 1])[0].Tags;
@@ -43,7 +44,7 @@ function fixture({ commandFailed = false, neverStops = false, foreignBuilder = f
       return JSON.stringify(builderId);
     }
     if (args.includes("describe-instances")) {
-      const value = { InstanceId: builderId, ImageId: "ami-aaaaaaaaaaaaaaaaa", State: { Name: terminationRequested ? terminationStates[Math.min(terminationPolls++, terminationStates.length - 1)] : sent >= 2 && !neverStops ? "stopped" : "running" }, Tags: foreignBuilder ? [] : tags, SubnetId: "subnet-aaaaaaaaaaaaaaaaa", SecurityGroups: [{ GroupId: "sg-aaaaaaaaaaaaaaaaa" }], KeyName: "relay-fixture-worker", IamInstanceProfile: { Arn: "arn:aws:iam::123456789012:instance-profile/relay-fixture-builder" } };
+      const value = { InstanceId: builderId, ImageId: sourceImageId, State: { Name: terminationRequested ? terminationStates[Math.min(terminationPolls++, terminationStates.length - 1)] : sent >= 2 && !neverStops ? "stopped" : "running" }, Tags: foreignBuilder ? [] : tags, SubnetId: "subnet-aaaaaaaaaaaaaaaaa", SecurityGroups: [{ GroupId: "sg-aaaaaaaaaaaaaaaaa" }], KeyName: "relay-fixture-worker", IamInstanceProfile: { Arn: "arn:aws:iam::123456789012:instance-profile/relay-fixture-builder" } };
       if (terminationRequested && detachedWhileTerminating) { delete value.SubnetId; delete value.IamInstanceProfile; value.SecurityGroups = []; }
       return JSON.stringify([mutateInstance(value, { terminationRequested, calls })]);
     }
@@ -145,12 +146,16 @@ test("AMI cleanup observes exact terminal state with detached network but never 
 });
 
 test("hibernation bake is explicitly opt-in and cannot claim production acceptance", async () => {
-  const f = fixture();
-  const options = parseOptions([...required, "--hibernation-candidate"]);
+  const candidateImageId = "ami-ccccccccccccccccc";
+  const candidateRequired = [...required];
+  candidateRequired[candidateRequired.indexOf("--base-image-id") + 1] = candidateImageId;
+  const f = fixture({ baseOverride: { ImageId: candidateImageId, Name: "ubuntu/images/hvm-ssd-gp3/ubuntu-jammy-22.04-amd64-server-20230303" } });
+  const options = parseOptions([...candidateRequired, "--hibernation-candidate"]);
   const result = await bakeWorkerImage(options, { run: f.run, sleep: async () => {} });
   assert.equal(result.hibernationCandidate, "candidate-v1");
   assert.equal(result.productionReady, false);
   const launch = f.calls.find(c => c.includes("run-instances"));
+  assert.equal(launch[launch.indexOf("--image-id") + 1], candidateImageId);
   assert.equal(launch[launch.indexOf("--hibernation-options") + 1], "Configured=true");
   const image = f.calls.find(c => c.includes("create-image"));
   const tags = JSON.parse(image[image.indexOf("--tag-specifications") + 1])[0].Tags;
@@ -158,6 +163,28 @@ test("hibernation bake is explicitly opt-in and cannot claim production acceptan
   assert.equal(tags.some(tag => tag.Key === "AgentRelayAcceptance"), false);
   assert.match(f.getUserData(), /ec2-hibinit-agent/);
   assert.doesNotMatch(f.getUserData(), /420.*shutdown/);
+  assert.match(f.getUserData(), /libgtk-3-0\n/);
+  assert.doesNotMatch(f.getUserData(), /libgtk-3-0t64/);
+});
+
+test("hibernation candidate requires documented Jammy while the ordinary baker remains Noble", async () => {
+  for (const baseOverride of [
+    {},
+    { Name: "ubuntu/images/hvm-ssd-gp3/ubuntu-jammy-22.04-amd64-server-20230302" },
+    { Name: "ubuntu/images/hvm-ssd-gp3/ubuntu-jammy-22.04-amd64-server-latest" },
+    { Name: "ubuntu/images/hvm-ssd-gp3/ubuntu-jammy-22.04-amd64-server-20230303", VirtualizationType: "paravirtual" },
+  ]) {
+    const invalidCandidate = fixture({ baseOverride });
+    await assert.rejects(bakeWorkerImage(parseOptions([...required, "--hibernation-candidate"]), { run: invalidCandidate.run }), /Ubuntu 22\.04/);
+    assert.equal(invalidCandidate.calls.some(call => call.includes("run-instances")), false);
+  }
+
+  const jammyOrdinary = fixture({ baseOverride: { Name: "ubuntu/images/hvm-ssd-gp3/ubuntu-jammy-22.04-amd64-server-20230303" } });
+  await assert.rejects(bakeWorkerImage(parseOptions(required), { run: jammyOrdinary.run }), /Ubuntu 24\.04/);
+  assert.equal(jammyOrdinary.calls.some(call => call.includes("run-instances")), false);
+
+  assert.throws(() => parseOptions([...required, "--hibernation-candidate", "--instance-type", "t3.xlarge", "--volume-gb", "20"]), /leave 16 GiB beyond instance RAM/);
+  assert.equal(parseOptions([...required, "--hibernation-candidate", "--instance-type", "t3.xlarge", "--volume-gb", "32"]).volumeGb, 32);
 });
 
 test("cleanup does a strict recheck before termination and rejects detached nonterminal instances", async () => {

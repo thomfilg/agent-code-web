@@ -9,6 +9,19 @@ export function hibernationRecipe(recipe) {
     if (recipe.split(before).length !== 2) throw new Error("Unexpected worker recipe; hibernation candidate was not generated");
     recipe = recipe.replace(before, after);
   };
+  // The ordinary worker image is Noble. AWS's documented hibernation list
+  // currently tops out at Jammy, whose browser libraries predate the t64
+  // transition. The candidate baker separately verifies the official Jammy
+  // AMI; keep this package conversion inseparable from the hibernation recipe.
+  for (const [noble, jammy] of [
+    ["libasound2t64", "libasound2"],
+    ["libatk-bridge2.0-0t64", "libatk-bridge2.0-0"],
+    ["libatk1.0-0t64", "libatk1.0-0"],
+    ["libatspi2.0-0t64", "libatspi2.0-0"],
+    ["libcups2t64", "libcups2"],
+    ["libgtk-3-0t64", "libgtk-3-0"],
+  ]) replace(`  - ${noble}\n`, `  - ${jammy}\n`);
+  replace("The AMI baker selects Ubuntu 24.04 amd64.", "The hibernation candidate baker selects Ubuntu 22.04 amd64.");
   replace("packages:\n", "packages:\n  - ec2-hibinit-agent\n  - acpid\n");
   replace("write_files:\n", `write_files:
   - path: /etc/systemd/system/hibinit-agent.service.d/relay.conf

@@ -50,7 +50,15 @@ because it baked successfully.
 The actual run checks STS identity, completed stack outputs, deployment-owned
 network/key/profile, private subnet, controller-only SSH ingress, HTTP(S) egress,
 and a builder role limited to `AmazonSSMManagedInstanceCore` before launching.
-Base images must be official Canonical Ubuntu 24.04 amd64 images.
+Ordinary base images must be official Canonical Ubuntu 24.04 amd64 images.
+Hibernation candidates deliberately require official Canonical Ubuntu 22.04
+amd64 instead, because it is the newest Ubuntu x86 release in AWS's documented
+hibernation support list. The candidate flag also rewrites Noble's `t64`
+browser-library package names to their Jammy names and requires a root volume
+with at least 16 GiB beyond the selected instance's RAM. Its base image is
+therefore not required to equal the controller's Noble stack output; account,
+Canonical ownership, architecture, deployment network/key/profile and exact
+release name are still verified before launch.
 
 The baker gzip-compresses cloud-init user-data and checks the compressed bytes
 against EC2's 16 KiB limit locally, including in `--dry-run`. It checks again
@@ -218,11 +226,12 @@ The ordinary verifier deliberately rejects a hibernation candidate. Use the
 dedicated verifier only with the exact candidate AMI after reviewing its
 effective launch/disk prerequisites:
 
-The normal baker currently pins Canonical Ubuntu 24.04. AWS's current
-[hibernation prerequisites](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/hibernating-prerequisites.html)
-do not list that Ubuntu release (22.04.2 is the newest listed Ubuntu x86 image).
-Do not run the billable hibernation path until the candidate uses a documented
-supported base/recipe or AWS supplies equivalent support evidence.
+The candidate baker requires Canonical Ubuntu 22.04 amd64, matching the newest
+Ubuntu x86 release in AWS's current
+[hibernation prerequisites](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/hibernating-prerequisites.html).
+Resolve and pin that AMI explicitly (for example from Canonical's 22.04 stable
+SSM parameter); never pass the controller's Ubuntu 24.04 base merely because it
+is already present in the stack output.
 
 ```bash
 node deploy/aws/verify-worker-hibernation.mjs \

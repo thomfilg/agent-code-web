@@ -87,6 +87,8 @@ export function parseOptions(args) {
   if (!/^t3\.(small|medium|large|xlarge)$/.test(options.instanceType)) throw new Error("Use a supported x86_64 t3 builder size");
   options.volumeGb = Number(options.volumeGb);
   if (!Number.isSafeInteger(options.volumeGb) || options.volumeGb < 20 || options.volumeGb > 100) throw new Error("Builder volume must be 20–100 GiB");
+  const ramGb = { "t3.small": 2, "t3.medium": 4, "t3.large": 8, "t3.xlarge": 16 }[options.instanceType];
+  if (options.hibernationCandidate && options.volumeGb < 16 + ramGb) throw new Error("Hibernation candidate volume must leave 16 GiB beyond instance RAM");
   options.name ||= `${options.deployment}-worker-${Date.now()}`;
   if (!/^[A-Za-z0-9_.-]{3,128}$/.test(options.name)) throw new Error("Invalid AMI name");
   return options;
@@ -169,8 +171,10 @@ export async function bakeWorkerImage(options, { run = runBakerAws, sleep = ms =
     const stacks = await json("cloudformation", "describe-stacks", "--stack-name", o.deployment, "--query", "Stacks");
     const stack = stacks?.[0];
     const outputs = Object.fromEntries((stack?.Outputs || []).map(({ OutputKey, OutputValue }) => [OutputKey, OutputValue]));
+    const expectedOutputs = { WorkerSubnetId: o.subnetId, WorkerSecurityGroupId: o.securityGroupId, WorkerKeyName: o.keyName, BuilderInstanceProfile: o.builderInstanceProfile, DeploymentName: o.deployment,
+      ...(!o.hibernationCandidate ? { BaseImageId: o.baseImageId } : {}) };
     if (stacks?.length !== 1 || stack.StackName !== o.deployment || !stack.StackId?.includes(`:cloudformation:${o.region}:${o.expectedAccount}:stack/${o.deployment}/`) || !["CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE"].includes(stack.StackStatus) ||
-        Object.entries({ WorkerSubnetId: o.subnetId, WorkerSecurityGroupId: o.securityGroupId, WorkerKeyName: o.keyName, BuilderInstanceProfile: o.builderInstanceProfile, BaseImageId: o.baseImageId, DeploymentName: o.deployment }).some(([key, value]) => outputs[key] !== value)) {
+        Object.entries(expectedOutputs).some(([key, value]) => outputs[key] !== value)) {
       throw new Error("Baker inputs must exactly match a completed deployment's CloudFormation outputs");
     }
     const owned = resource => resource?.Tags?.some(t => t.Key === "AgentRelayDeployment" && t.Value === o.deployment) && resource.Tags.some(t => t.Key === "ManagedBy" && t.Value === "12-apps-ci");
@@ -191,7 +195,13 @@ export async function bakeWorkerImage(options, { run = runBakerAws, sleep = ms =
     const inline = await json("iam", "list-role-policies", "--role-name", role.RoleName, "--query", "PolicyNames");
     if (!owned(role) || role.Arn !== profile.Roles[0].Arn || policies?.length !== 1 || policies[0].PolicyArn !== "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" || inline?.length !== 0) throw new Error("Builder role must be deployment-owned and limited to AmazonSSMManagedInstanceCore");
     const base = await json("ec2", "describe-images", "--image-ids", o.baseImageId, "--query", "Images[0]");
-    if (base?.ImageId !== o.baseImageId || base.State !== "available" || base.Architecture !== "x86_64" || base.OwnerId !== "099720109477" || !base.Name?.startsWith("ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-")) throw new Error("Base image must be an available official Canonical Ubuntu 24.04 amd64 AMI");
+    const release = o.hibernationCandidate ? "ubuntu-jammy-22.04-amd64-server-" : "ubuntu-noble-24.04-amd64-server-";
+    const namePrefix = `ubuntu/images/hvm-ssd-gp3/${release}`, serial = base?.Name?.slice(namePrefix.length);
+    const supportedJammy = !o.hibernationCandidate || /^\d{8}(?:\.\d+)?$/.test(serial || "") && serial.slice(0, 8) >= "20230303";
+    if (base?.ImageId !== o.baseImageId || base.State !== "available" || base.Architecture !== "x86_64" || base.VirtualizationType !== "hvm" || base.RootDeviceType !== "ebs"
+      || base.OwnerId !== "099720109477" || !base.Name?.startsWith(namePrefix) || !supportedJammy) {
+      throw new Error(`Base image must be an available official Canonical Ubuntu ${o.hibernationCandidate ? "22.04" : "24.04"} amd64 AMI`);
+    }
     const keys = await json("ec2", "describe-key-pairs", "--key-names", o.keyName, "--include-public-key", "--query", "KeyPairs");
     const key = keys?.[0];
     const normalizedKey = typeof key?.PublicKey === "string" ? key.PublicKey.trim() : "";
