@@ -94,10 +94,14 @@ export class WorkerLeaseAuthority {
       return row;
     } catch (error) { if (error?.message?.startsWith("Worker lease:")) throw error; throw leaseFailure("STORAGE_FAILURE"); }
   }
-  #held(row, controllerId) {
+  #owned(row, controllerId) {
     const held = this.claims.get(workerAttemptKey(row.value.binding.identity));
     if (!held || held.controllerId !== controllerId || held.controllerEpoch !== row.value.controllerEpoch || row.value.controllerId !== controllerId
-      || row.value.status !== "active" || pending(row.value).length) throw leaseFailure("CONTROLLER_FENCED");
+      || row.value.status !== "active") throw leaseFailure("CONTROLLER_FENCED");
+  }
+  #held(row, controllerId) {
+    this.#owned(row, controllerId);
+    if (pending(row.value).length) throw leaseFailure("CONTROLLER_FENCED");
   }
   async claim(binding, controllerId, { expectedRevision = 0 } = {}) {
     if (!leaseId(controllerId) || expectedRevision !== 0) throw leaseFailure("CLAIM_INVALID");
@@ -188,6 +192,27 @@ export class WorkerLeaseAuthority {
     if (lease.expiresAt <= Date.now() || lease.expiresAt > Date.now() + 60000) throw leaseFailure("LEASE_EXPIRED");
     return leaseView(lease);
   }
+  async release(binding, controllerId, id, processId) {
+    processId = this.#process(binding, processId);
+    const previous = await this.#row(binding); this.#owned(previous, controllerId);
+    const current = previous.value.leases?.[processId];
+    if (!leaseId(id)) throw leaseFailure("LEASE_CHANGED");
+    if (!current) {
+      if (!pending(previous.value).some(item => item.processId === processId && item.id === id)) throw leaseFailure("LEASE_CHANGED");
+      const row = await this.#notify(previous);
+      return { released: true, claim: publicClaim(row) };
+    }
+    if (current.id !== id || pending(previous.value).length) throw leaseFailure("LEASE_CHANGED");
+    let row = await this.#transaction(binding, previous.revision, ({ value }) => {
+      this.#held({ value }, controllerId);
+      const lease = value.leases?.[processId];
+      if (!lease || lease.id !== id) throw leaseFailure("LEASE_CHANGED");
+      const leases = { ...value.leases }; delete leases[processId];
+      return { ...value, leases, pendingInvalidations: [{ processId, id }] };
+    });
+    row = await this.#notify(row);
+    return { released: true, claim: publicClaim(row) };
+  }
   async revoke(binding, id) {
     const previous = await this.#row(binding, { allowStaleBoot: true });
     const known = [...Object.values(previous.value.leases || {}), ...pending(previous.value).map(item => ({ id: item.id }))];
@@ -204,6 +229,7 @@ export class WorkerLeaseAuthority {
   forAttempt(binding, controllerId, processId) {
     processId = this.#process(binding, processId);
     return { issue: () => this.issue(binding, controllerId, processId), renew: id => this.renew(binding, controllerId, id, processId),
+      release: id => this.release(binding, controllerId, id, processId),
       authorize: request => matches(request?.identity, binding.identity) && request.processId === processId ? this.authorize(request) : Promise.reject(leaseFailure()),
       revoke: id => this.revoke(binding, id) };
   }

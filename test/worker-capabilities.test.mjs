@@ -67,14 +67,20 @@ async function adapterFixture(t, provider) {
   const canonical = '[remote "origin"]\n  url = https://github.com/company/project.git\n';
   await writeFile(`${chat.workspace}/.git/config`, canonical);
   const starts = [], events = [], requests = [], config = testConfig(root, { CODEX_BIN: path.resolve("test/fixtures/fake-codex.mjs"), CLAUDE_BIN: path.resolve("test/fixtures/fake-claude-secret.mjs") });
-  const executor = { workspace: chat.workspace, runtimeHome: store.runtimeHome(chat.id), environmentVariables: variables, capabilitySecrets: runtimeMcpSecrets(allServers, "https://relay.example"),
-    mcpServers: allServers, mkdir: directory => mkdir(directory, { recursive: true }),
-    spawn(command, args, options) {
+  const launch = (kind, command, args, options) => {
       for (const token of [capability, browserCap, mcpCap]) assert.ok(!JSON.stringify(args).includes(token));
       assert.ok(!JSON.stringify([args, options.env]).includes(config.codex.providerKey));
       assert.ok(!JSON.stringify([args, options.env]).includes(config.claude.providerKey));
-      starts.push({ args, env: options.env }); return spawn(command, args, options);
-    },
+      starts.push({ kind, args, env: options.env });
+      if (kind === "ordinary" && args[0] === "plugin") {
+        return spawn(process.execPath, ["-e", "process.stdout.write(JSON.stringify({installed:[],available:[]}))"], options);
+      }
+      return spawn(command, args, options);
+  };
+  const executor = { workspace: chat.workspace, runtimeHome: store.runtimeHome(chat.id), environmentVariables: variables, capabilitySecrets: runtimeMcpSecrets(allServers, "https://relay.example"),
+    mcpServers: allServers, mkdir: directory => mkdir(directory, { recursive: true }),
+    spawn: (command, args, options) => launch("ordinary", command, args, options),
+    spawnAgent: (command, args, options) => launch("agent", command, args, options),
   };
   const adapter = new (provider === "codex" ? CodexAdapter : ClaudeAdapter)({ chat, store, config, executor, broker: new CapabilityBroker({ ttlMs: 10000 }), gatewayOrigin: "http://localhost",
     hooks: { onEvent: value => events.push(value), onRequest: value => requests.push(value), onLog: value => events.push({ log: value }) } });
@@ -87,6 +93,7 @@ test("Claude gateway-mode subprocess protects capability across every delta spli
   assert.equal(result.text, "[redacted] ".repeat(3 * (capability.length - 1)));
   for (const token of [capability, browserCap, mcpCap]) assert.ok(!JSON.stringify([result, f.events, f.requests]).includes(token));
   assert.equal(f.starts.at(-1).env.RELAY_MCP_CAPABILITY_0, capability);
+  assert.equal(f.starts.at(-1).kind, "agent", "interactive Claude owner must use the reconnectable agent path");
   assert.equal(f.starts.at(-1).env.GIT_CONFIG_VALUE_0, `Authorization: Bearer ${capability}`);
   assert.equal(await readFile(`${f.chat.workspace}/.git/config`, "utf8"), f.canonical);
 });
@@ -101,6 +108,9 @@ test("Codex gateway-mode RPC protects capability across every split, tool fields
   assert.equal(result.text, "[redacted] ".repeat(3 * (capability.length - 1)));
   for (const token of [capability, browserCap, mcpCap]) assert.ok(!JSON.stringify([result, f.events, f.requests]).includes(token));
   const side = await f.adapter.forkSide({}); assert.equal(side.credentialSecrets, f.adapter.credentialSecrets); await side.stop();
+  assert.equal(f.starts[0].kind, "agent", "Codex app-server must use the reconnectable agent path");
+  assert.deepEqual(await f.adapter.pluginCli.run(["list", "--available", "--json"]), { installed: [], available: [] });
+  assert.equal(f.starts.at(-1).kind, "ordinary", "transient Codex plugin commands must not occupy the retained native-agent slot");
   assert.equal(f.starts[0].env.RELAY_MCP_CAPABILITY_0, capability);
   assert.equal(await readFile(`${f.chat.workspace}/.git/config`, "utf8"), f.canonical);
 });

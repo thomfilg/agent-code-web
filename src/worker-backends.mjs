@@ -11,6 +11,7 @@ import { WORKER_SUPERVISOR_CODE } from "./worker-supervisor-paths.mjs";
 import { workerSupervisorFiles, workerSupervisorShell, workerSupervisorUnit, workerSupervisorVersion } from "./worker-supervisor-service.mjs";
 import { RemoteBrowserAttemptCoordinator } from "./remote-browser-attempt.mjs";
 import { ReconnectableBrowserProcess } from "./reconnectable-browser-process.mjs";
+import { ReconnectableAgentProcess } from "./reconnectable-agent-process.mjs";
 import { createSshWorkerProcessTransport } from "./ssh-worker-process-transport.mjs";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -53,6 +54,10 @@ class LocalExecutor {
 
   spawn(command, args, options) {
     return spawnWorker(command, args, { ...options, isolation: this.config.processIsolation });
+  }
+
+  spawnAgent(command, args, options) {
+    return this.spawn(command, args, options);
   }
 
   // Chrome keeps its native renderer sandbox. Mapping the launcher to UID 0
@@ -144,6 +149,14 @@ export class Ec2Executor {
     const child = new ReconnectableBrowserProcess(context, 3000, this.backend.controllerLifetime);
     await child.start({ command, args, cwd: options.cwd || this.workspace, env });
     return child;
+  }
+
+  spawnAgent(command, args, options = {}) {
+    if (!this.supervisorReady) return this.spawn(command, args, options);
+    const { env, stdio } = this.#remoteOptions(options);
+    if (stdio.some(value => value !== "pipe")) throw new Error("Reconnectable native-agent transport requires piped stdio");
+    const context = this.browserCoordinator.open(this.chat, "native-agent");
+    return new ReconnectableAgentProcess(context, { command, args, cwd: options.cwd || this.workspace, env });
   }
 
   #remoteOptions(options) {

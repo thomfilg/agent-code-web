@@ -26,7 +26,7 @@ function fixture({ initial = instance(), config = ec2Config(), ami = image(), lo
     if (command === config.ec2.sshBin) {
       if (args.at(-1).includes(".workspace-seeded")) return "ready";
       if (args.at(-1).includes("systemctl --user is-active")) return supervisorActive ? "active" : "";
-      if (args.at(-1).includes("worker-supervisor-control.mjs")) return JSON.stringify({ protocol: "relay-worker-supervisor/1", version: "v2", daemonInstanceId: "daemon-fixture", configured: false });
+      if (args.at(-1).includes("worker-supervisor-control.mjs")) return JSON.stringify({ protocol: "relay-worker-supervisor/1", version: "v3", daemonInstanceId: "daemon-fixture", configured: false });
       if (args.at(-1) === "cat /proc/sys/kernel/random/boot_id") return "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
       return "";
     }
@@ -64,7 +64,7 @@ test("EC2 starts/stops only a private deployment/chat worker and uses the IAM de
 });
 
 test("an accepted supervisor image verifies the independent user service and records the worker boot identity", async () => {
-  const tagged = image({ Tags: [...image().Tags, { Key: "AgentRelaySupervisor", Value: "v2" }] });
+  const tagged = image({ Tags: [...image().Tags, { Key: "AgentRelaySupervisor", Value: "v3" }] });
   const { backend, calls } = fixture({ ami: tagged });
   backend.store = { records: {} };
   const executor = await backend.acquire(chat);
@@ -77,7 +77,7 @@ test("an accepted supervisor image verifies the independent user service and rec
 });
 
 test("an inactive tagged supervisor uploads its explicit source allowlist and installs the user service", async () => {
-  const tagged = image({ Tags: [...image().Tags, { Key: "AgentRelaySupervisor", Value: "v2" }] });
+  const tagged = image({ Tags: [...image().Tags, { Key: "AgentRelaySupervisor", Value: "v3" }] });
   const config = ec2Config({ SSH_BIN: process.execPath });
   const { backend, calls } = fixture({ ami: tagged, config, supervisorActive: false });
   backend.store = { records: {} };

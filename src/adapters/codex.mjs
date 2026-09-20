@@ -201,7 +201,7 @@ export class CodexAdapter {
       command: this.config.codex.bin,
       args,
       isolation: this.executor ? "none" : this.config.processIsolation,
-      spawnFn: this.executor ? this.executor.spawn.bind(this.executor) : null,
+      spawnFn: this.executor ? (this.executor.spawnAgent || this.executor.spawn).bind(this.executor) : null,
       spawnOptions: { cwd: this.workspace, env },
       deferAgentDeltaRedaction: authMode === "account" || this.credentialSecrets.size > 0,
       redactSecrets: value => {

@@ -66,6 +66,17 @@ test("worker daemon owns exact identity and leases while controller transports c
   await control({ action: "configure", identity: selected, processId: "shared-chrome", lease: lease3 });
   const third = await connect(lease3.credential); await third.attach(receipt, 0); await third.terminate();
   await until(() => third.frames.some(frame => frame.channel === "exit")); await third.ackOutput(third.frames.at(-1).seq); third.disconnect();
+  assert.deepEqual(await control({ action: "release", processId: "shared-chrome", processInstanceId: receipt.processInstanceId, leaseId: lease3.id }), { released: true });
+  assert.deepEqual(await control({ action: "release", processId: "shared-chrome", processInstanceId: receipt.processInstanceId, leaseId: lease3.id }), { released: true });
+  await control({ action: "invalidate", processId: "shared-chrome", leaseId: lease3.id });
+  assert.deepEqual(await control({ action: "invalidate", processId: "shared-chrome", leaseId: lease3.id }), { invalidated: true });
+  const lease4 = { id: "lease-four", generation: 4, expiresAt: Date.now() + 30000, credential: credential(4) };
+  await control({ action: "configure", identity: selected, processId: "shared-chrome", lease: lease4 });
+  const fourth = await connect(lease4.credential), replacementReceipt = await fourth.launch("shared-chrome", spec);
+  assert.notEqual(replacementReceipt.processInstanceId, receipt.processInstanceId);
+  await fourth.attach(replacementReceipt, 0); await fourth.terminate();
+  await until(() => fourth.frames.some(frame => frame.channel === "exit")); await fourth.ackOutput(fourth.frames.at(-1).seq); fourth.disconnect();
+  await control({ action: "release", processId: "shared-chrome", processInstanceId: replacementReceipt.processInstanceId, leaseId: lease4.id });
   await native.terminate(); await until(() => native.frames.some(frame => frame.channel === "exit")); await native.ackOutput(native.frames.at(-1).seq); native.disconnect();
   assert.deepEqual(await control({ action: "reset" }), { reset: true });
   assert.equal((await control({ action: "status" })).configured, false);

@@ -114,13 +114,42 @@ test("browser and native-agent leases rotate independently while takeover and re
 
   const nextBrowser = await replacementAuthority.issue(binding, "controller-b", "shared-chrome");
   const nextNative = await replacementAuthority.issue(binding, "controller-b", "native-agent");
-  await replacementAuthority.revoke(binding, nextBrowser.id);
+  const released = await replacementAuthority.release(binding, "controller-b", nextBrowser.id, "shared-chrome");
+  assert.equal(released.released, true);
   assert.deepEqual(invalidated.slice(3), [
-    { id: nextNative.id, processId: "native-agent" },
     { id: nextBrowser.id, processId: "shared-chrome" },
   ]);
   await denied(replacementAuthority.authorize(leaseRequest(nextBrowser)));
+  assert.equal((await replacementAuthority.authorize(leaseRequest(nextNative, { processId: "native-agent" }))).id, nextNative.id);
+  const reopenedBrowser = await replacementAuthority.issue(binding, "controller-b", "shared-chrome");
+  assert.equal(reopenedBrowser.generation, 6);
+  await replacementAuthority.revoke(binding, reopenedBrowser.id);
+  assert.deepEqual(invalidated.slice(4), [
+    { id: nextNative.id, processId: "native-agent" },
+    { id: reopenedBrowser.id, processId: "shared-chrome" },
+  ]);
+  await denied(replacementAuthority.authorize(leaseRequest(reopenedBrowser)));
   await denied(replacementAuthority.authorize(leaseRequest(nextNative, { processId: "native-agent" })));
+});
+
+test("process release resumes an exact pending invalidation after its acknowledgement is lost", async () => {
+  const attempts = []; let loseAcknowledgement = true;
+  const { records, authority, binding, claim } = await fixture({ processIds: ["shared-chrome", "native-agent"],
+    invalidateLease: (id, processId) => {
+      attempts.push({ id, processId });
+      if (loseAcknowledgement) { loseAcknowledgement = false; throw Error("synthetic lost acknowledgement"); }
+    } });
+  const browser = await authority.issue(binding, "controller-a", "shared-chrome");
+  await denied(authority.release(binding, "controller-a", browser.id, "shared-chrome"));
+  const pending = await records.workerAttemptGet(claim.attemptId);
+  assert.equal(pending.value.leases["shared-chrome"], undefined);
+  assert.deepEqual(pending.value.pendingInvalidations, [{ processId: "shared-chrome", id: browser.id }]);
+  assert.equal((await authority.release(binding, "controller-a", browser.id, "shared-chrome")).released, true);
+  assert.deepEqual(attempts, [
+    { id: browser.id, processId: "shared-chrome" },
+    { id: browser.id, processId: "shared-chrome" },
+  ]);
+  assert.deepEqual((await records.workerAttemptGet(claim.attemptId)).value.pendingInvalidations, []);
 });
 
 test("commit failure never emits a credential; uncertain committed issuance fences the previous token", async () => {

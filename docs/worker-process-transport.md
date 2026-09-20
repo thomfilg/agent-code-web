@@ -1,11 +1,13 @@
-# Worker-owned process transport and EC2 browser candidate
+# Worker-owned process transport and EC2 browser/native candidate
 
 This implements the reconnectable-process prerequisite from the September 19
 process-preserving hibernation ADR. The transport is now wired into an
-independent worker-owned user service and the EC2 Shared Chrome executor for
-images carrying the exact `AgentRelaySupervisor=v2` capability tag. It is still
-not a working hibernation feature or a production worker/image acceptance
-receipt. Native adapters, controller shutdown and idle defaults are unchanged.
+independent worker-owned user service and the EC2 Shared Chrome and persistent
+native-agent executors for images carrying the exact
+`AgentRelaySupervisor=v3` capability tag. It is still not a working hibernation
+feature or a production worker/image acceptance receipt. Fresh-controller
+native session reconstruction, controller shutdown and idle defaults are
+unchanged.
 
 ## API and authority
 
@@ -94,7 +96,11 @@ Live cgroup behavior on the accepted AMI remains an AWS acceptance gate.
 chat/attempt identity and one hashed short-lived lease credential per allowed
 process. Rotating or invalidating the Shared Chrome lease does not detach a native
 agent attachment; controller takeover or attempt revocation still fences all
-processes through the durable authority. It
+processes through the durable authority. After confirmed group cleanup, exit
+delivery and output acknowledgement, an exact trusted release compacts only that
+process tombstone so Chrome can be reopened while the native agent remains. A
+lost invalidation acknowledgement is idempotently resumed without authorizing
+the old credential. It
 never unlinks a live daemon's sockets. Its systemd user unit has a private 0700
 runtime directory, restart policy, `NoNewPrivileges`, restrictive umask and
 cgroup cleanup. The AMI setup enables linger for the dedicated `agent` user.
@@ -105,9 +111,13 @@ records a SHA-256 worker boot identity, then creates the durable remote attempt
 coordinator. An older image keeps the legacy disposable SSH child path; no tag
 or boolean enables hibernation itself. A replacement controller can reconstruct
 the Shared Chrome facade from PostgreSQL authority plus daemon status and attach
-to the same process. Explicit Stop terminates that exact receipt and resets the
-daemon. A refused recovery retains the same cleanup operation instead of
-launching a replacement.
+to the same process. Codex app-server and persistent Claude SDK owners use a
+stable ChildProcess-compatible facade over the native-agent slot; link loss
+preserves their streams, process group and background Node descendants without
+replaying input. One-shot Claude turns and transient Codex plugin commands stay
+on the ordinary non-retained path. Explicit Stop terminates the exact process
+group; stopping one slot leaves the other admitted. A refused recovery retains
+the same cleanup operation instead of launching a replacement.
 
 ## Delivery, bounds and failure semantics
 
@@ -143,8 +153,11 @@ sequence. Reconnecting cannot accumulate an unbounded private stdin queue.
 
 Bounds also include 16 connections, 16 queued requests per connection, 256 KiB
 frames, 3-second authorization timeout, 5-second initial admission timeout, and
-16 process identities by default (maximum 128). Exited process identity tombstones
-remain to prevent reuse; this partition does not implement journal compaction.
+16 process identities by default (maximum 128). Exited process identity
+tombstones remain until exact confirmed group cleanup, exit delivery and output
+acknowledgement. Only then may the trusted coordinator release that instance and
+reuse its logical process ID; ambiguous input/output or cleanup keeps the
+tombstone.
 At most 16 underlying authorizations may be pending, even across disconnected
 sockets whose authorizer failed to settle; timeouts do not release that bound.
 `supervisor.close()` refuses live/unconfirmed groups and unacknowledged output. Service
@@ -159,9 +172,11 @@ shutdown/disposal policy is deliberately not implicit.
 - The executable daemon/service, SSH bridge, durable coordinator and Shared
   Chrome EC2 executor binding are production candidates, but have not been
   baked, deployed or exercised on an accepted AWS worker.
-- Codex, Claude and independent Node development servers do not yet use this
-  supervisor. The authority and daemon can now hold their process lease beside
-  Shared Chrome, but their native RPC/session reconstruction is still required.
+- Persistent Codex and Claude owners now use this supervisor, and a synthetic
+  background Node descendant retains the same PID and in-memory state across a
+  same-controller link reconnect. A new control-plane process still cannot
+  reconstruct the native facade/session ledger, so actual controller death and
+  hibernation are not accepted for native agents yet.
 - Deployment drain, two-minute idle suspension, wake and UI state integration
   are not enabled.
 - No Chrome memory, OS hibernation, encrypted image, actual provider session or
@@ -169,7 +184,7 @@ shutdown/disposal policy is deliberately not implicit.
   actual attach/ack/reconnect receipts after those integrations exist; marker
 booleans and this local fixture are insufficient.
 
-The tests launch synthetic Node processes through the daemon, fixed SSH byte
-bridge and actual `Ec2Executor.spawnBrowser` integration. Separate local tests
+The tests launch synthetic native/background Node processes through the daemon,
+fixed SSH byte bridge and actual `Ec2Executor` browser integration. Separate local tests
 exercise disposable real Chrome. They do not read user browser profiles, real
 credentials, model endpoints or AWS.

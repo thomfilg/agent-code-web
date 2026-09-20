@@ -350,10 +350,13 @@ export class ClaudeAdapter {
           env,
           stdio: ["pipe", "pipe", "pipe"],
         });
+    const spawnPersistent = launchArgs => this.executor?.spawnAgent
+      ? this.executor.spawnAgent(this.config.claude.bin, launchArgs, { cwd: this.workspace, env, stdio: ["pipe", "pipe", "pipe"] })
+      : spawn(launchArgs);
     try {
       if (this.applicationSession?.ended) this.applicationSession = null;
       const manage = launchArgs => {
-        const session = new ClaudeSession(spawn(launchArgs), args, env, event => {
+        const session = new ClaudeSession(spawnPersistent(launchArgs), args, env, event => {
           if (this.stopped || ![this.turnSession, this.applicationSession].includes(session)) return;
           return this.backgroundEvent(event);
         }, {

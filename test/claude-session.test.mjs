@@ -81,16 +81,28 @@ async function fixture(t, { interactive = false } = {}) {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const chat = await store.create({ agent: "claude", title: "Application transport" }), config = testConfig(root);
   const f = { launches: [], events: [], sessions: [], requests: [] }, broker = new CapabilityBroker({ ttlMs: 60000 });
-  const executor = { workspace: chat.workspace, runtimeHome: store.runtimeHome(chat.id), metadata: { backend: "local" }, mkdir: directory => mkdir(directory, { recursive: true }),
-    spawn(command, args, options) {
+  const launch = (kind, command, args, options) => {
       if (f.spawnFailure) throw Error("Fixture spawn failure");
-      f.launches.push({ command, args, env: options.env }); f.nativeSession = args[args.indexOf(args.includes("--session-id") ? "--session-id" : "--resume") + 1]; return transport(f);
-    } };
+      f.launches.push({ kind, command, args, env: options.env }); f.nativeSession = args[args.indexOf(args.includes("--session-id") ? "--session-id" : "--resume") + 1]; return transport(f);
+  };
+  const executor = { workspace: chat.workspace, runtimeHome: store.runtimeHome(chat.id), metadata: { backend: "local" }, mkdir: directory => mkdir(directory, { recursive: true }),
+    spawn: (command, args, options) => launch("ordinary", command, args, options),
+    spawnAgent: (command, args, options) => launch("agent", command, args, options) };
   const adapter = new ClaudeAdapter({ chat, store, config, executor, broker, gatewayOrigin: "http://127.0.0.1:9",
     hooks: { onSessionId: id => f.sessions.push(id), onEvent: event => f.events.push(event), ...(interactive ? { onRequest: request => f.requests.push(request) } : {}) } });
   t.after(() => adapter.stop());
   return Object.assign(f, { adapter, config, broker, chat, store });
 }
+
+test("Claude retains only managed native owners in the reconnectable agent transport", async t => {
+  const persistent = await fixture(t, { interactive: true });
+  await persistent.adapter.send("Managed private turn", {});
+  assert.deepEqual(persistent.launches.map(item => item.kind), ["agent"]);
+
+  const oneShot = await fixture(t);
+  await oneShot.adapter.send("One-shot turn", {});
+  assert.deepEqual(oneShot.launches.map(item => item.kind), ["ordinary"]);
+});
 
 test("forwarded child frames reach only the observer and never complete or contaminate the parent turn", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;

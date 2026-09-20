@@ -31,7 +31,7 @@ export class WorkerSupervisorDaemon {
   constructor({ root = WORKER_SUPERVISOR_ROOT, processSocket = WORKER_SUPERVISOR_SOCKET, controlSocket = WORKER_SUPERVISOR_CONTROL_SOCKET } = {}) {
     if (!path.isAbsolute(root) || path.dirname(processSocket) !== root || path.dirname(controlSocket) !== root || processSocket === controlSocket) throw fail("CONFIG_INVALID");
     Object.assign(this, { root, processSocket, controlSocket });
-    this.instanceId = randomUUID(); this.connections = new Set(); this.leases = new Map(); this.leaseGenerations = new Map();
+    this.instanceId = randomUUID(); this.connections = new Set(); this.leases = new Map(); this.leaseGenerations = new Map(); this.lastInvalidatedLeases = new Map();
   }
   async listen() {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
@@ -69,20 +69,27 @@ export class WorkerSupervisorDaemon {
     socket.once("close", () => clearTimeout(timer));
   }
   async dispatch(frame) {
-    if (!safeId(frame?.id) || !["status", "configure", "invalidate", "reset"].includes(frame.action)) throw fail("REQUEST_INVALID");
+    if (!safeId(frame?.id) || !["status", "configure", "invalidate", "release", "reset"].includes(frame.action)) throw fail("REQUEST_INVALID");
     if (frame.action === "status") return this.status();
     if (frame.action === "configure") return this.configure(frame.identity, frame.processId, frame.lease);
     if (frame.action === "invalidate") {
       if (!safeId(frame.processId) || !safeId(frame.leaseId)) throw fail("REQUEST_INVALID");
       const lease = this.leases.get(frame.processId);
+      if (!lease && this.lastInvalidatedLeases.get(frame.processId) === frame.leaseId) return { invalidated: true };
       if (!lease || lease.id !== frame.leaseId) throw fail("LEASE_CHANGED");
-      this.leases.delete(frame.processId); this.supervisor?.invalidateLease(lease.id); return { invalidated: true };
+      this.leases.delete(frame.processId); this.lastInvalidatedLeases.set(frame.processId, lease.id); this.supervisor?.invalidateLease(lease.id); return { invalidated: true };
     }
-    if (!this.supervisor) { this.selectedIdentity = null; this.leases.clear(); this.leaseGenerations.clear(); return { reset: true }; }
+    if (frame.action === "release") {
+      if (!safeId(frame.processId) || !safeId(frame.processInstanceId) || !safeId(frame.leaseId)) throw fail("REQUEST_INVALID");
+      const lease = this.leases.get(frame.processId);
+      if (!lease || lease.id !== frame.leaseId || !this.supervisor) throw fail("LEASE_CHANGED");
+      return this.supervisor.release(frame.processId, frame.processInstanceId);
+    }
+    if (!this.supervisor) { this.selectedIdentity = null; this.leases.clear(); this.leaseGenerations.clear(); this.lastInvalidatedLeases.clear(); return { reset: true }; }
     try { await this.supervisor.close(); }
     catch { throw fail("SUPERVISOR_BUSY"); }
     await removeOwnedSocket(this.processSocket);
-    this.supervisor = null; this.selectedIdentity = null; this.leases.clear(); this.leaseGenerations.clear();
+    this.supervisor = null; this.selectedIdentity = null; this.leases.clear(); this.leaseGenerations.clear(); this.lastInvalidatedLeases.clear();
     return { reset: true };
   }
   status() {

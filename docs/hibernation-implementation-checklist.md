@@ -69,8 +69,12 @@ lease coordinator and tagged-image EC2 executor path are integrated. Component
 tests preserve the same PID and in-memory sentinel across controller/executor
 replacement and prove exact cleanup after a refused mutating recovery. Local
 real-Chrome tests preserve the same renderer. This checks the three protocol
-items above, but does not complete the partition because Node/native-agent
-ownership, actual AWS hibernation and remote suspend/resume remain open. See the
+items above. Persistent Codex and Claude owners now use a reconnectable
+native-agent facade, and a synthetic background Node descendant retains its PID
+and memory across same-controller link loss while Chrome independently stops and
+reopens. This still does not complete the partition because fresh-controller
+native session reconstruction, expected-suspension fatal routing, actual AWS
+hibernation and remote suspend/resume remain open. See the
 [controller recovery receipt](validation-2026-09-20-browser-controller-recovery.md)
 and [EC2 supervisor candidate receipt](validation-2026-09-20-ec2-worker-supervisor.md).
 

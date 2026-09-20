@@ -108,17 +108,22 @@ export class ReconnectableBrowserProcess extends EventEmitter {
     try {
       this.client = await this.connection(epoch);
       const saved = (await this.context.records.workerTransportGet(this.storageRequest)).value;
-      if (!saved) {
+      const closed = saved?.schema === 2 && saved.state === "closed" && saved.receipt?.processId === processId
+        && !saved.input && Array.isArray(saved.rpcs) && !saved.rpcs.length
+        && Number.isSafeInteger(saved.committedOutputSeq) && saved.committedOutputSeq >= 0
+        && saved.appliedOutputSeq === saved.committedOutputSeq && Array.isArray(saved.inbox) && !saved.inbox.length;
+      if (!saved || closed) {
         await this.update(({ value }) => {
-          if (value) throw unavailable("another controller initialized the browser transport");
+          if (saved ? JSON.stringify(value) !== JSON.stringify(saved) : value) throw unavailable("another controller initialized the browser transport");
           return { schema: 2, lifetime: this.controllerLifetime, state: "launching", receipt: null, nextInputSeq: 1, input: null, rpcs: [], committedOutputSeq: 0, appliedOutputSeq: 0, inbox: [] };
         });
         this.receipt = await this.client.launch(processId, spec);
+        this.context.retain?.(this.receipt);
         await this.update(({ value }) => ({ ...value, receipt: this.receipt, state: "running" }));
         await this.client.attach(this.receipt, 0);
       } else {
         recovering = true;
-        if (saved?.receipt) this.receipt = saved.receipt;
+        if (saved?.receipt) { this.receipt = saved.receipt; this.context.retain?.(this.receipt); }
         const retry = () => this.receipt ? this.terminateRemote() : this.context.dispose({ failed: true });
         if (saved.lifetime === this.controllerLifetime) throw recoveryFailure(this.context, "a second facade in the same controller lifetime was refused", retry);
         if (saved.schema !== 2 || saved.state !== "running" || !sameReceipt(saved.receipt, saved.receipt) || saved.receipt.processId !== processId
@@ -274,7 +279,7 @@ export class ReconnectableBrowserProcess extends EventEmitter {
     if (this.terminating) return this.terminating;
     this.stopping = true; ++this.epoch; clearInterval(this.renewal);
     this.terminating = (async () => {
-      if (this.processClosed) { await this.context.dispose({ failed: false }); return; }
+      if (this.processClosed) { await this.context.dispose({ failed: false, receipt: this.receipt }); return; }
       await this.reconnecting?.catch(() => {}); await this.outputQueue;
       const epoch = this.epoch;
       if (this.detached || this.client.closed) {
@@ -291,7 +296,7 @@ export class ReconnectableBrowserProcess extends EventEmitter {
       await this.outputQueue;
       await this.update(({ value }) => ({ ...value, state: "closed", input: null }));
       this.processClosed = true;
-      this.client.disconnect(); await this.context.dispose({ failed: false });
+      this.client.disconnect(); await this.context.dispose({ failed: false, receipt: this.receipt });
     })();
     try { return await this.terminating; }
     catch (error) { this.terminating = null; throw error; }

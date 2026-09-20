@@ -91,8 +91,9 @@ remain unsupported, and actual selected-account workflow acceptance is still
 open; local protocol fixtures do not prove those gates.
 
 Two-minute process-preserving hibernation remains open. The candidate includes
-worker-owned process transport, durable lease authority and a locally wired
-Shared Chrome reconnection slice. The latter now proves link recovery and an
+worker-owned process transport, durable lease authority and locally wired
+Shared Chrome plus persistent native-agent reconnection slices. Shared Chrome
+now proves link recovery and an
 explicit fresh-controller-lifetime takeover at a quiescent durable RPC boundary
 with the same disposable Chrome/renderer. It refuses unresolved mutating RPCs
 without replacement or implicit termination. This is still an injected local
@@ -105,7 +106,10 @@ receipts, exact cleanup outcomes and restart-to-unknown reconciliation persist
 before later admission. Focused acceptance passed 77/77 and the complete Node
 regression passed 1,609 with zero failures and four optional skips; see the
 [lifecycle receipt](validation-2026-09-20-hibernation-lifecycle.md).
-Remote image/service ownership and native adapter reconnection remain gates;
+Persistent Codex/Claude owners and a background Node descendant now retain
+their process identity and memory across same-controller transport loss, while
+one-shot native commands remain ordinary. Fresh-controller native session
+reconstruction and remote image/service acceptance remain gates;
 hibernation admission stays unavailable, without destructive idle fallback. The
 production idle policy and automatic-deployment restrictions remain unchanged.
 See [local reconnection scope](shared-browser-reconnect-local.md).

@@ -78,6 +78,7 @@ export function spawnWorker(command, args, { isolation = "none", ...options } = 
 }
 
 export async function terminateWorker(child, graceMs = 2_000) {
+  if (typeof child?.terminateRemote === "function") { await child.terminateRemote(); return; }
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
   const signal = (name) => {
     try {

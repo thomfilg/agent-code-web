@@ -34,7 +34,7 @@ export class WorkerProcessSupervisor extends EventEmitter {
     if (!path.isAbsolute(socketPath) || typeof authorize !== "function" || !Number.isSafeInteger(maxSpoolBytes) || maxSpoolBytes < 1024 || maxSpoolBytes > 16 * 1024 * 1024
       || !Number.isSafeInteger(inputWindow) || inputWindow < 1 || inputWindow > 4096 || !Number.isSafeInteger(maxProcesses) || maxProcesses < 1 || maxProcesses > 128) throw transportError("CONFIG_INVALID");
     Object.assign(this, { socketPath, expectedIdentity: identity(expectedIdentity), authorize, maxSpoolBytes, inputWindow, maxProcesses });
-    this.processes = new Map(); this.connections = new Set(); this.instanceId = randomUUID(); this.invalidatedLeases = new Set(); this.authorizations = 0;
+    this.processes = new Map(); this.releasedProcesses = new Map(); this.connections = new Set(); this.instanceId = randomUUID(); this.invalidatedLeases = new Set(); this.authorizations = 0;
   }
   async listen() {
     const parent = await lstat(path.dirname(this.socketPath));
@@ -346,6 +346,23 @@ export class WorkerProcessSupervisor extends EventEmitter {
     if (this.invalidatedLeases.size >= 4096 && !this.invalidatedLeases.has(id)) this.admissionClosed = true;
     else this.invalidatedLeases.add(id);
     for (const entry of this.processes.values()) if (this.admissionClosed || entry.lease.id === id) entry.connection?.socket.destroy();
+  }
+  // Trusted coordinator compaction after an exact process has already exited,
+  // its whole group is confirmed gone and every output record is acknowledged.
+  // This never signals a process and cannot discard ambiguous input/output.
+  release(processId, processInstanceId) {
+    if (!safeId(processId) || !safeId(processInstanceId)) throw transportError("PROCESS_IDENTITY_CHANGED");
+    const entry = this.processes.get(processId);
+    if (!entry) {
+      if (this.releasedProcesses.get(processId) === processInstanceId) return { released: true };
+      throw transportError("PROCESS_NOT_FOUND");
+    }
+    if (entry.instanceId !== processInstanceId) throw transportError("PROCESS_IDENTITY_CHANGED");
+    if (!entry.exited || !entry.groupCleaned || entry.cleanupUnconfirmed || !entry.exitRecorded
+      || entry.records.length || entry.ackedSeq !== entry.outputSeq || entry.inputPending) throw transportError("PROCESS_RELEASE_UNSAFE");
+    entry.connection?.socket.destroy(); entry.connection = null;
+    this.processes.delete(processId); this.releasedProcesses.set(processId, processInstanceId);
+    return { released: true };
   }
   async close() {
     if ([...this.processes.values()].some(entry => !entry.exited || !entry.groupCleaned)) throw transportError("LIVE_PROCESSES_REQUIRE_EXPLICIT_TERMINATION");
