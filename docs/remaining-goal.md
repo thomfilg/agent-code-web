@@ -8,7 +8,7 @@ This is a verification checklist, not a claim that source changes are deployed.
 
 | Requirement | Evidence needed for completion | Current state |
 | --- | --- | --- |
-| Auto approvals | Actual Codex Auto turn handles the reported local IPC approval without a manual prompt; Edits/Plan retain their intended policies | Source exists; live activation and exact-case verification pending |
+| Auto approvals | Actual Codex Auto turn handles the reported local IPC approval without a manual prompt; Edits/Plan retain their intended policies | New chats can now start explicitly in Auto and pass it into the first Codex/Claude native turn; live activation and the exact provider-classifier case remain pending |
 | All slash commands | Inventory of native commands and installed skills for each provider; executable, tested handlers including `/goal` and `/plan`; no unsupported-command placeholders | In progress; current implementations, real-CLI checks and remaining gaps are tracked in `command-support.md` |
 | Credential ownership and availability | GitHub follows provider permissions without a second company allowlist (2026-09-18 clarification); agents, environments and MCPs retain company scopes. Separate user-owned connections, no credential fallback, selected-repository worker grants and revocation tests | GitHub policy refinement in progress; see the active queue and provider-permissions ADR. Earlier GitHub company-save acceptance is superseded, not a remaining onboarding step |
 | Browser quality and presence | Current deployed worker produces sharp frames at every preset after resizing; visible tabs/browser interaction prevent idle sleep; background tabs expire | Source tests passed previously; deployed verification pending |

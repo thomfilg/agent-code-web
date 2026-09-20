@@ -362,8 +362,9 @@ export class WorkspaceSettings {
     if (environmentError) throw new Error(environmentError);
     const agent = $("#agent-select").value, agentAccountId = $("#new-agent-account").value;
     if (!agent || this.state.config.features?.agentAccounts && ["codex", "claude"].includes(agent) && !agentAccountId) throw new Error("Connect and select an agent account first");
-    return { agent, ...(agentAccountId && ["codex", "claude"].includes(agent) ? { agentAccountId } : {}), ...this.modelPicker.value(), environmentId: $("#environment-select").value, repositories: this.selected };
+    return { agent, ...(agentAccountId && ["codex", "claude"].includes(agent) ? { agentAccountId } : {}), ...this.modelPicker.value(), mode: $("#new-mode-select").value, environmentId: $("#environment-select").value, repositories: this.selected };
   }
+  resetNewChatMode() { $("#new-mode-select").value = "accept_edits"; }
   async remember(modelSelection = {}) {
     if (this.restoringSelection) return;
     if (this.selected.length) this.selectionRestoreError = false;

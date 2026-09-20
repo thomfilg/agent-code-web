@@ -40,8 +40,10 @@ test("Google identity owns login URLs, account/model routes and explicit chat ad
   assert.deepEqual((await (await member.request("/api/agent-accounts")).json()).accounts, []);
   assert.equal((await post(member, `/api/agent-accounts/${id}/disconnect`)).status, 404);
   assert.notEqual((await post(browser, "/api/chats", { agent: "codex" })).status, 201);
-  const created = await post(browser, "/api/chats", { agent: "codex", agentAccountId: id }); assert.equal(created.status, 201);
-  const chat = (await created.json()).chat; assert.equal(chat.ownerId, ctx.user.id); assert.equal(chat.agentAccountId, id);
+  const invalidMode = await post(browser, "/api/chats", { agent: "codex", agentAccountId: id, mode: "dont_ask" });
+  assert.equal(invalidMode.status, 400); assert.match((await invalidMode.json()).error, /permission mode supported/);
+  const created = await post(browser, "/api/chats", { agent: "codex", agentAccountId: id, mode: "auto" }); assert.equal(created.status, 201);
+  const chat = (await created.json()).chat; assert.equal(chat.ownerId, ctx.user.id); assert.equal(chat.agentAccountId, id); assert.equal(chat.mode, "auto");
   assert.equal(app.broker.size, 0);
   assert.doesNotMatch(JSON.stringify(await (await browser.request("/api/agent-accounts")).json()), /fixture-(access|refresh)-token/);
 });

@@ -44,6 +44,7 @@ test("new chat is inline, workspace chips are compact, and first send shows prog
     await expect(page.locator("#new-chat-page")).toBeVisible(); await expect(page.locator("dialog[open]")).toHaveCount(0);
     await expect(page.locator("#repo-search")).toBeHidden(); await choose(page);
     await expect(page.locator("#selected-repositories")).toContainText("api");
+    await page.locator("#new-mode-select").selectOption("auto");
     const strip = await page.locator("#new-chat-page .workspace-strip").boundingBox(), input = await page.locator("#initial-prompt").boundingBox();
     expect(strip.height).toBeLessThan(40); expect(strip.y + strip.height).toBeLessThanOrEqual(input.y);
     await page.locator("#initial-prompt").fill("Build the dashboard");
@@ -53,18 +54,23 @@ test("new chat is inline, workspace chips are compact, and first send shows prog
     await expect(page.locator("#new-chat-status")).toHaveText("Preparing your chat…");
     await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", true);
     await page.locator("#new-chat-form").dispatchEvent("submit"); await expect.poll(() => f.calls.create.length).toBe(1);
+    expect(f.calls.create[0].mode).toBe("auto");
     f.gate.resolve(); await expect(page.locator("#conversation")).toBeVisible();
+    await expect(page.locator("#mode-label")).toHaveText("Auto");
     await expect(page.locator("#new-chat-page")).toBeHidden(); await expect(page.locator("#messages")).toContainText("Build the dashboard");
     await expect(page.locator("#chat-workspace-strip")).toContainText("api");
     await expect.poll(() => f.calls.messages.length).toBe(1); expect(f.calls.messages[0].text).toBe("Build the dashboard");
-    f.messageGate.resolve(); expect(errors).toEqual([]);
+    f.messageGate.resolve();
+    await page.locator("#new-chat-button").click(); await expect(page.locator("#new-mode-select")).toHaveValue("accept_edits");
+    expect(errors).toEqual([]);
   } finally { f.gate.resolve(); f.messageGate.resolve(); }
 });
 
-test("failed creation preserves draft; failed first send stays in the created chat without creating another", async ({ page }) => {
-  const f = await fixture(page); await choose(page); f.failCreate = true;
+test("failed creation preserves draft and its mode; failed first send stays in the created chat without creating another", async ({ page }) => {
+  const f = await fixture(page); await choose(page); await page.locator("#new-mode-select").selectOption("auto"); f.failCreate = true;
   await page.locator("#initial-prompt").fill("Keep my unsent task"); await page.locator("#initial-prompt").press("Enter");
   await expect(page.locator("#create-chat-error")).toHaveText("Reconnect GitHub"); await expect(page.locator("#initial-prompt")).toHaveValue("Keep my unsent task");
+  await expect(page.locator("#new-mode-select")).toHaveValue("auto");
   await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", false); expect(f.calls.messages).toHaveLength(0);
   f.failCreate = false; f.failMessage = true; await page.locator("#initial-prompt").press("Enter");
   await expect(page.locator("#message-input")).toHaveValue("Keep my unsent task");

@@ -100,6 +100,21 @@ test("an admitted Codex skill keeps structured dispatch while unknown names neve
   assert.equal(calls.length, 1);
 });
 
+test("a new chat validates its explicit permission mode and uses it on the first turn", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const calls = [];
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => ({
+    start: async () => {}, stop: async () => {}, send: async (text, settings) => { calls.push({ text, settings }); return { text: "Done" }; },
+  }) });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "codex", title: "First-turn Auto", mode: "auto" });
+  assert.equal(chat.mode, "auto");
+  await manager.send(chat.id, "inspect safely");
+  assert.equal(calls[0].settings.mode, "auto");
+  await assert.rejects(manager.createChat({ agent: "codex", title: "Invalid mode", mode: "dont_ask" }), /permission mode supported/);
+  assert.equal(store.list().filter(item => item.title === "Invalid mode").length, 0);
+});
+
 test("plan plus task uses read-only mode; goals persist and stream each native continuation separately", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const config = testConfig(root, { CODEX_BIN: fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url)), AGENT_IDLE_TIMEOUT_MS: "10000" });

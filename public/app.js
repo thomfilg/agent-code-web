@@ -565,6 +565,9 @@ async function createChat(event) {
     // Selection may have changed while model preferences were saving.
     initialCommand = firstChatCommand(initialPrompt, payload.agent);
     const { chat } = await api("/api/chats", { method: "POST", body: JSON.stringify(payload) });
+    // The permission mode belongs to this chat draft. Never silently inherit
+    // Auto or Plan when the user starts a separate conversation.
+    workspaceSettings.resetNewChatMode();
     updateChatSummary(chat);
     // Keep the saved chat and its draft if selection or the first send fails.
     // Retrying must never create a second chat or silently lose the prompt.

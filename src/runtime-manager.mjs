@@ -56,6 +56,7 @@ function remainingAssistantText(runtime, text) {
 const runtimeAccountBinding = chat => JSON.stringify([chat.ownerId || null, chat.agent, chat.agentAccountId || null]);
 const agentScopeBinding = chat => JSON.stringify([runtimeAccountBinding(chat), chat.environmentId || null, chat.workspace || null, companyForChat(chat)]);
 const slashCommandName = text => /^\/([\w:.-]+)(?:\s|$)/.exec(text)?.[1] || null;
+const permissionModes = agent => agent === "claude" ? Object.values(CLAUDE_PERMISSION_MODES) : ["auto", "accept_edits", "plan"];
 
 export class RuntimeManager extends EventEmitter {
   #runtimes = new Map();
@@ -1017,7 +1018,7 @@ export class RuntimeManager extends EventEmitter {
     if (this.#switching.has(chatId)) throw Object.assign(new Error("Wait for the agent switch to finish"), { statusCode: 409 });
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
-    const allowed = chat.agent === "claude" ? Object.values(CLAUDE_PERMISSION_MODES) : ["auto", "accept_edits", "plan"];
+    const allowed = permissionModes(chat.agent);
     if (!allowed.includes(mode)) throw new Error("Choose a permission mode supported by this agent");
     if (this.#modeChanges.has(chatId)) throw Object.assign(Error("Wait for the current permission change to finish"), { statusCode: 409 });
     const runtime = this.#runtimes.get(chatId), generation = runtime?.generation;
@@ -1326,6 +1327,8 @@ export class RuntimeManager extends EventEmitter {
     const allowed = this.availableAgents(ownerId).filter((agent) => agent.enabled).map((agent) => agent.id);
     const agent = input.agent || allowed[0];
     if (!allowed.includes(agent)) throw new Error(`agent is not enabled: ${agent}`);
+    const mode = input.mode ?? "accept_edits";
+    if (!permissionModes(agent).includes(mode)) throw new Error("Choose a permission mode supported by this agent");
     const title = input.title ? clampText(input.title, 120, "title") : agent === "mock" ? "New mock conversation" : "New conversation";
     if (this.resources && !this.resources.isLegacy(ownerId) && input.source) throw new Error("Server-local workspace sources are private to the server owner");
     const source = typeof input.source === "string" ? input.source.trim() : this.resources && !this.resources.isLegacy(ownerId) ? "" : this.config.workspaceSource;
@@ -1346,7 +1349,7 @@ export class RuntimeManager extends EventEmitter {
     if (environment && environment.backend !== this.config.workerBackend) throw new Error(`This server uses ${this.config.workerBackend} workers. Select an environment with that backend.`);
     const modelSettings = this.models ? await this.models.creationSettings(agent, { ...input, ownerId, agentAccountId }) : {};
     if (agentAccountId) await this.agentAccounts.rememberProject(ownerId, { agent, agentAccountId, repositories });
-    const chat = await this.store.create({ title, agent, ownerId, agentAccountId, ...modelSettings, modelSelectionSet: Object.hasOwn(input, "model") || Object.hasOwn(input, "effort"), source: repositories.length ? "" : source, repositories,
+    const chat = await this.store.create({ title, agent, ownerId, agentAccountId, ...modelSettings, modelSelectionSet: Object.hasOwn(input, "model") || Object.hasOwn(input, "effort"), mode, source: repositories.length ? "" : source, repositories,
       environmentId: environment?.id, environmentName: environment?.name, autoTitle: !input.title });
     try {
       if (repositories.length) {

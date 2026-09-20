@@ -909,6 +909,19 @@ test("private ordinary turns use live native approvals and close their transport
   await assert.rejects(f.adapter.respond(f.requests[1].requestId, { decision: "accept" }), /no longer active/);
 });
 
+test("the first Claude turn launches in explicitly selected Auto before native input", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Inspect the fixture without a mode switch", { mode: "auto" });
+  await nativeTurnStarted(f);
+  const mode = f.launches[0].args[f.launches[0].args.indexOf("--permission-mode") + 1];
+  assert.equal(mode, "auto");
+  assert.equal(f.inputs.length, 1);
+  assert.equal(f.controls[0].request.subtype, "initialize");
+  assert.equal(f.controls.some(packet => packet.request.subtype === "set_permission_mode"), false,
+    "Auto is part of the initial native launch, not a later best-effort switch");
+  f.complete(); await running;
+});
+
 test("Stop during private ordinary SDK initialization sends no user input and revokes the gateway capability", async t => {
   const f = await fixture(t, { interactive: true }); f.hold = "initialize";
   const running = f.adapter.send("Do not send this after Stop"), rejected = assert.rejects(running, /stopped|closed|interrupted/);
