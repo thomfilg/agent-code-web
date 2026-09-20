@@ -2,9 +2,11 @@
 
 ## Scope
 
-This increment extends the explicitly injected local validation transport. It
-does not enable hibernation, change the production/local default backend, install
-a worker service, add an SSH/remote bridge or claim an AWS image.
+This receipt records the first explicitly injected local validation transport.
+It does not enable hibernation or claim an AWS image. A later increment now adds
+the production-candidate worker service, SSH bridge and tagged-image EC2 Shared
+Chrome wiring; see the
+[EC2 supervisor candidate receipt](validation-2026-09-20-ec2-worker-supervisor.md).
 
 A fresh `SharedBrowsers` and `BrowserProcess` facade can now adopt the exact
 retained browser helper only after an explicit durable controller takeover. The
@@ -70,12 +72,9 @@ production restart or deployment occurred.
 
 ## Remaining limits
 
-- The supervisor and reconstructed application facade still run within the local
-  injected fixture boundary. An actual control-plane process-exit test of the
-  complete `SharedBrowsers` path remains open.
-- The EC2 executor still owns the browser through its disposable SSH child; the
-  supervisor is not installed as an independently owned worker service/cgroup and
-  no authenticated remote attachment bridge is wired.
+- This receipt's real-Chrome evidence still uses the local injected boundary.
+  The follow-on component tests wire the EC2 executor to an independent worker
+  daemon and fixed SSH bridge, but an actual AWS guest has not run that path.
 - This slice covers Shared Chrome. Node development servers, Codex, Claude and
   their durable native RPC/session reconstruction remain open.
 - Durable output already committed but not projected is refused rather than

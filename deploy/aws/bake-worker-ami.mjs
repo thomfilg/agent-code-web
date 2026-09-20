@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 import { hibernationCandidate, hibernationRecipe } from "./worker-hibernation.mjs";
+import { workerSupervisorVersion } from "../../src/worker-supervisor-service.mjs";
 
 const recipePath = fileURLToPath(new URL("worker-cloud-init.yaml", import.meta.url));
 const exec = promisify(execFile);
@@ -112,7 +113,7 @@ export async function bakeWorkerImage(options, { run = runBakerAws, sleep = ms =
     catch { throw awsFailure(args, "invalid-response"); }
   };
   const bakeId = randomUUID();
-  const tags = [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: o.deployment }, { Key: "AgentRelayWorkerKey", Value: o.keyName }, { Key: "CodexVersion", Value: CLI_VERSIONS.codex }, { Key: "ClaudeVersion", Value: CLI_VERSIONS.claude }];
+  const tags = [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: o.deployment }, { Key: "AgentRelayWorkerKey", Value: o.keyName }, { Key: "CodexVersion", Value: CLI_VERSIONS.codex }, { Key: "ClaudeVersion", Value: CLI_VERSIONS.claude }, { Key: "AgentRelaySupervisor", Value: workerSupervisorVersion }];
   if (o.hibernationCandidate) tags.push({ Key: "AgentRelayHibernation", Value: hibernationCandidate });
   let builderId;
   let temporary;

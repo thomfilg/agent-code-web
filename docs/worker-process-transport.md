@@ -1,9 +1,11 @@
-# Worker-owned process transport, local partition
+# Worker-owned process transport and EC2 browser candidate
 
 This implements the reconnectable-process prerequisite from the September 19
-process-preserving hibernation ADR. It is an **unwired library**, not a working
-hibernation feature or a production worker/image acceptance receipt. Existing
-SSH execution, adapters, controller shutdown and idle defaults are unchanged.
+process-preserving hibernation ADR. The transport is now wired into an
+independent worker-owned user service and the EC2 Shared Chrome executor for
+images carrying the exact `AgentRelaySupervisor=v1` capability tag. It is still
+not a working hibernation feature or a production worker/image acceptance
+receipt. Native adapters, controller shutdown and idle defaults are unchanged.
 
 ## API and authority
 
@@ -28,11 +30,14 @@ via an authorized status request while attached.
 An attachment replacement requires a strictly newer authoritative generation,
 including reconnect after an accidental link loss. The old connection is fenced
 before output is sent to the new one. A delayed old admission cannot take over.
-Revocation must first deny future authorization and then call the trusted local
+Revocation first denies future authorization and then calls the trusted local
 `supervisor.invalidateLease(id)` hook to immediately detach existing output; expiry
-is the fail-closed upper bound when that notification cannot arrive. Neither
-revocation nor expiry signals the child. Pausing or terminating a revoked child
-is a separate future coordinator policy, **not established by this partition**.
+is the fail-closed upper bound when that notification cannot arrive. The remote
+coordinator uses the durable worker-attempt authority to revalidate the selected
+owner, chat, provider account, company/environment and worker boot identity
+before it issues or renews that lease. Neither revocation nor expiry signals the
+child. Explicit Stop owns termination; broader revoked-native-process policy is
+not established by this slice.
 Revoked IDs are retained through delayed authorizer completions; a 4096-ID bound
 fails further admission closed instead of evicting a revocation tombstone.
 
@@ -42,7 +47,10 @@ preexisting socket/file is removed or reused. This boundary does not defend
 against a malicious process already running under the same UID, or root. A
 worker service/image must isolate that UID and protect the authorizer/lease issuer.
 
-`WorkerProcessTransport` is the controller-side client:
+`WorkerProcessTransport` is the controller-side client. Local fixtures connect
+directly to the Unix socket. EC2 uses an ephemeral fixed-command SSH bridge that
+only carries opaque framed bytes; identity and lease credentials remain inside
+the framed stream and never appear in SSH arguments:
 
 | Method | Contract |
 | --- | --- |
@@ -75,9 +83,28 @@ child's PID, kernel start ticks, session and group; after anchor exit it never
 signals that PID again. Unexpected anchor exit yields `GROUP_CLEANUP_UNCONFIRMED`,
 not a potentially unsafe cleanup retry. Linux `/proc` confirms there are no live
 group members after KILL; zombies are not running processes. This is Linux-only.
-Descendants that explicitly leave the group/session are not contained here: a
-future worker service cgroup must own those and handle supervisor crashes. That
-integration remains an acceptance gate, not a claim made by this library.
+Descendants that explicitly leave the group/session are contained by the worker
+user service cgroup. The service uses `KillMode=control-group`, so a daemon stop
+or crash cannot deliberately leave those children outside worker ownership.
+Live cgroup behavior on the accepted AMI remains an AWS acceptance gate.
+
+## Worker service and EC2 binding
+
+`WorkerSupervisorDaemon` owns the private control and process sockets, one exact
+chat/attempt identity and the current hashed short-lived lease credential. It
+never unlinks a live daemon's sockets. Its systemd user unit has a private 0700
+runtime directory, restart policy, `NoNewPrivileges`, restrictive umask and
+cgroup cleanup. The AMI setup enables linger for the dedicated `agent` user.
+
+The EC2 controller enables this path only after the already accepted image also
+advertises the exact supervisor version. It verifies the live daemon protocol,
+records a SHA-256 worker boot identity, then creates the durable remote attempt
+coordinator. An older image keeps the legacy disposable SSH child path; no tag
+or boolean enables hibernation itself. A replacement controller can reconstruct
+the Shared Chrome facade from PostgreSQL authority plus daemon status and attach
+to the same process. Explicit Stop terminates that exact receipt and resets the
+daemon. A refused recovery retains the same cleanup operation instead of
+launching a replacement.
 
 ## Delivery, bounds and failure semantics
 
@@ -126,13 +153,19 @@ shutdown/disposal policy is deliberately not implicit.
   supervisor's memory lifetime**. Supervisor crash/restart recovery is unsupported.
 - Controller client process exit/restart is supported; whole-machine shutdown,
   reboot, or EC2 stop is not. Genuine hibernation must preserve supervisor RAM.
-- There is no executable production daemon/service installation, network/SSH
-  gateway, durable coordinator state, runtime/adapter wrapper, account capability
-  reconciliation, deployment drain or wake integration here.
+- The executable daemon/service, SSH bridge, durable coordinator and Shared
+  Chrome EC2 executor binding are production candidates, but have not been
+  baked, deployed or exercised on an accepted AWS worker.
+- Codex, Claude and independent Node development servers do not yet use this
+  supervisor. Their native RPC/session reconstruction is still required.
+- Deployment drain, two-minute idle suspension, wake and UI state integration
+  are not enabled.
 - No Chrome memory, OS hibernation, encrypted image, actual provider session or
   deployed worker acceptance has been run. The worker-image probe must obtain
   actual attach/ack/reconnect receipts after those integrations exist; marker
 booleans and this local fixture are insufficient.
 
-The tests launch only synthetic Node processes and a separate fixture supervisor.
-They do not read browser profiles, real credentials, model endpoints or AWS.
+The tests launch synthetic Node processes through the daemon, fixed SSH byte
+bridge and actual `Ec2Executor.spawnBrowser` integration. Separate local tests
+exercise disposable real Chrome. They do not read user browser profiles, real
+credentials, model endpoints or AWS.

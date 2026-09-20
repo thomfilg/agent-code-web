@@ -16,14 +16,14 @@ const acceptedMatchesLedger = (ledger, accepted) => {
   if (ledger.input.mutating || ledger.input.chunks !== 1 || !Number.isInteger(ledger.input.sent) || ledger.input.sent < 0 || ledger.input.sent > 1) return false;
   return accepted <= ledger.nextInputSeq - 1 && accepted >= Math.max(0, ledger.nextInputSeq - 2);
 };
-function cleanupFailure(context) {
+function cleanupFailure(context, retry = () => context.dispose({ failed: true })) {
   const error = unavailable("startup cleanup is unconfirmed; retry Stop before opening another browser");
-  Object.defineProperty(error, "retryBrowserCleanup", { value: () => context.dispose({ failed: true }) });
+  Object.defineProperty(error, "retryBrowserCleanup", { value: retry });
   return error;
 }
-function recoveryFailure(context, message) {
+function recoveryFailure(context, message, retry = () => context.dispose({ failed: true })) {
   const error = unavailable(`${message}; the retained process was not replaced. Use Stop to clean it up explicitly`);
-  Object.defineProperty(error, "retryBrowserCleanup", { value: () => context.dispose({ failed: true }) });
+  Object.defineProperty(error, "retryBrowserCleanup", { value: retry });
   return error;
 }
 const privateLimit = 2 * 1024 * 1024;
@@ -83,7 +83,10 @@ export class ReconnectableBrowserProcess extends EventEmitter {
   async connection(epoch, stopping = false) {
     const lease = await this.context.issueLease(); this.check(epoch, stopping);
     if (typeof lease?.credential !== "string") throw unavailable("lease authority did not issue a credential");
-    const client = await new WorkerProcessTransport({ socketPath: this.context.socketPath, expectedIdentity: this.context.identity, lease: lease.credential }).connect();
+    const client = this.context.connectTransport
+      ? await this.context.connectTransport(lease.credential)
+      : await new WorkerProcessTransport({ socketPath: this.context.socketPath, expectedIdentity: this.context.identity, lease: lease.credential }).connect();
+    if (!client || typeof client.launch !== "function" || typeof client.attach !== "function") throw unavailable("worker transport is invalid");
     client.authorityLeaseId = lease.id;
     try { this.check(epoch, stopping); } catch (error) { client.disconnect(); throw error; }
     client.on("disconnect", () => {
@@ -115,25 +118,26 @@ export class ReconnectableBrowserProcess extends EventEmitter {
         await this.client.attach(this.receipt, 0);
       } else {
         recovering = true;
-        if (saved.lifetime === this.controllerLifetime) throw recoveryFailure(this.context, "a second facade in the same controller lifetime was refused");
+        if (saved?.receipt) this.receipt = saved.receipt;
+        const retry = () => this.receipt ? this.terminateRemote() : this.context.dispose({ failed: true });
+        if (saved.lifetime === this.controllerLifetime) throw recoveryFailure(this.context, "a second facade in the same controller lifetime was refused", retry);
         if (saved.schema !== 2 || saved.state !== "running" || !sameReceipt(saved.receipt, saved.receipt) || saved.receipt.processId !== processId
           || !Number.isSafeInteger(saved.nextInputSeq) || saved.nextInputSeq < 1 || !Array.isArray(saved.rpcs)
           || saved.rpcs.some(rpc => rpc?.mutating !== false)
           || saved.input && (saved.input.mutating || saved.input.chunks !== 1)
           || !Number.isSafeInteger(saved.committedOutputSeq) || saved.committedOutputSeq < 0
           || saved.appliedOutputSeq !== saved.committedOutputSeq || !Array.isArray(saved.inbox) || saved.inbox.length) {
-          throw recoveryFailure(this.context, "the durable browser ledger is not at a quiescent recovery boundary");
+          throw recoveryFailure(this.context, "the durable browser ledger is not at a quiescent recovery boundary", retry);
         }
         const observed = await this.client.inspect(processId);
-        if (observed.state !== "running" || !sameReceipt(saved.receipt, observed)) throw recoveryFailure(this.context, "the worker process no longer matches the exact durable identity");
-        if (!acceptedMatchesLedger(saved, observed.inputAcceptedThrough)) throw recoveryFailure(this.context, "the worker input cursor does not match the durable ledger");
+        if (observed.state !== "running" || !sameReceipt(saved.receipt, observed)) throw recoveryFailure(this.context, "the worker process no longer matches the exact durable identity", retry);
+        if (!acceptedMatchesLedger(saved, observed.inputAcceptedThrough)) throw recoveryFailure(this.context, "the worker input cursor does not match the durable ledger", retry);
         if (observed.outputCommittedThrough > saved.committedOutputSeq || observed.outputProducedThrough < saved.committedOutputSeq) {
-          throw recoveryFailure(this.context, "the worker output cursor does not match the durable ledger");
+          throw recoveryFailure(this.context, "the worker output cursor does not match the durable ledger", retry);
         }
-        this.receipt = saved.receipt;
         const attached = await this.client.attach(this.receipt, saved.committedOutputSeq);
         if (!sameReceipt(this.receipt, attached) || attached.state !== "running"
-          || attached.inputAcceptedThrough !== observed.inputAcceptedThrough) throw recoveryFailure(this.context, "the attached worker process changed during recovery");
+          || attached.inputAcceptedThrough !== observed.inputAcceptedThrough) throw recoveryFailure(this.context, "the attached worker process changed during recovery", retry);
         await this.update(({ value }) => {
           if (value.lifetime !== saved.lifetime || value.state !== "running"
             || JSON.stringify(value.input) !== JSON.stringify(saved.input) || JSON.stringify(value.rpcs) !== JSON.stringify(saved.rpcs)
@@ -150,9 +154,9 @@ export class ReconnectableBrowserProcess extends EventEmitter {
       // cleanup. Never fall back to killing a number in the controller PID space.
       this.client?.disconnect();
       if (recovering && typeof error.retryBrowserCleanup === "function") throw error;
-      if (recovering) throw recoveryFailure(this.context, error?.message || "controller recovery failed");
+      if (recovering) throw recoveryFailure(this.context, error?.message || "controller recovery failed", () => this.receipt ? this.terminateRemote() : this.context.dispose({ failed: true }));
       try { await this.context.dispose({ failed: true }); }
-      catch { throw cleanupFailure(this.context); }
+      catch { throw cleanupFailure(this.context, () => this.receipt ? this.terminateRemote() : this.context.dispose({ failed: true })); }
       throw error;
     }
   }

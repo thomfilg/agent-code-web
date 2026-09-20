@@ -42,13 +42,13 @@ Files: [ssh-worker-launcher.mjs](../src/ssh-worker-launcher.mjs),
 [Claude adapter](../src/adapters/claude.mjs),
 [claude-session.mjs](../src/claude-session.mjs).
 
-- [ ] Implement a narrowly scoped worker-owned supervisor/private attachment
+- [x] Implement a narrowly scoped worker-owned supervisor/private attachment
   protocol or an equivalently verified process-preserving design. Separate
   transport detach from process termination and from manual Stop.
-- [ ] Bind attachment to exact deployment/chat/worker/process instance and lease
+- [x] Bind attachment to exact deployment/chat/worker/process instance and lease
   generation; reject foreign endpoints, stale controllers, PID reuse, and
   attachment after deletion or revoked admission. Keep diagnostics sanitized.
-- [ ] Define bounded output buffering, sequence acknowledgement and pending RPC
+- [x] Define bounded output buffering, sequence acknowledgement and pending RPC
   recovery. Never replay a mutating RPC or prompt merely because its response
   was lost; expose unknown outcomes for explicit reconciliation.
 - [ ] Preserve Node background servers and the same Chrome/renderer state across
@@ -61,14 +61,18 @@ Files: [ssh-worker-launcher.mjs](../src/ssh-worker-launcher.mjs),
 
 This is mandatory continuity work, not an optional enhancement after release.
 
-Partial implementation evidence: the local injected Shared Chrome path now
-reconstructs a fresh application facade at a quiescent durable boundary and
-persists logical RPC completion separately from transport input acknowledgement.
-It preserves the same disposable Chrome/renderer and refuses takeover when a
-mutating RPC is unresolved. This does not check any partition item because EC2
-wiring, Node/native-agent ownership, actual controller-process exit and remote
-suspend/resume remain open. See the
-[controller recovery receipt](validation-2026-09-20-browser-controller-recovery.md).
+Partial implementation evidence: the Shared Chrome path now reconstructs a
+fresh application facade at a quiescent durable boundary and persists logical
+RPC completion separately from transport input acknowledgement. A worker-owned
+daemon, private sockets, systemd user cgroup, fixed SSH byte bridge, durable
+lease coordinator and tagged-image EC2 executor path are integrated. Component
+tests preserve the same PID and in-memory sentinel across controller/executor
+replacement and prove exact cleanup after a refused mutating recovery. Local
+real-Chrome tests preserve the same renderer. This checks the three protocol
+items above, but does not complete the partition because Node/native-agent
+ownership, actual AWS hibernation and remote suspend/resume remain open. See the
+[controller recovery receipt](validation-2026-09-20-browser-controller-recovery.md)
+and [EC2 supervisor candidate receipt](validation-2026-09-20-ec2-worker-supervisor.md).
 
 ### 3. Resume authorization and revocation
 

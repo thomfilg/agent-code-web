@@ -6,6 +6,13 @@ import { spawnWorker } from "./worker-process.mjs";
 import { SSH_WORKER_LAUNCHER, sshWorkerRequest } from "./ssh-worker-launcher.mjs";
 import { assertWorkerImage } from "./worker-image.mjs";
 import { hibernationAdmission, hibernationUnavailableError } from "./worker-suspension.mjs";
+import { workerImageTags } from "./worker-image.mjs";
+import { WORKER_SUPERVISOR_CODE } from "./worker-supervisor-paths.mjs";
+import { workerSupervisorFiles, workerSupervisorShell, workerSupervisorUnit, workerSupervisorVersion } from "./worker-supervisor-service.mjs";
+import { RemoteBrowserAttemptCoordinator } from "./remote-browser-attempt.mjs";
+import { ReconnectableBrowserProcess } from "./reconnectable-browser-process.mjs";
+import { createSshWorkerProcessTransport } from "./ssh-worker-process-transport.mjs";
+import { createHash, randomUUID } from "node:crypto";
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
@@ -77,7 +84,7 @@ class LocalBackend {
 }
 
 export class Ec2Executor {
-  constructor({ backend, chat, instance, host }) {
+  constructor({ backend, chat, instance, host, supervisorAvailable = false }) {
     this.backend = backend;
     this.chat = chat;
     this.instance = instance;
@@ -86,6 +93,7 @@ export class Ec2Executor {
     this.runtimeHome = `${backend.config.ec2.remoteRoot}/chats/${chat.id}/runtime-home`;
     this.heartbeat = `${backend.config.ec2.remoteRoot}/.heartbeat`;
     this.gatewayOrigin = backend.config.ec2.gatewayOrigin;
+    this.supervisorAvailable = supervisorAvailable;
     this.metadata = { backend: "ec2", instanceId: instance.InstanceId, host, imageId: instance.ImageId,
       ...(typeof instance.LaunchTime === "string" && Number.isFinite(Date.parse(instance.LaunchTime)) ? { launchTime: instance.LaunchTime } : {}) };
   }
@@ -105,19 +113,18 @@ export class Ec2Executor {
         check();
         if (exists !== "ready") await this.#uploadWorkspace(marker, repo.directory);
       }
+      if (this.supervisorAvailable) await this.#prepareSupervisor(check);
       return;
     }
     await this.#uploadWorkspace(marker);
+    if (this.supervisorAvailable) await this.#prepareSupervisor(check);
   }
 
   spawn(command, args, options = {}) {
-    const setupPath = options.env?.PATH?.startsWith(`${this.runtimeHome}/`) ? options.env.PATH : this.backend.config.ec2.remotePath;
-    const env = { ...(options.env || {}), PATH: this.environmentPath || setupPath };
+    const { env, stdio } = this.#remoteOptions(options);
     // Never put account tokens, gateway capabilities or native MCP arguments in
     // the controller's SSH argv. The fixed launcher consumes one private frame,
     // then hands the remaining stream to the CLI unchanged.
-    const stdio = options.stdio || ["pipe", "pipe", "pipe"];
-    if (!Array.isArray(stdio) || !["pipe", "ignore"].includes(stdio[0])) throw new Error("Remote workers require pipe or ignored stdin");
     const remote = `exec /usr/bin/node --input-type=module -e ${shellQuote(SSH_WORKER_LAUNCHER)}`;
     const child = spawn(this.backend.config.ec2.sshBin, [...this.backend.sshArgs(this.host, this.instance.InstanceId), remote], {
       stdio: ["pipe", ...stdio.slice(1)],
@@ -129,8 +136,90 @@ export class Ec2Executor {
     return child;
   }
 
+  async spawnBrowser(command, args, options = {}) {
+    if (!this.supervisorReady) return this.spawn(command, args, options);
+    const { env, stdio } = this.#remoteOptions(options);
+    if (stdio.some(value => value !== "pipe")) throw new Error("Reconnectable browser transport requires piped stdio");
+    const context = await this.browserCoordinator.open(this.chat);
+    const child = new ReconnectableBrowserProcess(context, 3000, this.backend.controllerLifetime);
+    await child.start({ command, args, cwd: options.cwd || this.workspace, env });
+    return child;
+  }
+
+  #remoteOptions(options) {
+    const setupPath = options.env?.PATH?.startsWith(`${this.runtimeHome}/`) ? options.env.PATH : this.backend.config.ec2.remotePath;
+    const env = { ...(options.env || {}), PATH: this.environmentPath || setupPath };
+    const stdio = options.stdio || ["pipe", "pipe", "pipe"];
+    if (!Array.isArray(stdio) || stdio.length !== 3 || !["pipe", "ignore"].includes(stdio[0])) throw new Error("Remote workers require pipe or ignored stdin");
+    return { env, stdio };
+  }
+
   mkdir(directory) {
     return this.backend.sshCapture(this.host, `install -d -m 700 ${shellQuote(directory)} && touch ${shellQuote(this.heartbeat)}`, this.instance.InstanceId).then(() => undefined);
+  }
+
+  async #prepareSupervisor(check) {
+    const active = workerSupervisorShell("systemctl --user is-active --quiet agent-relay-worker-supervisor.service && printf active || true");
+    check();
+    if (await this.backend.sshCapture(this.host, active, this.instance.InstanceId) !== "active") {
+      check(); await this.#uploadSupervisorCode(); check();
+      const unit = Buffer.from(workerSupervisorUnit).toString("base64");
+      const install = workerSupervisorShell(`test -d \"$XDG_RUNTIME_DIR\" && install -d -m 700 /home/agent/.config/systemd/user && printf %s ${shellQuote(unit)} | base64 -d > /home/agent/.config/systemd/user/agent-relay-worker-supervisor.service && chmod 600 /home/agent/.config/systemd/user/agent-relay-worker-supervisor.service && systemctl --user daemon-reload && systemctl --user enable --now agent-relay-worker-supervisor.service && systemctl --user is-active --quiet agent-relay-worker-supervisor.service`);
+      await this.backend.sshCapture(this.host, install, this.instance.InstanceId); check();
+    }
+    const status = await this.#supervisorControl({ action: "status" });
+    let receipt;
+    try { receipt = typeof status === "string" ? JSON.parse(status) : status; } catch { throw new Error("EC2 worker supervisor returned an invalid status receipt"); }
+    if (receipt?.protocol !== "relay-worker-supervisor/1" || receipt.version !== workerSupervisorVersion || typeof receipt.configured !== "boolean" || typeof receipt.daemonInstanceId !== "string") throw new Error("EC2 worker supervisor failed its startup check");
+    const rawBootId = await this.backend.sshCapture(this.host, "cat /proc/sys/kernel/random/boot_id", this.instance.InstanceId);
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(rawBootId)) throw new Error("EC2 worker returned an invalid boot identity");
+    const bootId = createHash("sha256").update(rawBootId).digest("hex");
+    this.metadata.bootId = bootId;
+    if (this.acquisitionReceipt?.worker) this.acquisitionReceipt.worker.bootId = bootId;
+    this.browserCoordinator = new RemoteBrowserAttemptCoordinator({ records: this.backend.store.records,
+      deploymentId: this.backend.config.ec2.deployment, workerId: this.instance.InstanceId, bootId,
+      controllerId: this.backend.controllerId, legacyOwnerId: this.backend.legacyOwnerId,
+      control: request => this.#supervisorControl(request), connect: async ({ identity, credential }) =>
+        createSshWorkerProcessTransport({ sshBin: this.backend.config.ec2.sshBin,
+          sshArgs: this.backend.sshArgs(this.host, this.instance.InstanceId), expectedIdentity: identity, lease: credential }).connect() });
+    this.supervisorReady = true;
+  }
+
+  #supervisorControl(request) {
+    return this.backend.sshCapture(this.host, workerSupervisorShell(`exec /usr/bin/node ${WORKER_SUPERVISOR_CODE}/worker-supervisor-control.mjs`), this.instance.InstanceId,
+      { input: JSON.stringify(request) }).then(output => {
+        try { return JSON.parse(output); } catch { throw new Error("EC2 worker supervisor returned an invalid control receipt"); }
+      });
+  }
+
+  #uploadSupervisorCode() {
+    return new Promise((resolve, reject) => {
+      const source = path.join(this.backend.config.appRoot, "src");
+      const remote = `install -d -m 700 ${WORKER_SUPERVISOR_CODE} && tar -xf - -C ${WORKER_SUPERVISOR_CODE}`;
+      let tar, ssh;
+      try {
+        tar = spawn("tar", ["-C", source, "-cf", "-", "--", ...workerSupervisorFiles], { stdio: ["ignore", "pipe", "pipe"] });
+        ssh = spawn(this.backend.config.ec2.sshBin, [...this.backend.sshArgs(this.host, this.instance.InstanceId), remote], { stdio: ["pipe", "ignore", "pipe"] });
+      } catch {
+        const error = new Error("worker supervisor upload failed before transport started");
+        if (!tar) { reject(error); return; }
+        tar.stdout.resume(); tar.stderr.resume(); tar.once("error", () => {}); tar.once("close", () => reject(error)); tar.kill("SIGKILL"); return;
+      }
+      let tarCode, sshCode, failed = false;
+      const stop = child => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); };
+      const failUpload = () => { if (failed) return; failed = true; tar.stdout.unpipe(ssh.stdin); ssh.stdin.destroy(); stop(tar); stop(ssh); };
+      const timer = setTimeout(failUpload, 60000); timer.unref();
+      tar.stderr.resume(); ssh.stderr.resume(); tar.stdout.on("error", failUpload); ssh.stdin.on("error", failUpload); tar.once("error", failUpload); ssh.once("error", failUpload);
+      const finish = () => {
+        if (tarCode === undefined || sshCode === undefined) return;
+        clearTimeout(timer);
+        if (!failed && tarCode === 0 && sshCode === 0) resolve();
+        else reject(new Error(`worker supervisor upload failed (tar=${tarCode}, ssh=${sshCode})`));
+      };
+      tar.once("close", code => { tarCode = code; if (code !== 0) failUpload(); finish(); });
+      ssh.once("close", code => { sshCode = code; if (code !== 0) failUpload(); finish(); });
+      tar.stdout.pipe(ssh.stdin);
+    });
   }
 
   #uploadWorkspace(marker, directory = ".") {
@@ -185,10 +274,12 @@ export class Ec2Executor {
 }
 
 export class Ec2Backend {
-  constructor({ store, config, commandRunner = runCapture }) {
+  constructor({ store, config, commandRunner = runCapture, legacyOwnerId = null }) {
     this.store = store;
     this.config = config;
     this.commandRunner = commandRunner;
+    this.legacyOwnerId = legacyOwnerId;
+    this.controllerId = randomUUID(); this.controllerLifetime = randomUUID();
     const required = {
       AGENT_EC2_AMI_ID: config.ec2.amiId,
       AGENT_EC2_DEPLOYMENT: config.ec2.deployment,
@@ -230,8 +321,8 @@ export class Ec2Backend {
     ];
   }
 
-  sshCapture(host, remoteCommand, instanceId) {
-    return this.commandRunner(this.config.ec2.sshBin, [...this.sshArgs(host, instanceId), remoteCommand], { timeoutMs: 60_000 });
+  sshCapture(host, remoteCommand, instanceId, options = {}) {
+    return this.commandRunner(this.config.ec2.sshBin, [...this.sshArgs(host, instanceId), remoteCommand], { timeoutMs: 60_000, ...options });
   }
 
   async acquire(chat, { workspaceReady = Promise.resolve(), onStage = async () => {}, check = () => {}, onMutation = () => {} } = {}) {
@@ -256,13 +347,14 @@ export class Ec2Backend {
         ...(typeof observed?.LaunchTime === "string" && Number.isFinite(Date.parse(observed.LaunchTime)) ? { launchTime: observed.LaunchTime } : {}) },
         release: releaseAcquisition });
     };
+    let acceptedImage;
     await stage("machine", async () => {
     instance = await this.#find(chat.id); check();
     if (!instance) instance = await this.#create(chat.id, check, instanceId => mutated(instanceId, "created"));
     // Existing/stopped workers retain their actual AMI, not necessarily the
     // currently configured one. A revoked marker denies new admission only;
     // sleep/destroy deliberately remain available for exact-owned cleanup.
-    check(); await this.#acceptedImage(instance.ImageId); check();
+    check(); acceptedImage = await this.#acceptedImage(instance.ImageId); check();
     if (instance.State?.Name === "stopping") {
       await this.#aws("ec2", "wait", "instance-stopped", "--instance-ids", instance.InstanceId);
       check();
@@ -276,7 +368,7 @@ export class Ec2Backend {
     await this.#aws("ec2", "wait", "instance-running", "--instance-ids", instance.InstanceId);
     check();
     instance = await this.#describe(instance.InstanceId, chat.id);
-    check(); await this.#acceptedImage(instance.ImageId); check();
+    check(); acceptedImage = await this.#acceptedImage(instance.ImageId); check();
     });
     const host = this.config.ec2.usePublicIp ? instance.PublicIpAddress : instance.PrivateIpAddress;
     if (!host) throw new Error(`EC2 instance ${instance.InstanceId} has no ${this.config.ec2.usePublicIp ? "public" : "private"} IP`);
@@ -284,7 +376,8 @@ export class Ec2Backend {
       await mkdir(path.dirname(this.config.ec2.sshKnownHosts), { recursive: true, mode: 0o700 });
       check(); await this.#waitForSsh(host, instance.InstanceId, check);
     });
-    const executor = new Ec2Executor({ backend: this, chat, instance, host });
+    const executor = new Ec2Executor({ backend: this, chat, instance, host,
+      supervisorAvailable: workerImageTags(acceptedImage).AgentRelaySupervisor === workerSupervisorVersion });
     executor.releaseAcquisition = releaseAcquisition;
     executor.acquisitionReceipt = { mutation: acquisitionMutation, worker: { backend: "ec2", instanceId: instance.InstanceId,
       imageId: instance.ImageId, ...(typeof instance.LaunchTime === "string" && Number.isFinite(Date.parse(instance.LaunchTime)) ? { launchTime: instance.LaunchTime } : {}) } };
@@ -427,11 +520,11 @@ export class Ec2Backend {
   }
 }
 
-export function createWorkerBackend({ store, config, gatewayOrigin, commandRunner, browserTransport }) {
+export function createWorkerBackend({ store, config, gatewayOrigin, commandRunner, browserTransport, legacyOwnerId = null }) {
   // Programmatic, local synthetic validation only. No configuration flag or
   // HTTP input can bypass the missing production service/cgroup admission.
   if (browserTransport && (config.workerBackend !== "local" || !config.enableMock || browserTransport.admission !== "local-validation"
     || typeof browserTransport.spawnBrowser !== "function")) throw new Error("Reconnectable browser transport is only admitted for explicit local validation");
-  if (config.workerBackend === "ec2") return new Ec2Backend({ store, config, commandRunner });
+  if (config.workerBackend === "ec2") return new Ec2Backend({ store, config, commandRunner, legacyOwnerId });
   return new LocalBackend({ store, config, gatewayOrigin, browserTransport });
 }

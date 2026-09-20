@@ -932,6 +932,7 @@ export async function createAgentWebServer(options = {}) {
         config,
         gatewayOrigin,
         commandRunner: options.commandRunner,
+        legacyOwnerId: googleAuth.legacyOwnerId,
       });
     } catch (error) {
       await new Promise((resolve) => server.close(resolve));

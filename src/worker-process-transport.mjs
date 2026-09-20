@@ -4,23 +4,47 @@ import { lstat, realpath } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { MAX_INPUT_BYTES, PROTOCOL, identity, readFrames, requestId, safeId, sequence, transportError, writeFrame } from "./worker-transport-wire.mjs";
 
+const streamAdmission = Symbol("worker-process-stream-admission");
+
+// Internal controller transports (currently the pinned SSH bridge) may supply
+// an already-authenticated byte stream. Keeping the constructor key private
+// prevents an ordinary caller from accidentally bypassing the local Unix
+// ownership checks by passing a similarly named option.
+export function createStreamWorkerProcessTransport({ connectStream, ...options }) {
+  return new WorkerProcessTransport({ ...options, connectStream }, streamAdmission);
+}
+
 // Controller-side connection only. No auto-reconnect, input resend, output ACK,
 // process spawn or child termination is hidden in connection lifecycle methods.
 export class WorkerProcessTransport extends EventEmitter {
-  constructor({ socketPath, expectedIdentity, lease, timeoutMs = 5000 }) {
+  constructor({ socketPath, expectedIdentity, lease, timeoutMs = 5000, connectStream }, admission = null) {
     super();
-    if (!path.isAbsolute(socketPath) || typeof lease !== "string" || !lease || lease.length > 512
+    const remote = admission === streamAdmission && typeof connectStream === "function";
+    if ((!remote && !path.isAbsolute(socketPath)) || typeof lease !== "string" || !lease || lease.length > 512
       || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) throw transportError("CONFIG_INVALID");
-    Object.assign(this, { socketPath, expectedIdentity: identity(expectedIdentity), lease, timeoutMs });
+    Object.assign(this, { socketPath, expectedIdentity: identity(expectedIdentity), lease, timeoutMs,
+      ...(remote ? { connectStream } : {}) });
     this.pending = new Map(); this.attachment = null;
   }
   async connect() {
     if (this.socket) throw transportError("ALREADY_CONNECTED");
-    const parent = await lstat(path.dirname(this.socketPath)), endpoint = await lstat(this.socketPath);
-    if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid?.() || (parent.mode & 0o777) !== 0o700
-      || await realpath(path.dirname(this.socketPath)) !== path.resolve(path.dirname(this.socketPath))) throw transportError("PRIVATE_DIRECTORY_REQUIRED");
-    if (!endpoint.isSocket() || endpoint.uid !== process.getuid?.() || (endpoint.mode & 0o777) !== 0o600) throw transportError("PRIVATE_SOCKET_REQUIRED");
-    const socket = this.socket = net.createConnection(this.socketPath);
+    let socket, connected = false;
+    if (this.connectStream) {
+      try { socket = await this.connectStream(); }
+      catch { throw transportError("CONNECTION_FAILED"); }
+      if (!socket || typeof socket.on !== "function" || typeof socket.write !== "function" || typeof socket.destroy !== "function") {
+        try { socket?.destroy?.(); } catch {}
+        throw transportError("CONNECTION_FAILED");
+      }
+      connected = true;
+    } else {
+      const parent = await lstat(path.dirname(this.socketPath)), endpoint = await lstat(this.socketPath);
+      if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid?.() || (parent.mode & 0o777) !== 0o700
+        || await realpath(path.dirname(this.socketPath)) !== path.resolve(path.dirname(this.socketPath))) throw transportError("PRIVATE_DIRECTORY_REQUIRED");
+      if (!endpoint.isSocket() || endpoint.uid !== process.getuid?.() || (endpoint.mode & 0o777) !== 0o600) throw transportError("PRIVATE_SOCKET_REQUIRED");
+      socket = net.createConnection(this.socketPath);
+    }
+    this.socket = socket;
     this.closed = false;
     const lost = () => {
       if (this.closed) return; this.closed = true;
@@ -31,7 +55,7 @@ export class WorkerProcessTransport extends EventEmitter {
     readFrames(socket, frame => {
       try { this.receive(frame); } catch { socket.destroy(); }
     }, () => socket.destroy());
-    await new Promise((resolve, reject) => {
+    if (!connected) await new Promise((resolve, reject) => {
       const error = () => { clearTimeout(timer); reject(transportError("CONNECTION_FAILED")); };
       const timer = setTimeout(() => { socket.destroy(); error(); }, this.timeoutMs); timer.unref();
       socket.once("error", error); socket.once("connect", () => { clearTimeout(timer); socket.off("error", error); resolve(); });

@@ -18,12 +18,18 @@ function instance(overrides = {}) {
 function image(overrides = {}) {
   return { ImageId: "ami-aaaaaaaaaaaaaaaaa", OwnerId: "123456789012", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true } }], State: "available", Architecture: "x86_64", Tags: [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: "relay-fixture" }, { Key: "AgentRelayWorkerKey", Value: "fixture-worker" }, { Key: "CodexVersion", Value: "0.154.0" }, { Key: "ClaudeVersion", Value: "2.1.222" }, { Key: "AgentRelayAcceptance", Value: "verified-v1" }, { Key: "AgentRelayAcceptanceId", Value: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }], ...overrides };
 }
-function fixture({ initial = instance(), config = ec2Config(), ami = image(), lookup, afterLaunch } = {}) {
+function fixture({ initial = instance(), config = ec2Config(), ami = image(), lookup, afterLaunch, supervisorActive = true } = {}) {
   const calls = [];
   let worker = initial;
-  const backend = new Ec2Backend({ store: {}, config, commandRunner: async (command, args) => {
-    calls.push({ command, args });
-    if (command === "ssh") return args.at(-1).includes(".workspace-seeded") ? "ready" : "";
+  const backend = new Ec2Backend({ store: {}, config, commandRunner: async (command, args, options) => {
+    calls.push({ command, args, options });
+    if (command === config.ec2.sshBin) {
+      if (args.at(-1).includes(".workspace-seeded")) return "ready";
+      if (args.at(-1).includes("systemctl --user is-active")) return supervisorActive ? "active" : "";
+      if (args.at(-1).includes("worker-supervisor-control.mjs")) return JSON.stringify({ protocol: "relay-worker-supervisor/1", version: "v1", daemonInstanceId: "daemon-fixture", configured: false });
+      if (args.at(-1) === "cat /proc/sys/kernel/random/boot_id") return "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      return "";
+    }
     if (args.includes("describe-images")) return JSON.stringify([typeof ami === "function" ? ami(args) : ami]);
     if (args.includes("describe-instances")) return JSON.stringify(args.includes("--instance-ids") ? worker : (lookup || (worker ? [worker] : [])));
     if (args.includes("run-instances")) { worker = afterLaunch || instance({ State: { Name: "pending" } }); return JSON.stringify(worker); }
@@ -55,6 +61,33 @@ test("EC2 starts/stops only a private deployment/chat worker and uses the IAM de
   assert.ok(ssh.includes("IdentitiesOnly=yes"));
   assert.ok(ssh.some(arg => arg.startsWith("UserKnownHostsFile=")));
   assert.ok(ssh.includes("HostKeyAlias=relay-fixture-i-aaaaaaaaaaaaaaaaa"));
+});
+
+test("an accepted supervisor image verifies the independent user service and records the worker boot identity", async () => {
+  const tagged = image({ Tags: [...image().Tags, { Key: "AgentRelaySupervisor", Value: "v1" }] });
+  const { backend, calls } = fixture({ ami: tagged });
+  backend.store = { records: {} };
+  const executor = await backend.acquire(chat);
+  assert.equal(executor.supervisorReady, true);
+  assert.match(executor.metadata.bootId, /^[a-f0-9]{64}$/);
+  assert.equal(executor.acquisitionReceipt.worker.bootId, executor.metadata.bootId);
+  const control = calls.find(call => call.command === "ssh" && call.args.at(-1).includes("worker-supervisor-control.mjs"));
+  assert.deepEqual(JSON.parse(control.options.input), { action: "status" });
+  assert.ok(calls.some(call => call.command === "ssh" && call.args.at(-1).includes("systemctl --user is-active")));
+});
+
+test("an inactive tagged supervisor uploads its explicit source allowlist and installs the user service", async () => {
+  const tagged = image({ Tags: [...image().Tags, { Key: "AgentRelaySupervisor", Value: "v1" }] });
+  const config = ec2Config({ SSH_BIN: process.execPath });
+  const { backend, calls } = fixture({ ami: tagged, config, supervisorActive: false });
+  backend.store = { records: {} };
+  // The direct upload process receives the tar stream; mocked capture calls
+  // still inspect the fixed final remote command through commandRunner.
+  backend.sshArgs = () => ["-e", "process.stdin.resume()"];
+  const executor = await backend.acquire(chat);
+  assert.equal(executor.supervisorReady, true);
+  assert.ok(calls.some(call => call.args.at(-1).includes("daemon-reload") && call.args.at(-1).includes("enable --now agent-relay-worker-supervisor.service")));
+  assert.ok(calls.some(call => call.args.at(-1).includes("worker-supervisor-control.mjs")));
 });
 
 test("EC2 boots and connects while clone is pending, but workspace preparation waits for clone success", async () => {

@@ -112,6 +112,7 @@ test("normal SharedBrowsers path reconnects disposable real Chrome with durable 
     f.restartController = async () => {
       const previous = f.context;
       f.child.detach(); await until(() => f.child.detached);
+      await f.child.renewing?.catch(() => {});
       clearInterval(f.entry.browser.heartbeat); clearTimeout(f.entry.idleTimer);
       const controllerId = `controller-${randomUUID()}`;
       const authority = new WorkerLeaseAuthority({ records, deploymentId: previous.identity.deploymentId, bootForWorker: () => bootId,
