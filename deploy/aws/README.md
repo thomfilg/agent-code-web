@@ -44,6 +44,9 @@ node deploy/aws/bake-worker-ami.mjs \
 `--dry-run` validates arguments and pinned recipe without making any AWS calls.
 Remove it to perform the bake. `bake-worker-ami.sh` is an equivalent wrapper.
 `--name`, `--instance-type` (x86_64 t3 sizes) and `--volume-gb` are optional.
+Add `--hibernation-candidate` only when building the separately gated
+process-preserving image. A candidate is never production-admitted merely
+because it baked successfully.
 The actual run checks STS identity, completed stack outputs, deployment-owned
 network/key/profile, private subnet, controller-only SSH ingress, HTTP(S) egress,
 and a builder role limited to `AmazonSSMManagedInstanceCore` before launching.
@@ -208,6 +211,38 @@ controller, stack secret and product data are not deleted or modified. Only
 the tested AMI's two acceptance tags are changed after successful verification.
 Deleting either tag or changing its version denies subsequent admission without
 forcibly stopping already running chats; sleep/delete cleanup stays available.
+
+### Hibernation candidate acceptance
+
+The ordinary verifier deliberately rejects a hibernation candidate. Use the
+dedicated verifier only with the exact candidate AMI after reviewing its
+effective launch/disk prerequisites:
+
+The normal baker currently pins Canonical Ubuntu 24.04. AWS's current
+[hibernation prerequisites](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/hibernating-prerequisites.html)
+do not list that Ubuntu release (22.04.2 is the newest listed Ubuntu x86 image).
+Do not run the billable hibernation path until the candidate uses a documented
+supported base/recipe or AWS supplies equivalent support evidence.
+
+```bash
+node deploy/aws/verify-worker-hibernation.mjs \
+  --profile code-web --region us-east-2 --expected-account 123456789012 \
+  --deployment YOUR_STACK --image-id ami-0123456789abcdef0 --dry-run
+```
+
+Remove `--dry-run` for the explicit billable run. It retains all ordinary image,
+network, controller, credential-scrub, ownership and cleanup gates, launches the
+disposable worker with EC2 hibernation configured, starts a unique in-memory
+native process, hibernates the exact instance, and requires the same kernel,
+PID/start identity, SSH identity and sentinel after resume. Only after both
+probes, exact instance termination and disposable encrypted-volume deletion does
+it publish `AgentRelayHibernationAcceptance=verified-v1` plus the unique receipt
+ID. A normal stop/start or a process reconstructed from disk cannot pass this
+gate.
+
+Keep `AGENT_IDLE_POLICY=stop` until that marker exists and the separate live
+application/controller-recovery acceptance has passed. Enabling `hibernate` on
+an ordinary or unaccepted image fails closed without silently stopping it.
 The marker is trusted operator metadata, not cryptographic attestation. The
 controller role cannot tag AMIs. Its narrower `RunInstances` IAM condition
 requires a separate reviewed stack update before it is active. See the

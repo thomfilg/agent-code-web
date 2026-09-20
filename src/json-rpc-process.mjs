@@ -18,6 +18,7 @@ export class JsonRpcProcess extends EventEmitter {
     this.redactSecrets = redactSecrets;
     this.deferAgentDeltaRedaction = deferAgentDeltaRedaction;
     this.child = null;
+    this.ready = Promise.resolve();
   }
 
   start() {
@@ -29,6 +30,11 @@ export class JsonRpcProcess extends EventEmitter {
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.child = child;
+    this.ready = Promise.resolve(child.ready).then(() => {
+      this.recovered = child.recovered === true;
+      this.recovery = child.recovery || null;
+      return child;
+    });
     const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     lines.on("line", (line) => this.#receive(line));
     child.stderr.setEncoding("utf8");

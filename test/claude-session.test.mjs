@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter, once } from "node:events";
 import { PassThrough } from "node:stream";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, symlink, writeFile } from "node:fs/promises";
 import { ClaudeSession, claudeCallResult, CLAUDE_SCHEDULE_DIAGNOSTICS } from "../src/claude-session.mjs";
 import { ClaudeAdapter } from "../src/adapters/claude.mjs";
@@ -77,17 +78,30 @@ function transport(f) {
   return child;
 }
 
-async function fixture(t, { interactive = false } = {}) {
+async function fixture(t, { interactive = false, recover = false } = {}) {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
-  const chat = await store.create({ agent: "claude", title: "Application transport" }), config = testConfig(root);
+  let chat = await store.create({ agent: "claude", title: "Application transport" });
+  if (recover) {
+    await store.update(chat.id, { agentSessionId: "11111111-1111-4111-8111-111111111111",
+      suspension: { policy: "hibernate", status: "hibernated", nativeRetained: true } });
+    chat = store.get(chat.id);
+  }
+  const config = testConfig(root);
   const f = { launches: [], events: [], sessions: [], requests: [] }, broker = new CapabilityBroker({ ttlMs: 60000 });
+  const retainedToken = recover ? broker.issue({ chatId: chat.id, provider: "anthropic" }) : null;
   const launch = (kind, command, args, options) => {
       if (f.spawnFailure) throw Error("Fixture spawn failure");
-      f.launches.push({ kind, command, args, env: options.env }); f.nativeSession = args[args.indexOf(args.includes("--session-id") ? "--session-id" : "--resume") + 1]; return transport(f);
+      f.launches.push({ kind, command, args, env: options.env, recoverOnly: options.recoverOnly === true }); f.nativeSession = args[args.indexOf(args.includes("--session-id") ? "--session-id" : "--resume") + 1];
+      const child = transport(f);
+      if (recover) Object.assign(child, { ready: Promise.resolve(), recovered: true,
+        recovery: { provider: "claude", sessionId: chat.agentSessionId } });
+      return child;
   };
   const executor = { workspace: chat.workspace, runtimeHome: store.runtimeHome(chat.id), metadata: { backend: "local" }, mkdir: directory => mkdir(directory, { recursive: true }),
     spawn: (command, args, options) => launch("ordinary", command, args, options),
     spawnAgent: (command, args, options) => launch("agent", command, args, options) };
+  if (retainedToken) executor.retainedCapabilities = { provider: { provider: "anthropic", token: retainedToken,
+    credentialHash: createHash("sha256").update(JSON.stringify(["anthropic", config.claude.providerKey || null, config.claude.upstreamBaseUrl || null])).digest("hex") } };
   const adapter = new ClaudeAdapter({ chat, store, config, executor, broker, gatewayOrigin: "http://127.0.0.1:9",
     hooks: { onSessionId: id => f.sessions.push(id), onEvent: event => f.events.push(event), ...(interactive ? { onRequest: request => f.requests.push(request) } : {}) } });
   t.after(() => adapter.stop());
@@ -102,6 +116,18 @@ test("Claude retains only managed native owners in the reconnectable agent trans
   const oneShot = await fixture(t);
   await oneShot.adapter.send("One-shot turn", {});
   assert.deepEqual(oneShot.launches.map(item => item.kind), ["ordinary"]);
+});
+
+test("a hibernated Claude owner is adopted for the first ordinary turn without launching a replacement", async t => {
+  const f = await fixture(t, { recover: true });
+  await f.adapter.send("Continue the retained session", {});
+  assert.equal(f.launches.length, 1);
+  assert.equal(f.launches[0].kind, "agent");
+  assert.equal(f.launches[0].recoverOnly, true);
+  assert.ok(f.launches[0].args.includes("--resume"));
+  assert.equal(f.nativeSession, f.chat.agentSessionId);
+  assert.equal(f.adapter.recoverApplication, false);
+  assert.equal(f.inputs.length, 1);
 });
 
 test("forwarded child frames reach only the observer and never complete or contaminate the parent turn", async t => {

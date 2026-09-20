@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
-import { parseVerificationOptions, verifyReceipt, verifyWorkerImage } from "../deploy/aws/verify-worker-ami.mjs";
+import { parseVerificationOptions, verifyHibernationImage, verifyReceipt, verifyWorkerImage } from "../deploy/aws/verify-worker-ami.mjs";
 
 const options = parseVerificationOptions(["--region", "us-east-2", "--expected-account", "123456789012", "--deployment", "relay-fixture", "--image-id", "ami-aaaaaaaaaaaaaaaaa"]);
 const workerId = "i-aaaaaaaaaaaaaaaaa", controllerId = "i-ccccccccccccccccc";
@@ -11,10 +11,11 @@ const resources = [["Controller", "AWS::EC2::Instance", controllerId], ["Applica
 
 function receipt(payload) {
   return { schema: 1, verificationId: payload.verificationId, workerId, phase: payload.phase, heartbeatFresh: true, sentinelPresent: true, versions: { codex: "codex-cli 0.154.0", claude: "2.1.222 (Claude Code)" }, knownHosts: `verify-${workerId} ssh-ed25519 AAAAFixturePublicKey\n`,
+    ...(payload.hibernation ? { processIdentity: payload.processIdentity || "d".repeat(64) } : {}),
     audit: { schema: 1, valid: true, finalized: true, cloudInitDisabled: true, ssmDisabled: true, credentialsAbsent: true, transportKeyMatches: true, freshIdentity: true, heartbeatEnabled: true, watchdogActive: true, metadataReachable: false, machine: "a".repeat(64), hostKeys: { "ssh_host_ed25519_key.pub": "b".repeat(64) } } };
 }
 
-function fixture({ account = "123456789012", stackOutputs = outputs, controllerOverride = {}, imageOverride = {}, networkOverride = {}, workerOverride = {}, mutateReceipt = r => r, commandFailed = false, driftAfterLaunch = false, noCleanup = false, detachedShutdown = false, shutdownBeforeCleanup = false, driftDuringCleanup = false, markerFailure = false, markerReadbackFailure = false, imageDrift = {}, volumeStuck = false, volumeDrift = false } = {}) {
+function fixture({ account = "123456789012", stackOutputs = outputs, controllerOverride = {}, imageOverride = {}, networkOverride = {}, workerOverride = {}, mutateReceipt = r => r, commandFailed = false, driftAfterLaunch = false, noCleanup = false, detachedShutdown = false, shutdownBeforeCleanup = false, driftDuringCleanup = false, markerFailure = false, markerReadbackFailure = false, imageDrift = {}, volumeStuck = false, volumeDrift = false, hibernation = false } = {}) {
   const calls = [], requests = [];
   let workerTags, state = "running", result, acceptanceTags = [], imageReads = 0;
   const run = async args => {
@@ -25,7 +26,8 @@ function fixture({ account = "123456789012", stackOutputs = outputs, controllerO
     if (args.includes("list-stack-resources")) return reply(resources);
     if (args.includes("describe-subnets")) return reply([{ SubnetId: outputs.WorkerSubnetId, OwnerId: account, Tags: infrastructureTags, MapPublicIpOnLaunch: false, VpcId: "vpc-fixture", ...networkOverride }]);
     if (args.includes("describe-security-groups")) return reply([{ GroupId: outputs.WorkerSecurityGroupId, OwnerId: account, Tags: infrastructureTags, VpcId: "vpc-fixture", IpPermissions: [{ IpProtocol: "tcp", FromPort: 22, ToPort: 22, UserIdGroupPairs: [{ GroupId: "sg-ccccccccccccccccc" }] }] }]);
-    if (args.includes("describe-images")) return reply([{ ImageId: options.imageId, OwnerId: account, State: "available", Architecture: "x86_64", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true, VolumeSize: 20 } }], Tags: [...Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: "relay-fixture", AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" }).map(([Key, Value]) => ({ Key, Value })), ...acceptanceTags], ...imageOverride, ...(imageReads++ > 0 ? imageDrift : {}) }]);
+    if (args.includes("describe-images")) return reply([{ ImageId: options.imageId, OwnerId: account, State: "available", Architecture: "x86_64", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true, VolumeSize: 20 } }], Tags: [...Object.entries({ ManagedBy: "agent-relay", AgentRelayDeployment: "relay-fixture", AgentRelayWorkerKey: outputs.WorkerKeyName, CodexVersion: "0.154.0", ClaudeVersion: "2.1.222",
+      ...(hibernation ? { AgentRelaySupervisor: "v3", AgentRelayHibernation: "candidate-v1" } : {}) }).map(([Key, Value]) => ({ Key, Value })), ...acceptanceTags], ...imageOverride, ...(imageReads++ > 0 ? imageDrift : {}) }]);
     if (args.includes("create-tags")) {
       assert.equal(state, "terminated");
       assert.equal(args[args.indexOf("--resources") + 1], options.imageId);
@@ -39,7 +41,8 @@ function fixture({ account = "123456789012", stackOutputs = outputs, controllerO
       if (args.includes(controllerId)) return reply([{ InstanceId: controllerId, State: { Name: "running" }, Tags: infrastructureTags, SubnetId: "subnet-ccccccccccccccccc", SecurityGroups: [{ GroupId: "sg-ccccccccccccccccc" }], IamInstanceProfile: { Arn: "arn:aws:iam::123456789012:instance-profile/fixture-controller" }, ...controllerOverride }]);
       const base = { InstanceId: workerId, ImageId: options.imageId, State: { Name: state }, Tags: driftAfterLaunch || driftDuringCleanup && state === "shutting-down" ? [] : workerTags, ...workerOverride };
       if (["shutting-down", "terminated"].includes(state)) { if (state === "shutting-down") state = "terminated"; return reply([base]); }
-      return reply([{ ...base, SubnetId: outputs.WorkerSubnetId, SecurityGroups: [{ GroupId: outputs.WorkerSecurityGroupId }], KeyName: outputs.WorkerKeyName, MetadataOptions: { HttpEndpoint: "disabled" }, PrivateIpAddress: "10.84.2.22", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { VolumeId: "vol-aaaaaaaaaaaaaaaaa", DeleteOnTermination: true } }], ...workerOverride }]);
+      return reply([{ ...base, SubnetId: outputs.WorkerSubnetId, SecurityGroups: [{ GroupId: outputs.WorkerSecurityGroupId }], KeyName: outputs.WorkerKeyName, MetadataOptions: { HttpEndpoint: "disabled" }, PrivateIpAddress: "10.84.2.22", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { VolumeId: "vol-aaaaaaaaaaaaaaaaa", DeleteOnTermination: true } }],
+        ...(hibernation ? { HibernationOptions: { Configured: true } } : {}), ...workerOverride }]);
     }
     if (args.includes("run-instances")) { workerTags = JSON.parse(args[args.indexOf("--tag-specifications") + 1])[0].Tags; return reply(workerId); }
     if (args.includes("send-command")) {
@@ -115,6 +118,40 @@ test("ordinary acceptance cannot mark a hibernation candidate", async () => {
   const f = fixture({ imageOverride: { Tags: [{ Key: "AgentRelayHibernation", Value: "candidate-v1" }] } });
   await assert.rejects(verifyWorkerImage(options, { run: f.run }), /requires process-resume acceptance/);
   assert.equal(f.calls.some(c => c.includes("run-instances") || c.includes("create-tags")), false);
+});
+
+test("dedicated hibernation acceptance proves one native process survives and marks only the exact candidate", async () => {
+  const f = fixture({ hibernation: true }), logs = [];
+  const result = await verifyHibernationImage(options, { run: f.run, sleep: async () => {}, log: line => logs.push(line) });
+  assert.equal(result.accepted, true); assert.equal(result.cleanedUp, true);
+  assert.deepEqual(result.acceptance, { version: "verified-v1", verificationId: result.verificationId, confirmed: true, kind: "hibernation" });
+  assert.equal(result.evidence.processIdentity, "d".repeat(64));
+  assert.equal(result.checks.nativeProcessSurvivedHibernation, true);
+  assert.deepEqual(f.requests.map(request => [request.phase, request.hibernation]), [["fresh", true], ["resumed", true]]);
+  assert.equal(f.requests[1].processIdentity, "d".repeat(64));
+  const launch = f.calls.find(call => call.includes("run-instances"));
+  assert.deepEqual(launch.slice(launch.indexOf("--hibernation-options"), launch.indexOf("--hibernation-options") + 2), ["--hibernation-options", "Configured=true"]);
+  const stop = f.calls.find(call => call.includes("stop-instances")); assert.ok(stop.includes("--hibernate"));
+  const tags = JSON.parse(f.calls.find(call => call.includes("create-tags"))[f.calls.find(call => call.includes("create-tags")).indexOf("--tags") + 1]);
+  assert.deepEqual(tags.map(tag => tag.Key), ["AgentRelayHibernationAcceptance", "AgentRelayHibernationAcceptanceId"]);
+  assert.doesNotMatch(JSON.stringify(result) + logs.join(""), /knownHosts|AAAAFixturePublicKey/);
+});
+
+test("hibernation acceptance rejects missing candidate evidence and changed native process identity without marking", async () => {
+  const ordinary = fixture();
+  await assert.rejects(verifyHibernationImage(options, { run: ordinary.run, sleep: async () => {} }), /candidate recipe/);
+  assert.equal(ordinary.calls.some(call => call.includes("run-instances") || call.includes("create-tags")), false);
+
+  const changed = fixture({ hibernation: true, mutateReceipt: receipt => receipt.phase === "resumed" ? { ...receipt, processIdentity: "e".repeat(64) } : receipt });
+  await assert.rejects(verifyHibernationImage(options, { run: changed.run, sleep: async () => {} }), /receipt failed validation/);
+  assert.equal(changed.calls.filter(call => call.includes("terminate-instances")).length, 1);
+  assert.equal(changed.calls.some(call => call.includes("create-tags")), false);
+});
+
+test("hibernation acceptance dry-run is read-only and names its process continuity gate", async () => {
+  const result = await verifyHibernationImage({ ...options, dryRun: true }, { run: () => { throw Error("must not run"); } });
+  assert.ok(result.actions.includes("native-process-hibernate-resume"));
+  assert.ok(result.actions.includes("mark-exact-hibernation-accepted-image"));
 });
 
 test("acceptance refuses foreign identity/network/image/controller/secret before creating resources", async () => {

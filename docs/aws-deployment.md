@@ -42,8 +42,16 @@ Rollout SSM `e8941890-07f8-4aa9-b96a-b74929d4398d` completed Success/0; an
 independent check matched the running immutable image, all five changed public
 assets, readiness and 13 denial probes. No workers existed before/after this
 manual rollout. [Exact receipt and limits](validation-2026-09-18-runtime-controls.md#aws-publication--independently-verified-at-1840-utc).
-The newly chosen two-minute hibernation/manual-only full stop policy is not
-activated by this release; it needs compatible-image and process-resume proof.
+The two-minute hibernation/manual-only full stop policy is still not activated
+by this release. Its source path and dedicated verifier are implemented, but it
+still needs a freshly baked candidate, real process-resume/application proof,
+the exact acceptance marker and a separately reviewed deployment configuration.
+The current worker baker pins Ubuntu 24.04. AWS's current hibernation prerequisite
+list names Ubuntu 22.04.2, 20.04 and older supported releases, but not 24.04, so
+the candidate base/recipe must be moved to a documented supported image or
+separately proven supported before a billable probe; do not treat package
+installation alone as provider support. See
+[EC2 hibernation prerequisites](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/hibernating-prerequisites.html).
 
 Previous application publication (2026-09-18 17:41 UTC): build source `28654d6`
 (runtime `79d66cc`) adds Shared Chrome streaming/input improvements, remote

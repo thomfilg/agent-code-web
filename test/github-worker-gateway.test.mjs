@@ -88,6 +88,19 @@ test("capabilities are replaced on resume and isolate exact owner connection rev
   f.gateway.revokeConnection(null, cid); await assert.rejects(f.gateway.listRepositories(legacy.token));
 });
 
+test("GitHub hibernation restores the exact worker token only after immutable repository credentials revalidate", async t => {
+  const f = await fixture(t), first = await f.gateway.runtime(f.chat.id, "https://relay.example"), snapshot = f.gateway.suspendRuntime(f.chat.id);
+  f.gateway.revokeChat(f.chat.id); await assert.rejects(f.gateway.listRepositories(first.token));
+  const resumed = await f.gateway.resumeRuntime(f.chat.id, "https://relay.example", snapshot);
+  assert.equal(resumed.token, first.token);
+  assert.deepEqual(await f.gateway.listRepositories(first.token), [{ id: 1, fullName: "allowed/repo" }]);
+
+  f.gateway.revokeChat(f.chat.id);
+  await f.records.put("github_connection", cid, { ...await f.github.get(cid), revision: 2 });
+  await assert.rejects(f.gateway.resumeRuntime(f.chat.id, "https://relay.example", snapshot));
+  await assert.rejects(f.gateway.listRepositories(first.token));
+});
+
 test("connection revision, credential and expiry are rechecked from saved owner service", async t => {
   for (const patch of [{ revision: 2 }, { token: "different-private-fixture" }, { expiresAt: "2000-01-01T00:00:00Z" }]) {
     const f = await fixture(t), grant = await f.gateway.runtime(f.chat.id, "https://relay.example");

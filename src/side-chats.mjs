@@ -11,6 +11,7 @@ export class SideChats {
   #revision = 0;
   #epoch = newId("side_epoch");
   constructor({ fork, prepare, publish, activity, authorize = () => {} }) { Object.assign(this, { fork, prepare, publish, activity, authorize }); }
+  has(chatId) { const side = this.#entries.get(chatId); return Boolean(side && !side.closed); }
   busy(chatId) { const side = this.#entries.get(chatId); return Boolean(side && (side.busy || side.status === "starting")); }
   get(chatId) {
     const side = this.#entries.get(chatId);

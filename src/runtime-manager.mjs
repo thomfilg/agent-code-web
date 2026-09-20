@@ -55,7 +55,17 @@ function remainingAssistantText(runtime, text) {
   return published && text.startsWith(published.trimEnd()) ? text.slice(published.length).replace(/^\n+/, "") : text;
 }
 const runtimeAccountBinding = chat => JSON.stringify([chat.ownerId || null, chat.agent, chat.agentAccountId || null]);
-const agentScopeBinding = chat => JSON.stringify([runtimeAccountBinding(chat), chat.environmentId || null, chat.workspace || null, companyForChat(chat)]);
+const agentScopeBinding = chat => JSON.stringify([runtimeAccountBinding(chat), chat.environmentId || null, chat.workspace || null,
+  companyForChat(chat), (chat.repositories || []).map(repository => [repository.id || null, repository.fullName || null,
+    repository.githubConnectionId || null, repository.branch || null])]);
+const HIBERNATION_CAPABILITIES = "hibernation-capabilities";
+function retainedCapabilities(record, chat) {
+  if (record?.schema !== 1 || record.binding !== agentScopeBinding(chat) || record.agent !== chat.agent
+    || record.sessionId !== (chat.agentSessionId || null)) {
+    throw new Error("The retained native process no longer matches this chat; use Stop before continuing");
+  }
+  return record;
+}
 const slashCommandName = text => /^\/([\w:.-]+)(?:\s|$)/.exec(text)?.[1] || null;
 const permissionModes = agent => agent === "claude" ? Object.values(CLAUDE_PERMISSION_MODES) : ["auto", "accept_edits", "plan"];
 
@@ -78,6 +88,7 @@ export class RuntimeManager extends EventEmitter {
   #forking = new Map();
   #workspaceIdleTimers = new Map();
   #workerWakes = new Map();
+  #suspensions = new Map();
   #awakeWorkers = new Set();
   #workerIdleTimers = new Map();
   #modeChanges = new Map();
@@ -720,7 +731,7 @@ export class RuntimeManager extends EventEmitter {
     ];
   }
 
-  isBusy(chatId) { const runtime = this.#runtimes.get(chatId); return this.#modeChanges.has(chatId) || this.#workerWakes.has(chatId) || this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.failing || runtime?.busy || runtime?.adapter.isBackgroundBusy?.()) || this.#importPending(chatId); }
+  isBusy(chatId) { const runtime = this.#runtimes.get(chatId); return this.#modeChanges.has(chatId) || this.#workerWakes.has(chatId) || this.#suspensions.has(chatId) || this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.failing || runtime?.busy || runtime?.adapter.isBackgroundBusy?.()) || this.#importPending(chatId); }
   publishChat(chat) { if (chat) this.#emit(chat.id, { type: "chat_updated", chat }); }
 
   // Admit quickly: a cold EC2 start can outlast the public HTTP timeout. This
@@ -792,7 +803,7 @@ export class RuntimeManager extends EventEmitter {
         this.#workerIdleTimers.delete(chatId);
         if (!this.#awakeWorkers.has(chatId) || this.#runtimes.has(chatId) || this.isBusy(chatId)) return;
         if (this.browsers?.hasViewers(chatId) || this.previewActivity.has(chatId) || this.workspacePresence.has(chatId) || this.presence.has(chatId)) { void this.#scheduleWorkerIdle(chatId).catch(() => {}); return; }
-        void this.stop(chatId, "idle-timeout").catch(() => {});
+        void (this.config.idlePolicy === "hibernate" ? this.hibernate(chatId) : this.stop(chatId, "idle-timeout")).catch(() => {});
       }, this.config.idleTimeoutMs);
       timer.unref?.(); this.#workerIdleTimers.set(chatId, timer);
     }
@@ -821,14 +832,19 @@ export class RuntimeManager extends EventEmitter {
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     if (chat.archived || this.#previewStops.has(chatId)) throw Object.assign(new Error("This environment is archived or stopping"), { statusCode: 409 });
     if (this.#executors.has(chatId)) return this.#executors.get(chatId);
-    if (this.config.idlePolicy === "hibernate" && !hibernationAdmission().available) {
-      await this.#suspensionUnavailable(chatId, { admission: true });
-      throw hibernationUnavailableError();
+    if (this.config.idlePolicy === "hibernate") {
+      const admission = typeof this.workerBackend.suspensionAdmission === "function"
+        ? hibernationAdmission(await this.workerBackend.suspensionAdmission(chat)) : hibernationAdmission();
+      if (!admission.available) {
+        await this.#suspensionUnavailable(chatId, { admission: true });
+        throw hibernationUnavailableError();
+      }
     }
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const controller = new AbortController();
     let acquisitionStarted = false, acquisitionMutation, workerLifecycleGeneration = null;
-    const workerLifecycleAction = chat.workerLifecycle?.state === "suspended" ? "resume" : "acquire";
+    const workerLifecycleAction = chat.workerLifecycle?.state === "suspended" || chat.suspension?.status === "hibernated" ? "resume" : "acquire";
+    const expectedWorker = workerLifecycleAction === "resume" ? chat.workerLifecycle?.worker : null;
     this.#startupControllers.set(chatId, controller);
     const check = () => { controller.signal.throwIfAborted(); if (!this.store.get(chatId) || this.store.get(chatId).archived || (this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" }); };
     const pending = (async () => {
@@ -860,6 +876,7 @@ export class RuntimeManager extends EventEmitter {
         if (this.config.workerBackend !== "ec2") { await repositories; check(); }
         check(); acquisitionStarted = true;
         return this.workerBackend.acquire(this.store.get(chatId), { workspaceReady: repositories, check,
+          action: workerLifecycleAction, expectedWorker,
           onMutation: receipt => { acquisitionMutation = receipt; },
           onStage: (id, status) => this.#startupStage(chatId, id, status, version) });
       })());
@@ -881,7 +898,7 @@ export class RuntimeManager extends EventEmitter {
             generation: workerLifecycleGeneration, action: workerLifecycleAction, status: "succeeded",
             mutation: receipt.mutation || "inspected", cleanup: "not-required", ...(worker ? { worker } : {}),
             ...(receipt.controllerLease !== undefined ? { controllerLease: receipt.controllerLease } : {}),
-          }, nowIso()) };
+          }, nowIso()), ...(workerLifecycleAction === "resume" ? { suspension: { ...(current.suspension || {}), status: "resumed", resumedAt: nowIso() } } : {}) };
       });
       check();
       await this.store.update(chatId, current => { check(); return { startupProgress: { ...current.startupProgress, finishedAt: nowIso() } }; });
@@ -919,7 +936,10 @@ export class RuntimeManager extends EventEmitter {
     if (this.#awakeWorkers.has(chatId)) return this.#scheduleWorkerIdle(chatId);
     // A browser-only wake must release its EC2 lease too. Otherwise the cloud
     // watchdog can stop the VM behind a cached executor, breaking the next open.
-    if (!this.#runtimes.has(chatId) && !this.isBusy(chatId) && !this.workspacePresence.has(chatId) && !this.previewActivity.has(chatId) && !this.browsers?.entries.has(chatId) && this.store.get(chatId)) await this.stop(chatId, "idle-timeout");
+    if (!this.#runtimes.has(chatId) && !this.isBusy(chatId) && !this.workspacePresence.has(chatId) && !this.previewActivity.has(chatId) && !this.browsers?.entries.has(chatId) && this.store.get(chatId)) {
+      try { await (this.config.idlePolicy === "hibernate" ? this.hibernate(chatId) : this.stop(chatId, "idle-timeout")); }
+      catch (error) { if (error?.code !== "HIBERNATION_UNAVAILABLE") throw error; }
+    }
   }
 
   async workspaceFiles(chatId, action, input = {}) {
@@ -1841,6 +1861,139 @@ export class RuntimeManager extends EventEmitter {
     }
   }
 
+  hibernate(chatId) {
+    const existing = this.#suspensions.get(chatId);
+    if (existing) return existing;
+    const operation = this.#hibernate(chatId).finally(() => {
+      if (this.#suspensions.get(chatId) === operation) this.#suspensions.delete(chatId);
+    });
+    this.#suspensions.set(chatId, operation); return operation;
+  }
+
+  async #hibernate(chatId) {
+    const chat = this.store.get(chatId), runtime = this.#runtimes.get(chatId);
+    if (!chat) throw Object.assign(new Error("chat not found"), { statusCode: 404 });
+    if (this.config.idlePolicy !== "hibernate" || this.config.workerBackend !== "ec2") throw hibernationUnavailableError();
+    if (chat.archived || this.#previewStops.has(chatId) || this.#workerWakes.has(chatId) || this.#sendingNow.has(chatId)
+      || this.#switching.has(chatId) || this.#queued.has(chatId) || this.#importPending(chatId)
+      || runtime?.busy || runtime?.failing || runtime?.trustReviewing || runtime?.adapter.isBackgroundBusy?.()
+      || runtime?.adapter.hasScheduledWork?.() || runtime?.adapter.agents?.busy() || this.sideChats.busy(chatId)
+      || this.browsers?.hasViewers(chatId) || this.previewActivity.has(chatId) || this.workspacePresence.has(chatId) || this.presence.has(chatId)) {
+      throw Object.assign(new Error("The environment became active before hibernation"), { statusCode: 409 });
+    }
+    const admission = typeof this.workerBackend.suspensionAdmission === "function"
+      ? hibernationAdmission(await this.workerBackend.suspensionAdmission(chat)) : hibernationAdmission();
+    if (!admission.available || typeof this.workerBackend.hibernate !== "function") {
+      await this.#suspensionUnavailable(chatId);
+      throw hibernationUnavailableError();
+    }
+    const executor = await this.#executors.get(chatId);
+    if (!executor) throw new Error("The environment executor is unavailable at the hibernation boundary");
+    const version = this.#lifecycleVersions.get(chatId) || 0;
+    let lifecycleGeneration, detached = false, capabilityRecordWritten = false;
+    let native = { retained: chat.suspension?.nativeRetained === true };
+    let browser = { retained: chat.suspension?.browserRetained === true };
+    const startedAt = nowIso();
+    const starting = await this.store.update(chatId, current => {
+      if ((this.#lifecycleVersions.get(chatId) || 0) !== version || current.archived) throw Object.assign(new Error("Hibernation cancelled"), { name: "AbortError" });
+      const workerLifecycle = beginWorkerLifecycle(current.workerLifecycle, "hibernate", startedAt);
+      lifecycleGeneration = workerLifecycle.generation;
+      return { ...runtimeWorkflowPatch(current, "stopping"), status: "stopping", statusDetail: "Hibernating environment", idleDeadlineAt: null, idleKeepAwakeReason: null,
+        workerLifecycle, suspension: { policy: "hibernate", status: "hibernating", startedAt } };
+    });
+    this.publishChat(starting);
+    try {
+      // Idle side chats share the native transport. Close them before the
+      // checkpoint so their unsubscribe/cleanup writes are included in the
+      // exact durable cursors; a busy side chat was rejected above.
+      if (this.sideChats.has(chatId)) await this.sideChats.close(chatId);
+      if (runtime) await this.agentThreads.flush(chatId);
+      native = await runtime?.adapter.prepareTransportSuspend?.() || native;
+      if (runtime && chat.agent === "codex" && native.retained !== true) throw new Error("Codex native process did not produce a recoverable suspension checkpoint");
+      let capabilityRecord = null;
+      if (native.retained) {
+        if (!this.store.records) throw new Error("Private capability storage is required before retaining a native process");
+        if (runtime) {
+          const services = await this.servicesFor(chat);
+          capabilityRecord = { schema: 1, binding: agentScopeBinding(chat), agent: chat.agent, sessionId: chat.agentSessionId || null,
+            environmentRevision: runtime.environmentRevision ?? null, native: native.capabilities || {},
+            mcp: services.mcps?.suspendRuntime(chatId) ?? null,
+            github: this.githubWorkers?.suspendRuntime(chatId) ?? null,
+            browser: this.browsers?.suspendRuntime(chatId) ?? null };
+        } else capabilityRecord = retainedCapabilities(await this.store.records.get(HIBERNATION_CAPABILITIES, chatId), chat);
+      }
+      const browserBoundary = await this.browsers?.detachForSuspend(chatId);
+      if (browserBoundary?.retained || !browser.retained) browser = browserBoundary || browser;
+      if ((this.#lifecycleVersions.get(chatId) || 0) !== version || runtime && this.#runtimes.get(chatId) !== runtime
+        || runtime?.busy || runtime?.adapter.isBackgroundBusy?.() || this.presence.has(chatId) || this.previewActivity.has(chatId)
+        || this.workspacePresence.has(chatId) || this.browsers?.hasViewers(chatId)) throw new Error("The environment changed while hibernation was being prepared");
+      if (native.retained) {
+        if (!capabilityRecord?.browser && runtime && this.browsers) throw new Error("Shared Browser capability could not be retained with the native process");
+        if (runtime && this.githubWorkers && chat.repositories?.length && !capabilityRecord.github) throw new Error("GitHub capability could not be retained with the native process");
+        const services = runtime ? await this.servicesFor(chat) : null;
+        if (runtime && services?.mcps?.suspendRuntime && (chat.environmentId || services.mcps.companies) && !capabilityRecord.mcp) {
+          throw new Error("MCP capabilities could not be retained with the native process");
+        }
+        const authMode = chat.agentAccountId ? "account" : this.config[chat.agent]?.authMode;
+        if (runtime && authMode === "gateway" && (capabilityRecord.native?.provider?.provider !== (chat.agent === "codex" ? "openai" : "anthropic")
+          || !/^cap_[A-Za-z0-9_-]{43}$/.test(capabilityRecord.native?.provider?.token || "")
+          || !/^[a-f0-9]{64}$/.test(capabilityRecord.native?.provider?.credentialHash || ""))) {
+          throw new Error("Provider capability could not be retained with the native process");
+        }
+        if (runtime && chat.agent === "claude" && authMode === "account" && !/^[a-f0-9]{64}$/.test(capabilityRecord.native?.accountCredentialHash || "")) {
+          throw new Error("Claude account credential could not be retained with the native process");
+        }
+        await this.store.records.put(HIBERNATION_CAPABILITIES, chatId, capabilityRecord);
+        capabilityRecordWritten = true;
+      } else if (this.store.records) await this.store.records.delete(HIBERNATION_CAPABILITIES, chatId);
+      if (runtime) {
+        await runtime.eventQueue;
+        await this.agentThreads.flush(chatId);
+        await runtime.adapter.detachTransportForSuspend?.();
+        runtime.generation += 1; clearTimeout(runtime.idleTimer);
+        this.#runtimes.delete(chatId);
+        detached = true;
+      }
+      if (browser.retained) detached = true;
+      // Agent/browser process ownership is retained by the worker supervisor;
+      // revoke every controller-side capability without terminating either.
+      await this.browsers?.revokeForSuspend(chatId);
+      this.#lifecycleVersions.set(chatId, version + 1);
+      this.#awakeWorkers.delete(chatId);
+      clearTimeout(this.#workerIdleTimers.get(chatId)); this.#workerIdleTimers.delete(chatId);
+      this.previewActivity.revokeChat(chatId); this.emit("preview-revoke", { chatId, reason: "hibernate" });
+      this.broker.revokeChat(chatId); this.githubWorkers?.revokeChat(chatId); this.revokeChatMcps(chatId);
+      detached = true;
+      const observed = await this.workerBackend.hibernate(this.store.get(chatId), chat.workerLifecycle?.worker);
+      this.#executors.delete(chatId);
+      const hibernatedAt = nowIso();
+      const updated = await this.store.update(chatId, current => ({ ...runtimeWorkflowPatch(current, "stopped"), status: "stopped", statusDetail: "Environment hibernated", idleDeadlineAt: null, idleKeepAwakeReason: null,
+        workerLifecycle: finishWorkerLifecycle(current.workerLifecycle, { generation: lifecycleGeneration, action: "hibernate", status: "succeeded", mutation: "hibernated", cleanup: "not-required", worker: chat.workerLifecycle?.worker }, hibernatedAt),
+        suspension: { policy: "hibernate", status: "hibernated", startedAt, hibernatedAt, nativeRetained: native.retained === true, browserRetained: browser.retained === true,
+          ...(observed?.instanceId ? { instanceId: observed.instanceId } : {}) } }));
+      this.publishChat(updated); this.#emit(chatId, { type: "runtime_hibernated" });
+      return updated;
+    } catch (error) {
+      if (!detached && typeof browser.resume === "function") {
+        try { await browser.resume(); }
+        catch { detached = true; }
+      }
+      if (detached) {
+        this.#executors.delete(chatId);
+        this.#awakeWorkers.delete(chatId);
+      }
+      if (capabilityRecordWritten && !detached) await this.store.records?.delete(HIBERNATION_CAPABILITIES, chatId).catch(() => {});
+      const failedAt = nowIso();
+      await this.store.update(chatId, current => ({ workerLifecycle: finishWorkerLifecycle(current.workerLifecycle, {
+        generation: lifecycleGeneration, action: "hibernate", status: detached ? "unknown" : "failed", mutation: "none", cleanup: detached ? "unknown" : "not-required",
+        worker: chat.workerLifecycle?.worker,
+      }, failedAt), suspension: { policy: "hibernate", status: "failed", startedAt, failedAt, detached, message: "Hibernation failed; use Wake to reconcile or Stop to shut down explicitly." },
+        status: detached ? "error" : "idle", statusDetail: detached ? "Hibernation outcome requires reconciliation" : "Hibernation failed; environment remains awake", idleDeadlineAt: null, idleKeepAwakeReason: null }));
+      this.publishChat(this.store.get(chatId));
+      throw error;
+    }
+  }
+
   async stop(chatId, reason = "manual") {
     // A fatal exit owns the old runtime until its queued events and visible
     // response have been checkpointed. Do not race its teardown with Stop.
@@ -1860,6 +2013,12 @@ export class RuntimeManager extends EventEmitter {
     // An idle request must never enter destructive Stop, even when suspension
     // support or diagnostic persistence fails. Manual/revocation Stop is separate.
     if (reason === "idle-timeout" && this.config.idlePolicy === "hibernate") return this.#suspensionUnavailable(chatId);
+    const retainedNative = chat.suspension?.nativeRetained === true && !this.#runtimes.has(chatId);
+    const retainedBrowser = chat.suspension?.browserRetained === true && !this.#runtimes.has(chatId);
+    // Explicit Stop must first wake the exact hibernated worker so its retained
+    // native owners can be terminated rather than silently surviving Stop.
+    if ((retainedNative || retainedBrowser) && !this.#executors.has(chatId)) await this.browserExecutor(chatId);
+    if (retainedBrowser) await this.browsers?.ensure(chatId);
     const stoppingExecutor = this.#executors.get(chatId);
     this.#previewStops.set(chatId, (this.#previewStops.get(chatId) || 0) + 1);
     let stopped = false;
@@ -1904,7 +2063,14 @@ export class RuntimeManager extends EventEmitter {
       await runtime.eventQueue; // Flush final context/usage before worker storage disappears.
       await this.agentThreads.flush(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
     }
-    else await this.sideChats.close(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Side stop warning: ${errorMessage(error)}` }));
+    else {
+      await this.sideChats.close(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Side stop warning: ${errorMessage(error)}` }));
+      if (retainedNative) {
+        const retainedExecutor = await (stoppingExecutor || this.#executors.get(chatId));
+        if (typeof retainedExecutor?.stopRetainedAgent !== "function") throw new Error("Retained native-agent cleanup is unavailable; the worker was not stopped");
+        await retainedExecutor.stopRetainedAgent();
+      }
+    }
     await this.browsers?.stop(chatId);
     const executor = stoppingExecutor || this.#executors.get(chatId);
     if (executor) await executor.catch(() => {});
@@ -1933,6 +2099,9 @@ export class RuntimeManager extends EventEmitter {
     });
     const detail = reason === "idle-timeout" ? "Stopped after idle timeout" : "Stopped manually";
     await this.#setStatus(chatId, "stopped", detail, null);
+    await this.store.update(chatId, current => ({ suspension: current.suspension ? { ...current.suspension,
+      status: "stopped", stoppedAt: nowIso(), nativeRetained: false, browserRetained: false } : current.suspension }));
+    await this.store.records?.delete(HIBERNATION_CAPABILITIES, chatId);
     if (reason === "manual") this.publishChat(await this.store.update(chatId, { githubEventsStoppedAt: nowIso() }));
     this.#emit(chatId, { type: "runtime_stopped", reason });
     stopped = true;
@@ -2033,6 +2202,10 @@ export class RuntimeManager extends EventEmitter {
 
   async #start(chatId) {
     const chat = this.store.get(chatId);
+    const recoveringNative = chat?.suspension?.nativeRetained === true;
+    const retained = recoveringNative
+      ? retainedCapabilities(await this.store.records?.get(HIBERNATION_CAPABILITIES, chatId), chat)
+      : null;
     if (chat?.agentAccountId && ["codex", "claude"].includes(chat.agent)) await this.agentAccounts.select(chat.ownerId, chat.agentAccountId, chat);
     else if (chat?.agent !== "mock" && (this.config.google?.enabled || this.resources && !this.resources.isLegacy(chat?.ownerId))) throw new Error("Connect and select an agent account for this user before starting a worker");
     const version = this.#lifecycleVersions.get(chatId) || 0;
@@ -2043,6 +2216,7 @@ export class RuntimeManager extends EventEmitter {
     let runtime;
     let executor;
     let forkRecord;
+    let runtimeEnvironment = null;
     let savedAgentThreads;
     let forkContext = "";
     const hooks = {
@@ -2115,17 +2289,22 @@ export class RuntimeManager extends EventEmitter {
         if (chat.nativeForkSessionId) validateSessionBundle(forkRecord.bundle, chat.agentSessionId);
       }
       executor = chat.agent === "mock" ? null : await this.browserExecutor(chatId);
+      if (executor && recoveringNative) executor.retainedCapabilities = retained.native || {};
       if (executor?.metadata) await this.store.update(chatId, { runtimeMetadata: executor.metadata });
       checkCancelled();
       if (executor && chat.environmentId) {
-        const environment = await (await this.servicesFor(chat)).environments.runtime(chat.environmentId, chat);
+        const environment = runtimeEnvironment = await (await this.servicesFor(chat)).environments.runtime(chat.environmentId, chat);
         if (environment.backend !== this.config.workerBackend) throw new Error("The environment backend changed. Use the original worker backend to resume this chat.");
+        if (recoveringNative && retained.environmentRevision !== environment.revision) throw new Error("The environment changed while its native process was hibernated; use Stop before continuing");
         checkCancelled();
-        await this.#startupTask(chatId, "software", version, () => prepareSoftware(executor, environment, async () => { checkCancelled(); }));
+        if (!recoveringNative) await this.#startupTask(chatId, "software", version, () => prepareSoftware(executor, environment, async () => { checkCancelled(); }));
         checkCancelled();
         executor.environmentVariables = { ...environment.variables, ...executor.capabilityVariables };
-        executor.mcpServers = await (await this.servicesFor(chat)).mcps?.runtime(chatId, environment.mcpIds || [], executor.gatewayOrigin || this.gatewayOrigin, chat) || {};
-        if (environment.setupScript) {
+        const mcps = (await this.servicesFor(chat)).mcps;
+        executor.mcpServers = recoveringNative && mcps?.resumeRuntime
+          ? await mcps.resumeRuntime(chatId, environment.mcpIds || [], executor.gatewayOrigin || this.gatewayOrigin, chat, retained.mcp)
+          : await mcps?.runtime(chatId, environment.mcpIds || [], executor.gatewayOrigin || this.gatewayOrigin, chat) || {};
+        if (environment.setupScript && !recoveringNative) {
           checkCancelled();
           await this.#startupTask(chatId, "setup", version, async () => { try {
             checkCancelled();
@@ -2136,20 +2315,32 @@ export class RuntimeManager extends EventEmitter {
       }
       if (executor && !chat.environmentId) {
         const mcps = (await this.servicesFor(chat)).mcps;
-        if (mcps?.companies) executor.mcpServers = await mcps.runtime(chatId, await mcps.forCompany(companyForChat(chat)), executor.gatewayOrigin || this.gatewayOrigin, chat);
+        if (mcps?.companies) {
+          const ids = await mcps.forCompany(companyForChat(chat));
+          executor.mcpServers = recoveringNative && mcps.resumeRuntime
+            ? await mcps.resumeRuntime(chatId, ids, executor.gatewayOrigin || this.gatewayOrigin, chat, retained.mcp)
+            : await mcps.runtime(chatId, ids, executor.gatewayOrigin || this.gatewayOrigin, chat);
+        }
         checkCancelled();
       }
-      if (executor && this.browsers) executor.mcpServers = { ...executor.mcpServers, ...this.browsers.runtime(chatId, executor.gatewayOrigin || this.gatewayOrigin, {validWhile:() => {
+      if (executor && this.browsers) {
+        if (recoveringNative && !retained.browser) throw new Error("The retained Shared Browser capability is unavailable; use Stop before continuing");
+        executor.mcpServers = { ...executor.mcpServers, ...this.browsers.runtime(chatId, executor.gatewayOrigin || this.gatewayOrigin, { restoreToken: recoveringNative ? retained.browser.token : null, validWhile:() => {
         const current = this.store.get(chatId);
         return Boolean(current) && !current.archived && runtimeAccountBinding(current) === runtimeAccountBinding(chat) && (this.#lifecycleVersions.get(chatId)||0) === version;
       }}) };
+      }
       if (executor && this.githubWorkers) {
         checkCancelled();
         const origin = executor.gatewayOrigin || this.gatewayOrigin;
-        const grant = await this.githubWorkers.runtime(chatId, origin, { validWhile: () => {
+        const grantOptions = { validWhile: () => {
           const current = this.store.get(chatId);
           return (this.#lifecycleVersions.get(chatId) || 0) === version && Boolean(current) && !current.archived;
-        } });
+        } };
+        if (recoveringNative && chat.repositories?.length && !retained.github) throw new Error("The retained GitHub capability is unavailable; use Stop before continuing");
+        const grant = recoveringNative && retained.github
+          ? await this.githubWorkers.resumeRuntime(chatId, origin, retained.github, grantOptions)
+          : await this.githubWorkers.runtime(chatId, origin, grantOptions);
         checkCancelled();
         // Setup runs before issuance. Nothing is written to .git/config, chat
         // records or executor metadata; Git inherits a revocable per-chat grant.
@@ -2199,7 +2390,8 @@ export class RuntimeManager extends EventEmitter {
             if (!Number.isSafeInteger(checkpointVersion) || checkpointVersion !== (this.#lifecycleVersions.get(chatId) || 0)
               || !current || current.archived || runtimeAccountBinding(current) !== runtimeAccountBinding(chat) || active && active !== runtime) throw new Error("Native checkpoint owner changed");
           } });
-      runtime = { adapter, executor, forkContext, accountBinding: runtimeAccountBinding(chat), agentScopeBinding: agentScopeBinding(chat), busy: false, idleTimer: null, generation: 0, eventQueue: Promise.resolve() };
+      runtime = { adapter, executor, forkContext, environmentRevision: runtimeEnvironment?.revision ?? null,
+        accountBinding: runtimeAccountBinding(chat), agentScopeBinding: agentScopeBinding(chat), busy: false, idleTimer: null, generation: 0, eventQueue: Promise.resolve() };
       this.#runtimes.set(chatId, runtime);
       await this.#startupTask(chatId, "agent", version, () => { checkCancelled(); return adapter.start(); });
       checkCancelled();
@@ -2251,8 +2443,8 @@ export class RuntimeManager extends EventEmitter {
     runtime.idleTimer = setTimeout(() => {
       if (this.#importPending(chatId) || this.#forking.has(chatId) || runtime.adapter.hasScheduledWork?.() || runtime.adapter.agents?.busy() || this.sideChats.busy(chatId) || this.browsers?.hasViewers(chatId) || this.previewActivity.has(chatId) || this.workspacePresence.has(chatId) || this.presence.has(chatId)) { void this.#scheduleIdleStop(chatId, runtime); return; }
       if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.trustReviewing || runtime.adapter.isBackgroundBusy?.()) return;
-      this.stop(chatId, "idle-timeout").catch((error) => {
-        if (this.config.idlePolicy === "hibernate") this.#emit(chatId, { type: "runtime_log", text: "Hibernation unavailable; its diagnostic could not be saved. Worker left running; use Stop explicitly." });
+      (this.config.idlePolicy === "hibernate" ? this.hibernate(chatId) : this.stop(chatId, "idle-timeout")).catch((error) => {
+        if (this.config.idlePolicy === "hibernate") this.#emit(chatId, { type: "runtime_log", text: `Hibernation failed: ${errorMessage(error)} Worker left running unless reconciliation is required; use Wake to reconcile or Stop explicitly.` });
         else this.#fatal(chatId, error);
       });
     }, this.config.idleTimeoutMs);

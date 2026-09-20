@@ -90,28 +90,19 @@ does not enable it. The native MCP mutation and `/code-review` combinations
 remain unsupported, and actual selected-account workflow acceptance is still
 open; local protocol fixtures do not prove those gates.
 
-Two-minute process-preserving hibernation remains open. The candidate includes
-worker-owned process transport, durable lease authority and locally wired
-Shared Chrome plus persistent native-agent reconnection slices. Shared Chrome
-now proves link recovery and an
-explicit fresh-controller-lifetime takeover at a quiescent durable RPC boundary
-with the same disposable Chrome/renderer. It refuses unresolved mutating RPCs
-without replacement or implicit termination. This is still an injected local
-facade reconstruction, not an actual control-plane process-exit or EC2
-suspend/resume result; see the
-[controller recovery receipt](validation-2026-09-20-browser-controller-recovery.md).
-Lifecycle partition 1 is now integrated: intent/result/generation, exact worker
-identity, sanitized controller-lease descriptors, `created`/`started`/`inspected`
-receipts, exact cleanup outcomes and restart-to-unknown reconciliation persist
-before later admission. Focused acceptance passed 77/77 and the complete Node
-regression passed 1,609 with zero failures and four optional skips; see the
-[lifecycle receipt](validation-2026-09-20-hibernation-lifecycle.md).
-Persistent Codex/Claude owners and a background Node descendant now retain
-their process identity and memory across same-controller transport loss, while
-one-shot native commands remain ordinary. Fresh-controller native session
-reconstruction and remote image/service acceptance remain gates;
-hibernation admission stays unavailable, without destructive idle fallback. The
-production idle policy and automatic-deployment restrictions remain unchanged.
+Two-minute process-preserving hibernation has its controller/runtime source path
+implemented but is not image-complete or live-accepted. The candidate includes exact worker lifecycle receipts, fresh-
+controller recovery of Codex/Claude/Shared Chrome, encrypted capability
+continuity with scope revalidation, non-destructive automatic idle paths,
+explicit retained-process Stop, image/watchdog admission, and a dedicated
+disposable hibernation verifier. Local focused and complete regression suites
+are the source gates. The current worker baker pins Ubuntu 24.04 while AWS's
+current documented supported Ubuntu hibernation list stops at 22.04.2; the
+candidate base/recipe must first use a documented supported image or obtain
+equivalent provider evidence. A freshly baked candidate then still needs real AWS
+hibernate/resume plus application/controller-replacement acceptance before the
+production idle policy can change; admission remains fail-closed without that
+image marker. Automatic-deployment restrictions remain unchanged.
 See [local reconnection scope](shared-browser-reconnect-local.md).
 
 The reported Claude cancellation timeout has a reproduced source regression

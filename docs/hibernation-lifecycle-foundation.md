@@ -1,34 +1,44 @@
-# Hibernation lifecycle foundation (partition 1)
+# Hibernation lifecycle and activation boundary
 
-This is **not working hibernation**. Process-preserving transport, resume/account
-revalidation, admitted-image evidence and disposable live acceptance are still
-required. No production setting or worker was changed or tested by this patch.
+The source now implements the process-preserving EC2 lifecycle, reconnectable
+native/Chrome transports, exact capability restoration after scope
+revalidation, manual retained-process cleanup, and dedicated image acceptance
+operator. The default remains `stop`, and no production setting or worker is
+changed by source integration alone. A real disposable AWS acceptance and
+separately coordinated activation are still required before the MVP can claim
+live hibernation.
 
 ## Requested policy versus availability
 
 The user's chosen end state remains hibernation after two minutes of inactivity
 and full stop only on explicit action. Restarting processes is not a substitute.
 
-`AGENT_IDLE_POLICY=hibernate` records an explicit opt-in policy and defaults its
-idle threshold to 120,000 ms. It does **not** enable hibernation. Admission is
-currently denied before repository credentials, worker creation/start, SSH or
-agent startup. The current backend, SSH process transport and image verifier do
-not provide the complete support required by `src/worker-suspension.mjs`.
-An EC2 `HibernationOptions` field or a backend method named `hibernate` is not
-sufficient evidence. Do not enable the integration flag as a rollout step yet.
+`AGENT_IDLE_POLICY=hibernate` is an explicit opt-in and defaults its idle
+threshold to 120,000 ms. Admission requires all three independent signals:
+configured EC2 hibernation, the pinned reconnectable supervisor version, and
+the dedicated candidate-image acceptance marker. Missing or revoked evidence
+fails before agent admission and never downgrades the idle action to full Stop.
+An EC2 `HibernationOptions` field or a backend method named `hibernate` alone is
+not sufficient evidence. Do not enable the integration flag before live
+acceptance.
 
 The shipped default remains `AGENT_IDLE_POLICY=stop`, retaining existing behavior
 and billing until the remaining partitions are accepted. Local workers retain
 their existing idle behavior; opting local workers into hibernation is rejected.
 
-For a cached/warmed worker with the opt-in policy, every idle-timeout path exits
-before destructive Stop. It persists an unavailable diagnostic, clears the idle
-deadline and leaves the runtime/processes alone. There is no polling retry loop;
-new activity can schedule another idle check, and an explicit wake can retry
-admission. Diagnostic storage failure does not trigger fatal teardown. Manual
-Stop and security revocation cleanup remain separate and available. This is not
-a claim that deploy, shutdown, browser lifecycle or controller restart currently
-preserves processes: those require the subsequent transport/lifecycle partitions.
+For an admitted worker, every automatic idle path checkpoints quiescent native
+and browser transports, saves capability continuity only in private encrypted
+controller records, revokes controller-side grants, and hibernates the exact VM.
+Wake resumes the same worker/process receipts without sending a prompt. Changed
+account credentials, company/repository/environment scope, MCP/GitHub identity,
+or missing private checkpoints fail closed and require explicit Stop. Manual
+Stop wakes only to terminate retained native/browser owners and then stops the
+worker; Delete retains its destructive semantics.
+
+For an unaccepted worker, idle hibernation persists an unavailable diagnostic,
+clears the deadline and leaves the runtime/processes alone. There is no hot retry
+loop and no automatic full-stop fallback. Diagnostic storage failure does not
+trigger fatal teardown.
 
 ## Attempt-owned acquisition rollback
 
@@ -59,28 +69,20 @@ an ambiguous response. EC2 custom backends must publish receipts for mutations
 they want the manager to roll back. Direct backend callers retain responsibility
 for deciding when to invoke the receipt on failure.
 
-## Acceptance boundary
+## Current acceptance boundary
 
-Deterministic tests cover unsupported admission without mutations, untouched
-pre-existing workers, no idle fallback even on persistence failure, manual Stop,
-late cancellation cleanup, exact-instance receipt ownership and idempotence.
-These are fake-backend/local tests only. No AWS, provider, real model, browser
-profile or credential operation is part of this acceptance.
+Deterministic tests cover unsupported admission without mutation; exact worker,
+kernel and process receipts; same/fresh-controller reconnection; no prompt/RPC
+replay; encrypted private capability checkpoints; MCP/GitHub/Browser/provider
+token restoration; changed account/environment denial; manual retained-process
+Stop; watchdog policy; and the dedicated hibernation verifier's cleanup/tagging
+rules. The complete local suite must remain green on the final commit.
 
-Validation on this partition: 63/63 tests passed (12 new cases), no skips or
-retries, across the five files below. Syntax checks and `git diff --check` also
-passed. Existing local/mock autosleep, explicit Stop, parallel startup and late
-preview acquisition regressions remain covered.
-
-```sh
-taskset -c 0,1 nice -n 10 node --test --test-concurrency=1 \
-  test/hibernation-lifecycle.test.mjs test/ec2-backend.test.mjs \
-  test/parallel-worker-startup.test.mjs test/runtime-manager.test.mjs \
-  test/preview-activity.test.mjs
-```
-
-Next: implement reconnectable worker-owned transport and jointly reviewed
-suspend/resume coordination; revalidate named-account ownership/revocation before
-restoring any capability; implement compatible image/watchdog admission; then
-perform separately coordinated disposable-instance process continuity acceptance.
-Only after those pass may the availability boundary and deployment policy change.
+Local evidence is not AWS evidence. Remaining activation work is to authenticate
+the scoped operator profile, replace or prove the current Ubuntu 24.04 worker
+base against AWS's documented supported hibernation images (the current list
+names Ubuntu 22.04.2 but not 24.04), bake a fresh candidate, run
+`verify-worker-hibernation.mjs`, exercise the application through
+real hibernate/resume and controller replacement without paid prompts or user
+profiles, then publish the accepted AMI/config through the normal reviewed
+deployment path. Until those steps pass, production stays on `stop`.

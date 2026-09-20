@@ -51,30 +51,22 @@ Files: [ssh-worker-launcher.mjs](../src/ssh-worker-launcher.mjs),
 - [x] Define bounded output buffering, sequence acknowledgement and pending RPC
   recovery. Never replay a mutating RPC or prompt merely because its response
   was lost; expose unknown outcomes for explicit reconciliation.
-- [ ] Preserve Node background servers and the same Chrome/renderer state across
+- [x] Preserve Node background servers and the same Chrome/renderer state across
   detach/reattach. Cover both Codex and Claude ownership, not only one provider.
-- [ ] Test transport loss, long silence, controller restart and repeated
+- [x] Test transport loss, long silence, controller restart and repeated
   reattachment with synthetic local processes and in-memory sentinels. Verify
   no duplicate process, prompt, approval, tool call, or queued-message delivery.
-- [ ] Ensure error and timeout paths cannot route expected suspension into
+- [x] Ensure error and timeout paths cannot route expected suspension into
   RuntimeManager `#fatal` full-stop cleanup.
 
 This is mandatory continuity work, not an optional enhancement after release.
 
-Partial implementation evidence: the Shared Chrome path now reconstructs a
-fresh application facade at a quiescent durable boundary and persists logical
-RPC completion separately from transport input acknowledgement. A worker-owned
-daemon, private sockets, systemd user cgroup, fixed SSH byte bridge, durable
-lease coordinator and tagged-image EC2 executor path are integrated. Component
-tests preserve the same PID and in-memory sentinel across controller/executor
-replacement and prove exact cleanup after a refused mutating recovery. Local
-real-Chrome tests preserve the same renderer. This checks the three protocol
-items above. Persistent Codex and Claude owners now use a reconnectable
-native-agent facade, and a synthetic background Node descendant retains its PID
-and memory across same-controller link loss while Chrome independently stops and
-reopens. This still does not complete the partition because fresh-controller
-native session reconstruction, expected-suspension fatal routing, actual AWS
-hibernation and remote suspend/resume remain open. See the
+Local implementation evidence now covers fresh-controller takeover of exact
+Codex/Claude and Shared Chrome owners, explicit quiescent transfer, durable
+sequence/checkpoint validation, no replacement on ambiguous recovery, and exact
+manual cleanup. Synthetic descendants retain PID and in-memory state, while
+real local Chrome retains the renderer. Actual AWS suspend/resume remains the
+separate live gate. See the
 [controller recovery receipt](validation-2026-09-20-browser-controller-recovery.md)
 and [EC2 supervisor candidate receipt](validation-2026-09-20-ec2-worker-supervisor.md).
 
@@ -88,17 +80,17 @@ Files: [agent-accounts.mjs](../src/agent-accounts.mjs),
 [runtime-manager.mjs](../src/runtime-manager.mjs),
 [server.mjs](../src/server.mjs) account `onRevoke` integration.
 
-- [ ] Revalidate exact selected owner/provider/account and company/environment
+- [x] Revalidate exact selected owner/provider/account and company/environment
   binding before resume admission. Do not substitute another connected account.
-- [ ] Reconcile expired MCP/browser/provider/GitHub capabilities without restoring
+- [x] Reconcile expired MCP/browser/provider/GitHub capabilities without restoring
   revoked authority or copying host credential stores. Native processes holding
   old credentials must not bypass the new admission decision.
-- [ ] Prove disconnect/removal/expiry while hibernated remains fail-closed after
+- [x] Prove disconnect/removal/expiry while hibernated remains fail-closed after
   reconnect and controller restart, including failed persistence and failed
   worker cleanup. Keep unrelated accounts usable and retries visible.
 - [ ] Test late credential refresh, stale RPC responses, account selection change,
   company/MCP removal, and concurrent Stop/Delete during resume.
-- [ ] Establish safe handling of the WIP resume-before-full-stop interval: no
+- [x] Establish safe handling of the WIP resume-before-full-stop interval: no
   resumed revoked work may gain provider or company access before cleanup.
 
 Do not equate RAM preservation with credential validity or authorize work from
@@ -114,16 +106,16 @@ Files: [runtime-manager.mjs](../src/runtime-manager.mjs) `#scheduleIdleStop`,
 [preview-activity.mjs](../src/preview-activity.mjs),
 [app.js](../public/app.js), and [index.html](../public/index.html).
 
-- [ ] Wire all automatic idle paths to the accepted suspension state machine;
+- [x] Wire all automatic idle paths to the accepted suspension state machine;
   remove independent idle Chrome teardown in that mode. Manual Stop/Delete must
   retain explicit semantics, rather than being aliases for hibernation.
-- [ ] Keep active main/child/side work, trust/import reconciliation, scheduled
+- [x] Keep active main/child/side work, trust/import reconciliation, scheduled
   work, and browser/preview/workspace/tab presence exclusions. Document exactly
   when the idle clock starts, pauses, and resets.
-- [ ] Make wake resume retained infrastructure and processes without a prompt;
+- [x] Make wake resume retained infrastructure and processes without a prompt;
   cached executor/runtime objects must not bypass resume. Deduplicate browser,
   workspace, agent, and explicit wake requests.
-- [ ] Show real hibernating/hibernated/resuming/failed states and actual timing;
+- [x] Show real hibernating/hibernated/resuming/failed states and actual timing;
   do not show "ready" until resume/authorization/transport checks succeed.
 - [ ] Use fake clocks to verify the 120-second boundary, activity immediately
   before expiry, visibility changes, multiple viewers, queued messages and
@@ -144,18 +136,18 @@ Files: [worker-hibernation.mjs](../deploy/aws/worker-hibernation.mjs),
 The root WIP also contains a detached `hibernation-probe-worker.mjs`; it is not
 part of the committed baseline used by this document.
 
-- [ ] Integrate the inspected WIP only after scoped source review. Keep candidate
+- [x] Integrate the inspected WIP only after scoped source review. Keep candidate
   image status distinct from ordinary acceptance and application continuity
   acceptance; no manual tag may substitute for missing evidence.
 - [ ] Verify supported launch/image/disk configuration against authoritative
   current provider requirements before any separately authorized cloud probe.
-- [ ] Reconcile the orphan watchdog and post-resume heartbeat with the new policy;
+- [x] Reconcile the orphan watchdog and post-resume heartbeat with the new policy;
   neither may silently full-stop a worker or immediately rehibernate a newly
   resumed machine based on elapsed wall-clock suspension time.
 - [ ] Extend verifier receipts beyond detached Node/Chrome memory to actual
   application transport, same-process identity, authorization and no-replay
   checks. Failed or partial evidence must never promote an image.
-- [ ] Issue/read back an exact acceptance marker only after complete evidence and
+- [x] Issue/read back an exact acceptance marker only after complete evidence and
   verified disposable resource cleanup. Preserve ownership, private network,
   metadata-disabled, credential-scrub and image-identity checks.
 

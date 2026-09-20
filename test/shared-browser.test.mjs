@@ -8,6 +8,7 @@ import WebSocket from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ChromeBrowser } from "../src/browser-worker.mjs";
+import { SharedBrowsers } from "../src/shared-browser.mjs";
 import { createAgentWebServer } from "../src/server.mjs";
 import { testConfig, temporaryDirectory, waitFor } from "./helpers.mjs";
 import { startBrowserSite } from "./fixtures/browser-site.mjs";
@@ -63,6 +64,56 @@ test("browser-only worker acquisition is deduplicated and idle release does not 
   assert.equal(one, two); assert.deepEqual(calls, ["acquire"]);
   await app.manager.browserIdle(chat.id); assert.deepEqual(calls, ["acquire", "sleep"]);
   await app.manager.browserExecutor(chat.id); assert.deepEqual(calls, ["acquire", "sleep", "acquire"]);
+});
+
+test("shared Chrome suspension drains commands, disables capture and detaches without terminating the helper", async () => {
+  const chat = { id: "chat_" + "a".repeat(32), archived: false }, watched = [], child = {
+    detached: false, inputQueue: Promise.resolve(), outputQueue: Promise.resolve(), storageQueue: Promise.resolve(),
+    detach() { this.detached = true; },
+  };
+  const browser = { child, pending: new Map(), heartbeat: null, heartbeatPending: null, watchingRequested: true,
+    ensureConnected: async () => {}, command: async (action, params) => { watched.push([action, params]); if (action === "watch") browser.watchingRequested = params.enabled; } };
+  const browsers = new SharedBrowsers({ store: { get: id => id === chat.id ? chat : null }, config: { sessionCapabilityTtlMs: 60000, idleTimeoutMs: 60000 }, acquire: async () => { throw Error("must not acquire"); } });
+  browsers.entries.set(chat.id, { ready: Promise.resolve(), viewers: new Set(), browser });
+  const result = await browsers.detachForSuspend(chat.id);
+  assert.equal(result.retained, true); assert.equal(result.processId, "shared-chrome");
+  assert.deepEqual(watched, [["watch", { enabled: false }]]);
+  assert.equal(child.detached, true);
+  assert.equal(browsers.entries.has(chat.id), true);
+  await result.resume();
+  assert.equal(browsers.entries.has(chat.id), true);
+  assert.equal(browsers.entries.get(chat.id).suspended, false);
+});
+
+test("opening a suspended shared Chrome resumes its worker before reconnecting the same facade", async () => {
+  const chat = { id: "chat_" + "b".repeat(32), archived: false }, order = [];
+  const child = { detached: false, inputQueue: Promise.resolve(), outputQueue: Promise.resolve(), storageQueue: Promise.resolve(),
+    detach() { this.detached = true; } };
+  const browser = { child, pending: new Map(), heartbeat: null, heartbeatPending: null, watchingRequested: false,
+    command: async () => {}, ensureConnected: async () => { order.push("reconnect"); child.detached = false; } };
+  const browsers = new SharedBrowsers({ store: { get: id => id === chat.id ? chat : null },
+    config: { sessionCapabilityTtlMs: 60000, idleTimeoutMs: 60000 }, acquire: async () => { order.push("resume"); } });
+  browsers.entries.set(chat.id, { ready: Promise.resolve(), viewers: new Set(), browser });
+  await browsers.detachForSuspend(chat.id);
+  order.length = 0;
+  const resumed = await browsers.ensure(chat.id);
+  assert.equal(resumed.browser, browser);
+  assert.deepEqual(order, ["resume", "reconnect"]);
+  assert.equal(resumed.suspended, false);
+});
+
+test("Shared Browser hibernation restores the exact native MCP capability after revocation", async () => {
+  const chat = { id: "chat_" + "c".repeat(32), archived: false };
+  const browsers = new SharedBrowsers({ store: { get: id => id === chat.id ? chat : null },
+    config: { sessionCapabilityTtlMs: 60000, idleTimeoutMs: 60000 }, acquire: async () => { throw Error("must not acquire"); } });
+  const first = browsers.runtime(chat.id, "https://relay.example", { validWhile: () => true }), snapshot = browsers.suspendRuntime(chat.id);
+  const token = first.relay_browser.headers.Authorization.slice(7);
+  assert.equal(snapshot.token, token);
+  await browsers.revokeForSuspend(chat.id); assert.equal(browsers.grants.validate(token, "browser"), null);
+  const resumed = browsers.runtime(chat.id, "https://relay.example", { validWhile: () => true, restoreToken: snapshot.token });
+  assert.equal(resumed.relay_browser.headers.Authorization, `Bearer ${token}`);
+  assert(browsers.grants.validate(token, "browser"));
+  await browsers.revokeForSuspend(chat.id);
 });
 
 test("real Chrome: pipe-only sandboxed browser, live website, clicks, typing, dialogs, tabs and ephemeral profiles", { skip: !available }, async t => {

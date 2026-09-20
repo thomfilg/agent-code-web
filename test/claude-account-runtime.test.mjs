@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { access, mkdir } from "node:fs/promises";
 import { ClaudeAdapter } from "../src/adapters/claude.mjs";
 import { ChatStore } from "../src/store.mjs";
@@ -9,6 +10,20 @@ import { createAgentWebServer } from "../src/server.mjs";
 import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
 import { googleOidcFixture, googleTestEnv, cookieClient } from "./fixtures/google-oidc.mjs";
 import { claudeAccountFixture } from "./fixtures/claude-account.mjs";
+
+test("a retained Claude account process resumes only with the exact credential snapshot", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  let chat = await store.create({ agent: "claude", agentAccountId: "named-account", title: "Retained account" });
+  await store.update(chat.id, { agentSessionId: "11111111-1111-4111-8111-111111111111", suspension: { nativeRetained: true } }); chat = store.get(chat.id);
+  const credentials = { accessToken: "sk-ant-oat01-retained", accountId: "person", organizationId: "company", expiresAt: Date.now() + 3600000 };
+  const hash = createHash("sha256").update(JSON.stringify([credentials.accountId, credentials.organizationId, credentials.accessToken])).digest("hex");
+  const make = accountCredentialHash => new ClaudeAdapter({ chat, store, config: testConfig(root, { CLAUDE_AUTH_MODE: "host", ANTHROPIC_API_KEY: "" }),
+    broker: new CapabilityBroker({ ttlMs: 10000 }), executor: { workspace: chat.workspace, runtimeHome: store.runtimeHome(chat.id), retainedCapabilities: { accountCredentialHash } },
+    hooks: { accountCredentials: async () => credentials } });
+  const valid = make(hash); t.after(() => valid.stop()); await valid.start();
+  const changed = make("0".repeat(64)); t.after(() => changed.stop());
+  await assert.rejects(changed.start(), /credential changed/);
+});
 
 test("named Claude worker uses only its account, redacts token echoes and retains its session through stop/resume", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();

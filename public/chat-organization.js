@@ -61,7 +61,7 @@ export function workflowPatch(chat) {
   let workflowState = "idle", stateOrigin = "runtime", stateDetail = "Ready for another message";
   if (chat.archived) { workflowState = "archived"; stateOrigin = "archive"; stateDetail = "Unarchive this chat to continue"; }
   else if (chat.pendingRequest) { workflowState = "asking_question"; stateDetail = "The agent needs your answer or approval"; }
-  else if (["starting", "running", "stopping"].includes(chat.status)) { workflowState = "working"; stateDetail = chat.status === "stopping" ? "Stopping the worker" : "The agent is working"; }
+  else if (["starting", "running", "stopping"].includes(chat.status)) { workflowState = "working"; stateDetail = chat.suspension?.status === "hibernating" ? "Hibernating the environment" : chat.suspension?.status === "hibernated" && chat.status === "starting" ? "Resuming the environment" : chat.status === "stopping" ? "Stopping the worker" : "The agent is working"; }
   else if (chat.awaitingUser) { workflowState = "asking_question"; stateOrigin = "agent"; stateDetail = "The agent is waiting for your reply"; }
   else {
     const prs = (chat.pullRequests || []).filter(pr => pr.verifiedAt);

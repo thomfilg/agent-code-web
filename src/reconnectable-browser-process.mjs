@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { createHash, randomUUID } from "node:crypto";
 import { WorkerProcessTransport } from "./worker-process-transport.mjs";
-import { MAX_INPUT_BYTES, safeId } from "./worker-transport-wire.mjs";
+import { MAX_INPUT_BYTES, PROTOCOL, safeId } from "./worker-transport-wire.mjs";
 
 const processId = "shared-chrome", controllerLifetime = randomUUID();
 const hash = value => createHash("sha256").update(value).digest("hex");
@@ -10,6 +10,12 @@ const unavailable = message => new Error(`Browser reconnect: ${message}`);
 const sameReceipt = (left, right) => Boolean(left && right)
   && ["protocol", "supervisorInstanceId", "processId", "processInstanceId", "pid", "startedAt"].every(key => left[key] === right[key])
   && JSON.stringify(left.groupAnchor) === JSON.stringify(right.groupAnchor);
+const validReceipt = receipt => receipt?.protocol === PROTOCOL && receipt.processId === processId
+  && safeId(receipt.supervisorInstanceId) && safeId(receipt.processInstanceId)
+  && Number.isSafeInteger(receipt.pid) && receipt.pid > 1
+  && typeof receipt.startedAt === "string" && Number.isFinite(Date.parse(receipt.startedAt))
+  && Number.isSafeInteger(receipt.groupAnchor?.pid) && receipt.groupAnchor.pid > 1
+  && typeof receipt.groupAnchor?.start === "string" && /^[0-9]+$/.test(receipt.groupAnchor.start);
 const acceptedMatchesLedger = (ledger, accepted) => {
   if (!Number.isSafeInteger(accepted) || accepted < 0) return false;
   if (!ledger.input) return accepted === ledger.nextInputSeq - 1;
@@ -126,7 +132,7 @@ export class ReconnectableBrowserProcess extends EventEmitter {
         if (saved?.receipt) { this.receipt = saved.receipt; this.context.retain?.(this.receipt); }
         const retry = () => this.receipt ? this.terminateRemote() : this.context.dispose({ failed: true });
         if (saved.lifetime === this.controllerLifetime) throw recoveryFailure(this.context, "a second facade in the same controller lifetime was refused", retry);
-        if (saved.schema !== 2 || saved.state !== "running" || !sameReceipt(saved.receipt, saved.receipt) || saved.receipt.processId !== processId
+        if (saved.schema !== 2 || saved.state !== "running" || !validReceipt(saved.receipt)
           || !Number.isSafeInteger(saved.nextInputSeq) || saved.nextInputSeq < 1 || !Array.isArray(saved.rpcs)
           || saved.rpcs.some(rpc => rpc?.mutating !== false)
           || saved.input && (saved.input.mutating || saved.input.chunks !== 1)

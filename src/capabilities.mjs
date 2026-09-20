@@ -3,6 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 function digest(token) {
   return createHash("sha256").update(token).digest();
 }
+const hashPattern = /^[a-f0-9]{64}$/;
 
 export class CapabilityBroker {
   #entries = new Map();
@@ -36,6 +37,47 @@ export class CapabilityBroker {
       entry.timer.unref?.();
     }
     return token;
+  }
+
+  snapshotHash(chatId, provider) {
+    const matches = [];
+    for (const [key, entry] of this.#entries) if (entry.chatId === chatId && entry.provider === provider && this.#live(key, entry)) matches.push(key);
+    if (matches.length > 1) throw new Error("Capability scope is ambiguous");
+    return matches[0] || null;
+  }
+
+  restoreHash({ hash, chatId, provider, renewable = false, validWhile = null }) {
+    if (!hashPattern.test(hash || "")) throw new Error("Capability checkpoint hash is invalid");
+    if (renewable && typeof validWhile !== "function") throw new Error("Renewable capabilities require a controller-owned scope guard");
+    const existing = this.#entries.get(hash);
+    if (existing && this.#live(hash, existing) && (existing.chatId !== chatId || existing.provider !== provider)) {
+      throw new Error("Capability checkpoint is already owned by another scope");
+    }
+    this.revokeChat(chatId);
+    const bytes = Buffer.from(hash, "hex"), entry = { hash: bytes, chatId, provider,
+      expiresAt: this.now() + this.ttlMs, validWhile, observers: new Set() };
+    this.#entries.set(hash, entry);
+    if (renewable) {
+      entry.timer = setInterval(() => {
+        if (this.#entries.get(hash) !== entry || !this.#live(hash, entry)) return;
+        entry.expiresAt = this.now() + this.ttlMs;
+      }, Math.max(1, Math.floor(this.ttlMs / 3)));
+      entry.timer.unref?.();
+    }
+    return hash;
+  }
+
+  restoreToken({ token, chatId, provider, renewable = false, validWhile = null }) {
+    if (!/^cap_[A-Za-z0-9_-]{43}$/.test(token || "")) throw new Error("Capability checkpoint token is invalid");
+    this.restoreHash({ hash: digest(token).toString("hex"), chatId, provider, renewable, validWhile });
+    return token;
+  }
+
+  validateHash(hash, provider) {
+    if (!hashPattern.test(hash || "")) return null;
+    const entry = this.#entries.get(hash);
+    if (!entry || entry.provider !== provider || !this.#live(hash, entry)) return null;
+    return { chatId: entry.chatId, provider: entry.provider, expiresAt: entry.expiresAt };
   }
 
   validate(token, provider) {

@@ -58,6 +58,25 @@ test("missed renewal, revocation, guard errors and replacement tokens never resu
   assert.equal(broker.size, 0);
 });
 
+test("a controller can restore only the hash of a revalidated retained-process capability", t => {
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: 1000000 });
+  const first = new CapabilityBroker({ ttlMs: 3000 });
+  const token = first.issue({ chatId: "retained", provider: "mcp" });
+  const hash = first.snapshotHash("retained", "mcp");
+  assert.match(hash, /^[a-f0-9]{64}$/);
+  first.revokeChat("retained"); assert.equal(first.validate(token, "mcp"), null);
+
+  let allowed = true;
+  const restored = new CapabilityBroker({ ttlMs: 3000 });
+  restored.restoreToken({ token, chatId: "retained", provider: "mcp", renewable: true, validWhile: () => allowed });
+  assert(restored.validate(token, "mcp"));
+  assert.throws(() => restored.restoreToken({ token, chatId: "other", provider: "mcp" }), /another scope/);
+  assert(restored.validateHash(hash, "mcp"));
+  assert.equal(restored.validateHash(hash, "github-worker"), null);
+  assert.throws(() => restored.restoreHash({ hash: "0".repeat(63), chatId: "retained", provider: "mcp" }), /invalid/);
+  allowed = false; assert.equal(restored.validate(token, "mcp"), null);
+});
+
 test("gateway swaps a chat capability for the real provider key", async (t) => {
   let received;
   let upstreamRequests = 0;

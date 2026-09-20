@@ -7,13 +7,15 @@ import { isIP } from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertWorkerImage, workerAcceptanceVersion, workerImageIdentity, workerImageTags } from "../../src/worker-image.mjs";
+import { workerHibernationAcceptance, workerHibernationAcceptanceId, workerHibernationCandidate } from "../../src/worker-suspension.mjs";
+import { workerSupervisorVersion } from "../../src/worker-supervisor-service.mjs";
 
 const execute = promisify(execFile);
 const privateIp = value => isIP(value) === 4 && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(value);
 const tagsOf = resource => Object.fromEntries((resource?.Tags || []).map(({ Key, Value }) => [Key, Value]));
 const quote = value => `'${String(value).replaceAll("'", `'"'"'`)}'`;
 const imageTags = { ManagedBy: "agent-relay", CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" };
-const probeFailureCategories = new Set(["worker-user", "native-version", "image-audit", "heartbeat", "sentinel", "invalid-receipt", "ssh-host-key", "ssh-permission-denied", "ssh-connection-refused", "ssh-network-unreachable", "remote-command-missing", "ssh-transport", "remote-command-failed", "ssh-probe-timeout", "ssh-executable-unavailable"]);
+const probeFailureCategories = new Set(["worker-user", "native-version", "image-audit", "heartbeat", "sentinel", "native-process", "invalid-receipt", "ssh-host-key", "ssh-permission-denied", "ssh-connection-refused", "ssh-network-unreachable", "remote-command-missing", "ssh-transport", "remote-command-failed", "ssh-probe-timeout", "ssh-executable-unavailable"]);
 const probeStages = new Set(["request", "identity", "native-version", "image-audit-run", "image-audit-json", "image-audit-validation", "heartbeat", "sentinel", "receipt"]);
 const exceptionClasses = new Set(["RuntimeError", "JSONDecodeError", "FileNotFoundError", "PermissionError", "TimeoutExpired", "CalledProcessError", "OSError", "ValueError", "TypeError", "KeyError", "IndexError", "AttributeError", "NameError", "UnboundLocalError", "ImportError", "ModuleNotFoundError", "UnicodeDecodeError", "AssertionError"]);
 
@@ -46,7 +48,7 @@ export function parseVerificationOptions(args) {
   return options;
 }
 
-export function verifyReceipt(receipt, { verificationId, workerId, phase, previous } = {}) {
+export function verifyReceipt(receipt, { verificationId, workerId, phase, previous, hibernation = false } = {}) {
   if (receipt?.schema !== 1 || receipt.verificationId !== verificationId || receipt.workerId !== workerId || receipt.phase !== phase || receipt.heartbeatFresh !== true || receipt.sentinelPresent !== true || receipt.versions?.codex !== "codex-cli 0.154.0" || receipt.versions?.claude !== "2.1.222 (Claude Code)") throw new Error("Worker acceptance receipt is incomplete or belongs to another probe");
   const audit = receipt.audit;
   for (const key of ["valid", "finalized", "cloudInitDisabled", "ssmDisabled", "credentialsAbsent", "transportKeyMatches", "freshIdentity", "heartbeatEnabled", "watchdogActive"]) if (audit?.[key] !== true) throw new Error(`Worker image acceptance failed: ${key}`);
@@ -54,6 +56,9 @@ export function verifyReceipt(receipt, { verificationId, workerId, phase, previo
   const knownHosts = receipt.knownHosts;
   if (typeof knownHosts !== "string" || knownHosts.length > 4096 || !knownHosts.trim().split("\n").every(line => new RegExp(`^verify-${workerId} (?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/=]+$`).test(line))) throw new Error("Worker acceptance lacks a pinned public SSH host identity");
   if (previous && (previous.audit.machine !== audit.machine || Object.keys(previous.audit.hostKeys).length !== Object.keys(audit.hostKeys).length || Object.entries(previous.audit.hostKeys).some(([key, value]) => audit.hostKeys[key] !== value) || previous.knownHosts !== knownHosts)) throw new Error("Worker machine/SSH identity changed across stop/start");
+  if (hibernation && (!/^[a-f0-9]{64}$/.test(receipt.processIdentity || "") || previous && receipt.processIdentity !== previous.processIdentity)) {
+    throw new Error("Worker native process identity did not survive hibernation");
+  }
   return receipt;
 }
 
@@ -65,8 +70,10 @@ async function defaultRun(args) {
   }
 }
 
-export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), log = () => {}, pollLimit = 90 } = {}) {
-  if (o.dryRun) return { dryRun: true, account: o.account, deployment: o.deployment, imageId: o.imageId, region: o.region, actions: ["preflight", "private-worker-launch", "controller-SSM-SSH-audit", "stop-start-persistence", "terminate-exact-test-worker", "observe-disposable-volume-deletion", "mark-exact-accepted-image"], promptsSent: false, accountImports: false };
+async function verifyImage(o, { run = defaultRun, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), log = () => {}, pollLimit = 90 } = {}, hibernation = false) {
+  if (o.dryRun) return { dryRun: true, account: o.account, deployment: o.deployment, imageId: o.imageId, region: o.region,
+    actions: ["preflight", "private-worker-launch", "controller-SSM-SSH-audit", hibernation ? "native-process-hibernate-resume" : "stop-start-persistence", "terminate-exact-test-worker", "observe-disposable-volume-deletion", hibernation ? "mark-exact-hibernation-accepted-image" : "mark-exact-accepted-image"],
+    promptsSent: false, accountImports: false };
   const aws = (...args) => run([...(o.profile ? ["--profile", o.profile] : []), "--region", o.region, "--no-cli-pager", ...args]);
   const json = async (...args) => JSON.parse(await aws(...args, "--output", "json"));
   const identity = await json("sts", "get-caller-identity");
@@ -93,7 +100,10 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
   if (ingress?.length !== 1 || ingress[0].IpProtocol !== "tcp" || ingress[0].FromPort !== 22 || ingress[0].ToPort !== 22 || ingress[0].UserIdGroupPairs?.length !== 1 || ingress[0].UserIdGroupPairs[0].GroupId !== controllerGroup || ingress[0].IpRanges?.length || ingress[0].Ipv6Ranges?.length || ingress[0].PrefixListIds?.length) throw new Error("Acceptance permits only controller-to-worker SSH ingress");
   const images = await json("ec2", "describe-images", "--image-ids", o.imageId, "--owners", o.account, "--query", "Images");
   const image = images?.[0], tags = tagsOf(image);
-  if (tags.AgentRelayHibernation) throw new Error("A hibernation candidate requires process-resume acceptance, not the ordinary stop/start verifier");
+  if (!hibernation && tags.AgentRelayHibernation) throw new Error("A hibernation candidate requires process-resume acceptance, not the ordinary stop/start verifier");
+  if (hibernation && (tags.AgentRelayHibernation !== workerHibernationCandidate || tags.AgentRelaySupervisor !== workerSupervisorVersion)) {
+    throw new Error("Hibernation acceptance requires the exact candidate recipe and reconnectable supervisor");
+  }
   const imageScope = { imageId: o.imageId, account: o.account, deployment: o.deployment, keyName: outputs.WorkerKeyName };
   assertWorkerImage(image, { ...imageScope, accepted: false });
   const imageIdentity = workerImageIdentity(image);
@@ -128,7 +138,8 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
     // EC2 releases interfaces during shutting-down, not only after terminated.
     // This reduced check is read-only: no mutation can follow it without a new
     // strict check, and immutable identity plus every ownership tag still match.
-    if (!(terminationObservation && ["shutting-down", "terminated"].includes(current.State?.Name)) && (current.SubnetId !== outputs.WorkerSubnetId || current.SecurityGroups?.length !== 1 || current.SecurityGroups[0].GroupId !== outputs.WorkerSecurityGroupId || current.KeyName !== outputs.WorkerKeyName || current.IamInstanceProfile || current.PublicIpAddress || current.MetadataOptions?.HttpEndpoint !== "disabled")) throw new Error("Test worker isolation changed; refusing mutation");
+    if (!(terminationObservation && ["shutting-down", "terminated"].includes(current.State?.Name)) && (current.SubnetId !== outputs.WorkerSubnetId || current.SecurityGroups?.length !== 1 || current.SecurityGroups[0].GroupId !== outputs.WorkerSecurityGroupId || current.KeyName !== outputs.WorkerKeyName || current.IamInstanceProfile || current.PublicIpAddress || current.MetadataOptions?.HttpEndpoint !== "disabled"
+      || hibernation && current.HibernationOptions?.Configured !== true)) throw new Error("Test worker isolation changed; refusing mutation");
     return current;
   }
   async function poll(description, check) {
@@ -154,7 +165,8 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
     const current = await worker();
     if (current.State?.Name !== "running" || !privateIp(current.PrivateIpAddress)) throw new Error("Test worker is not privately reachable/running");
     workerHost = current.PrivateIpAddress;
-    const payload = { account: o.account, region: o.region, secretArn: outputs.SecretArn, verificationId, workerId, host: workerHost, publicKey, phase, sentinel, ...(previous ? { knownHosts: previous.knownHosts } : {}) };
+    const payload = { account: o.account, region: o.region, secretArn: outputs.SecretArn, verificationId, workerId, host: workerHost, publicKey, phase, sentinel, hibernation,
+      ...(previous ? { knownHosts: previous.knownHosts, processIdentity: previous.processIdentity } : {}) };
     const code = `import base64;exec(base64.b64decode('${Buffer.from(controllerScript).toString("base64")}'))`;
     const command = `python3 -I -c ${quote(code)} ${quote(Buffer.from(JSON.stringify(payload)).toString("base64"))}`;
     const sent = await json("ssm", "send-command", "--instance-ids", outputs.ControllerInstanceId, "--document-name", "AWS-RunShellScript", "--timeout-seconds", "120", "--parameters", JSON.stringify({ commands: [command], executionTimeout: ["420"] }));
@@ -166,7 +178,7 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
       catch (error) { if (error.message === "InvocationDoesNotExist") return false; throw error; }
       if (["Pending", "InProgress", "Delayed"].includes(invocation.Status)) return false;
       if (invocation.Status !== "Success" || invocation.ResponseCode !== 0) throw new Error(`Worker acceptance audit failed (${phase})${safeProbeFailure(invocation.StandardOutputContent)}; inspect scoped SSM command ${commandId}; private output suppressed`);
-      try { return verifyReceipt(JSON.parse(invocation.StandardOutputContent), { verificationId, workerId, phase, previous }); }
+      try { return verifyReceipt(JSON.parse(invocation.StandardOutputContent), { verificationId, workerId, phase, previous, hibernation }); }
       catch { throw new Error(`Worker acceptance receipt failed validation (${phase}); no private output emitted`); }
     });
     return { ...result, commandId };
@@ -178,6 +190,7 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
     const launched = await json("ec2", "run-instances", "--image-id", o.imageId, "--instance-type", "t3.medium", "--client-token", verificationId,
       "--network-interfaces", JSON.stringify([{ DeviceIndex: 0, SubnetId: outputs.WorkerSubnetId, Groups: [outputs.WorkerSecurityGroupId], AssociatePublicIpAddress: false, DeleteOnTermination: true }]),
       "--key-name", outputs.WorkerKeyName, "--metadata-options", "HttpTokens=required,HttpEndpoint=disabled", "--instance-initiated-shutdown-behavior", "stop", "--credit-specification", "CpuCredits=standard",
+      ...(hibernation ? ["--hibernation-options", "Configured=true"] : []),
       "--block-device-mappings", JSON.stringify([{ DeviceName: image.RootDeviceName, Ebs: { VolumeType: "gp3", VolumeSize: Math.max(20, rootDisks[0].Ebs.VolumeSize || 20), Encrypted: true, DeleteOnTermination: true } }]),
       "--tag-specifications", JSON.stringify(["instance", "volume"].map(ResourceType => ({ ResourceType, Tags }))), "--query", "Instances[0].InstanceId");
     if (!/^i-[a-f0-9]{8,17}$/.test(launched || "")) throw new Error("Invalid acceptance worker ID");
@@ -192,15 +205,18 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
     for (const volumeId of disposableVolumes) await volume(volumeId);
     const fresh = await probe("fresh");
     await worker();
-    await aws("ec2", "stop-instances", "--instance-ids", workerId);
+    await aws("ec2", "stop-instances", ...(hibernation ? ["--hibernate"] : []), "--instance-ids", workerId);
     await poll("test worker stopped", async () => (await worker()).State?.Name === "stopped");
     await worker();
     await aws("ec2", "start-instances", "--instance-ids", workerId);
     await poll("test worker resumed", async () => (await worker()).State?.Name === "running");
     const resumed = await probe("resumed", fresh);
     receipt = { accepted: true, schema: 1, account: o.account, region: o.region, deployment: o.deployment, imageId: o.imageId, verificationId, workerId, controllerId: outputs.ControllerInstanceId,
-      checks: { freshBoot: true, disabledMetadata: true, noInstanceRole: true, privateNetwork: true, credentialScrub: true, pinnedNativeVersions: true, freshMachineAndHostIdentity: true, identitySurvivedStopStart: true, sentinelSurvivedStopStart: true, heartbeatFreshAfterBoot: true, controllerSecretStayedLocal: true },
-      evidence: { freshCommandId: fresh.commandId, resumedCommandId: resumed.commandId, machineHash: resumed.audit.machine, hostKeyHashes: resumed.audit.hostKeys }, promptsSent: false, accountImports: false };
+      checks: { freshBoot: true, disabledMetadata: true, noInstanceRole: true, privateNetwork: true, credentialScrub: true, pinnedNativeVersions: true, freshMachineAndHostIdentity: true,
+        ...(hibernation ? { machineIdentitySurvivedHibernation: true, nativeProcessSurvivedHibernation: true, sentinelSurvivedHibernation: true }
+          : { identitySurvivedStopStart: true, sentinelSurvivedStopStart: true }), heartbeatFreshAfterBoot: true, controllerSecretStayedLocal: true },
+      evidence: { freshCommandId: fresh.commandId, resumedCommandId: resumed.commandId, machineHash: resumed.audit.machine, hostKeyHashes: resumed.audit.hostKeys,
+        ...(hibernation ? { processIdentity: resumed.processIdentity } : {}) }, promptsSent: false, accountImports: false };
   } catch (error) {
     primaryFailure = error;
     throw error;
@@ -228,22 +244,33 @@ export async function verifyWorkerImage(o, { run = defaultRun, sleep = ms => new
   async function checkedImage(accepted = false) {
     const current = await json("ec2", "describe-images", "--image-ids", o.imageId, "--owners", o.account, "--query", "Images");
     if (current?.length !== 1) throw new Error("Acceptance image disappeared or ownership changed");
-    assertWorkerImage(current[0], { ...imageScope, accepted });
+    assertWorkerImage(current[0], { ...imageScope, accepted: accepted && !hibernation });
     if (workerImageIdentity(current[0]) !== imageIdentity) throw new Error("Acceptance image identity changed; refusing to mark it");
+    if (accepted && hibernation) {
+      const currentTags = workerImageTags(current[0]);
+      if (currentTags.AgentRelayHibernationAcceptance !== workerHibernationAcceptance
+        || !workerHibernationAcceptanceId.test(currentTags.AgentRelayHibernationAcceptanceId || "")) throw new Error("Hibernation acceptance marker is incomplete");
+    }
     return current[0];
   }
   if (!receipt?.accepted || !cleaned || !disposableVolumes.length) throw new Error("Acceptance has no complete cleanup evidence; refusing to mark image");
   await checkedImage();
   try {
-    await aws("ec2", "create-tags", "--resources", o.imageId, "--tags", JSON.stringify([
-      { Key: "AgentRelayAcceptance", Value: workerAcceptanceVersion }, { Key: "AgentRelayAcceptanceId", Value: verificationId },
-    ]));
-    if (workerImageTags(await checkedImage(true)).AgentRelayAcceptanceId !== verificationId) throw new Error();
+    const acceptanceTags = hibernation
+      ? [{ Key: "AgentRelayHibernationAcceptance", Value: workerHibernationAcceptance }, { Key: "AgentRelayHibernationAcceptanceId", Value: verificationId }]
+      : [{ Key: "AgentRelayAcceptance", Value: workerAcceptanceVersion }, { Key: "AgentRelayAcceptanceId", Value: verificationId }];
+    await aws("ec2", "create-tags", "--resources", o.imageId, "--tags", JSON.stringify(acceptanceTags));
+    const confirmed = workerImageTags(await checkedImage(true));
+    if ((hibernation ? confirmed.AgentRelayHibernationAcceptanceId : confirmed.AgentRelayAcceptanceId) !== verificationId) throw new Error();
   } catch {
     throw new Error("Worker probes and cleanup passed, but acceptance marker was not confirmed; inspect only this AMI before retrying");
   }
-  return { ...receipt, cleanedUp: cleaned, volumesRemoved: disposableVolumes.length, acceptance: { version: workerAcceptanceVersion, verificationId, confirmed: true } };
+  return { ...receipt, cleanedUp: cleaned, volumesRemoved: disposableVolumes.length,
+    acceptance: { version: hibernation ? workerHibernationAcceptance : workerAcceptanceVersion, verificationId, confirmed: true, ...(hibernation ? { kind: "hibernation" } : {}) } };
 }
+
+export function verifyWorkerImage(options, dependencies) { return verifyImage(options, dependencies, false); }
+export function verifyHibernationImage(options, dependencies) { return verifyImage(options, dependencies, true); }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   try { console.log(JSON.stringify(await verifyWorkerImage(parseVerificationOptions(process.argv.slice(2)), { log: message => console.error(message) }), null, 2)); }

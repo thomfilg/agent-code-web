@@ -113,10 +113,45 @@ test("EC2 clone failure or cancellation after SSH never uploads a workspace", as
   }
 });
 
-test("hibernation opt-in denies direct acquisition before any AWS/SSH operation", async () => {
+test("hibernation opt-in performs only read-only admission before rejecting an unaccepted image", async () => {
   const { backend, calls } = fixture({ config: ec2Config({ AGENT_IDLE_POLICY: "hibernate" }) });
   await assert.rejects(backend.acquire(chat), { code: "HIBERNATION_UNAVAILABLE" });
-  assert.deepEqual(calls, []);
+  assert.ok(calls.some(call => call.args.includes("describe-instances")));
+  assert.ok(calls.some(call => call.args.includes("describe-images")));
+  assert.ok(calls.every(call => call.args.includes("describe-instances") || call.args.includes("describe-images")));
+});
+
+test("verified hibernation image admits exact resume and uses only EC2 hibernate for idle suspension", async () => {
+  const accepted = image({ Tags: [...image().Tags,
+    { Key: "AgentRelaySupervisor", Value: "v3" },
+    { Key: "AgentRelayHibernation", Value: "candidate-v1" },
+    { Key: "AgentRelayHibernationAcceptance", Value: "verified-v1" },
+    { Key: "AgentRelayHibernationAcceptanceId", Value: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+  ] });
+  const initial = instance({ HibernationOptions: { Configured: true } });
+  const { backend, calls } = fixture({ initial, ami: accepted, config: ec2Config({ AGENT_IDLE_POLICY: "hibernate" }) });
+  backend.store = { records: {} };
+  assert.deepEqual(await backend.suspensionAdmission(chat), { available: true, backend: true, transport: true, image: true, reason: null });
+  const executor = await backend.acquire(chat);
+  const expected = executor.acquisitionReceipt.worker;
+  assert.equal(executor.supervisorReady, true);
+  assert.deepEqual(await backend.hibernate({ ...chat, workerLifecycle: { worker: expected } }, expected), { instanceId: initial.InstanceId, hibernated: true });
+  const hibernate = calls.find(call => call.args.includes("stop-instances") && call.args.includes("--hibernate"));
+  assert.ok(hibernate); assert.equal(hibernate.args.at(-1), initial.InstanceId);
+  const resumed = await backend.acquire(chat, { action: "resume", expectedWorker: expected });
+  assert.equal(resumed.metadata.bootId, expected.bootId);
+  assert.equal(calls.filter(call => call.args.includes("start-instances")).length, 2);
+  assert.equal(calls.some(call => call.args.includes("terminate-instances")), false);
+});
+
+test("EC2 resume never creates or starts a replacement worker", async () => {
+  const accepted = image({ Tags: [...image().Tags,
+    { Key: "AgentRelaySupervisor", Value: "v3" }, { Key: "AgentRelayHibernation", Value: "candidate-v1" },
+    { Key: "AgentRelayHibernationAcceptance", Value: "verified-v1" }, { Key: "AgentRelayHibernationAcceptanceId", Value: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+  ] });
+  const { backend, calls } = fixture({ initial: instance({ HibernationOptions: { Configured: true } }), ami: accepted, config: ec2Config({ AGENT_IDLE_POLICY: "hibernate" }) });
+  await assert.rejects(backend.acquire(chat, { action: "resume", expectedWorker: { backend: "ec2", instanceId: "i-bbbbbbbbbbbbbbbbb", imageId: "ami-aaaaaaaaaaaaaaaaa" } }), /identity changed/);
+  assert.equal(calls.some(call => call.args.includes("start-instances") || call.args.includes("run-instances")), false);
 });
 
 test("running worker admission rejection produces no rollback authority", async () => {

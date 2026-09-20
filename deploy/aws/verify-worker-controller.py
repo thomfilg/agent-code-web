@@ -26,7 +26,7 @@ CREDENTIAL_COUNTS = ('providerAuthFiles', 'sshPrivateKeyFiles', 'pemFiles', 'ssm
 METADATA_RESULTS = ('token-endpoint-accessible', 'http-403-denied', 'http-401-unauthorized',
                     'unexpected-http-response', 'network-unavailable', 'unexpected-network-error')
 PROBE_STAGES = ('request', 'identity', 'native-version', 'image-audit-run', 'image-audit-json',
-                'image-audit-validation', 'heartbeat', 'sentinel', 'receipt')
+                'image-audit-validation', 'heartbeat', 'sentinel', 'native-process', 'receipt')
 EXCEPTION_CLASSES = ('RuntimeError', 'JSONDecodeError', 'FileNotFoundError', 'PermissionError',
                      'TimeoutExpired', 'CalledProcessError', 'OSError', 'ValueError', 'TypeError',
                      'KeyError', 'IndexError', 'AttributeError', 'NameError', 'UnboundLocalError',
@@ -70,7 +70,8 @@ def probe_failure(result):
         reason = None
     known_checks = {'wrong worker user': 'worker-user', 'native version mismatch': 'native-version',
                     'image scrub audit failed': 'image-audit', 'boot heartbeat is stale': 'heartbeat',
-                    'worker sentinel mismatch': 'sentinel', 'invalid-worker-receipt': 'invalid-receipt'}
+                    'worker sentinel mismatch': 'sentinel', 'native process did not survive hibernation': 'native-process',
+                    'invalid-worker-receipt': 'invalid-receipt'}
     if reason in known_checks:
         return ProbeFailure(known_checks[reason], result.returncode, worker_failure.get('auditChecks'), worker_failure.get('credentialFailureCounts'), worker_failure.get('metadataProbe'), worker_failure)
     stderr = (result.stderr or '').lower()
@@ -100,7 +101,7 @@ def failure_receipt(error):
 
 
 WORKER_PROBE = r'''
-import json, os, pathlib, re, subprocess, sys, time
+import hashlib, json, os, pathlib, re, subprocess, sys, time
 audit_checks = {}
 credential_counts = {}
 metadata_probe = None
@@ -146,10 +147,43 @@ try:
     persisted = sentinel.read_text() == request['sentinel']
     if not persisted:
         raise RuntimeError('worker sentinel mismatch')
+    process_identity = None
+    if request.get('hibernation') is True:
+        stage = 'native-process'
+        marker = 'relay-hibernation-' + request['verificationId']
+        process_file = pathlib.Path('/opt/agent-web/verify-' + request['verificationId'] + '.native')
+        if request['phase'] == 'fresh':
+            child = subprocess.Popen(['/usr/bin/python3', '-I', '-c', 'import time; time.sleep(1800)', marker],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                     start_new_session=True, close_fds=True)
+            time.sleep(0.1)
+            if child.poll() is not None:
+                raise RuntimeError('native process did not survive hibernation')
+            stat = pathlib.Path('/proc/' + str(child.pid) + '/stat').read_text().split()
+            saved = {'pid': child.pid, 'start': stat[21], 'boot': pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip(), 'marker': marker}
+            fd = os.open(process_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, 'w') as target:
+                json.dump(saved, target, sort_keys=True, separators=(',', ':'))
+        else:
+            saved = json.loads(process_file.read_text())
+        encoded_identity = json.dumps(saved, sort_keys=True, separators=(',', ':')).encode()
+        process_identity = hashlib.sha256(encoded_identity).hexdigest()
+        process_path = pathlib.Path('/proc/' + str(saved.get('pid')))
+        try:
+            stat = (process_path / 'stat').read_text().split()
+            cmdline = (process_path / 'cmdline').read_bytes().split(b'\0')
+            same_process = stat[21] == saved.get('start') and saved.get('marker', '').encode() in cmdline
+            same_kernel = pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip() == saved.get('boot')
+        except (FileNotFoundError, PermissionError, IndexError):
+            same_process = same_kernel = False
+        if (request['phase'] == 'resumed' and request.get('processIdentity') != process_identity) or not same_process or not same_kernel:
+            raise RuntimeError('native process did not survive hibernation')
     stage = 'receipt'
-    print(json.dumps({'audit': receipt, 'versions': versions, 'heartbeatFresh': fresh, 'sentinelPresent': persisted}))
+    print(json.dumps({'audit': receipt, 'versions': versions, 'heartbeatFresh': fresh, 'sentinelPresent': persisted,
+                      **({'processIdentity': process_identity} if process_identity else {})}))
 except Exception as error:
-    reasons = ('wrong worker user', 'native version mismatch', 'image scrub audit failed', 'boot heartbeat is stale', 'worker sentinel mismatch')
+    reasons = ('wrong worker user', 'native version mismatch', 'image scrub audit failed', 'boot heartbeat is stale',
+               'worker sentinel mismatch', 'native process did not survive hibernation')
     failure = {'error': 'Worker acceptance checks failed; no private diagnostics emitted', 'reason': str(error) if isinstance(error, RuntimeError) and str(error) in reasons else 'invalid-worker-receipt'}
     failure['probeStage'] = stage
     if type(error).__name__ in exception_classes:
@@ -183,6 +217,8 @@ def main():
     if not pathlib.Path('/var/lib/relay-controller-ready').is_file():
         raise RuntimeError('Controller bootstrap is not ready')
     if not re.fullmatch(r'[a-f0-9-]{36}', request['verificationId']) or request['phase'] not in ('fresh', 'resumed'):
+        raise RuntimeError('Invalid verification request')
+    if type(request.get('hibernation')) is not bool or request['phase'] == 'resumed' and request['hibernation'] and not re.fullmatch(r'[a-f0-9]{64}', request.get('processIdentity', '')):
         raise RuntimeError('Invalid verification request')
     if not re.fullmatch(r'i-[a-f0-9]{8,17}', request['workerId']):
         raise RuntimeError('Invalid worker ID')
@@ -234,7 +270,9 @@ def main():
                '-o', 'HostKeyAlias=verify-' + request['workerId'],
                '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=2',
                'ubuntu@' + request['host']]
-        worker_request = {key: request[key] for key in ('verificationId', 'phase', 'sentinel')}
+        worker_request = {key: request[key] for key in ('verificationId', 'phase', 'sentinel', 'hibernation')}
+        if request.get('processIdentity'):
+            worker_request['processIdentity'] = request['processIdentity']
         command = 'python3 -I -c ' + shlex.quote(WORKER_PROBE) + ' ' + shlex.quote(json.dumps(worker_request))
         deadline = time.monotonic() + 240
         audit_attempts = 0

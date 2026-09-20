@@ -160,7 +160,16 @@ export class SharedBrowsers {
       await existing.ready;
       if (existing.stopping) throw new Error("Browser is stopping; retry Stop if cleanup failed");
       if (existing.browser?.child?.reconnect) existing.browser.watchingRequested = existing.viewers.size > 0;
-      await existing.browser?.ensureConnected();
+      if (existing.suspended) {
+        existing.resumePromise ||= (async () => {
+          await this.acquire(chatId);
+          if (this.entries.get(chatId) !== existing || (this.versions.get(chatId) || 0) !== version) throw new Error("Browser resume cancelled");
+          await existing.browser?.ensureConnected();
+          existing.suspended = false;
+          this.touch(chatId);
+        })().finally(() => { existing.resumePromise = null; });
+        await existing.resumePromise;
+      } else await existing.browser?.ensureConnected();
       if (this.entries.get(chatId) !== existing || (this.versions.get(chatId) || 0) !== version) throw new Error("Browser start cancelled");
       return existing;
     }
@@ -292,17 +301,69 @@ export class SharedBrowsers {
     })();
     try { await entry.stopPromise; } finally { entry.stopPromise = null; }
   }
+  async revokeForSuspend(chatId) {
+    await this.personal?.revokeChat(chatId);
+    this.invalidateOfficial(chatId);
+    const attempt = this.browserAttempts.get(chatId);
+    const cleanup = () => attempt?.proxy ? attempt.proxy.revoke() : attempt?.cleanup?.();
+    try { await cleanup(); }
+    catch { throw new Error("Browser capability cleanup is unconfirmed; hibernation was cancelled"); }
+    if (this.browserAttempts.get(chatId) === attempt) this.browserAttempts.delete(chatId);
+    this.grants.revokeChat(chatId);
+  }
+  async detachForSuspend(chatId) {
+    const entry = this.entries.get(chatId);
+    if (!entry) return { retained: false };
+    await entry.ready;
+    if (entry.suspended) return { retained: true, processId: "shared-chrome" };
+    if (entry.stopping || entry.viewers.size || entry.browser.pending.size) throw new Error("Shared Chrome is not at a quiescent suspension boundary");
+    clearTimeout(entry.idleTimer); clearInterval(entry.browser.heartbeat);
+    await entry.browser.heartbeatPending?.catch(() => {});
+    await entry.browser.ensureConnected();
+    if (entry.browser.pending.size) throw new Error("Shared Chrome changed while preparing suspension");
+    if (entry.browser.watchingRequested) await entry.browser.command("watch", { enabled: false });
+    const child = entry.browser.child;
+    await child.inputQueue; await child.outputQueue; await child.storageQueue;
+    if (child.detached || typeof child.detach !== "function") throw new Error("Shared Chrome transport cannot detach safely");
+    child.detach();
+    entry.suspended = true;
+    let resumed = false;
+    return { retained: true, processId: "shared-chrome", resume: async () => {
+      if (resumed) return;
+      const current = this.entries.get(chatId);
+      if (current !== entry) throw new Error("Shared Chrome was replaced before suspension rollback");
+      await entry.browser.ensureConnected();
+      entry.suspended = false;
+      resumed = true; this.touch(chatId);
+    } };
+  }
   async shutdown() {
     await this.personal?.shutdown();
+    for (const [chatId, entry] of this.entries) {
+      if (!entry.suspended) continue;
+      clearTimeout(entry.idleTimer); clearInterval(entry.browser?.heartbeat);
+      entry.browser?.child?.detach?.();
+      this.entries.delete(chatId); this.browserAttempts.delete(chatId); this.grants.revokeChat(chatId);
+    }
     await Promise.allSettled([...new Set([...this.entries.keys(),...this.browserAttempts.keys()])].map(id => this.stop(id)));
   }
-  runtime(chatId, origin, {validWhile = null} = {}) {
+  suspendRuntime(chatId) {
+    const attempt = this.browserAttempts.get(chatId);
+    if (!attempt) return null;
+    if (typeof attempt.validWhile !== "function" || attempt.validWhile() !== true) throw new Error("Browser capability expired before hibernation");
+    if (!attempt.capabilityToken || !this.grants.validate(attempt.capabilityToken, "browser")) throw new Error("Browser capability expired before hibernation");
+    return { schema: 1, token: attempt.capabilityToken };
+  }
+  runtime(chatId, origin, {validWhile = null, restoreToken = null} = {}) {
+    if (restoreToken !== null && !/^cap_[A-Za-z0-9_-]{43}$/.test(restoreToken)) throw new Error("Browser hibernation checkpoint is invalid");
     const previous=this.browserAttempts.get(chatId);
     this.invalidateOfficial(chatId);
     const cleanup=previous?.proxy?previous.proxy.revoke.bind(previous.proxy):previous?.cleanup||(()=>Promise.resolve());
     const previousCleanup=cleanup();previousCleanup.catch(()=>{});
     this.browserAttempts.set(chatId,{id:randomUUID(),validWhile,personalUsed:false,cleanup,previousCleanup,generation:(this.versions.get(chatId)||0)+1});
-    const token = this.grants.issue({ chatId, provider: "browser" });
+    const token = restoreToken === null ? this.grants.issue({ chatId, provider: "browser" }) : restoreToken;
+    if (restoreToken !== null) this.grants.restoreToken({ token, chatId, provider: "browser" });
+    this.browserAttempts.get(chatId).capabilityToken = token;
     return { relay_browser: { type: "http", url: `${origin}/gateway/browser`, headers: { Authorization: `Bearer ${token}` } } };
   }
   invalidateOfficial(chatId) {

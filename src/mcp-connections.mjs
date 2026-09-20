@@ -9,11 +9,29 @@ import { connectionCompany } from "./companies.mjs";
 import { companyForChat, companyScope, normalizeCompanyScope, scopeAllows, scopesOverlap } from "../public/company-scope.js";
 const fail = message => Object.assign(new Error(message), { statusCode: 400 });
 const publicConnection = ({ headers, oauth, oauthClientSecret, authGeneration, ...connection }) => ({ ...connection, ...companyScope(connection), scopeNeedsReview: !Array.isArray(connection.companies) && !connection.organization, authMode: connection.authMode || (Object.keys(headers || {}).length ? "headers" : "none"), headerNames: Object.keys(headers || {}), hasCredentials: Boolean(Object.keys(headers || {}).length), oauthConnected: Boolean(oauth?.tokens), hasClientSecret: Boolean(oauthClientSecret), health: connection.health || { status: "unverified" } });
+const recoveryConnection = connection => ({ id: connection.id, revision: connection.revision || 0,
+  authGeneration: connection.authGeneration || 0, companyId: connectionCompany(connection) || null });
+const sameRecoveryConnections = (left, right) => JSON.stringify([...left].sort((a, b) => a.id.localeCompare(b.id)))
+  === JSON.stringify([...right].sort((a, b) => a.id.localeCompare(b.id)));
+const runtimeServers = (connections, origin, token) => {
+  const names = new Set(connections.filter(c => !companyScope(c).companies.length).map(c => `relay_${c.name}`));
+  return Object.fromEntries(connections.map(c => {
+    let name = `relay_${c.name}`;
+    if (companyScope(c).companies.length) {
+      name = `relay_${c.name.slice(0, 20)}_${c.id.slice(4).replaceAll("-", "")}`;
+      while (names.has(name)) name += "_";
+      names.add(name);
+    }
+    return [name, c.type === "http"
+      ? { type: "http", url: `${origin}/gateway/mcp/${c.id}`, headers: { Authorization: `Bearer ${token}` } }
+      : { type: "stdio", command: c.command, args: c.args }];
+  }));
+};
 
 export class McpConnections {
   constructor(records, { ttlMs = 86400000, fetchImpl = fetch, companies = null } = {}) {
     this.companies = companies;
-    this.records = records; this.fetch = fetchImpl; this.broker = new CapabilityBroker({ ttlMs }); this.grants = new Map(); this.queue = Promise.resolve();
+    this.records = records; this.fetch = fetchImpl; this.broker = new CapabilityBroker({ ttlMs }); this.grants = new Map(); this.runtimeTokens = new Map(); this.queue = Promise.resolve();
     this.oauth = new McpOAuth(this);
   }
   async list() { await this.queue; return (await this.records.list("mcp")).map(connection => ({ ...publicConnection(connection), ...(this.companies ? { companyId: connectionCompany(connection), scopeNeedsReview: !connectionCompany(connection) } : {}), signIn: this.oauth.status(connection.id) })); }
@@ -144,21 +162,40 @@ export class McpConnections {
     // Filter before granting credentials, including for stdio servers.
     const connections = (await Promise.all(ids.map(id => this.get(id)))).filter(c => this.companies ? connectionCompany(c) === company && Boolean(company) : scopeAllows(c, company));
     const token = connections.length ? this.broker.issue({ chatId, provider: "mcp" }) : null;
+    if (token) this.runtimeTokens.set(chatId, token); else this.runtimeTokens.delete(chatId);
     this.grants.set(chatId, new Map(connections.map(connection => [connection.id, { connection, sessions: new Set(), streams: new Set() }])));
-    const names = new Set(connections.filter(c => !companyScope(c).companies.length).map(c => `relay_${c.name}`));
-    return Object.fromEntries(connections.map(c => {
-      let name = `relay_${c.name}`;
-      if (companyScope(c).companies.length) {
-        name = `relay_${c.name.slice(0, 20)}_${c.id.slice(4).replaceAll("-", "")}`;
-        while (names.has(name)) name += "_";
-        names.add(name);
-      }
-      return [name, c.type === "http"
-      ? { type: "http", url: `${origin}/gateway/mcp/${c.id}`, headers: { Authorization: `Bearer ${token}` } }
-      : { type: "stdio", command: c.command, args: c.args }];
-    }));
+    return runtimeServers(connections, origin, token);
   }
-  revokeChat(chatId) { for (const selected of this.grants.get(chatId)?.values() || []) for (const controller of selected.streams) controller.abort(); this.broker.revokeChat(chatId); this.grants.delete(chatId); }
+  suspendRuntime(chatId) {
+    const selected = this.grants.get(chatId);
+    if (!selected) return null;
+    const token = this.runtimeTokens.get(chatId);
+    if (selected.size && (!token || !this.broker.validate(token, "mcp"))) throw new Error("MCP capability expired before hibernation");
+    if (!selected.size && token) throw new Error("MCP capability checkpoint is inconsistent");
+    return { schema: 1, token: token || null, connections: [...selected.values()].map(item => recoveryConnection(item.connection)) };
+  }
+  async resumeRuntime(chatId, ids, origin, chat, snapshot) {
+    if (snapshot?.schema !== 1 || !Array.isArray(snapshot.connections)
+      || snapshot.connections.length && !/^cap_[A-Za-z0-9_-]{43}$/.test(snapshot.token || "")
+      || !snapshot.connections.length && snapshot.token !== null) {
+      throw new Error("MCP hibernation checkpoint is invalid");
+    }
+    await this.validateSelection(ids);
+    const company = companyForChat(chat);
+    if (this.companies && company) await this.companies.get(company);
+    const connections = (await Promise.all(ids.map(id => this.get(id)))).filter(c => this.companies ? connectionCompany(c) === company && Boolean(company) : scopeAllows(c, company));
+    if (!sameRecoveryConnections(connections.map(recoveryConnection), snapshot.connections)) {
+      throw new Error("MCP connections changed while the worker was hibernated; use Stop before continuing");
+    }
+    this.revokeChat(chatId);
+    this.grants.set(chatId, new Map(connections.map(connection => [connection.id, { connection, sessions: new Set(), streams: new Set() }])));
+    if (snapshot.token) {
+      this.broker.restoreToken({ token: snapshot.token, chatId, provider: "mcp" });
+      this.runtimeTokens.set(chatId, snapshot.token);
+    } else this.runtimeTokens.delete(chatId);
+    return runtimeServers(connections, origin, snapshot.token);
+  }
+  revokeChat(chatId) { for (const selected of this.grants.get(chatId)?.values() || []) for (const controller of selected.streams) controller.abort(); this.broker.revokeChat(chatId); this.grants.delete(chatId); this.runtimeTokens.delete(chatId); }
   restrictChat(chatId, allowedIds) {
     const connections = this.grants.get(chatId); if (!connections) return;
     for (const [id, selected] of connections) if (!allowedIds.includes(id)) { for (const controller of selected.streams) controller.abort(); connections.delete(id); }

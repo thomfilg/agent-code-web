@@ -498,6 +498,17 @@ export class ClaudeSession {
     turn.stdout.end(); turn.stderr.end(); turn.emit("exit", code, signal); turn.emit("close", code, signal);
   }
 
+  async prepareTransportSuspend() {
+    if (this.ended || this.stopping || this.active || this.pending || this.backgroundCommand || this.workflowReport
+      || this.workflows.size || this.scheduledJobs.size || this.scheduleCalls.size || this.workflowCalls.size
+      || this.control.pending.size || this.requests?.requests.size || this.requests?.refreshing) {
+      throw Error("Claude is not at a quiescent suspension boundary");
+    }
+    if (typeof this.child.markRecoverable !== "function") return { retained: false };
+    const checkpoint = await this.child.markRecoverable({ provider: "claude", sessionId: this.sessionId });
+    return { retained: true, processId: "native-agent", checkpoint };
+  }
+
   async stop() {
     if (this.ended) { await this.closed; return; }
     this.stopping ||= (async () => {

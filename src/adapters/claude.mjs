@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import readline from "node:readline";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
@@ -19,6 +19,13 @@ import { claudeCommandMetadata } from "../command-catalog.mjs";
 import { claudeFinalAnswer } from "../message-search.mjs";
 import { ClaudeAgentThreads } from "../claude-agent-threads.mjs";
 
+const accountCredentialHash = credentials => createHash("sha256").update(JSON.stringify([
+  credentials?.accountId || null, credentials?.organizationId || null, credentials?.accessToken || null,
+])).digest("hex");
+const providerCredentialHash = config => createHash("sha256").update(JSON.stringify([
+  "anthropic", config.providerKey || null, config.upstreamBaseUrl || null,
+])).digest("hex");
+
 export class ClaudeAdapter {
   constructor({ chat, store, config, broker, gatewayOrigin, executor = null, hooks, fetchImpl = fetch, now = Date.now }) {
     this.chat = chat;
@@ -32,6 +39,11 @@ export class ClaudeAdapter {
     this.runtimeHome = executor?.runtimeHome || store.runtimeHome(chat.id);
     this.hooks = hooks;
     this.sessionId = chat.agentSessionId;
+    // A hibernated native application is adopted on the first request after
+    // wake. Never launch a replacement CLI while that exact process is
+    // retained by the worker supervisor.
+    this.recoverApplication = chat.suspension?.nativeRetained === true;
+    this.retainedCapabilities = executor?.retainedCapabilities || null;
     this.child = null;
     this.turnSession = null;
     this.capability = "";
@@ -47,6 +59,7 @@ export class ClaudeAdapter {
       const credentials = await hooks.accountCredentials(options);
       if (typeof credentials?.accessToken !== "string" || !credentials.accessToken || !credentials.accountId || !credentials.organizationId || credentials.expiresAt <= this.now()) throw Error("Reconnect this Claude account; no other credentials were used.");
       this.accountSecrets.add(credentials.accessToken);
+      this.currentAccountCredentialHash = accountCredentialHash(credentials);
       return credentials;
     } } : {}) };
   }
@@ -65,19 +78,25 @@ export class ClaudeAdapter {
 
   async start() {
     const authMode = this.config.claude.authMode;
-    if (authMode === "account") await this.hooks.accountCredentials({});
+    if (authMode === "account") this.assertRetainedAccountCredential(await this.hooks.accountCredentials({}));
     if (authMode === "gateway" && !this.config.claude.providerKey) {
       throw new Error("ANTHROPIC_API_KEY is required when CLAUDE_AUTH_MODE=gateway");
     }
     if (authMode === "gateway") {
       const scope = claudeFastScope(this.chat), credential = claudeFastCredential(this.config.claude), upstream = this.config.claude.upstreamBaseUrl;
-      this.capability = this.broker.issue({ chatId: this.chat.id, provider: "anthropic", renewable: true, validWhile: () => {
+      const retained = this.recoverApplication ? this.retainedCapabilities?.provider : null;
+      if (this.recoverApplication && (retained?.provider !== "anthropic" || !/^cap_[A-Za-z0-9_-]{43}$/.test(retained?.token || "")
+        || retained.credentialHash !== providerCredentialHash(this.config.claude))) {
+        throw new Error("The retained Claude provider capability is invalid");
+      }
+      const grant = { chatId: this.chat.id, provider: "anthropic", renewable: true, validWhile: () => {
         const current = this.store.get(this.chat.id);
         return !this.stopped && current && !current.archived && claudeFastScope(current) === scope
           && claudeFastCredential(this.config.claude) === credential && this.config.claude.upstreamBaseUrl === upstream
           && (this.executor?.workspace || this.chat.workspace) === this.workspace
           && (this.executor?.runtimeHome || this.store.runtimeHome(this.chat.id)) === this.runtimeHome;
-      } });
+      } };
+      this.capability = retained ? this.broker.restoreToken({ token: retained.token, ...grant }) : this.broker.issue(grant);
     }
     this.stopped = false;
     this.effortEnvironmentNotified = false;
@@ -160,7 +179,7 @@ export class ClaudeAdapter {
     // The native review handler checkpoints its journal only when it returns.
     // Keep its SDK input open so Stop can cancel the query and let it flush.
     const reviewRequest = /^\/code-review(?:\s|$)/.test(text.trimStart());
-    const applicationRequest = /^\/(?:run|verify)(?:\s|$)/.test(text.trimStart());
+    const applicationRequest = this.recoverApplication || /^\/(?:run|verify)(?:\s|$)/.test(text.trimStart());
     const interactive = this.privateProfile && Boolean(this.hooks.onRequest || this.hooks.accountCredentials);
     if (ultracode === true && (!this.privateProfile || effort !== "xhigh")) throw new Error("Ultracode requires a private Claude session with xhigh effort.");
     if (ultracode === true && (mcpRequest?.action || reviewRequest)) throw new Error("Ultracode confirmation is not supported for this native command yet. Select ordinary effort before running it; this chat's saved mode has not changed.");
@@ -180,6 +199,7 @@ export class ClaudeAdapter {
     this.assertCapability();
 
     const accountCredentials = this.nativeAuthMode === "account" ? await this.hooks.accountCredentials({}) : null;
+    if (accountCredentials) this.assertRetainedAccountCredential(accountCredentials);
 
     const credential = claudeFastCredential(this.config.claude);
     const sameAccount = fastCredential === credential;
@@ -338,6 +358,7 @@ export class ClaudeAdapter {
     const modeObserver = { sessionId, version, onPermissionMode };
     this.modeObserver = modeObserver;
     let child, managed, startedDebugCapture = false;
+    const recoveringApplication = this.recoverApplication;
     const spawn = launchArgs => this.executor
       ? this.executor.spawn(this.config.claude.bin, launchArgs, {
           cwd: this.workspace,
@@ -351,7 +372,7 @@ export class ClaudeAdapter {
           stdio: ["pipe", "pipe", "pipe"],
         });
     const spawnPersistent = launchArgs => this.executor?.spawnAgent
-      ? this.executor.spawnAgent(this.config.claude.bin, launchArgs, { cwd: this.workspace, env, stdio: ["pipe", "pipe", "pipe"] })
+      ? this.executor.spawnAgent(this.config.claude.bin, launchArgs, { cwd: this.workspace, env, stdio: ["pipe", "pipe", "pipe"], recoverOnly: recoveringApplication })
       : spawn(launchArgs);
     try {
       if (this.applicationSession?.ended) this.applicationSession = null;
@@ -393,6 +414,14 @@ export class ClaudeAdapter {
         this.applicationSession = manage(launchArgs);
       }
       managed = this.applicationSession || (interactive || ultracodeSession || pluginReload || settingsPrompt || debugRequest ? manage(args) : null);
+      if (recoveringApplication) {
+        await managed.child.ready;
+        if (managed.child.recovered !== true || managed.child.recovery?.provider !== "claude"
+          || !this.sessionId || managed.child.recovery.sessionId !== this.sessionId) {
+          throw Error("The retained Claude process does not match this chat's native session");
+        }
+        this.recoverApplication = false;
+      }
       this.turnSession = managed;
       child = managed ? await managed.open(args, env, { resetEffort, ultracode, selectionCurrent }) : spawn(args);
       if (version !== this.sendVersion) throw Error("Claude turn interrupted");
@@ -428,6 +457,10 @@ export class ClaudeAdapter {
       if (child && managed?.active === child && !child.commandUuid) managed.finish(child, 1, null);
       if (!managed) await terminateWorker(child);
       if (managed && managed !== this.applicationSession) await managed.stop();
+      // Recovery failures deliberately leave the retained remote process for
+      // explicit Stop; replacing or killing it would destroy the only
+      // continuity evidence.
+      if (recoveringApplication && this.applicationSession === managed) this.applicationSession = null;
       if (this.turnSession === managed) this.turnSession = null;
       // Failed first initialization must not leave a live, unaddressable CLI
       // or retry a provisional session whose journal was never checkpointed.
@@ -722,6 +755,15 @@ export class ClaudeAdapter {
     if (credentials.email) env.CLAUDE_CODE_USER_EMAIL = credentials.email;
     env.CLAUDE_CODE_ENTRYPOINT = "local-agent";
     env.CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH = "1";
+    this.currentAccountCredentialHash = accountCredentialHash(credentials);
+  }
+
+  assertRetainedAccountCredential(credentials) {
+    const expected = this.recoverApplication ? this.retainedCapabilities?.accountCredentialHash : null;
+    if (this.recoverApplication && (!/^[a-f0-9]{64}$/.test(expected || "") || accountCredentialHash(credentials) !== expected)) {
+      throw new Error("The selected Claude account credential changed while its native process was hibernated; use Stop before continuing");
+    }
+    this.currentAccountCredentialHash = accountCredentialHash(credentials);
   }
 
   hasScheduledWork() {
@@ -809,6 +851,42 @@ export class ClaudeAdapter {
     else if (this.turnSession?.pending) await this.turnSession.stop();
     await this.applicationSession?.interruptWorkflows();
     if (this.applicationSession?.backgroundCommand) await this.applicationSession.interruptBackground();
+  }
+
+  async prepareTransportSuspend() {
+    if (this.stopped || this.child || this.turnSession?.pending || this.isBackgroundBusy() || this.hasScheduledWork()) {
+      throw Error("Claude is not at a quiescent suspension boundary");
+    }
+    if (!this.applicationSession || this.applicationSession.ended) return { retained: false };
+    if (this.nativeAuthMode === "gateway") this.assertCapability();
+    if (this.nativeAuthMode === "account" && !/^[a-f0-9]{64}$/.test(this.currentAccountCredentialHash || "")) {
+      throw Error("Claude account credential could not be checkpointed before hibernation");
+    }
+    const boundary = await this.applicationSession.prepareTransportSuspend();
+    return { ...boundary, capabilities: {
+      ...(this.nativeAuthMode === "gateway" ? { provider: { provider: "anthropic", token: this.capability,
+        credentialHash: providerCredentialHash(this.config.claude) } } : {}),
+      ...(this.nativeAuthMode === "account" ? { accountCredentialHash: this.currentAccountCredentialHash } : {}),
+    } };
+  }
+
+  async detachTransportForSuspend() {
+    const session = this.applicationSession;
+    if (!session || session.ended || typeof session.child?.detach !== "function") {
+      this.stopped = true;
+      this.agents?.close();
+      this.turnSession = null; this.applicationSession = null;
+      this.broker.revoke(this.capability); this.capability = "";
+      return { detached: false };
+    }
+    if (this.child || this.turnSession?.pending || this.isBackgroundBusy() || this.hasScheduledWork()) throw Error("Claude changed after its suspension checkpoint");
+    this.stopped = true;
+    this.agents?.close();
+    if (typeof session.child.relinquish === "function") await session.child.relinquish();
+    else session.child.detach();
+    this.turnSession = null; this.applicationSession = null;
+    this.broker.revoke(this.capability); this.capability = "";
+    return { detached: true, processId: "native-agent" };
   }
 
   async stop() {

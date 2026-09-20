@@ -71,6 +71,25 @@ test("saved MCP credentials stay masked, selections validate, revisions conflict
   const runtime = await mcps.runtime("chat-a", [connection.id], "http://localhost:8787", { repositories: [{ fullName: "fixture/project" }] });
   assert.ok(!JSON.stringify(runtime).includes("protected")); assert.match(codexMcpArgs(runtime).join(" "), /http_headers/);
 });
+test("MCP hibernation restores the exact worker token only while every selected connection is unchanged", async () => {
+  const records = new MemoryRecords(), mcps = new McpConnections(records);
+  const connection = await mcps.save({ name: "retained", allowUnassigned: true, type: "http", url: "https://tools.example/mcp", headers: { Authorization: "Bearer protected" } });
+  const first = await mcps.runtime("retained-chat", [connection.id], "https://relay.example"), snapshot = mcps.suspendRuntime("retained-chat");
+  const token = first.relay_retained.headers.Authorization.slice(7);
+  assert.equal(snapshot.token, token);
+  mcps.revokeChat("retained-chat"); assert.equal(mcps.broker.validate(token, "mcp"), null);
+  const resumed = await mcps.resumeRuntime("retained-chat", [connection.id], "https://relay.example", {}, snapshot);
+  assert.equal(resumed.relay_retained.headers.Authorization, `Bearer ${token}`);
+  assert(mcps.broker.validate(token, "mcp"));
+
+  mcps.revokeChat("retained-chat");
+  await records.put("mcp", connection.id, { ...await mcps.get(connection.id), revision: connection.revision + 1 });
+  await assert.rejects(mcps.resumeRuntime("retained-chat", [connection.id], "https://relay.example", {}, snapshot), /changed/);
+
+  const empty = await mcps.runtime("empty-chat", [], "https://relay.example"), emptySnapshot = mcps.suspendRuntime("empty-chat");
+  assert.deepEqual(empty, {}); assert.deepEqual(emptySnapshot, { schema: 1, token: null, connections: [] });
+  assert.deepEqual(await mcps.resumeRuntime("empty-chat", [], "https://relay.example", {}, emptySnapshot), {});
+});
 test("MCP gateway scopes capabilities, preserves protocol headers, blocks redirects and revokes on sleep", async t => {
   const records = new MemoryRecords(); let received, redirect = false;
   const mcps = new McpConnections(records, { fetchImpl: async (url, options) => { received = { url, headers: options.headers }; return redirect ? new Response(null, { status: 302, headers: { location: "https://evil.example" } }) : Response.json({ jsonrpc: "2.0", id: 1, result: {} }, { headers: { "mcp-session-id": "scoped-session" } }); } });

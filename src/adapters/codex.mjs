@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { JsonRpcProcess } from "../json-rpc-process.mjs";
 import { buildWorkerEnvironment } from "../worker-process.mjs";
@@ -25,6 +25,9 @@ import { planProgress } from "../tab-title.mjs";
 import { captureCodexFinal, codexFinalAnswer } from "../message-search.mjs";
 
 const toml = (value) => JSON.stringify(value);
+const providerCredentialHash = config => createHash("sha256").update(JSON.stringify([
+  "openai", config.providerKey || null, config.upstreamBaseUrl || null,
+])).digest("hex");
 
 function gatewayArgs(origin) {
   return [
@@ -112,6 +115,7 @@ export class CodexAdapter {
     this.hooks = hooks;
     this.rpc = null;
     this.threadId = chat.agentSessionId;
+    this.recoverApplication = chat.suspension?.nativeRetained === true;
     this.requireResume = requireResume;
     this.restoreFork = restoreFork;
     this.savedAgentThreads = savedAgentThreads;
@@ -139,9 +143,17 @@ export class CodexAdapter {
     if (authMode === "gateway" && !this.config.codex.providerKey) {
       throw new Error("OPENAI_API_KEY is required when CODEX_AUTH_MODE=gateway");
     }
+    const retainedProvider = this.recoverApplication ? this.executor?.retainedCapabilities?.provider : null;
+    if (this.recoverApplication && authMode === "gateway"
+      && (retainedProvider?.provider !== "openai" || !/^cap_[A-Za-z0-9_-]{43}$/.test(retainedProvider?.token || "")
+        || retainedProvider.credentialHash !== providerCredentialHash(this.config.codex))) {
+      throw new Error("The retained Codex provider capability is invalid");
+    }
     const capability = authMode === "gateway"
-      ? this.broker.issue({ chatId: this.chat.id, provider: "openai" })
+      ? retainedProvider ? this.broker.restoreToken({ token: retainedProvider.token, chatId: this.chat.id, provider: "openai" })
+        : this.broker.issue({ chatId: this.chat.id, provider: "openai" })
       : "";
+    this.capability = capability;
     const ensureDirectory = this.executor
       ? (directory) => this.executor.mkdir(directory)
       : (directory) => mkdir(directory, { recursive: true, mode: 0o700 });
@@ -202,7 +214,7 @@ export class CodexAdapter {
       args,
       isolation: this.executor ? "none" : this.config.processIsolation,
       spawnFn: this.executor ? (this.executor.spawnAgent || this.executor.spawn).bind(this.executor) : null,
-      spawnOptions: { cwd: this.workspace, env },
+      spawnOptions: { cwd: this.workspace, env, recoverOnly: this.recoverApplication },
       deferAgentDeltaRedaction: authMode === "account" || this.credentialSecrets.size > 0,
       redactSecrets: value => {
         for (const secret of [...this.credentialSecrets].sort((a, b) => b.length - a.length)) value = value.replaceAll(secret, "[redacted]");
@@ -240,12 +252,21 @@ export class CodexAdapter {
       this.#rejectCurrent(new Error("Codex worker stopped before the turn completed"));
     });
     rpc.start();
-    const initialized = await rpc.request("initialize", {
-      clientInfo: { name: "agent_web_poc", title: "Agent Web POC", version: "0.1.0" },
-      capabilities: { experimentalApi: true },
-    });
-    this.cliVersion = cliVersionFromUserAgent(initialized?.userAgent);
-    rpc.notify("initialized", {});
+    await rpc.ready;
+    if (rpc.recovered) {
+      if (rpc.recovery?.provider !== "codex" || !this.threadId || rpc.recovery.threadId !== this.threadId) {
+        throw new Error("The retained Codex process does not match this chat's native session");
+      }
+      this.cliVersion = typeof rpc.recovery.cliVersion === "string" ? rpc.recovery.cliVersion : null;
+      this.recoverApplication = false;
+    } else {
+      const initialized = await rpc.request("initialize", {
+        clientInfo: { name: "agent_web_poc", title: "Agent Web POC", version: "0.1.0" },
+        capabilities: { experimentalApi: true },
+      });
+      this.cliVersion = cliVersionFromUserAgent(initialized?.userAgent);
+      rpc.notify("initialized", {});
+    }
     if (authMode === "account") {
       const credentials = await this.hooks.accountCredentials({});
       this.credentialSecrets.add(credentials.accessToken);
@@ -729,6 +750,38 @@ export class CodexAdapter {
     this.current = { text: "", finalText: "", resolveTurn, rejectTurn, timer, done: complete.catch(() => {}), started: startReady.promise, resolveStarted: startReady.resolve };
     try { await this.rpc.request("thread/compact/start", { threadId: this.threadId }, 10000); return await complete; }
     catch (error) { this.#rejectCurrent(error); await complete.catch(() => {}); throw error; }
+  }
+
+  async prepareTransportSuspend() {
+    if (this.sharedParent || !this.rpc || this.intentionalStop) return { retained: false };
+    if (this.current || this.requests.size || this.nativeSettingsBusy() || this.agents?.busy()
+      || [this.plugins, this.hookControls, this.featureControls, this.memoryControls, this.importControls].some(service => service?.changing || service?.needsRefresh)) {
+      throw new Error("Codex is not at a quiescent suspension boundary");
+    }
+    if (this.nativeAuthMode === "gateway" && !this.broker.validate(this.capability, "openai")) {
+      throw new Error("Codex provider capability expired before hibernation");
+    }
+    const child = this.rpc.child;
+    if (typeof child?.markRecoverable !== "function") return { retained: false };
+    await this.nativeCapture;
+    const checkpoint = await child.markRecoverable({ provider: "codex", threadId: this.threadId, cliVersion: this.cliVersion || null });
+    return { retained: true, processId: "native-agent", checkpoint,
+      capabilities: this.nativeAuthMode === "gateway" ? { provider: { provider: "openai", token: this.capability,
+        credentialHash: providerCredentialHash(this.config.codex) } } : {} };
+  }
+
+  async detachTransportForSuspend() {
+    const rpc = this.rpc;
+    if (!rpc || typeof rpc.child?.detach !== "function") return { detached: false };
+    if (this.current || this.requests.size) throw new Error("Codex changed after its suspension checkpoint");
+    this.intentionalStop = true;
+    await this.pluginCli?.stop();
+    await this.agents?.close();
+    if (typeof rpc.child.relinquish === "function") await rpc.child.relinquish();
+    else rpc.child.detach();
+    this.rpc = null;
+    this.broker.revokeChat(this.chat.id);
+    return { detached: true, processId: "native-agent" };
   }
 
   async stop({ checkpointVersion } = {}) {

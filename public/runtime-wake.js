@@ -9,10 +9,18 @@ export class RuntimeWake {
     this.button.hidden = !chat;
     if (!chat) return;
     const pending = this.pending.has(chat.id), asleep = ["stopped", "error"].includes(chat.status);
+    const suspension = chat.suspension?.status;
     this.button.disabled = pending || !asleep || chat.archived || chat.workflowState === "archived" || this.unavailable(chat.id);
-    this.button.textContent = pending ? "Waking…" : chat.status === "starting" ? "Starting…" : chat.status === "stopping" ? "Stopping…" : asleep ? "Wake environment" : "Environment awake";
+    this.button.textContent = pending ? (suspension === "hibernated" ? "Resuming…" : "Waking…")
+      : chat.status === "starting" ? (suspension === "hibernated" ? "Resuming…" : "Starting…")
+      : chat.status === "stopping" ? (suspension === "hibernating" ? "Hibernating…" : "Stopping…")
+      : suspension === "hibernated" ? "Resume environment"
+      : suspension === "failed" && chat.status === "error" ? "Reconcile environment"
+      : asleep ? "Wake environment" : "Environment awake";
     this.button.setAttribute("aria-busy", String(pending || chat.status === "starting"));
-    this.button.title = "Start this chat's environment without sending a message to the agent. Stopped app servers are not restarted automatically.";
+    this.button.title = suspension === "hibernated"
+      ? "Resume this exact hibernated environment without sending a message to the agent."
+      : "Start this chat's environment without sending a message to the agent. Stopped app servers are not restarted automatically.";
     if (!pending && this.waiting.has(chat.id) && !["starting", "stopping"].includes(chat.status)) {
       this.waiting.delete(chat.id);
       if (chat.status === "idle") this.ready(chat.id);

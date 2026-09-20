@@ -276,7 +276,12 @@ function renderActive() {
   const runtimeLabel = chat.runtimeMetadata?.instanceId ? ` · ${chat.runtimeMetadata.instanceId}` : "";
   const account = workspaceSettings.accounts?.find(item => item.id === chat.agentAccountId);
   elements.meta.textContent = `${agentLabel(chat.agent)}${account ? ` · ${account.name}` : ""}${runtimeLabel} · ${chat.workspace}`;
-  elements.status.textContent = chat.status === "idle" && chat.idleKeepAwakeReason ? "Ready" : chat.status;
+  const suspensionStatus = chat.suspension?.status;
+  elements.status.textContent = suspensionStatus === "hibernating" ? "hibernating"
+    : suspensionStatus === "hibernated" && chat.status === "starting" ? "resuming"
+    : suspensionStatus === "hibernated" ? "hibernated"
+    : suspensionStatus === "failed" && chat.status === "error" ? "hibernation failed"
+    : chat.status === "idle" && chat.idleKeepAwakeReason ? "Ready" : chat.status;
   const deleting = state.deletingChats.has(chat.id);
   elements.detail.textContent = deleting ? "Deleting chat · waiting for its worker to stop…" : chat.statusDetail || "";
   elements.statusDot.className = `status-dot ${chat.status}`;

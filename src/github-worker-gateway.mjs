@@ -121,7 +121,45 @@ export class GitHubWorkerGateway {
     if (!this.sameChat(entry)) throw fail();
     this.entries.set(chatId, entry);
     const token = this.broker.issue({ chatId, provider: "github-worker", renewable: true, validWhile: () => this.sameChat(entry) });
+    entry.capabilityToken = token;
     return { token, environmentVariables: gitEnvironment(origin, snapshot.repositories, token), repositories: snapshot.repositories.map(publicRepo) };
+  }
+  suspendRuntime(chatId) {
+    const entry = this.entries.get(chatId);
+    if (!entry) return null;
+    if (!this.sameChat(entry)) throw fail();
+    if (!entry.capabilityToken || !this.broker.validate(entry.capabilityToken, "github-worker")) throw fail();
+    return { schema: 1, token: entry.capabilityToken, fingerprint: entry.fingerprint,
+      connections: [...entry.connections.entries()].map(([id, value]) => ({ id, revision: value.revision, tokenHash: value.tokenHash, epoch: value.epoch })) };
+  }
+  async resumeRuntime(chatId, origin, snapshot, { validWhile = () => true } = {}) {
+    if (snapshot?.schema !== 1 || !/^cap_[A-Za-z0-9_-]{43}$/.test(snapshot.token || "") || typeof snapshot.fingerprint !== "string"
+      || !Array.isArray(snapshot.connections) || snapshot.connections.some(item => typeof item?.id !== "string" || !Number.isSafeInteger(item.revision)
+        || !/^[a-f0-9]{64}$/.test(item.tokenHash || "") || !Number.isSafeInteger(item.epoch))) throw fail();
+    this.revokeChat(chatId);
+    const chat = this.store.get(chatId), selected = selection(chat), fingerprint = JSON.stringify(selected), generation = this.generations.get(chatId);
+    if (fingerprint !== snapshot.fingerprint || !selected.repositories.length) throw fail();
+    endpoint(origin);
+    const { github } = await this.servicesFor(chat);
+    const entry = { chatId, snapshot: selected, fingerprint, generation, validWhile, github, connections: new Map(), controllers: new Set() };
+    const expected = new Map(snapshot.connections.map(item => [item.id, item]));
+    if (expected.size !== snapshot.connections.length) throw fail();
+    for (const repo of selected.repositories) {
+      await github.queue;
+      const epoch = this.connectionEpochs.get(connectionKey(selected.ownerId, repo.githubConnectionId)) || 0;
+      const record = await github.requireConnection({ connectionId: repo.githubConnectionId, repository: repo.fullName, chatCompany: selected.company });
+      const current = { revision: record.revision || 0, tokenHash: tokenHash(record.token), epoch };
+      const saved = expected.get(record.id);
+      if (!saved || saved.revision !== current.revision || saved.tokenHash !== current.tokenHash || saved.epoch !== current.epoch || !this.sameChat(entry)) throw fail();
+      entry.connections.set(record.id, current); expected.delete(record.id);
+    }
+    if (expected.size) throw fail();
+    await this.assertConnections(entry);
+    if (!this.sameChat(entry)) throw fail();
+    this.entries.set(chatId, entry);
+    this.broker.restoreToken({ token: snapshot.token, chatId, provider: "github-worker", renewable: true, validWhile: () => this.sameChat(entry) });
+    entry.capabilityToken = snapshot.token;
+    return { token: snapshot.token, environmentVariables: gitEnvironment(origin, selected.repositories, snapshot.token), repositories: selected.repositories.map(publicRepo), restored: true };
   }
   entry(token) {
     const grant = this.broker.validate(token, "github-worker"), entry = grant && this.entries.get(grant.chatId);

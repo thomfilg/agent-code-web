@@ -5,7 +5,8 @@ import { isIP } from "node:net";
 import { spawnWorker } from "./worker-process.mjs";
 import { SSH_WORKER_LAUNCHER, sshWorkerRequest } from "./ssh-worker-launcher.mjs";
 import { assertWorkerImage } from "./worker-image.mjs";
-import { hibernationAdmission, hibernationUnavailableError } from "./worker-suspension.mjs";
+import { hibernationAdmission, hibernationUnavailableError, workerHibernationAcceptance,
+  workerHibernationAcceptanceId, workerHibernationCandidate } from "./worker-suspension.mjs";
 import { workerImageTags } from "./worker-image.mjs";
 import { WORKER_SUPERVISOR_CODE } from "./worker-supervisor-paths.mjs";
 import { workerSupervisorFiles, workerSupervisorShell, workerSupervisorUnit, workerSupervisorVersion } from "./worker-supervisor-service.mjs";
@@ -156,7 +157,15 @@ export class Ec2Executor {
     const { env, stdio } = this.#remoteOptions(options);
     if (stdio.some(value => value !== "pipe")) throw new Error("Reconnectable native-agent transport requires piped stdio");
     const context = this.browserCoordinator.open(this.chat, "native-agent");
-    return new ReconnectableAgentProcess(context, { command, args, cwd: options.cwd || this.workspace, env });
+    return new ReconnectableAgentProcess(context, { command, args, cwd: options.cwd || this.workspace, env }, this.backend.controllerLifetime,
+      { recoverOnly: options.recoverOnly === true });
+  }
+
+  async stopRetainedAgent() {
+    if (!this.supervisorReady) throw new Error("Reconnectable native-agent cleanup is unavailable");
+    const child = this.spawnAgent("/usr/bin/false", [], { cwd: this.workspace, env: {}, stdio: ["pipe", "pipe", "pipe"], recoverOnly: true });
+    await child.ready;
+    await child.terminateRemote();
   }
 
   #remoteOptions(options) {
@@ -338,11 +347,10 @@ export class Ec2Backend {
     return this.commandRunner(this.config.ec2.sshBin, [...this.sshArgs(host, instanceId), remoteCommand], { timeoutMs: 60_000, ...options });
   }
 
-  async acquire(chat, { workspaceReady = Promise.resolve(), onStage = async () => {}, check = () => {}, onMutation = () => {} } = {}) {
+  async acquire(chat, { workspaceReady = Promise.resolve(), onStage = async () => {}, check = () => {}, onMutation = () => {}, action = "acquire", expectedWorker = null } = {}) {
     // Observe an early clone rejection while AWS/SSH is still in flight. The
     // same promise remains the mandatory join before any workspace upload.
     workspaceReady.catch(() => {});
-    if (this.config.idlePolicy === "hibernate" && !hibernationAdmission().available) throw hibernationUnavailableError();
     const stage = async (id, action) => {
       check(); await onStage(id, "running");
       try { check(); const value = await action(); check(); await onStage(id, "completed"); check(); return value; }
@@ -363,11 +371,18 @@ export class Ec2Backend {
     let acceptedImage;
     await stage("machine", async () => {
     instance = await this.#find(chat.id); check();
-    if (!instance) instance = await this.#create(chat.id, check, instanceId => mutated(instanceId, "created"));
+    if (action === "resume") {
+      if (!instance || instance.InstanceId !== expectedWorker?.instanceId || instance.ImageId !== expectedWorker?.imageId
+        || expectedWorker?.launchTime && instance.LaunchTime !== expectedWorker.launchTime
+        || !["stopped", "stopping"].includes(instance.State?.Name) || instance.HibernationOptions?.Configured !== true) {
+        throw new Error("EC2 resume worker identity changed; no replacement instance was started");
+      }
+    } else if (!instance) instance = await this.#create(chat.id, check, instanceId => mutated(instanceId, "created"));
     // Existing/stopped workers retain their actual AMI, not necessarily the
     // currently configured one. A revoked marker denies new admission only;
     // sleep/destroy deliberately remain available for exact-owned cleanup.
     check(); acceptedImage = await this.#acceptedImage(instance.ImageId); check();
+    if (this.config.idlePolicy === "hibernate" && !this.#hibernationEvidence(acceptedImage, instance).available) throw hibernationUnavailableError();
     if (instance.State?.Name === "stopping") {
       await this.#aws("ec2", "wait", "instance-stopped", "--instance-ids", instance.InstanceId);
       check();
@@ -382,6 +397,7 @@ export class Ec2Backend {
     check();
     instance = await this.#describe(instance.InstanceId, chat.id);
     check(); acceptedImage = await this.#acceptedImage(instance.ImageId); check();
+    if (this.config.idlePolicy === "hibernate" && !this.#hibernationEvidence(acceptedImage, instance).available) throw hibernationUnavailableError();
     });
     const host = this.config.ec2.usePublicIp ? instance.PublicIpAddress : instance.PrivateIpAddress;
     if (!host) throw new Error(`EC2 instance ${instance.InstanceId} has no ${this.config.ec2.usePublicIp ? "public" : "private"} IP`);
@@ -397,11 +413,47 @@ export class Ec2Backend {
     await workspaceReady; check();
     await stage("workspace", async () => {
     await executor.prepare(check);
+    if (action === "resume" && expectedWorker?.bootId && executor.metadata.bootId !== expectedWorker.bootId) {
+      throw new Error("EC2 worker rebooted instead of resuming the hibernated kernel; native continuity was refused");
+    }
     // SSH readiness/workspace upload can take time; do not hand an executor
     // to provider credential delivery if acceptance was revoked meanwhile.
     await this.#acceptedImage(instance.ImageId);
     });
     return executor;
+  }
+
+  #hibernationEvidence(image, instance = null) {
+    const tags = workerImageTags(image);
+    return hibernationAdmission({
+      backend: !instance || instance.HibernationOptions?.Configured === true,
+      transport: tags.AgentRelaySupervisor === workerSupervisorVersion,
+      image: tags.AgentRelayHibernation === workerHibernationCandidate
+        && tags.AgentRelayHibernationAcceptance === workerHibernationAcceptance
+        && workerHibernationAcceptanceId.test(tags.AgentRelayHibernationAcceptanceId || ""),
+    });
+  }
+
+  async suspensionAdmission(chat) {
+    const instance = await this.#find(chat.id);
+    const image = await this.#acceptedImage(instance?.ImageId || this.config.ec2.amiId);
+    return this.#hibernationEvidence(image, instance);
+  }
+
+  async hibernate(chat, expectedWorker = chat.workerLifecycle?.worker) {
+    const instance = await this.#find(chat.id);
+    if (!instance || instance.InstanceId !== expectedWorker?.instanceId || instance.ImageId !== expectedWorker?.imageId
+      || expectedWorker?.launchTime && instance.LaunchTime !== expectedWorker.launchTime) {
+      throw new Error("EC2 hibernation worker identity changed; no instance was mutated");
+    }
+    const image = await this.#acceptedImage(instance.ImageId);
+    if (!this.#hibernationEvidence(image, instance).available) throw hibernationUnavailableError();
+    if (instance.State?.Name !== "running") throw new Error("EC2 worker is not running at the hibernation boundary");
+    await this.#aws("ec2", "stop-instances", "--hibernate", "--instance-ids", instance.InstanceId);
+    await this.#aws("ec2", "wait", "instance-stopped", "--instance-ids", instance.InstanceId);
+    const stopped = await this.#describe(instance.InstanceId, chat.id);
+    if (stopped.State?.Name !== "stopped" || stopped.HibernationOptions?.Configured !== true) throw new Error("EC2 hibernation completion is unconfirmed");
+    return { instanceId: stopped.InstanceId, hibernated: true };
   }
 
   async #releaseAcquisition(instanceId, chatId) {
@@ -481,7 +533,8 @@ export class Ec2Backend {
 
   async #create(chatId, check = () => {}, onMutation = () => {}) {
     const ec2 = this.config.ec2;
-    await this.#acceptedImage(ec2.amiId);
+    const acceptedImage = await this.#acceptedImage(ec2.amiId);
+    if (this.config.idlePolicy === "hibernate" && !this.#hibernationEvidence(acceptedImage).available) throw hibernationUnavailableError();
     check();
     const Tags = [
       { Key: "Name", Value: `agent-relay-${chatId.slice(-12)}` }, { Key: "AgentWebChat", Value: chatId },
@@ -500,6 +553,7 @@ export class Ec2Backend {
       "--block-device-mappings", blockDevice,
       "--metadata-options", "HttpTokens=required,HttpEndpoint=disabled",
       "--instance-initiated-shutdown-behavior", "stop",
+      ...(this.config.idlePolicy === "hibernate" ? ["--hibernation-options", "Configured=true"] : []),
       "--tag-specifications", JSON.stringify(["instance", "volume"].map(ResourceType => ({ ResourceType, Tags }))),
       "--query", "Instances[0]", "--output", "json",
     );

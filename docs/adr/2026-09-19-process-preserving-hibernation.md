@@ -1,6 +1,6 @@
 # Process-preserving two-minute hibernation
 
-Status: required architecture; implementation and live acceptance incomplete.
+Status: architecture and local implementation complete; live AWS acceptance and activation incomplete.
 
 ## Settled product decision
 
@@ -82,8 +82,12 @@ prompt, approval, or user message.
 
 Before resumed work is admitted, revalidate the selected account and company
 scope and reconcile expired/revoked capabilities. Surviving memory is not proof
-of current authority. Do not copy host account credentials or resurrect old
-capability strings from snapshots. Account disconnect/removal must remain
+of current authority. Do not copy host account credentials or restore authority
+from public lifecycle/chat snapshots. Because the retained process cannot
+atomically replace capability strings already in its environment, the exact
+token may be checkpointed only in encrypted private controller storage and
+restored only after its owner/account/company, environment revision and backing
+MCP/GitHub/provider identity revalidate. Account disconnect/removal must remain
 fail-closed across suspension and controller restart; a failed cleanup must
 remain visible and retryable. Model security revocation separately from idle
 management, not as a pretext for an automatic full-stop fallback.

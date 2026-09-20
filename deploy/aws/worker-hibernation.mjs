@@ -1,6 +1,8 @@
+import { workerHibernationCandidate } from "../../src/worker-suspension.mjs";
+
 // Opt-in candidate recipe. This is not admission or evidence of successful
 // process resume: the ordinary image verifier must never promote it.
-export const hibernationCandidate = "candidate-v1";
+export const hibernationCandidate = workerHibernationCandidate;
 
 export function hibernationRecipe(recipe) {
   const replace = (before, after) => {

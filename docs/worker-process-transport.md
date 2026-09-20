@@ -4,10 +4,10 @@ This implements the reconnectable-process prerequisite from the September 19
 process-preserving hibernation ADR. The transport is now wired into an
 independent worker-owned user service and the EC2 Shared Chrome and persistent
 native-agent executors for images carrying the exact
-`AgentRelaySupervisor=v3` capability tag. It is still not a working hibernation
-feature or a production worker/image acceptance receipt. Fresh-controller
-native session reconstruction, controller shutdown and idle defaults are
-unchanged.
+`AgentRelaySupervisor=v3` capability tag. Fresh-controller native/Chrome
+reconstruction, idle suspend/wake, exact manual cleanup and private capability
+continuity are now wired. This source is still not a production worker/image
+acceptance receipt; live AWS hibernation has not been run.
 
 ## API and authority
 
@@ -167,22 +167,23 @@ shutdown/disposal policy is deliberately not implicit.
 
 - Idempotence, output retention and child ownership last only for the **same
   supervisor's memory lifetime**. Supervisor crash/restart recovery is unsupported.
-- Controller client process exit/restart is supported; whole-machine shutdown,
-  reboot, or EC2 stop is not. Genuine hibernation must preserve supervisor RAM.
+- Controller client process exit/restart is supported. Ordinary shutdown,
+  reboot, or EC2 stop is intentionally rejected as continuity; the dedicated
+  verifier must prove that actual EC2 hibernation preserves supervisor RAM.
 - The executable daemon/service, SSH bridge, durable coordinator and Shared
   Chrome EC2 executor binding are production candidates, but have not been
   baked, deployed or exercised on an accepted AWS worker.
-- Persistent Codex and Claude owners now use this supervisor, and a synthetic
-  background Node descendant retains the same PID and in-memory state across a
-  same-controller link reconnect. A new control-plane process still cannot
-  reconstruct the native facade/session ledger, so actual controller death and
-  hibernation are not accepted for native agents yet.
-- Deployment drain, two-minute idle suspension, wake and UI state integration
-  are not enabled.
+- Persistent Codex and Claude owners use this supervisor; a replacement control
+  plane reconstructs only an explicitly relinquished quiescent session ledger,
+  never launches a substitute. Synthetic Node and real local Chrome fixtures
+  retain process/renderer state across reconnect.
+- Two-minute idle suspension, prompt-free wake and UI state integration are
+  implemented but remain disabled by the default `stop` policy.
 - No Chrome memory, OS hibernation, encrypted image, actual provider session or
-  deployed worker acceptance has been run. The worker-image probe must obtain
-  actual attach/ack/reconnect receipts after those integrations exist; marker
-booleans and this local fixture are insufficient.
+  deployed worker acceptance has been run. The dedicated hibernation verifier
+  now proves a same-process identity across the real VM transition before it
+  can write an image marker; the full application/controller replacement still
+  needs the separately scoped live run.
 
 The tests launch synthetic native/background Node processes through the daemon,
 fixed SSH byte bridge and actual `Ec2Executor` browser integration. Separate local tests
