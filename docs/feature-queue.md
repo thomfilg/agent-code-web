@@ -94,6 +94,12 @@ Two-minute process-preserving hibernation remains open. The candidate includes
 worker-owned process transport, durable lease authority and a locally wired
 Shared Chrome link-reconnection slice. The latter proves same-controller link
 recovery with disposable Chrome, not controller restart or EC2 suspend/resume.
+Lifecycle partition 1 is now integrated: intent/result/generation, exact worker
+identity, sanitized controller-lease descriptors, `created`/`started`/`inspected`
+receipts, exact cleanup outcomes and restart-to-unknown reconciliation persist
+before later admission. Focused acceptance passed 77/77 and the complete Node
+regression passed 1,609 with zero failures and four optional skips; see the
+[lifecycle receipt](validation-2026-09-20-hibernation-lifecycle.md).
 Remote image/service ownership and native adapter reconnection remain gates;
 hibernation admission stays unavailable, without destructive idle fallback. The
 production idle policy and automatic-deployment restrictions remain unchanged.

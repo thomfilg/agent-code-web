@@ -42,6 +42,7 @@ import { githubWorkerMcpConfig } from "./github-worker-mcp.mjs";
 import { runtimeMcpSecrets } from "./worker-capabilities.mjs";
 import { HIBERNATION_UNAVAILABLE, hibernationAdmission, hibernationUnavailableError } from "./worker-suspension.mjs";
 import { startupStage, failRunningStartup } from "./startup-progress.mjs";
+import { beginWorkerLifecycle, finishWorkerLifecycle, workerIdentityFromMetadata } from "./worker-lifecycle.mjs";
 
 const ADAPTERS = {
   codex: CodexAdapter,
@@ -826,13 +827,20 @@ export class RuntimeManager extends EventEmitter {
     }
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const controller = new AbortController();
-    let acquisitionStarted = false, acquisitionMutation;
+    let acquisitionStarted = false, acquisitionMutation, workerLifecycleGeneration = null;
+    const workerLifecycleAction = chat.workerLifecycle?.state === "suspended" ? "resume" : "acquire";
     this.#startupControllers.set(chatId, controller);
     const check = () => { controller.signal.throwIfAborted(); if (!this.store.get(chatId) || this.store.get(chatId).archived || (this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" }); };
     const pending = (async () => {
       if (chat.environmentId) await (await this.servicesFor(chat)).environments.runtime(chat.environmentId, chat);
       check();
-      await this.store.update(chatId, current => { check(); return { startupProgress: { startedAt: nowIso(), stages: [] } }; });
+      const acquiring = await this.store.update(chatId, current => {
+        check();
+        const workerLifecycle = beginWorkerLifecycle(current.workerLifecycle, workerLifecycleAction, nowIso());
+        workerLifecycleGeneration = workerLifecycle.generation;
+        return { workerLifecycle, startupProgress: { startedAt: nowIso(), stages: [] } };
+      });
+      workerLifecycleGeneration = acquiring.workerLifecycle.generation;
       check();
       this.publishChat(this.store.get(chatId));
       let failure;
@@ -864,23 +872,40 @@ export class RuntimeManager extends EventEmitter {
       }
       const executor = workerResult.value;
       check();
-      if (executor?.metadata) await this.store.update(chatId, current => { check(); return { runtimeMetadata: executor.metadata }; });
+      await this.store.update(chatId, current => {
+        check();
+        const receipt = executor?.acquisitionReceipt || {};
+        const worker = receipt.worker || workerIdentityFromMetadata(executor?.metadata);
+        return { ...(executor?.metadata ? { runtimeMetadata: executor.metadata } : {}),
+          workerLifecycle: finishWorkerLifecycle(current.workerLifecycle, {
+            generation: workerLifecycleGeneration, action: workerLifecycleAction, status: "succeeded",
+            mutation: receipt.mutation || "inspected", cleanup: "not-required", ...(worker ? { worker } : {}),
+            ...(receipt.controllerLease !== undefined ? { controllerLease: receipt.controllerLease } : {}),
+          }, nowIso()) };
+      });
       check();
       await this.store.update(chatId, current => { check(); return { startupProgress: { ...current.startupProgress, finishedAt: nowIso() } }; });
       check(); this.publishChat(this.store.get(chatId));
       return executor;
     })().catch(async error => {
+      let cleanup = acquisitionMutation ? "unknown" : "not-required", cleanupError = null;
       if (acquisitionStarted && this.#executors.get(chatId) === pending) {
         try {
-          if (acquisitionMutation) { await acquisitionMutation.release(); pending.workerReleased = true; }
-          else if (this.config.workerBackend !== "ec2") { await this.workerBackend.sleep(chat); pending.workerReleased = true; }
+          if (acquisitionMutation) { await acquisitionMutation.release(); pending.workerReleased = true; cleanup = "stopped"; }
+          else if (this.config.workerBackend !== "ec2") { await this.workerBackend.sleep(chat); pending.workerReleased = true; cleanup = "stopped"; }
         }
-        catch { pending.cleanupFailed = true; throw new Error("Worker startup failed and its machine could not be stopped. Use Stop to retry cleanup before waking it again."); }
+        catch { pending.cleanupFailed = true; cleanup = "failed"; cleanupError = new Error("Worker startup failed and its machine could not be stopped. Use Stop to retry cleanup before waking it again."); }
       }
       if ((this.#lifecycleVersions.get(chatId) || 0) === version && this.store.get(chatId)) {
-        await this.store.update(chatId, current => ({ startupProgress: failRunningStartup(current.startupProgress) }));
+        await this.store.update(chatId, current => ({ startupProgress: failRunningStartup(current.startupProgress),
+          ...(workerLifecycleGeneration === null ? {} : { workerLifecycle: finishWorkerLifecycle(current.workerLifecycle, {
+            generation: workerLifecycleGeneration, action: workerLifecycleAction, status: "failed",
+            mutation: acquisitionMutation?.mutation || "none", cleanup,
+            ...(acquisitionMutation?.worker ? { worker: acquisitionMutation.worker } : {}),
+          }, nowIso()) }) }));
         if ((this.#lifecycleVersions.get(chatId) || 0) === version) this.publishChat(this.store.get(chatId));
       }
+      if (cleanupError) throw cleanupError;
       throw error;
     });
     this.#executors.set(chatId, pending);
@@ -1840,6 +1865,7 @@ export class RuntimeManager extends EventEmitter {
     let stopped = false;
     try {
     const stopVersion = (this.#lifecycleVersions.get(chatId) || 0) + 1;
+    let workerLifecycleGeneration = null;
     this.#lifecycleVersions.set(chatId, stopVersion);
     this.#startupControllers.get(chatId)?.abort(Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" }));
     // Storage failure must not leave a warmed native RPC reusable. Keep the
@@ -1858,7 +1884,12 @@ export class RuntimeManager extends EventEmitter {
     this.broker.revokeChat(chatId);
     this.githubWorkers?.revokeChat(chatId);
     this.revokeChatMcps(chatId);
-    this.publishChat(await this.store.update(chatId, current => ({ queuePaused: true, startupProgress: failRunningStartup(current.startupProgress), ...(reason === "manual" ? { forkGoalPending: false, githubEventsStoppedAt: nowIso() } : {}) })));
+    this.publishChat(await this.store.update(chatId, current => {
+      const workerLifecycle = beginWorkerLifecycle(current.workerLifecycle, "stop", nowIso());
+      workerLifecycleGeneration = workerLifecycle.generation;
+      return { queuePaused: true, startupProgress: failRunningStartup(current.startupProgress), workerLifecycle,
+        ...(reason === "manual" ? { forkGoalPending: false, githubEventsStoppedAt: nowIso() } : {}) };
+    }));
     const runtime = this.#runtimes.get(chatId);
     if (this.config.workerBackend === "ec2" && chat.agent !== "mock") {
       await this.#setStatus(chatId, "stopping", "Stopping EC2 worker", null);
@@ -1878,16 +1909,28 @@ export class RuntimeManager extends EventEmitter {
     const executor = stoppingExecutor || this.#executors.get(chatId);
     if (executor) await executor.catch(() => {});
     this.#executors.delete(chatId);
+    let observed;
     try {
-      const observed = chat.agent !== "mock" && !executor?.workerReleased ? await this.workerBackend.sleep(chat) : null;
+      observed = chat.agent !== "mock" && !executor?.workerReleased ? await this.workerBackend.sleep(chat) : null;
       if (this.config.workerBackend === "ec2") await runtime?.adapter.confirmImportWorkerStopped?.(observed);
     } catch (error) {
       this.broker.revokeChat(chatId);
+      await this.store.update(chatId, current => ({ workerLifecycle: finishWorkerLifecycle(current.workerLifecycle, {
+        generation: workerLifecycleGeneration, action: "stop", status: "failed", mutation: "none", cleanup: "failed",
+      }, nowIso()) })).catch(() => {});
       await this.#setStatus(chatId, "error", `Worker stop failed: ${errorMessage(error)}`, null);
       this.#emit(chatId, { type: "runtime_error", text: `Worker stop failed: ${errorMessage(error)}` });
       throw error;
     }
     this.broker.revokeChat(chatId);
+    await this.store.update(chatId, current => {
+      const metadata = observed?.instanceId && current.runtimeMetadata ? { ...current.runtimeMetadata, instanceId: observed.instanceId } : current.runtimeMetadata;
+      const worker = workerIdentityFromMetadata(metadata);
+      return { workerLifecycle: finishWorkerLifecycle(current.workerLifecycle, {
+        generation: workerLifecycleGeneration, action: "stop", status: "succeeded", mutation: "stopped", cleanup: "stopped",
+        ...(worker ? { worker } : {}),
+      }, nowIso()) };
+    });
     const detail = reason === "idle-timeout" ? "Stopped after idle timeout" : "Stopped manually";
     await this.#setStatus(chatId, "stopped", detail, null);
     if (reason === "manual") this.publishChat(await this.store.update(chatId, { githubEventsStoppedAt: nowIso() }));
@@ -1929,7 +1972,25 @@ export class RuntimeManager extends EventEmitter {
     if (!chat) return false;
     await this.stop(chatId, "deleted");
     this.presence.remove(chatId);
-    if (chat.agent !== "mock") await this.workerBackend.destroy(chat);
+    if (chat.agent !== "mock") {
+      let workerLifecycleGeneration;
+      await this.store.update(chatId, current => {
+        const workerLifecycle = beginWorkerLifecycle(current.workerLifecycle, "destroy", nowIso());
+        workerLifecycleGeneration = workerLifecycle.generation;
+        return { workerLifecycle };
+      });
+      try {
+        await this.workerBackend.destroy(this.store.get(chatId));
+        await this.store.update(chatId, current => ({ workerLifecycle: finishWorkerLifecycle(current.workerLifecycle, {
+          generation: workerLifecycleGeneration, action: "destroy", status: "succeeded", mutation: "destroyed", cleanup: "stopped", worker: null,
+        }, nowIso()) }));
+      } catch (error) {
+        await this.store.update(chatId, current => ({ workerLifecycle: finishWorkerLifecycle(current.workerLifecycle, {
+          generation: workerLifecycleGeneration, action: "destroy", status: "failed", mutation: "none", cleanup: "failed",
+        }, nowIso()) })).catch(() => {});
+        throw error;
+      }
+    }
     const removed = await this.store.remove(chatId);
     this.agentThreads.forget(chatId);
     await this.attachments?.removeChat(chatId);

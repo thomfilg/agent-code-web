@@ -38,6 +38,8 @@ test("EC2 starts/stops only a private deployment/chat worker and uses the IAM de
   const { backend, calls } = fixture();
   const executor = await backend.acquire(chat);
   assert.equal(executor.metadata.instanceId, "i-aaaaaaaaaaaaaaaaa");
+  assert.equal(executor.acquisitionReceipt.mutation, "started");
+  assert.deepEqual(executor.acquisitionReceipt.worker, { backend: "ec2", instanceId: "i-aaaaaaaaaaaaaaaaa", imageId: "ami-aaaaaaaaaaaaaaaaa" });
   assert.ok(calls.some(c => c.args.includes("start-instances")));
   assert.ok(calls.filter(c => c.command !== "ssh").every(c => !c.args.includes("--profile")));
   const lookup = calls.find(c => c.args.includes("--filters")).args;
@@ -92,11 +94,12 @@ test("running worker admission rejection produces no rollback authority", async 
 });
 
 test("new and started worker rollback receipts keep exact instance ownership and are idempotent", async () => {
-  for (const initial of [null, instance()]) {
+  for (const [initial, mutation] of [[null, "created"], [instance(), "started"]]) {
     const lookup = initial ? [initial] : [], { backend, calls } = fixture({ initial, lookup });
     let receipt;
     const executor = await backend.acquire(chat, { onMutation: value => { receipt = value; } });
     assert.equal(receipt.instanceId, "i-aaaaaaaaaaaaaaaaa");
+    assert.equal(receipt.mutation, mutation); assert.equal(executor.acquisitionReceipt.mutation, mutation);
     // A chat lookup now points at a replacement; the old attempt must never
     // acquire authority to stop it during its deferred failure cleanup.
     lookup.splice(0, lookup.length, instance({ InstanceId: "i-bbbbbbbbbbbbbbbbb", State: { Name: "running" } }));
@@ -107,6 +110,13 @@ test("new and started worker rollback receipts keep exact instance ownership and
     const stops = cleanup.filter(call => call.args.includes("stop-instances"));
     assert.equal(stops.length, 1); assert.equal(stops[0].args.at(-1), "i-aaaaaaaaaaaaaaaaa");
   }
+});
+
+test("an already-running worker returns an inspected receipt without cleanup authority", async () => {
+  const { backend, calls } = fixture({ initial: instance({ State: { Name: "running" } }) });
+  const mutations = [], executor = await backend.acquire(chat, { onMutation: value => mutations.push(value) });
+  assert.deepEqual(mutations, []); assert.equal(executor.acquisitionReceipt.mutation, "inspected");
+  assert.equal(calls.some(call => call.args.includes("start-instances")), false);
 });
 
 test("late launched ID publishes cleanup authority before cancelled admission can throw", async () => {

@@ -41,6 +41,7 @@ class LocalExecutor {
     this.chat = chat;
     this.browserTransport = browserTransport;
     this.metadata = { backend: "local", isolation: config.processIsolation };
+    this.acquisitionReceipt = { mutation: "inspected", worker: { backend: "local" } };
   }
 
   spawn(command, args, options) {
@@ -85,7 +86,8 @@ export class Ec2Executor {
     this.runtimeHome = `${backend.config.ec2.remoteRoot}/chats/${chat.id}/runtime-home`;
     this.heartbeat = `${backend.config.ec2.remoteRoot}/.heartbeat`;
     this.gatewayOrigin = backend.config.ec2.gatewayOrigin;
-    this.metadata = { backend: "ec2", instanceId: instance.InstanceId, host };
+    this.metadata = { backend: "ec2", instanceId: instance.InstanceId, host, imageId: instance.ImageId,
+      ...(typeof instance.LaunchTime === "string" && Number.isFinite(Date.parse(instance.LaunchTime)) ? { launchTime: instance.LaunchTime } : {}) };
   }
 
   async prepare(check = () => {}) {
@@ -242,17 +244,21 @@ export class Ec2Backend {
       try { check(); const value = await action(); check(); await onStage(id, "completed"); check(); return value; }
       catch (error) { try { await onStage(id, "failed"); } catch {} throw error; }
     };
-    let instance, releaseAcquisition = async () => null;
-    const mutated = instanceId => {
+    let instance, releaseAcquisition = async () => null, acquisitionMutation = "inspected";
+    const mutated = (instanceId, mutation = "started", observed = null) => {
       // The closure owns one exact mutation target, never a later chat lookup.
       // Publish before further awaited admission checks, including cancellation.
+      acquisitionMutation = mutation;
       let pending;
       releaseAcquisition = () => pending ||= this.#releaseAcquisition(instanceId, chat.id).catch(error => { pending = null; throw error; });
-      onMutation({ instanceId, release: releaseAcquisition });
+      onMutation({ instanceId, mutation, worker: { backend: "ec2", instanceId,
+        ...(observed?.ImageId ? { imageId: observed.ImageId } : {}),
+        ...(typeof observed?.LaunchTime === "string" && Number.isFinite(Date.parse(observed.LaunchTime)) ? { launchTime: observed.LaunchTime } : {}) },
+        release: releaseAcquisition });
     };
     await stage("machine", async () => {
     instance = await this.#find(chat.id); check();
-    if (!instance) instance = await this.#create(chat.id, check, mutated);
+    if (!instance) instance = await this.#create(chat.id, check, instanceId => mutated(instanceId, "created"));
     // Existing/stopped workers retain their actual AMI, not necessarily the
     // currently configured one. A revoked marker denies new admission only;
     // sleep/destroy deliberately remain available for exact-owned cleanup.
@@ -263,7 +269,7 @@ export class Ec2Backend {
       instance.State.Name = "stopped";
     }
     if (instance.State?.Name === "stopped") {
-      mutated(instance.InstanceId);
+      mutated(instance.InstanceId, "started", instance);
       await this.#aws("ec2", "start-instances", "--instance-ids", instance.InstanceId);
       check();
     }
@@ -280,6 +286,8 @@ export class Ec2Backend {
     });
     const executor = new Ec2Executor({ backend: this, chat, instance, host });
     executor.releaseAcquisition = releaseAcquisition;
+    executor.acquisitionReceipt = { mutation: acquisitionMutation, worker: { backend: "ec2", instanceId: instance.InstanceId,
+      imageId: instance.ImageId, ...(typeof instance.LaunchTime === "string" && Number.isFinite(Date.parse(instance.LaunchTime)) ? { launchTime: instance.LaunchTime } : {}) } };
     await workspaceReady; check();
     await stage("workspace", async () => {
     await executor.prepare(check);

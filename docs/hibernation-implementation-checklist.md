@@ -13,20 +13,22 @@ cloud resources. Do not enable the flag as a shortcut to completing the list.
 Files: [runtime-manager.mjs](../src/runtime-manager.mjs),
 [store.mjs](../src/store.mjs), [worker-backends.mjs](../src/worker-backends.mjs).
 
-- [ ] Define persisted lifecycle intent/result, generation, exact worker identity,
+- [x] Define persisted lifecycle intent/result, generation, exact worker identity,
   current controller lease, and safe timestamps. Distinguish suspended, fully
   stopped, unknown, and failed states without storing private credentials.
-- [ ] Define backend acquire/resume receipts identifying whether an operation
+- [x] Define backend acquire/resume receipts identifying whether an operation
   created/started a worker or merely inspected an already-running worker.
-- [ ] Fix `browserExecutor` cleanup so rejected admission cannot full-stop a
+- [x] Fix `browserExecutor` cleanup so rejected admission cannot full-stop a
   pre-existing running legacy/nonaccepted worker. Preserve parallel-startup
   join-before-upload and cleanup guarantees from the current implementation.
-- [ ] Specify restart reconciliation in `ChatStore.initialize` and manager
+- [x] Specify restart reconciliation in `ChatStore.initialize` and manager
   admission; never turn a saved record alone into proof of a live process.
-- [ ] Add deterministic tests for persistence failure before/after intent,
+- [x] Add deterministic tests for persistence failure before/after intent,
   uncertain cloud completion, old-generation callbacks, and foreign worker IDs.
 
 This partition is preparatory. It does not enable hibernation or change timers.
+Its implementation and exact limits are recorded in the
+[lifecycle-contract receipt](validation-2026-09-20-hibernation-lifecycle.md).
 
 ### 2. Process ownership and reconnectable transport
 

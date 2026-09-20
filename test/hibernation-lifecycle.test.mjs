@@ -111,4 +111,6 @@ test("failed acquired metadata persistence rolls back only the published receipt
   };
   await assert.rejects(f.manager.browserExecutor(f.chat.id), /metadata persistence/);
   assert.equal(released, 1); assert.equal(f.calls.sleep, 0);
+  assert.equal(f.store.get(f.chat.id).workerLifecycle.state, "failed");
+  assert.equal(f.store.get(f.chat.id).workerLifecycle.result.cleanup, "stopped");
 });

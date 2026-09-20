@@ -2,15 +2,17 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import path from "node:path";
 import { newId, nowIso } from "./utils.mjs";
 import { runtimeWorkflowPatch } from "../public/chat-organization.js";
+import { initialWorkerLifecycle, restoreWorkerLifecycle } from "./worker-lifecycle.mjs";
 
 function restored(chat) {
   chat = { ...chat, archived: chat.archived ?? chat.workflowState === "archived" };
+  const workerLifecycle = restoreWorkerLifecycle(chat.workerLifecycle, chat.runtimeMetadata, nowIso());
   // The original source-only schema predates saved repository selections.
   // An absent field means no GitHub grant, not permission to infer a connection.
   // Explicit null/malformed selections remain intact so admission rejects them.
   return { repositories: [], pinned: false, customGroupId: null, workflowState: "idle", ...chat,
     ...runtimeWorkflowPatch(chat, "stopped"), status: "stopped", pendingRequest: null, idleDeadlineAt: null,
-    queuePaused: Boolean(chat.queuedMessages?.length) || Boolean(chat.queuePaused) };
+    queuePaused: Boolean(chat.queuedMessages?.length) || Boolean(chat.queuePaused), workerLifecycle };
 }
 
 function clone(value) {
@@ -36,6 +38,10 @@ export class ChatStore {
         chat.pendingRequest = null;
         chat.idleDeadlineAt = null;
         this.#chats.set(chat.id, restored(chat));
+        // Persist the fenced lifecycle before this controller can admit work.
+        // The saved observation from another controller is never treated as a
+        // live process or a current lease merely because the row survived.
+        await this.#persist(chat.id);
       }
     }
     const entries = await readdir(this.chatsDir, { withFileTypes: true });
@@ -125,6 +131,7 @@ export class ChatStore {
       status: "stopped",
       statusDetail: "Not started",
       runtimeMetadata: null,
+      workerLifecycle: initialWorkerLifecycle(timestamp),
       agentSessionId: null,
       pendingRequest: null,
       messages: [],
