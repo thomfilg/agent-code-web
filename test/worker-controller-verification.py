@@ -20,7 +20,7 @@ class ControllerProbeTest(unittest.TestCase):
         request = {'verificationId': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'phase': 'resumed' if resumed else 'fresh',
                    'workerId': 'i-aaaaaaaaaaaaaaaaa', 'host': '10.84.2.22', 'region': 'us-east-2', 'account': '123456789012',
                    'secretArn': 'arn:aws:secretsmanager:us-east-2:123456789012:secret:fixture',
-                   'publicKey': 'ssh-ed25519 AAAAFixturePublicKey', 'sentinel': 'fixture-sentinel'}
+                   'publicKey': 'ssh-ed25519 AAAAFixturePublicKey', 'sentinel': 'fixture-sentinel', 'hibernation': False}
         known = 'verify-i-aaaaaaaaaaaaaaaaa ssh-ed25519 AAAAFixturePublicKey\n'
         if resumed and not missing_pin:
             request['knownHosts'] = known

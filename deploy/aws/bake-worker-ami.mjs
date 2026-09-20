@@ -196,10 +196,16 @@ export async function bakeWorkerImage(options, { run = runBakerAws, sleep = ms =
     if (!owned(role) || role.Arn !== profile.Roles[0].Arn || policies?.length !== 1 || policies[0].PolicyArn !== "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" || inline?.length !== 0) throw new Error("Builder role must be deployment-owned and limited to AmazonSSMManagedInstanceCore");
     const base = await json("ec2", "describe-images", "--image-ids", o.baseImageId, "--query", "Images[0]");
     const release = o.hibernationCandidate ? "ubuntu-jammy-22.04-amd64-server-" : "ubuntu-noble-24.04-amd64-server-";
-    const namePrefix = `ubuntu/images/hvm-ssd-gp3/${release}`, serial = base?.Name?.slice(namePrefix.length);
+    // Canonical's current Jammy parameter can still point at an hvm-ssd/gp2
+    // source AMI even though this launch always replaces the root mapping with
+    // an encrypted gp3 volume below. Accept both official Jammy namespaces,
+    // but keep the ordinary Noble baker pinned to its gp3 namespace.
+    const namePrefixes = (o.hibernationCandidate ? ["ubuntu/images/hvm-ssd/", "ubuntu/images/hvm-ssd-gp3/"] : ["ubuntu/images/hvm-ssd-gp3/"]).map(prefix => prefix + release);
+    const namePrefix = namePrefixes.find(prefix => base?.Name?.startsWith(prefix));
+    const serial = namePrefix ? base.Name.slice(namePrefix.length) : null;
     const supportedJammy = !o.hibernationCandidate || /^\d{8}(?:\.\d+)?$/.test(serial || "") && serial.slice(0, 8) >= "20230303";
     if (base?.ImageId !== o.baseImageId || base.State !== "available" || base.Architecture !== "x86_64" || base.VirtualizationType !== "hvm" || base.RootDeviceType !== "ebs"
-      || base.OwnerId !== "099720109477" || !base.Name?.startsWith(namePrefix) || !supportedJammy) {
+      || base.OwnerId !== "099720109477" || !namePrefix || !supportedJammy) {
       throw new Error(`Base image must be an available official Canonical Ubuntu ${o.hibernationCandidate ? "22.04" : "24.04"} amd64 AMI`);
     }
     const keys = await json("ec2", "describe-key-pairs", "--key-names", o.keyName, "--include-public-key", "--query", "KeyPairs");

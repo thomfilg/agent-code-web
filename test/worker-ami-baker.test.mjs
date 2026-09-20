@@ -145,11 +145,11 @@ test("AMI cleanup observes exact terminal state with detached network but never 
   }
 });
 
-test("hibernation bake is explicitly opt-in and cannot claim production acceptance", async () => {
+test("hibernation bake accepts Canonical's current Jammy namespace, overrides gp2 with encrypted gp3, and cannot claim production acceptance", async () => {
   const candidateImageId = "ami-ccccccccccccccccc";
   const candidateRequired = [...required];
   candidateRequired[candidateRequired.indexOf("--base-image-id") + 1] = candidateImageId;
-  const f = fixture({ baseOverride: { ImageId: candidateImageId, Name: "ubuntu/images/hvm-ssd-gp3/ubuntu-jammy-22.04-amd64-server-20230303" } });
+  const f = fixture({ baseOverride: { ImageId: candidateImageId, Name: "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-20230303" } });
   const options = parseOptions([...candidateRequired, "--hibernation-candidate"]);
   const result = await bakeWorkerImage(options, { run: f.run, sleep: async () => {} });
   assert.equal(result.hibernationCandidate, "candidate-v1");
@@ -157,6 +157,7 @@ test("hibernation bake is explicitly opt-in and cannot claim production acceptan
   const launch = f.calls.find(c => c.includes("run-instances"));
   assert.equal(launch[launch.indexOf("--image-id") + 1], candidateImageId);
   assert.equal(launch[launch.indexOf("--hibernation-options") + 1], "Configured=true");
+  assert.deepEqual(JSON.parse(launch[launch.indexOf("--block-device-mappings") + 1]), [{ DeviceName: "/dev/sda1", Ebs: { VolumeSize: 20, VolumeType: "gp3", Encrypted: true, DeleteOnTermination: true } }]);
   const image = f.calls.find(c => c.includes("create-image"));
   const tags = JSON.parse(image[image.indexOf("--tag-specifications") + 1])[0].Tags;
   assert.ok(tags.some(tag => tag.Key === "AgentRelayHibernation" && tag.Value === "candidate-v1"));
@@ -170,8 +171,10 @@ test("hibernation bake is explicitly opt-in and cannot claim production acceptan
 test("hibernation candidate requires documented Jammy while the ordinary baker remains Noble", async () => {
   for (const baseOverride of [
     {},
+    { Name: "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-20230302" },
     { Name: "ubuntu/images/hvm-ssd-gp3/ubuntu-jammy-22.04-amd64-server-20230302" },
     { Name: "ubuntu/images/hvm-ssd-gp3/ubuntu-jammy-22.04-amd64-server-latest" },
+    { Name: "ubuntu/images/hvm/ubuntu-jammy-22.04-amd64-server-20230303" },
     { Name: "ubuntu/images/hvm-ssd-gp3/ubuntu-jammy-22.04-amd64-server-20230303", VirtualizationType: "paravirtual" },
   ]) {
     const invalidCandidate = fixture({ baseOverride });

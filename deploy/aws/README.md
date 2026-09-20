@@ -229,9 +229,13 @@ effective launch/disk prerequisites:
 The candidate baker requires Canonical Ubuntu 22.04 amd64, matching the newest
 Ubuntu x86 release in AWS's current
 [hibernation prerequisites](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/hibernating-prerequisites.html).
-Resolve and pin that AMI explicitly (for example from Canonical's 22.04 stable
-SSM parameter); never pass the controller's Ubuntu 24.04 base merely because it
-is already present in the stack output.
+Resolve and pin that AMI explicitly from Canonical's 22.04 stable SSM namespace;
+never pass the controller's Ubuntu 24.04 base merely because it is already
+present in the stack output. Canonical may publish that supported Jammy source
+under `hvm-ssd`/`ebs-gp2`. The candidate baker accepts that official namespace
+and still replaces the launched root mapping with an encrypted `gp3` volume of
+the explicitly checked size; it does not inherit the source snapshot's volume
+type, encryption or size.
 
 ```bash
 node deploy/aws/verify-worker-hibernation.mjs \
