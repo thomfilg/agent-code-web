@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { WorkerLeaseAuthority } from "./worker-lease-authority.mjs";
 import { workerAttemptKey } from "./worker-lease-scope.mjs";
 import { identity as exactIdentity, safeId } from "./worker-transport-wire.mjs";
+import { workerSupervisorVersion } from "./worker-supervisor-service.mjs";
 
 const failure = message => new Error(`Remote browser supervisor: ${message}`);
 const sameBase = (left, right) => ["deploymentId", "ownerId", "chatId", "workerId", "provider", "accountId"].every(key => left?.[key] === right?.[key]);
@@ -25,7 +26,7 @@ export class RemoteBrowserAttemptCoordinator {
     if (!chat || !/^user_[a-f0-9]{32}$/.test(chat.ownerId || "") || !/^chat_[a-f0-9]{32}$/.test(chat.id || "")
       || !["codex", "claude"].includes(chat.agent) || !/^account_[a-f0-9-]{36}$/.test(chat.agentAccountId || "")) throw failure("chat binding is invalid");
     const status = await this.control({ action: "status" });
-    if (status?.protocol !== "relay-worker-supervisor/1" || status.version !== "v1" || !safeId(status.daemonInstanceId)
+    if (status?.protocol !== "relay-worker-supervisor/1" || status.version !== workerSupervisorVersion || !safeId(status.daemonInstanceId)
       || typeof status.configured !== "boolean" || status.configured && (!Array.isArray(status.processes) || !safeId(status.supervisorInstanceId))) throw failure("daemon status is invalid");
     const base = { deploymentId: this.deploymentId, ownerId: chat.ownerId, chatId: chat.id, workerId: this.workerId,
       provider: chat.agent, accountId: chat.agentAccountId };
@@ -39,7 +40,8 @@ export class RemoteBrowserAttemptCoordinator {
     let context;
     const authority = new WorkerLeaseAuthority({ records: this.records, deploymentId: this.deploymentId, bootForWorker: candidate => {
       if (!sameBase(candidate, selected)) throw failure("worker identity changed"); return this.bootId;
-    }, legacyOwnerId: this.legacyOwnerId, ttlMs: this.ttlMs, invalidateLease: id => this.control({ action: "invalidate", leaseId: id }) });
+    }, legacyOwnerId: this.legacyOwnerId, ttlMs: this.ttlMs,
+      invalidateLease: id => this.control({ action: "invalidate", processId: "shared-chrome", leaseId: id }) });
     const binding = await authority.prepare(selected);
     let claim;
     if (status.configured) {
@@ -50,11 +52,11 @@ export class RemoteBrowserAttemptCoordinator {
     const admitted = authority.forAttempt(binding, this.controllerId);
     let currentLease = null, disposed = false;
     const install = async lease => {
-      const receipt = await this.control({ action: "configure", identity: selected,
+      const receipt = await this.control({ action: "configure", identity: selected, processId: "shared-chrome",
         lease: { id: lease.id, generation: lease.generation, expiresAt: lease.expiresAt, credential: lease.credential || currentLease?.credential } });
       if (receipt?.configured !== true || receipt.daemonInstanceId !== status.daemonInstanceId || !safeId(receipt.supervisorInstanceId)
         || status.configured && receipt.supervisorInstanceId !== status.supervisorInstanceId
-        || receipt.lease?.id !== lease.id || receipt.lease?.generation !== lease.generation) throw failure("daemon rejected the authoritative lease");
+        || receipt.processId !== "shared-chrome" || receipt.lease?.id !== lease.id || receipt.lease?.generation !== lease.generation) throw failure("daemon rejected the authoritative lease");
       return receipt;
     };
     context = {

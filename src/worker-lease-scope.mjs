@@ -40,6 +40,7 @@ export function synchronousTransition(transition, snapshot) {
 }
 
 export function assertAttemptFence(attempt, request, now) {
-  if (!attempt || attempt.status !== "active" || attempt.pendingInvalidation || attempt.controllerId !== request.controllerId || attempt.controllerEpoch !== request.controllerEpoch
-    || !attempt.processIds?.includes(request.processId) || !attempt.lease || attempt.lease.expiresAt <= now) throw leaseFailure("CONTROLLER_FENCED");
+  const lease = attempt?.leases?.[request.processId];
+  if (!attempt || attempt.status !== "active" || attempt.pendingInvalidations?.length || attempt.controllerId !== request.controllerId || attempt.controllerEpoch !== request.controllerEpoch
+    || !attempt.processIds?.includes(request.processId) || !lease || lease.expiresAt <= now) throw leaseFailure("CONTROLLER_FENCED");
 }

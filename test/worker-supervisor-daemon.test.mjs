@@ -33,32 +33,45 @@ test("worker daemon owns exact identity and leases while controller transports c
 
   assert.deepEqual((await control({ action: "status" })).configured, false);
   const lease1 = { id: "lease-one", generation: 1, expiresAt: Date.now() + 30000, credential: credential(1) };
-  const configured = await control({ action: "configure", identity: selected, lease: lease1 });
+  const configured = await control({ action: "configure", identity: selected, processId: "shared-chrome", lease: lease1 });
   assert.equal(configured.configured, true); assert.equal(configured.lease.id, lease1.id);
   assert.equal(JSON.stringify(configured).includes(lease1.credential), false);
-  await assert.rejects(control({ action: "configure", identity: { ...selected, accountId: "foreign" }, lease: lease1 }), { code: "IDENTITY_CHANGED" });
+  await assert.rejects(control({ action: "configure", identity: { ...selected, accountId: "foreign" }, processId: "shared-chrome", lease: lease1 }), { code: "IDENTITY_CHANGED" });
 
   const connect = async lease => {
     const client = await new WorkerProcessTransport({ socketPath: processSocket, expectedIdentity: selected, lease }).connect();
     client.frames = []; client.on("output", frame => client.frames.push(frame)); clients.push(client); return client;
   };
   const first = await connect(lease1.credential), receipt = await first.launch("shared-chrome", spec); await first.attach(receipt, 0);
-  first.disconnect(); await until(() => first.closed);
+  const nativeLease = { id: "lease-native", generation: 1, expiresAt: Date.now() + 30000, credential: credential(9) };
+  await control({ action: "configure", identity: selected, processId: "native-agent", lease: nativeLease });
+  const native = await connect(nativeLease.credential), nativeReceipt = await native.launch("native-agent", spec); await native.attach(nativeReceipt, 0);
 
   const lease2 = { id: "lease-two", generation: 2, expiresAt: Date.now() + 30000, credential: credential(2) };
-  await control({ action: "configure", identity: selected, lease: lease2 });
+  await control({ action: "configure", identity: selected, processId: "shared-chrome", lease: lease2 });
+  await until(() => first.closed);
   const second = await connect(lease2.credential); await second.attach(receipt, 0);
   assert.equal((await second.status()).pid, receipt.pid);
+  assert.equal((await native.status()).pid, nativeReceipt.pid);
+  const status = await control({ action: "status" });
+  assert.deepEqual(status.leases.map(lease => lease.processId).sort(), ["native-agent", "shared-chrome"]);
   await assert.rejects(control({ action: "reset" }), { code: "SUPERVISOR_BUSY" });
-  await control({ action: "invalidate", leaseId: lease2.id }); await until(() => second.closed);
+  await control({ action: "invalidate", processId: "shared-chrome", leaseId: lease2.id }); await until(() => second.closed);
+  assert.equal((await native.status()).pid, nativeReceipt.pid);
+  await assert.rejects(control({ action: "configure", identity: selected, processId: "shared-chrome", lease: lease2 }), { code: "LEASE_FENCED" });
+  assert.equal((await native.status()).pid, nativeReceipt.pid);
   const denied = await connect(lease2.credential); await assert.rejects(denied.inspect("shared-chrome"), { code: "ADMISSION_DENIED" });
 
   const lease3 = { id: "lease-three", generation: 3, expiresAt: Date.now() + 30000, credential: credential(3) };
-  await control({ action: "configure", identity: selected, lease: lease3 });
+  await control({ action: "configure", identity: selected, processId: "shared-chrome", lease: lease3 });
   const third = await connect(lease3.credential); await third.attach(receipt, 0); await third.terminate();
   await until(() => third.frames.some(frame => frame.channel === "exit")); await third.ackOutput(third.frames.at(-1).seq); third.disconnect();
+  await native.terminate(); await until(() => native.frames.some(frame => frame.channel === "exit")); await native.ackOutput(native.frames.at(-1).seq); native.disconnect();
   assert.deepEqual(await control({ action: "reset" }), { reset: true });
   assert.equal((await control({ action: "status" })).configured, false);
+  const nextIdentity = { ...selected, attemptId: "next-attempt" };
+  await control({ action: "configure", identity: nextIdentity, processId: "shared-chrome", lease: lease1 });
+  assert.deepEqual(await control({ action: "reset" }), { reset: true });
 });
 
 test("a duplicate daemon never unlinks a live daemon's private sockets", async t => {
@@ -69,4 +82,3 @@ test("a duplicate daemon never unlinks a live daemon's private sockets", async t
   await assert.rejects(new WorkerSupervisorDaemon({ root, processSocket, controlSocket }).listen(), { code: "SOCKET_ALREADY_EXISTS" });
   assert.equal((await workerSupervisorControl({ action: "status" }, { socketPath: controlSocket })).configured, false);
 });
-

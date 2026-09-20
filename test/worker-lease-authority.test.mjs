@@ -15,7 +15,7 @@ const denied = promise => assert.rejects(promise, /Worker lease:/);
 test("opaque lease is issued only after persisted generation and authorizer returns no credential or scope secrets", async () => {
   const { records, authority, binding, claim } = await fixture();
   const issued = await authority.issue(binding, "controller-a"), row = await records.workerAttemptGet(claim.attemptId);
-  assert.equal(row.value.generation, 1); assert.equal(row.value.lease.id, issued.id);
+  assert.equal(row.value.generation, 1); assert.equal(row.value.leases["shared-chrome"].id, issued.id);
   assert.ok(!JSON.stringify(row).includes(issued.credential)); assert.match(issued.credential, /^[A-Za-z0-9_-]{43}$/);
   for (const action of ["launch", "inspect", "attach", "input", "endInput", "ackOutput", "status", "terminate"]) {
     const result = await authority.authorize(leaseRequest(issued, { action }));
@@ -75,8 +75,52 @@ test("renew is explicit, persisted and scope checked; worker status never extend
   const renewed = await authority.renew(binding, "controller-a", issued.id);
   assert.equal(renewed.id, issued.id); assert.equal(renewed.generation, issued.generation); assert.ok(renewed.expiresAt >= issued.expiresAt);
   const row = await records.workerAttemptGet(claim.attemptId);
-  await records.workerAttemptTransaction({ attemptId: claim.attemptId, expectedRevision: row.revision, scope: binding.scope }, ({ value }) => ({ ...value, lease: { ...value.lease, expiresAt: Date.now() - 1 } }));
+  await records.workerAttemptTransaction({ attemptId: claim.attemptId, expectedRevision: row.revision, scope: binding.scope }, ({ value }) => ({
+    ...value, leases: { ...value.leases, "shared-chrome": { ...value.leases["shared-chrome"], expiresAt: Date.now() - 1 } },
+  }));
   await denied(authority.renew(binding, "controller-a", issued.id)); await denied(authority.authorize(leaseRequest(issued)));
+});
+
+test("browser and native-agent leases rotate independently while takeover and revoke fence both", async () => {
+  const invalidated = [];
+  const processIds = ["shared-chrome", "native-agent"];
+  const { records, authority, binding, claim } = await fixture({ processIds, invalidateLease: (id, processId) => invalidated.push({ id, processId }) });
+  assert.deepEqual(binding.processIds, ["native-agent", "shared-chrome"]);
+
+  const browser = await authority.issue(binding, "controller-a", "shared-chrome");
+  const native = await authority.issue(binding, "controller-a", "native-agent");
+  assert.equal((await authority.authorize(leaseRequest(browser))).id, browser.id);
+  assert.equal((await authority.authorize(leaseRequest(native, { processId: "native-agent" }))).id, native.id);
+
+  const replacement = await authority.issue(binding, "controller-a", "shared-chrome");
+  assert.deepEqual(invalidated, [{ id: browser.id, processId: "shared-chrome" }]);
+  await denied(authority.authorize(leaseRequest(browser)));
+  assert.equal((await authority.authorize(leaseRequest(replacement))).id, replacement.id);
+  assert.equal((await authority.authorize(leaseRequest(native, { processId: "native-agent" }))).id, native.id);
+  const renewedNative = await authority.renew(binding, "controller-a", native.id, "native-agent");
+  assert.equal(renewedNative.id, native.id);
+
+  const row = await records.workerAttemptGet(claim.attemptId), replacementAuthority = leaseAuthority(records, {
+    processIds, invalidateLease: (id, processId) => invalidated.push({ id, processId }),
+  });
+  const takeover = await replacementAuthority.takeover(binding, "controller-b", { expectedRevision: row.revision });
+  assert.equal(takeover.controllerEpoch, 2);
+  assert.deepEqual(invalidated.slice(1), [
+    { id: native.id, processId: "native-agent" },
+    { id: replacement.id, processId: "shared-chrome" },
+  ]);
+  await denied(authority.authorize(leaseRequest(replacement)));
+  await denied(authority.authorize(leaseRequest(native, { processId: "native-agent" })));
+
+  const nextBrowser = await replacementAuthority.issue(binding, "controller-b", "shared-chrome");
+  const nextNative = await replacementAuthority.issue(binding, "controller-b", "native-agent");
+  await replacementAuthority.revoke(binding, nextBrowser.id);
+  assert.deepEqual(invalidated.slice(3), [
+    { id: nextNative.id, processId: "native-agent" },
+    { id: nextBrowser.id, processId: "shared-chrome" },
+  ]);
+  await denied(replacementAuthority.authorize(leaseRequest(nextBrowser)));
+  await denied(replacementAuthority.authorize(leaseRequest(nextNative, { processId: "native-agent" })));
 });
 
 test("commit failure never emits a credential; uncertain committed issuance fences the previous token", async () => {
@@ -106,11 +150,12 @@ test("revocation tombstone and failed invalidation stay fail closed, with an exp
   const { records, authority, binding, claim } = await fixture({ bootForWorker: () => boot, invalidateLease: id => { if (fail) throw Error("PRIVATE"); invalidated.push(id); } });
   const first = await authority.issue(binding, "controller-a"); fail = true;
   await denied(authority.issue(binding, "controller-a"));
+  const replacementId = Object.values((await records.workerAttemptGet(claim.attemptId)).value.leases)[0].id;
   await denied(authority.authorize(leaseRequest(first))); await denied(authority.issue(binding, "controller-a"));
   await records.delete("agent-account", leaseIdentity.accountId); boot = "c".repeat(64);
   await denied(authority.revoke(binding));
   assert.equal((await records.workerAttemptGet(claim.attemptId)).value.status, "revoked");
-  fail = false; assert.deepEqual(await authority.revoke(binding), { revoked: true }); assert.deepEqual(invalidated, [first.id]);
+  fail = false; assert.deepEqual(await authority.revoke(binding), { revoked: true }); assert.deepEqual(invalidated, [first.id, replacementId]);
   boot = "b".repeat(64); await seedLeaseScope(records);
   await denied(leaseAuthority(records).claim(binding, "controller-z"));
   await denied(leaseAuthority(records).takeover(binding, "controller-z", { expectedRevision: (await records.workerAttemptGet(claim.attemptId)).revision }));

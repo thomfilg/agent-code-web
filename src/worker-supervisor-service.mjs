@@ -1,6 +1,6 @@
 import { WORKER_SUPERVISOR_CODE } from "./worker-supervisor-paths.mjs";
 
-export const workerSupervisorVersion = "v1";
+export const workerSupervisorVersion = "v2";
 export const workerSupervisorFiles = [
   "worker-process-anchor.mjs",
   "worker-process-supervisor.mjs",

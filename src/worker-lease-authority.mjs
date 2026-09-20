@@ -10,14 +10,21 @@ const positive = value => revision(value) && value > 0;
 const matches = (first, second) => canonical(first) === canonical(second);
 const publicClaim = row => ({ attemptId: workerAttemptKey(row.value.binding.identity), controllerId: row.value.controllerId, controllerEpoch: row.value.controllerEpoch, revision: row.revision });
 const leaseView = lease => ({ id: lease.id, generation: lease.generation, expiresAt: lease.expiresAt });
+const pending = value => Array.isArray(value?.pendingInvalidations) ? value.pendingInvalidations : [];
+const processList = value => Array.isArray(value) && value.length > 0 && value.length <= 16 && value.every(leaseId)
+  && new Set(value).size === value.length ? [...value].sort() : null;
 
 // Internal coordinator service only. No HTTP route, global account, deployment
 // switch or provider credentials are created or exposed by this partition.
+// Leases are process-scoped: reconnecting Chrome cannot fence an attached native
+// agent, while a controller takeover still revokes every process atomically.
 export class WorkerLeaseAuthority {
-  constructor({ records, deploymentId, bootForWorker, legacyOwnerId = null, ttlMs = 30000, invalidateLease }) {
-    if (!leaseId(deploymentId) || typeof bootForWorker !== "function" || typeof invalidateLease !== "function" || !Number.isSafeInteger(ttlMs) || ttlMs < 1 || ttlMs > 60000
+  constructor({ records, deploymentId, bootForWorker, legacyOwnerId = null, ttlMs = 30000, invalidateLease, processIds = ["shared-chrome"] }) {
+    const allowed = processList(processIds);
+    if (!leaseId(deploymentId) || typeof bootForWorker !== "function" || typeof invalidateLease !== "function" || !allowed
+      || !Number.isSafeInteger(ttlMs) || ttlMs < 1 || ttlMs > 60000
       || legacyOwnerId !== null && !/^user_[a-f0-9]{32}$/.test(legacyOwnerId)) throw leaseFailure("CONFIGURATION_INVALID");
-    Object.assign(this, { records, deploymentId, bootForWorker, legacyOwnerId, ttlMs, invalidateLease });
+    Object.assign(this, { records, deploymentId, bootForWorker, legacyOwnerId, ttlMs, processIds: allowed, invalidateLease });
     this.claims = new Map();
   }
   #boot(selected) {
@@ -28,12 +35,18 @@ export class WorkerLeaseAuthority {
     let selected;
     try { selected = identity(binding?.identity); } catch { throw leaseFailure("IDENTITY_INVALID"); }
     if (selected.deploymentId !== this.deploymentId || !["codex", "claude"].includes(selected.provider)
-      || binding?.schema !== 1 || !hash(binding.bootId) || !allowStaleBoot && binding.bootId !== this.#boot(selected)
+      || binding?.schema !== 2 || !hash(binding.bootId) || !allowStaleBoot && binding.bootId !== this.#boot(selected)
       || !matches(binding.scope, { ownerId: selected.ownerId, chatId: selected.chatId, accountId: selected.accountId,
         companyId: binding.scope?.companyId, environmentId: binding.scope?.environmentId, legacy: selected.ownerId === this.legacyOwnerId })
-      || !Array.isArray(binding.processIds) || binding.processIds.length !== 1 || binding.processIds[0] !== "shared-chrome") throw leaseFailure("BINDING_INVALID");
+      || !matches(binding.processIds, this.processIds)) throw leaseFailure("BINDING_INVALID");
     scopeRecords(binding.scope);
     return binding;
+  }
+  #process(binding, processId) {
+    this.#binding(binding);
+    const selected = processId ?? (binding.processIds.length === 1 ? binding.processIds[0] : null);
+    if (!leaseId(selected) || !binding.processIds.includes(selected)) throw leaseFailure("PROCESS_NOT_ALLOWED");
+    return selected;
   }
   #current(binding, records) {
     this.#binding(binding);
@@ -65,7 +78,7 @@ export class WorkerLeaseAuthority {
       companyId: companyForChat(chat || {}), environmentId: chat?.environmentId, legacy: selected.ownerId === this.legacyOwnerId };
     const refs = scopeRecords(scope), values = await Promise.all(refs.map(([kind, id]) => this.records.get(kind, id)));
     const records = Object.fromEntries(["chat", "account", "disconnection", "company", "environment"].map((key, index) => [key, values[index]]));
-    const binding = { schema: 1, identity: selected, bootId: this.#boot(selected), scope, processIds: ["shared-chrome"] };
+    const binding = { schema: 2, identity: selected, bootId: this.#boot(selected), scope, processIds: this.processIds };
     return { ...binding, ...this.#current(binding, records) };
   }
   #transaction(binding, expectedRevision, transition, options) {
@@ -84,50 +97,58 @@ export class WorkerLeaseAuthority {
   #held(row, controllerId) {
     const held = this.claims.get(workerAttemptKey(row.value.binding.identity));
     if (!held || held.controllerId !== controllerId || held.controllerEpoch !== row.value.controllerEpoch || row.value.controllerId !== controllerId
-      || row.value.status !== "active" || row.value.pendingInvalidation) throw leaseFailure("CONTROLLER_FENCED");
+      || row.value.status !== "active" || pending(row.value).length) throw leaseFailure("CONTROLLER_FENCED");
   }
   async claim(binding, controllerId, { expectedRevision = 0 } = {}) {
     if (!leaseId(controllerId) || expectedRevision !== 0) throw leaseFailure("CLAIM_INVALID");
     const row = await this.#transaction(binding, expectedRevision, ({ value, records, now }) => {
       if (value) throw leaseFailure("CLAIM_EXISTS"); this.#admit(binding, records);
-      return { schema: 1, binding, processIds: binding.processIds, controllerId, controllerEpoch: 1, generation: 0, status: "active", lease: null, pendingInvalidation: null, createdAt: now };
+      return { schema: 2, binding, processIds: binding.processIds, controllerId, controllerEpoch: 1, generation: 0,
+        status: "active", leases: {}, pendingInvalidations: [], createdAt: now };
     });
     const claim = publicClaim(row); this.claims.set(claim.attemptId, claim); return claim;
   }
   async takeover(binding, controllerId, { expectedRevision } = {}) {
     if (!leaseId(controllerId) || !positive(expectedRevision)) throw leaseFailure("CLAIM_INVALID");
     let row = await this.#transaction(binding, expectedRevision, ({ value, records }) => {
-      if (!value || value.status !== "active" || !matches(value.binding, binding) || value.controllerId === controllerId || value.pendingInvalidation) throw leaseFailure("CONTROLLER_FENCED");
+      if (!value || value.status !== "active" || !matches(value.binding, binding) || value.controllerId === controllerId || pending(value).length) throw leaseFailure("CONTROLLER_FENCED");
       this.#admit(binding, records);
       if (!positive(value.controllerEpoch + 1)) throw leaseFailure("GENERATION_EXHAUSTED");
-      return { ...value, controllerId, controllerEpoch: value.controllerEpoch + 1, lease: null, pendingInvalidation: value.lease?.id || null };
+      const invalidations = value.processIds.flatMap(processId => value.leases?.[processId]
+        ? [{ processId, id: value.leases[processId].id }] : []);
+      return { ...value, controllerId, controllerEpoch: value.controllerEpoch + 1, leases: {}, pendingInvalidations: invalidations };
     });
     row = await this.#notify(row);
     const claim = publicClaim(row); this.claims.set(claim.attemptId, claim); return claim;
   }
   async #notify(row) {
-    const id = row.value.pendingInvalidation;
-    if (!id) return row;
-    try { await this.invalidateLease(id); } catch { throw leaseFailure("INVALIDATION_PENDING"); }
-    return this.#transaction(row.value.binding, row.revision, ({ value }) => {
-      if (!value || value.pendingInvalidation !== id) throw leaseFailure("CAS_CONFLICT");
-      return { ...value, pendingInvalidation: null };
-    }, { allowStaleBoot: true });
+    while (pending(row.value).length) {
+      const target = pending(row.value)[0];
+      try { await this.invalidateLease(target.id, target.processId); } catch { throw leaseFailure("INVALIDATION_PENDING"); }
+      row = await this.#transaction(row.value.binding, row.revision, ({ value }) => {
+        const current = pending(value)[0];
+        if (!current || !matches(current, target)) throw leaseFailure("CAS_CONFLICT");
+        return { ...value, pendingInvalidations: pending(value).slice(1) };
+      }, { allowStaleBoot: true });
+    }
+    return row;
   }
-  async issue(binding, controllerId) {
+  async issue(binding, controllerId, processId) {
+    processId = this.#process(binding, processId);
     const previous = await this.#row(binding); this.#held(previous, controllerId);
     const credential = randomBytes(32).toString("base64url"), id = randomUUID();
     let row = await this.#transaction(binding, previous.revision, ({ value, records, now }) => {
       this.#held({ value }, controllerId); this.#admit(binding, records);
       const generation = value.generation + 1;
       if (!positive(generation)) throw leaseFailure("GENERATION_EXHAUSTED");
-      return { ...value, generation, pendingInvalidation: value.lease?.id || null,
-        lease: { id, generation, expiresAt: now + this.ttlMs, credentialHash: digest(credential) } };
+      const old = value.leases?.[processId], pendingInvalidations = old ? [{ processId, id: old.id }] : [];
+      return { ...value, generation, pendingInvalidations,
+        leases: { ...(value.leases || {}), [processId]: { id, generation, expiresAt: now + this.ttlMs, credentialHash: digest(credential) } } };
     });
     row = await this.#notify(row);
-    // A delayed COMMIT/notification is not an extension of the stored deadline.
-    if (row.value.lease.expiresAt <= Date.now() || row.value.lease.expiresAt > Date.now() + 60000) throw leaseFailure("LEASE_EXPIRED");
-    return { ...leaseView(row.value.lease), credential, claim: publicClaim(row) };
+    const lease = row.value.leases[processId];
+    if (lease.expiresAt <= Date.now() || lease.expiresAt > Date.now() + 60000) throw leaseFailure("LEASE_EXPIRED");
+    return { ...leaseView(lease), credential, processId, claim: publicClaim(row) };
   }
   async authorize(request) {
     try {
@@ -139,45 +160,51 @@ export class WorkerLeaseAuthority {
         if (!binding || !matches(binding.identity, selected)) throw leaseFailure();
         try {
           const checked = await this.#transaction(binding, row.revision, ({ value, records, now }) => {
-            if (!value || value.status !== "active" || value.pendingInvalidation || !value.processIds.includes(request.processId)
-              || !value.lease || value.lease.expiresAt <= now || value.lease.expiresAt > now + 60000
-              || !hash(value.lease.credentialHash) || !timingSafeEqual(Buffer.from(value.lease.credentialHash, "hex"), Buffer.from(digest(request.lease), "hex"))) throw leaseFailure();
+            const lease = value?.leases?.[request.processId];
+            if (!value || value.status !== "active" || pending(value).length || !value.processIds.includes(request.processId)
+              || !lease || lease.expiresAt <= now || lease.expiresAt > now + 60000
+              || !hash(lease.credentialHash) || !timingSafeEqual(Buffer.from(lease.credentialHash, "hex"), Buffer.from(digest(request.lease), "hex"))) throw leaseFailure();
             this.#admit(binding, records);
           });
-          if (checked.value.lease.expiresAt <= Date.now()) throw leaseFailure();
-          return leaseView(checked.value.lease);
+          const lease = checked.value.leases[request.processId];
+          if (lease.expiresAt <= Date.now()) throw leaseFailure();
+          return leaseView(lease);
         } catch (error) {
-          // Only this read-only operation may retry a raced renewal. Re-read
-          // every binding/credential/scope; never retry input or lease issuance.
           if (error.code !== "CAS_CONFLICT" || attempt === 2) throw error;
         }
       }
     } catch { throw leaseFailure(); }
   }
-  async renew(binding, controllerId, id) {
+  async renew(binding, controllerId, id, processId) {
+    processId = this.#process(binding, processId);
     const previous = await this.#row(binding); this.#held(previous, controllerId);
     const row = await this.#transaction(binding, previous.revision, ({ value, records, now }) => {
       this.#held({ value }, controllerId); this.#admit(binding, records);
-      if (!value.lease || value.lease.id !== id || value.lease.expiresAt <= now) throw leaseFailure("LEASE_EXPIRED");
-      return { ...value, lease: { ...value.lease, expiresAt: now + this.ttlMs } };
+      const lease = value.leases?.[processId];
+      if (!lease || lease.id !== id || lease.expiresAt <= now) throw leaseFailure("LEASE_EXPIRED");
+      return { ...value, leases: { ...value.leases, [processId]: { ...lease, expiresAt: now + this.ttlMs } } };
     });
-    if (row.value.lease.expiresAt <= Date.now() || row.value.lease.expiresAt > Date.now() + 60000) throw leaseFailure("LEASE_EXPIRED");
-    return leaseView(row.value.lease);
+    const lease = row.value.leases[processId];
+    if (lease.expiresAt <= Date.now() || lease.expiresAt > Date.now() + 60000) throw leaseFailure("LEASE_EXPIRED");
+    return leaseView(lease);
   }
   async revoke(binding, id) {
     const previous = await this.#row(binding, { allowStaleBoot: true });
-    if (id !== undefined && (!leaseId(id) || previous.value.lease?.id !== id && previous.value.pendingInvalidation !== id)) throw leaseFailure("LEASE_CHANGED");
-    const row = previous.value.status === "revoked" ? previous : await this.#transaction(binding, previous.revision, ({ value, now }) => ({
-      ...value, status: "revoked", revokedAt: now, pendingInvalidation: value.pendingInvalidation || value.lease?.id || null,
-    }), { allowStaleBoot: true });
+    const known = [...Object.values(previous.value.leases || {}), ...pending(previous.value).map(item => ({ id: item.id }))];
+    if (id !== undefined && (!leaseId(id) || !known.some(lease => lease.id === id))) throw leaseFailure("LEASE_CHANGED");
+    const row = previous.value.status === "revoked" ? previous : await this.#transaction(binding, previous.revision, ({ value, now }) => {
+      const additions = value.processIds.flatMap(processId => value.leases?.[processId]
+        ? [{ processId, id: value.leases[processId].id }] : []);
+      const invalidations = [...pending(value), ...additions].filter((item, index, all) => all.findIndex(other => other.id === item.id) === index);
+      return { ...value, status: "revoked", revokedAt: now, leases: {}, pendingInvalidations: invalidations };
+    }, { allowStaleBoot: true });
     this.claims.delete(workerAttemptKey(binding.identity)); await this.#notify(row);
     return { revoked: true };
   }
-  // The browser slice receives the expected facade; claim/takeover remains a
-  // separate explicit coordinator operation, never an implicit issue fallback.
-  forAttempt(binding, controllerId) {
-    this.#binding(binding);
-    return { issue: () => this.issue(binding, controllerId), renew: id => this.renew(binding, controllerId, id),
-      authorize: request => matches(request?.identity, binding.identity) ? this.authorize(request) : Promise.reject(leaseFailure()), revoke: id => this.revoke(binding, id) };
+  forAttempt(binding, controllerId, processId) {
+    processId = this.#process(binding, processId);
+    return { issue: () => this.issue(binding, controllerId, processId), renew: id => this.renew(binding, controllerId, id, processId),
+      authorize: request => matches(request?.identity, binding.identity) && request.processId === processId ? this.authorize(request) : Promise.reject(leaseFailure()),
+      revoke: id => this.revoke(binding, id) };
   }
 }

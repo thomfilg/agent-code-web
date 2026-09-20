@@ -123,7 +123,7 @@ test("real PostgreSQL lease authority survives controller/database restart and s
     try {
       await assert.rejects(authority.issue(binding, "controller-commit"), error => error.code === "STORAGE_FAILURE" && !error.message.includes("PRIVATE"));
       const unchanged = await records.workerAttemptGet(claim.attemptId);
-      assert.equal(unchanged.revision, 1); assert.equal(unchanged.value.generation, 0); assert.equal(unchanged.value.lease, null);
+      assert.equal(unchanged.revision, 1); assert.equal(unchanged.value.generation, 0); assert.deepEqual(unchanged.value.leases, {});
     } finally {
       await records.pool.query("DROP TRIGGER fixture_worker_commit ON relay_worker_state");
       await records.pool.query("DROP FUNCTION fixture_reject_worker_commit()");

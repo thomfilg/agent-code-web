@@ -3,7 +3,7 @@
 This implements the reconnectable-process prerequisite from the September 19
 process-preserving hibernation ADR. The transport is now wired into an
 independent worker-owned user service and the EC2 Shared Chrome executor for
-images carrying the exact `AgentRelaySupervisor=v1` capability tag. It is still
+images carrying the exact `AgentRelaySupervisor=v2` capability tag. It is still
 not a working hibernation feature or a production worker/image acceptance
 receipt. Native adapters, controller shutdown and idle defaults are unchanged.
 
@@ -91,7 +91,10 @@ Live cgroup behavior on the accepted AMI remains an AWS acceptance gate.
 ## Worker service and EC2 binding
 
 `WorkerSupervisorDaemon` owns the private control and process sockets, one exact
-chat/attempt identity and the current hashed short-lived lease credential. It
+chat/attempt identity and one hashed short-lived lease credential per allowed
+process. Rotating or invalidating the Shared Chrome lease does not detach a native
+agent attachment; controller takeover or attempt revocation still fences all
+processes through the durable authority. It
 never unlinks a live daemon's sockets. Its systemd user unit has a private 0700
 runtime directory, restart policy, `NoNewPrivileges`, restrictive umask and
 cgroup cleanup. The AMI setup enables linger for the dedicated `agent` user.
@@ -157,7 +160,8 @@ shutdown/disposal policy is deliberately not implicit.
   Chrome EC2 executor binding are production candidates, but have not been
   baked, deployed or exercised on an accepted AWS worker.
 - Codex, Claude and independent Node development servers do not yet use this
-  supervisor. Their native RPC/session reconstruction is still required.
+  supervisor. The authority and daemon can now hold their process lease beside
+  Shared Chrome, but their native RPC/session reconstruction is still required.
 - Deployment drain, two-minute idle suspension, wake and UI state integration
   are not enabled.
 - No Chrome memory, OS hibernation, encrypted image, actual provider session or

@@ -31,7 +31,7 @@ export class WorkerSupervisorDaemon {
   constructor({ root = WORKER_SUPERVISOR_ROOT, processSocket = WORKER_SUPERVISOR_SOCKET, controlSocket = WORKER_SUPERVISOR_CONTROL_SOCKET } = {}) {
     if (!path.isAbsolute(root) || path.dirname(processSocket) !== root || path.dirname(controlSocket) !== root || processSocket === controlSocket) throw fail("CONFIG_INVALID");
     Object.assign(this, { root, processSocket, controlSocket });
-    this.instanceId = randomUUID(); this.connections = new Set();
+    this.instanceId = randomUUID(); this.connections = new Set(); this.leases = new Map(); this.leaseGenerations = new Map();
   }
   async listen() {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
@@ -71,48 +71,54 @@ export class WorkerSupervisorDaemon {
   async dispatch(frame) {
     if (!safeId(frame?.id) || !["status", "configure", "invalidate", "reset"].includes(frame.action)) throw fail("REQUEST_INVALID");
     if (frame.action === "status") return this.status();
-    if (frame.action === "configure") return this.configure(frame.identity, frame.lease);
+    if (frame.action === "configure") return this.configure(frame.identity, frame.processId, frame.lease);
     if (frame.action === "invalidate") {
-      if (!safeId(frame.leaseId) || !this.lease || this.lease.id !== frame.leaseId) throw fail("LEASE_CHANGED");
-      const id = this.lease.id; this.lease = null; this.supervisor?.invalidateLease(id); return { invalidated: true };
+      if (!safeId(frame.processId) || !safeId(frame.leaseId)) throw fail("REQUEST_INVALID");
+      const lease = this.leases.get(frame.processId);
+      if (!lease || lease.id !== frame.leaseId) throw fail("LEASE_CHANGED");
+      this.leases.delete(frame.processId); this.supervisor?.invalidateLease(lease.id); return { invalidated: true };
     }
-    if (!this.supervisor) { this.selectedIdentity = null; this.lease = null; return { reset: true }; }
+    if (!this.supervisor) { this.selectedIdentity = null; this.leases.clear(); this.leaseGenerations.clear(); return { reset: true }; }
     try { await this.supervisor.close(); }
     catch { throw fail("SUPERVISOR_BUSY"); }
     await removeOwnedSocket(this.processSocket);
-    this.supervisor = null; this.selectedIdentity = null; this.lease = null;
+    this.supervisor = null; this.selectedIdentity = null; this.leases.clear(); this.leaseGenerations.clear();
     return { reset: true };
   }
   status() {
     return { protocol: "relay-worker-supervisor/1", version: workerSupervisorVersion, daemonInstanceId: this.instanceId, configured: Boolean(this.supervisor),
       ...(this.selectedIdentity ? { identity: this.selectedIdentity } : {}),
+      ...(this.leases.size ? { leases: [...this.leases].map(([processId, lease]) => ({ processId, id: lease.id, generation: lease.generation, expiresAt: lease.expiresAt })) } : {}),
       ...(this.supervisor ? { supervisorInstanceId: this.supervisor.instanceId,
         processes: [...this.supervisor.processes.values()].map(entry => this.supervisor.receipt(entry)) } : {}) };
   }
-  async configure(selected, lease) {
+  async configure(selected, processId, lease) {
     try { selected = identity(selected); } catch { throw fail("IDENTITY_INVALID"); }
-    if (!validLease(lease)) throw fail("LEASE_INVALID");
+    if (!safeId(processId) || !validLease(lease)) throw fail("LEASE_INVALID");
     if (this.selectedIdentity && !exactIdentity(this.selectedIdentity, selected)) throw fail("IDENTITY_CHANGED");
-    const credentialHash = digest(lease.credential), current = this.lease;
+    const credentialHash = digest(lease.credential), current = this.leases.get(processId), generationFloor = this.leaseGenerations.get(processId) || 0;
+    if (!current && lease.generation <= generationFloor) throw fail("LEASE_FENCED");
     if (current && (lease.generation < current.generation || lease.generation === current.generation
       && (lease.id !== current.id || !timingSafeEqual(credentialHash, current.credentialHash)))) throw fail("LEASE_FENCED");
     if (!this.supervisor) {
       this.selectedIdentity = selected;
-      this.lease = { id: lease.id, generation: lease.generation, expiresAt: lease.expiresAt, credentialHash };
+      this.leases.set(processId, { id: lease.id, generation: lease.generation, expiresAt: lease.expiresAt, credentialHash });
+      this.leaseGenerations.set(processId, lease.generation);
       try {
         this.supervisor = await new WorkerProcessSupervisor({ socketPath: this.processSocket, expectedIdentity: selected,
           authorize: request => this.authorize(request) }).listen();
-      } catch (error) { this.supervisor = null; this.selectedIdentity = null; this.lease = null; throw error; }
+      } catch (error) { this.supervisor = null; this.selectedIdentity = null; this.leases.clear(); this.leaseGenerations.clear(); throw error; }
     } else {
-      const prior = this.lease;
-      this.lease = { id: lease.id, generation: lease.generation, expiresAt: lease.expiresAt, credentialHash };
+      const prior = current;
+      this.leases.set(processId, { id: lease.id, generation: lease.generation, expiresAt: lease.expiresAt, credentialHash });
+      this.leaseGenerations.set(processId, Math.max(generationFloor, lease.generation));
       if (prior && prior.id !== lease.id) this.supervisor.invalidateLease(prior.id);
     }
     return { configured: true, daemonInstanceId: this.instanceId, supervisorInstanceId: this.supervisor.instanceId,
-      lease: { id: this.lease.id, generation: this.lease.generation, expiresAt: this.lease.expiresAt } };
+      processId, lease: { id: lease.id, generation: lease.generation, expiresAt: lease.expiresAt } };
   }
   authorize(request) {
-    const lease = this.lease;
+    const lease = this.leases.get(request.processId);
     if (!lease || lease.expiresAt <= Date.now() || typeof request.lease !== "string") throw fail("ADMISSION_DENIED");
     const submitted = digest(request.lease);
     if (!timingSafeEqual(submitted, lease.credentialHash)) throw fail("ADMISSION_DENIED");

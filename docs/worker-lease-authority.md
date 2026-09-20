@@ -1,15 +1,16 @@
-# Durable worker lease authority — unwired partition
+# Durable worker lease authority
 
 This supplies the durable admission prerequisite for `relay-worker-process/1`.
-It does not enable hibernation, install a worker service/gateway, change defaults,
-or resume any existing worker. The first supported process ID is `shared-chrome`;
-it does not establish native-agent session or whole-machine acceptance.
+It is wired to the EC2 Shared Chrome coordinator and supports multiple independent
+process leases in one worker attempt. It does not enable hibernation, change idle
+defaults or yet connect the native-agent adapters; whole-machine acceptance remains
+open.
 
 ## Authority and immutable binding
 
 `WorkerLeaseAuthority` requires encrypted records, a fixed deployment ID, a
-trusted synchronous `bootForWorker(identity)` lookup, and an `invalidateLease(id)`
-hook. The coordinator must derive boot identity from its verified worker/endpoint,
+trusted synchronous `bootForWorker(identity)` lookup, a fixed non-empty process-ID
+allowlist, and an `invalidateLease(id, processId)` hook. The coordinator must derive boot identity from its verified worker/endpoint,
 never from a client frame. The hook must throw if notification cannot be confirmed.
 The local supervisor's synchronous hook can be passed directly.
 
@@ -19,8 +20,9 @@ worker, provider, selected named account and attempt. Owners must be explicit;
 only connected named Codex/Claude accounts qualify. There is no anonymous,
 host-credential, other-account or cross-owner namespace fallback.
 
-The resulting binding includes boot hash, one registered company, one compatible
-environment, account/company/environment revisions, and a hash of admission
+The resulting schema-2 binding includes boot hash, the exact sorted process-ID
+allowlist, one registered company, one compatible environment,
+account/company/environment revisions, and a hash of admission
 fields including selected repositories and account identity. Ordinary message
 revision changes do not invalidate it. Scope changes, archived/deleting/stopping
 chats, unresolved environments, disconnected accounts and even a present pending
@@ -34,14 +36,15 @@ otherwise company/environment records use `user:<ownerId>:<kind>`.
 
 - `claim(binding, controllerId, {expectedRevision: 0})`: create an attempt once.
 - `takeover(binding, newControllerId, {expectedRevision})`: explicit CAS handoff;
-  it advances controller epoch and invalidates the old lease. No automatic takeover
+  it advances controller epoch and invalidates every process lease. No automatic takeover
   occurs in `issue`, reconnect requests or authorization.
-- `issue(binding, controllerId)`: only the held controller claim can issue. A new
+- `issue(binding, controllerId, processId)`: only the held controller claim can issue.
+  A new
   generation and SHA-256 credential hash commit before an opaque 256-bit credential
   is returned. The credential itself is never stored. Results contain
-  `{id, generation, expiresAt, credential, claim}`; only the transport receives
+  `{id, generation, expiresAt, credential, processId, claim}`; only the transport receives
   the credential, never public chat/settings events.
-- `renew(binding, controllerId, leaseId)`: trusted coordinator-only, current-scope
+- `renew(binding, controllerId, leaseId, processId)`: trusted coordinator-only, current-scope
   checked CAS. It extends an unexpired deadline without changing token, ID or
   generation. An expired lease is not revived. Worker `status`/other requests
   never renew themselves; the coordinator renews before requesting status.
@@ -50,10 +53,18 @@ otherwise company/environment records use `user:<ownerId>:<kind>`.
   bindings or revoked scope fail closed. A raced renewal may cause at most three
   read-only CAS attempts; each reloads and revalidates everything. Mutating lease
   issuance, takeover, browser input and tool operations are never auto-replayed.
-- `revoke(binding, leaseId?)`: persist a revoked tombstone, then notify the
-  supervisor. It remains available after account deletion or boot replacement.
-- `forAttempt(binding, controllerId)`: scoped facade with `issue()`, `renew(id)`,
+- `revoke(binding, leaseId?)`: persist an attempt-wide revoked tombstone, then
+  notify the supervisor for every process lease. It remains available after account
+  deletion or boot replacement.
+- `forAttempt(binding, controllerId, processId)`: process-scoped facade with `issue()`, `renew(id)`,
   `authorize(request)` and `revoke(id)` for the browser transport slice.
+
+When a binding contains exactly one process, the process argument may be omitted
+for the existing browser coordinator. With multiple processes it is mandatory.
+Issuing or renewing one process never replaces another process's lease. Generation
+remains monotonic across the attempt, so generations for an individual process may
+legitimately skip. Controller takeover and attempt revocation remain whole-attempt
+operations and fence all processes in deterministic allowlist order.
 
 Claims are `{attemptId, controllerId, controllerEpoch, revision}`. `attemptId`
 here is a SHA-256 database key bound to deployment/owner/chat/wire-attempt, not
@@ -112,7 +123,7 @@ await records.workerTransportTransaction(
 ```
 
 Read/write checks an active attempt, exact controller epoch, allowed process,
-non-pending invalidation and live lease under the same locks as the ledger CAS.
+non-pending invalidation and that process's live lease under the same locks as the ledger CAS.
 Frames do not churn the lease row's revision. The ledger callback is synchronous;
 this primitive does not send input, ACK output or project messages. Those steps
 must occur in the browser/transport coordinator after the relevant commit.
@@ -121,7 +132,7 @@ must occur in the browser/transport coordinator after the relevant commit.
 
 Authorization linearizes at its committed read transaction. A revocation that
 commits afterward cannot retroactively retract the returned decision. The required
-sequence is durable denial followed by `supervisor.invalidateLease(id)`, whose
+sequence is durable denial followed by `supervisor.invalidateLease(id, processId)`, whose
 tombstone rejects already-approved but delayed results and closes attached output.
 This is not a claim of atomicity across the database and a remote worker.
 
@@ -153,8 +164,9 @@ used. Product hibernation and process-preserving deployment remain unaccepted.
 
 ### Local validation receipt (2026-09-19)
 
-- Focused authority/PostgreSQL run: **17/17 passed**, no skips, including the
-  final deferred-COMMIT failure case.
+- Focused authority/PostgreSQL run after schema-2 process isolation: **18/18
+  passed**, no skips, including the final deferred-COMMIT failure case and a
+  two-process rotation/takeover/revocation case.
 - Compatibility run before that additional test: **66/66 passed**, no skips,
   across authority, PostgreSQL, settings, agent accounts/API, company migration
   and worker-process transport. Production source was unchanged between runs;
