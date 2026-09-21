@@ -1019,10 +1019,23 @@ async function interruptAgent() {
 }
 $("#interrupt-button").addEventListener("click", () => void interruptAgent());
 const workerSizeDialog = $("#worker-size-dialog"), workerSizeSelect = $("#worker-instance-type");
+const workerSizeDefault = $("#worker-size-save-default"), workerSizeSubmit = $("#worker-size-submit");
+const workerSizeEnvironment = () => workspaceSettings.environments?.find(item => item.id === state.active?.environmentId);
 const renderWorkerSizeDescription = () => {
   const instance = workspaceSettings.instances?.find(item => item.id === workerSizeSelect.value);
   const region = workspaceSettings.instanceRegion === workspaceSettings.instancePricingRegion ? workspaceSettings.instanceRegion || "configured region" : `${workspaceSettings.instancePricingRegion} reference price`;
   $("#worker-instance-description").textContent = instance ? `${instance.vcpu} vCPU · ${instance.memoryGiB} GiB RAM · $${instance.usdPerHour.toFixed(4)}/hour · ${region}${instance.burstable ? " · burstable CPU" : " · sustained CPU"}` : "";
+  const environment = workerSizeEnvironment(), canSaveDefault = environment?.backend === "ec2";
+  $("#worker-size-default-option").hidden = !canSaveDefault;
+  $("#worker-size-default-detail").hidden = !canSaveDefault;
+  if (canSaveDefault) {
+    const alreadyDefault = workerSizeSelect.value === environment.instanceType;
+    $("#worker-size-environment-name").textContent = `“${environment.name}”`;
+    $("#worker-size-default-detail").textContent = alreadyDefault ? `${environment.instanceType} is already this environment’s default.` : `Current default: ${environment.instanceType}. Existing chats keep their own selected size.`;
+    if (alreadyDefault) workerSizeDefault.checked = false;
+    workerSizeDefault.disabled = alreadyDefault;
+  } else { workerSizeDefault.checked = false; workerSizeDefault.disabled = true; }
+  workerSizeSubmit.textContent = workerSizeDefault.checked ? "Save default and resize" : "Resize and restart";
 };
 $("#resize-worker-button").addEventListener("click", () => {
   const chat = state.active, instances = workspaceSettings.instances || [];
@@ -1033,6 +1046,7 @@ $("#resize-worker-button").addEventListener("click", () => {
   }));
   const environment = workspaceSettings.environments?.find(item => item.id === chat.environmentId);
   workerSizeSelect.value = chat.workerInstanceType || chat.runtimeMetadata?.instanceType || environment?.instanceType || workspaceSettings.defaultInstanceType || instances[0].id;
+  workerSizeDefault.checked = false;
   const resizeError = chat.workerResize?.error || "";
   $("#worker-size-error").textContent = chat.workerResize?.status === "failed"
     ? /UnauthorizedOperation|not authorized/i.test(resizeError) ? "AWS denied the previous resize request. Choose a size to retry."
@@ -1041,19 +1055,32 @@ $("#resize-worker-button").addEventListener("click", () => {
     : ""; renderWorkerSizeDescription(); workerSizeDialog.showModal();
 });
 workerSizeSelect.addEventListener("change", renderWorkerSizeDescription);
+workerSizeDefault.addEventListener("change", renderWorkerSizeDescription);
 $("#worker-size-form").addEventListener("submit", event => {
   event.preventDefault();
-  const chat = state.active, instanceType = workerSizeSelect.value;
+  const chat = state.active, instanceType = workerSizeSelect.value, environment = workerSizeEnvironment();
   if (!chat || !instanceType) return;
+  const saveDefault = workerSizeDefault.checked && environment?.backend === "ec2" && environment.instanceType !== instanceType;
   const previous = chat;
   state.active = { ...chat, workerInstanceType: instanceType, startupProgress: null,
     workerResize: { status: "resizing", phase: "stopping", instanceType, requestedAt: new Date().toISOString() } };
   workerSizeDialog.close(); renderActive();
-  void api(`/api/chats/${chat.id}/worker-size`, { method: "PATCH", body: JSON.stringify({ instanceType }) }).then(({ chat: updated }) => {
-    if (state.active?.id === updated.id && (updated.revision || 0) >= (state.active.revision || 0)) { state.active = { ...state.active, ...updated }; renderActive(); }
-  }).catch(error => {
-    if (state.active?.id === previous.id) { state.active = previous; renderActive(); }
-    toast(`Could not resize worker: ${error.message}`);
+  const resize = api(`/api/chats/${chat.id}/worker-size`, { method: "PATCH", body: JSON.stringify({ instanceType }) });
+  const save = saveDefault ? api(`/api/environments/${environment.id}/instance-type`, { method: "PATCH", body: JSON.stringify({ instanceType, revision: environment.revision }) }) : Promise.resolve(null);
+  void Promise.allSettled([resize, save]).then(([resized, saved]) => {
+    if (resized.status === "fulfilled") {
+      const updated = resized.value.chat;
+      if (state.active?.id === updated.id && (updated.revision || 0) >= (state.active.revision || 0)) state.active = { ...state.active, ...updated };
+    } else if (state.active?.id === previous.id) state.active = previous;
+    if (saved.status === "fulfilled" && saved.value?.environment) {
+      const updated = saved.value.environment;
+      workspaceSettings.environments = workspaceSettings.environments.map(item => item.id === updated.id ? updated : item);
+    }
+    renderActive();
+    if (resized.status === "rejected" && saved.status === "rejected") toast(`Could not resize the worker or save the environment default: ${resized.reason.message}; ${saved.reason.message}`);
+    else if (resized.status === "rejected") toast(`${saveDefault ? "Default saved, but " : ""}could not resize worker: ${resized.reason.message}`);
+    else if (saved.status === "rejected") toast(`Worker resize started, but the environment default was not saved: ${saved.reason.message}`);
+    else if (saveDefault) toast(`Default machine size for ${environment.name} saved`);
   });
 });
 function renderWorkingStatus() {

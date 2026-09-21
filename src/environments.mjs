@@ -60,6 +60,20 @@ export class Environments {
     this.queue = result.catch(() => {});
     return result;
   }
+  setInstanceType(id, input) {
+    const result = this.queue.then(() => this.setInstanceTypeUnlocked(id, input));
+    this.queue = result.catch(() => {});
+    return result;
+  }
+  async setInstanceTypeUnlocked(id, input) {
+    const old = await this.get(id, { reveal: true });
+    if (input.revision !== old.revision) throw Object.assign(new Error("This environment changed in another tab. Reload before saving."), { statusCode: 409 });
+    if (old.backend !== "ec2") throw new Error("Machine size defaults require an EC2 environment");
+    const value = { ...old, instanceType: validateWorkerInstanceType(input.instanceType, this.defaultInstanceType), revision: old.revision + 1, updatedAt: new Date().toISOString() };
+    await this.records.put("environment", id, value);
+    await this.onSaved?.(value);
+    return publicEnvironment(value, await this.registeredCompanies(), this.defaultInstanceType);
+  }
   async saveUnlocked(input, id = null) {
     const old = id ? await this.get(id, { reveal: true }) : null;
     if (old && input.revision !== old.revision) throw Object.assign(new Error("This environment changed in another tab. Reload before saving."), { statusCode: 409 });

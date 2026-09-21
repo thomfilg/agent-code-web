@@ -432,9 +432,11 @@
         <p class="muted">Resize this chat’s EC2 worker without losing its workspace or conversation. The worker restarts and queued messages resume afterward.</p>
         <label><span>EC2 instance</span><select id="worker-instance-type" aria-label="EC2 instance" required></select></label>
         <p id="worker-instance-description" class="muted"></p>
+        <label id="worker-size-default-option" class="checkbox-label worker-size-default-option"><input type="checkbox" id="worker-size-save-default"><span>Use this size by default for new chats in <strong id="worker-size-environment-name"></strong></span></label>
+        <p id="worker-size-default-detail" class="muted"></p>
         <p class="muted">On-Demand Linux price for the configured AWS region. EBS storage, data transfer and surplus CPU credits are separate.</p>
         <p class="form-error" id="worker-size-error" role="alert"></p>
-        <div class="dialog-actions"><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button type="submit" class="primary-button">Resize and restart</button></div>
+        <div class="dialog-actions"><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button type="submit" class="primary-button" id="worker-size-submit">Resize and restart</button></div>
       </form>
     </dialog>
 

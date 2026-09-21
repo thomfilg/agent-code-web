@@ -49,6 +49,22 @@ test("real shared-package OAuth flow persists subject identity, revokes logout, 
   assert.equal((await app.records.list("relay-user")).length, 1);
 });
 
+test("an authenticated user can save a revision-checked machine default for one environment", async t => {
+  const { fixture, client } = await setup(t);
+  const browser = client(); await browser.login(fixture);
+  const headers = { "content-type": "application/json" };
+  assert.equal((await browser.request("/api/companies", { method: "POST", headers, body: JSON.stringify({ id: "fixture", name: "Fixture" }) })).status, 201);
+  const created = await browser.request("/api/environments", { method: "POST", headers, body: JSON.stringify({ name: "Cloud", backend: "ec2", companyId: "fixture", instanceType: "t3.medium" }) });
+  assert.equal(created.status, 201);
+  const environment = (await created.json()).environment;
+  const changed = await browser.request(`/api/environments/${environment.id}/instance-type`, { method: "PATCH", headers, body: JSON.stringify({ instanceType: "m7i.xlarge", revision: environment.revision }) });
+  assert.equal(changed.status, 200);
+  const updated = (await changed.json()).environment;
+  assert.equal(updated.instanceType, "m7i.xlarge"); assert.equal(updated.revision, environment.revision + 1);
+  const stale = await browser.request(`/api/environments/${environment.id}/instance-type`, { method: "PATCH", headers, body: JSON.stringify({ instanceType: "t3.large", revision: environment.revision }) });
+  assert.equal(stale.status, 409);
+});
+
 test("another Google user cannot inherit legacy conversations, credentials, environments, groups, preferences or server agents", async t => {
   const { app, fixture, client } = await setup(t);
   const legacy = await app.store.create({ agent: "mock", title: "Old private transcript" });

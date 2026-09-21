@@ -486,14 +486,16 @@ export async function createAgentWebServer(options = {}) {
         instances: config.workerBackend === "ec2" ? WORKER_INSTANCE_CATALOG : [], defaultInstanceType: config.ec2.instanceType,
         region: config.ec2.region, pricingRegion: WORKER_INSTANCE_PRICING_REGION });
       if (url.pathname === "/api/environments" && request.method === "POST") return json(response, 201, { environment: await environments.save(await bodyJson(request, config.maxBodyBytes)) });
-      const environmentRoute = /^\/api\/environments\/(env_[a-f0-9-]{36})(?:\/(reveal))?$/.exec(url.pathname);
+      const environmentRoute = /^\/api\/environments\/(env_[a-f0-9-]{36})(?:\/(reveal|instance-type))?$/.exec(url.pathname);
       if (environmentRoute) {
         const id = environmentRoute[1];
         if (environmentRoute[2] && request.method === "POST") {
+          if (environmentRoute[2] !== "reveal") return json(response, 405, { error: "Method not allowed" });
           const key = (await bodyJson(request, config.maxBodyBytes)).key;
           const variable = (await environments.get(id, { reveal: true })).variables.find(v => v.key === key);
           return variable ? json(response, 200, { value: variable.value }) : json(response, 404, { error: "Variable not found" });
         }
+        if (environmentRoute[2] === "instance-type" && request.method === "PATCH") return json(response, 200, { environment: await environments.setInstanceType(id, await bodyJson(request, 1000)) });
         if (!environmentRoute[2] && request.method === "PATCH") return json(response, 200, { environment: await environments.save(await bodyJson(request, config.maxBodyBytes), id) });
         if (!environmentRoute[2] && request.method === "DELETE") { await environments.remove(id, store.list()); return json(response, 200, { removed: true }); }
       }

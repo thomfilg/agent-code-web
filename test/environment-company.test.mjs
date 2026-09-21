@@ -88,6 +88,20 @@ test("environment names are company-local; conflicting reassignments leave the o
   assert.deepEqual(await records.get("environment", first.id), original);
 });
 
+test("an EC2 environment machine default has a narrow revision-checked update", async () => {
+  const { records, environments } = await fixture();
+  const saved = await environments.save({ ...draft, backend: "ec2", instanceType: "t3.medium" });
+  const updated = await environments.setInstanceType(saved.id, { instanceType: "m7i.xlarge", revision: saved.revision });
+  assert.equal(updated.instanceType, "m7i.xlarge");
+  assert.equal(updated.revision, saved.revision + 1);
+  assert.equal(JSON.stringify(updated).includes("fixture-private"), false);
+  assert.deepEqual((await environments.get(saved.id, { reveal: true })).variables, draft.variables.map(variable => ({ ...variable, enabled: true })));
+  await assert.rejects(environments.setInstanceType(saved.id, { instanceType: "t3.large", revision: saved.revision }), { statusCode: 409 });
+  await assert.rejects(environments.setInstanceType(saved.id, { instanceType: "r9g.metal", revision: updated.revision }), /supported worker machine size/);
+  const local = await environments.save({ ...draft, name: "Local", backend: "local" });
+  await assert.rejects(environments.setInstanceType(local.id, { instanceType: "t3.large", revision: local.revision }), /require an EC2 environment/);
+});
+
 test("remembered selection cannot restore or grant an ambiguous environment", async () => {
   const { records, companies, environments } = await fixture();
   const environment = { ...draft, id: "legacy", companies: ["first", "second"], revision: 1 };

@@ -28,19 +28,25 @@ test("an EC2 chat offers priced machine sizes and applies a resize immediately i
     await route.fulfill({ json: config });
   });
   await page.route("**/api/environments", route => route.fulfill({ json: {
-    environments: [{ id: "env-fixture", name: "Fixture", backend: "ec2", instanceType: "t3.medium", companies: [], variables: [], software: [] }], software: [],
+    environments: [{ id: "env-fixture", name: "Fixture", backend: "ec2", instanceType: "t3.medium", revision: 4, companies: [], variables: [], software: [] }], software: [],
     instances: [{ id: "t3.medium", vcpu: 2, memoryGiB: 4, usdPerHour: 0.0416, burstable: true }, { id: "m7i.xlarge", vcpu: 4, memoryGiB: 16, usdPerHour: 0.2016, recommended: true }],
     defaultInstanceType: "t3.medium", region: "us-east-2",
   } }));
   const chat = await openFixture(page, [], { environmentId: "env-fixture", runtimeMetadata: { backend: "ec2", instanceType: "t3.medium" } });
-  const resize = Promise.withResolvers(); let request;
+  const resize = Promise.withResolvers(); let request, defaultRequest;
   await page.route(`**/api/chats/${chat.id}/worker-size`, async route => { request = route.request().postDataJSON(); await resize.promise; await route.fulfill({ status: 202, json: { chat: { ...chat, workerInstanceType: "m7i.xlarge", workerResize: { status: "resizing", instanceType: "m7i.xlarge" } } } }); });
+  await page.route("**/api/environments/env-fixture/instance-type", async route => {
+    defaultRequest = route.request().postDataJSON();
+    await route.fulfill({ json: { environment: { id: "env-fixture", name: "Fixture", backend: "ec2", instanceType: defaultRequest.instanceType, revision: 5, companies: [], variables: [], software: [] } } });
+  });
   await expect(page.locator("#runtime-banner #resize-worker-button")).toHaveText("t3.medium⌄");
   await page.locator("#runtime-banner #resize-worker-button").click();
   const dialog = page.getByRole("dialog", { name: "Machine size" }), size = page.getByRole("combobox", { name: "EC2 instance", exact: true });
   await expect(size.locator("option")).toHaveText([/2 vCPU.*4 GiB.*\$0\.0416\/hour/, /4 vCPU.*16 GiB.*\$0\.2016\/hour.*Recommended/]);
   await size.selectOption("m7i.xlarge"); await expect(dialog).toContainText("$0.2016/hour");
-  await page.getByRole("button", { name: "Resize and restart", exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: /Use this size by default for new chats in/ })).toBeEnabled();
+  await page.getByRole("checkbox", { name: /Use this size by default for new chats in/ }).check();
+  await page.getByRole("button", { name: "Save default and resize", exact: true }).click();
   await expect(dialog).not.toBeVisible();
   await expect(page.locator("#resize-worker-button")).toHaveText("Resizing to m7i.xlarge…");
   await expect(page.locator("#machine-resize-notice")).toBeVisible();
@@ -50,7 +56,9 @@ test("an EC2 chat offers priced machine sizes and applies a resize immediately i
   await expect(page.locator("#runtime-detail")).toHaveText("Step 1 of 3 · Stopping current machine");
   await expect(page.locator("#startup-progress")).toBeHidden();
   await expect.poll(() => request).toEqual({ instanceType: "m7i.xlarge" });
+  await expect.poll(() => defaultRequest).toEqual({ instanceType: "m7i.xlarge", revision: 4 });
   resize.resolve();
+  await expect(page.locator("#toasts")).toContainText("Default machine size for Fixture saved");
 });
 
 test("a stopped EC2 chat states the physical outcome and explains an interrupted resize", async ({ page }) => {
