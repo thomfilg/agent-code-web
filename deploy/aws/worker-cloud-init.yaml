@@ -68,10 +68,9 @@ write_files:
         [ "$code" -eq 0 ] && return
         emit_finalizer_receipt "AGENT_RELAY_FINALIZER_FAILED_V1 stage=$stage"
         sync || true
-        # This is the disposable image builder only. A failed scrub must never
-        # remain billable after removing SSM/SSH, and no failure marker permits
-        # the baker to create an image from this stopped instance.
-        systemctl poweroff --force --force >/dev/null 2>&1 || true
+        # Remain running on failure. The baker has a short bounded wait and then
+        # terminates this exact disposable builder without creating an image.
+        # A forced poweroff would make failure indistinguishable from success.
       }
       trap finalizer_exit EXIT
       trap 'exit 1' HUP INT TERM
@@ -154,18 +153,20 @@ write_files:
       [ "$(stat -c '%U:%G' /home/ubuntu/.ssh)" = ubuntu:ubuntu ] && [ "$(stat -c '%U:%G' /home/ubuntu/.ssh/authorized_keys)" = ubuntu:ubuntu ] || { echo 'Worker transport key ownership changed.' >&2; exit 1; }
       [ "$(stat -c '%a' /home/ubuntu/.ssh)" = 700 ] && [ "$(stat -c '%a' /home/ubuntu/.ssh/authorized_keys)" = 600 ] || { echo 'Worker transport key permissions changed.' >&2; exit 1; }
       printf '%s' '__RELAY_WORKER_PUBLIC_KEY_BASE64__' | base64 -d | cmp -s - /home/ubuntu/.ssh/authorized_keys || { echo 'Worker transport public key changed.' >&2; exit 1; }
-      stage=identity-scrub
-      # Remove builder host identity only after the transport key boundary.
-      for kind in rsa ecdsa ed25519; do
-        rm -f -- "/etc/ssh/ssh_host_${kind}_key" "/etc/ssh/ssh_host_${kind}_key.pub"
-      done
-      test -z "$(find /etc/ssh -maxdepth 1 -type f -name 'ssh_host_*_key' -print -quit)"
       # Names only, never contents; any unexpected credential file fails closed.
       stage=credential-scan
       suspect=$(find /root /home /opt/agent-web -type f \( -name auth.json -o -name .credentials.json -o -name credentials -o -name id_rsa -o -name id_ed25519 -o -name '*.pem' \) -print -quit)
       [ -z "$suspect" ] || { echo 'Credential filename scan failed; no AMI may be created.' >&2; exit 1; }
+      # Keep the builder SSH host identity through every remaining operation
+      # that can fail for package/unit/file reasons. A failed finalizer remains
+      # read-only diagnosable until the baker terminates this exact instance.
       stage=service-enable
       systemctl enable agent-web-heartbeat.service agent-web-idle-watchdog.timer agent-web-hostkeys.service
+      stage=identity-scrub
+      for kind in rsa ecdsa ed25519; do
+        rm -f -- "/etc/ssh/ssh_host_${kind}_key" "/etc/ssh/ssh_host_${kind}_key.pub"
+      done
+      test -z "$(find /etc/ssh -maxdepth 1 -type f -name 'ssh_host_*_key' -print -quit)"
       stage=finalize-marker
       rm -f /opt/agent-web/BUILD_PENDING
       touch /opt/agent-web/IMAGE_FINALIZED

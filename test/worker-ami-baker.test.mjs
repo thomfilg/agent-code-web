@@ -146,13 +146,11 @@ test("AMI cleanup observes exact terminal state with detached network but never 
   }
 });
 
-test("AMI creation requires one sanitized successful finalizer receipt after stopped state", async () => {
-  for (const finalizerOutput of ["", "PRIVATE OUTPUT", "AGENT_RELAY_FINALIZER_FAILED_V1 stage=service-enable\n", "AGENT_RELAY_FINALIZER_OK_V1\nAGENT_RELAY_FINALIZER_FAILED_V1 stage=poweroff\n"]) {
-    const f = fixture({ finalizerOutput });
-    await assert.rejects(bakeWorkerImage(parseOptions(required), { run: f.run, sleep: async () => {}, pollLimit: 2 }), error => !error.message.includes("PRIVATE OUTPUT"));
-    assert.equal(f.calls.some(call => call.includes("create-image")), false);
-    assert.equal(f.calls.filter(call => call.includes("terminate-instances")).length, 1);
-  }
+test("failed finalization never creates an image and exposes only an allowlisted console stage", async () => {
+  const f = fixture({ neverStops: true, finalizerOutput: "PRIVATE OUTPUT\nAGENT_RELAY_FINALIZER_FAILED_V1 stage=service-enable\n" });
+  await assert.rejects(bakeWorkerImage(parseOptions(required), { run: f.run, sleep: async () => {}, pollLimit: 2 }), error => /finalizer failed \(service-enable\)/.test(error.message) && !error.message.includes("PRIVATE OUTPUT"));
+  assert.equal(f.calls.some(call => call.includes("create-image")), false);
+  assert.equal(f.calls.filter(call => call.includes("terminate-instances")).length, 1);
   assert.deepEqual(safeFinalizerReceipt("boot noise\nAGENT_RELAY_FINALIZER_OK_V1\n"), { ok: true });
   assert.deepEqual(safeFinalizerReceipt(Buffer.from("AGENT_RELAY_FINALIZER_FAILED_V1 stage=ssm-purge\n").toString("base64")), { ok: false, stage: "ssm-purge" });
   assert.equal(safeFinalizerReceipt("AGENT_RELAY_FINALIZER_FAILED_V1 stage=PRIVATE\n"), null);

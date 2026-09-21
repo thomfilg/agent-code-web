@@ -256,12 +256,13 @@ export async function bakeWorkerImage(options, { run = runBakerAws, sleep = ms =
     await ssm([`python3 -I -c 'import base64;exec(base64.b64decode("${Buffer.from(bootstrap).toString("base64")}"))'`]);
     log("Pinned CLIs verified. Scheduling credential scrub and builder shutdown.");
     await ssm(["set -eu", "systemd-run --unit=agent-relay-image-finalize --on-active=15s /usr/local/sbin/agent-web-finalize-image"], "60");
-    await poll("sanitized builder shutdown", async () => (await builder()).State?.Name === "stopped");
-    const finalizer = await poll("sanitized builder finalizer receipt", async () => {
+    try { await poll("sanitized builder shutdown", async () => (await builder()).State?.Name === "stopped", Math.min(pollLimit, 36)); }
+    catch (error) {
       const consoleOutput = await json("ec2", "get-console-output", "--instance-id", builderId, "--latest");
-      return safeFinalizerReceipt(consoleOutput?.Output);
-    }, Math.min(pollLimit, 12));
-    if (!finalizer.ok) throw new Error(`Builder finalizer failed (${finalizer.stage}); no image was created`);
+      const finalizer = safeFinalizerReceipt(consoleOutput?.Output);
+      if (finalizer && !finalizer.ok) throw new Error(`Builder finalizer failed (${finalizer.stage}); no image was created`);
+      throw error;
+    }
     // No StopInstances: an interrupted scrub must fail, not produce an AMI.
     const imageId = await json("ec2", "create-image", "--instance-id", builderId, "--name", o.name,
       "--description", "Agent Relay private worker: no credentials; deployment-specific SSH public key",
