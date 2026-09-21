@@ -11,10 +11,13 @@ test("draft controls distinguish providers and never turn session-only commands 
   assert.equal(firstChatCommand("/name New title", "codex").name, "rename");
   assert.equal(firstChatCommand("/plan inspect first", "claude").name, "plan");
   assert.equal(firstChatCommand("ordinary message", "codex"), null);
-  assert.equal(firstChatCommand("/tmp/project is the folder", "codex"), null);
+  assert.throws(() => firstChatCommand("/tmp/project is the folder", "codex"), /Invalid slash command/);
   for (const command of ["/", "/goal pause", "/goal resume", "/goal clear", "/compact", "/copy", "/approve", "/unknown-native", "/help arguments"]) assert.throws(() => firstChatCommand(command, "codex"));
   assert.throws(() => firstChatCommand("/goal build", "claude"), /Unknown command \/goal/);
   assert.equal(newChatCommands("codex").commands.find(c => c.name === "compact").disabled, true);
+  const native = newChatCommands("claude", [{ name: "fixture-native" }]).commands.find(c => c.name === "fixture-native");
+  assert.equal(native.disabled, false);
+  assert.equal(firstChatCommand("/fixture-native exact args", "claude", [native]), native);
   assert.equal(newChatCommands(null).commands.length, 0);
 });
 
@@ -29,7 +32,7 @@ test("draft discovery uses only selected-account cached metadata and never host/
   const codex = await catalog.newChat({ agent: "codex", ownerId: "alice", agentAccountId: "codex-a" });
   assert(codex.commands.some(c => c.name === "goal" && !c.disabled));
   const claude = await catalog.newChat({ agent: "claude", ownerId: "alice", agentAccountId: "claude-a" });
-  assert.equal(claude.commands.find(c => c.name === "account-plugin").disabled, true);
+  assert.equal(claude.commands.find(c => c.name === "account-plugin").disabled, false);
   assert(!claude.commands.some(c => c.name === "goal"));
   await assert.rejects(catalog.newChat({ agent: "claude", ownerId: "bob", agentAccountId: "claude-a" }), /unavailable/);
   await assert.rejects(catalog.newChat({ agent: "codex", ownerId: "alice" }), /Choose an agent account/);

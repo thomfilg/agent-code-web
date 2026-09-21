@@ -16,6 +16,7 @@ import { mergeUsage } from "./session-info.mjs";
 import { legacyClaudeContext } from "./legacy-usage.mjs";
 import { renderingSample } from "./rendering-sample.mjs";
 import { messageCommand } from "./message-command.mjs";
+import { invalidSlashCommandError, parseSlashCommand } from "../public/slash-command.js";
 import { finalAnswerMeta } from "./message-search.mjs";
 import { ChatPresence } from "./chat-presence.mjs";
 import { PreviewActivity } from "./preview-activity.mjs";
@@ -66,7 +67,6 @@ function retainedCapabilities(record, chat) {
   }
   return record;
 }
-const slashCommandName = text => /^\/([\w:.-]+)(?:\s|$)/.exec(text)?.[1] || null;
 const permissionModes = agent => agent === "claude" ? Object.values(CLAUDE_PERMISSION_MODES) : ["auto", "accept_edits", "plan"];
 
 export class RuntimeManager extends EventEmitter {
@@ -1127,10 +1127,12 @@ export class RuntimeManager extends EventEmitter {
 
   #resolveMessageCommand(chat, text) {
     const commandAction = messageCommand(chat.agent, text);
-    const name = slashCommandName(text);
-    if (commandAction || !name || !this.commands) return { commandAction, skill: null };
+    const slash = parseSlashCommand(text);
+    if (commandAction || !slash) return { commandAction, skill: null };
+    if (!slash.name) throw Object.assign(invalidSlashCommandError(), { statusCode: 400 });
+    if (!this.commands) throw Object.assign(new Error(`Unknown command /${slash.name}. Choose a command from the / menu.`), { statusCode: 400 });
 
-    return this.#resolveCatalogCommand(chat, name);
+    return this.#resolveCatalogCommand(chat, slash.name);
   }
 
   async #resolveCatalogCommand(chat, name) {

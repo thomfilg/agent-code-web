@@ -154,10 +154,11 @@ test("plan plus task uses read-only mode; goals persist and stream each native c
   const beforeUnknown = store.get(chat.id).messages.length;
   await assert.rejects(manager.submit(chat.id, "/qualquerporra"), error => error.statusCode === 400 && /Unknown command \/qualquerporra/.test(error.message));
   await assert.rejects(manager.enqueue(chat.id, "/qualquerporra later"), error => error.statusCode === 400 && /Unknown command \/qualquerporra/.test(error.message));
+  await assert.rejects(manager.submit(chat.id, "/tmp/project is the folder"), error => error.statusCode === 400 && /Invalid slash command/.test(error.message));
   assert.equal(store.get(chat.id).messages.length, beforeUnknown, "Unknown commands must not become model turns");
   assert.deepEqual(store.get(chat.id).queuedMessages || [], [], "Unknown commands must not enter the queue");
-  await manager.send(chat.id, "/tmp/project is the folder to inspect");
-  assert.equal(store.get(chat.id).messages.filter(m => m.role === "user").at(-1).text, "/tmp/project is the folder to inspect", "Absolute paths remain ordinary prompts");
+  await manager.send(chat.id, "Inspect /tmp/project as an ordinary path");
+  assert.equal(store.get(chat.id).messages.filter(m => m.role === "user").at(-1).text, "Inspect /tmp/project as an ordinary path");
   const beforeInspection = store.get(chat.id).messages.length;
   const terminals = await manager.inspectCommand(chat.id, "ps");
   assert.equal(terminals.awake, true); assert.equal(terminals.items.length, 2); assert.ok(!JSON.stringify(terminals).includes("fixture-secret"));

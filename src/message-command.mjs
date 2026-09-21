@@ -1,42 +1,44 @@
+import { parseSlashCommand } from "../public/slash-command.js";
+
 export function messageCommand(agent, text) {
-  if (agent === "codex" && text.trim() === "/compact") return { type: "compact" };
-  const match = /^\/([\w:.-]+)(?:\s+([\s\S]*))?$/.exec(text.trim());
-  if (!match) return null;
-  const argument = (match[2] || "").trim();
-  if (agent === "claude" && ["config", "settings", "autocompact", "update-config", "fewer-permission-prompts", "doctor", "checkup"].includes(match[1])) return { type: "claudeConfig", prompt: text };
-  if (agent === "claude" && match[1] === "fast") {
+  if (text.trim() === "/compact") return agent === "codex" ? { type: "compact" } : { type: "nativeCommand", prompt: text };
+  const parsed = parseSlashCommand(text);
+  if (!parsed?.name) return null;
+  const { name, argument } = parsed;
+  if (agent === "claude" && ["config", "settings", "autocompact", "update-config", "fewer-permission-prompts", "doctor", "checkup"].includes(name)) return { type: "claudeConfig", prompt: text };
+  if (agent === "claude" && name === "fast") {
     if (argument && !["on", "off"].includes(argument)) throw new Error("Use /fast, /fast on, or /fast off");
     return { type: "claudeFast", prompt: text };
   }
-  if (agent === "claude" && match[1] === "effort" && argument === "status") return null;
-  if (match[1] === "keymap") throw new Error("Open /keymap without arguments to remap Relay keyboard shortcuts. This is a web control, not agent input.");
-  if (match[1] === "vim") throw new Error("Use /vim in the web composer to toggle Vim editing, not as agent input.");
-  if (match[1] === "statusline") throw new Error("Open /statusline in the web composer to configure its footer, not as agent input.");
-  if (match[1] === "title") throw new Error("Open /title in the web composer to configure the browser tab, not as agent input. Use /rename to rename the chat.");
-  if (match[1] === "theme") throw new Error("Open /theme without arguments in the web composer to choose syntax colors, not as agent input.");
-  if (["pets", "pet"].includes(match[1])) throw new Error("Use /pets in the web composer to choose a pet, or /pets off to hide it. This is not agent input.");
-  if (match[1] === "plan") return { type: "plan", prompt: argument };
-  if (["permissions", "mode"].includes(match[1]) && argument) {
+  if (agent === "claude" && name === "effort" && argument === "status") return null;
+  if (name === "keymap") throw new Error("Open /keymap without arguments to remap Relay keyboard shortcuts. This is a web control, not agent input.");
+  if (name === "vim") throw new Error("Use /vim in the web composer to toggle Vim editing, not as agent input.");
+  if (name === "statusline") throw new Error("Open /statusline in the web composer to configure its footer, not as agent input.");
+  if (name === "title") throw new Error("Open /title in the web composer to configure the browser tab, not as agent input. Use /rename to rename the chat.");
+  if (name === "theme") throw new Error("Open /theme without arguments in the web composer to choose syntax colors, not as agent input.");
+  if (["pets", "pet"].includes(name)) throw new Error("Use /pets in the web composer to choose a pet, or /pets off to hide it. This is not agent input.");
+  if (name === "plan") return { type: "plan", prompt: argument };
+  if (["permissions", "mode"].includes(name) && argument) {
     const mode = { auto: "auto", edits: "accept_edits", "accept-edits": "accept_edits", plan: "plan", "read-only": "plan" }[argument.toLowerCase()];
     if (!mode) throw new Error("Use /permissions auto, edits, or read-only");
     return { type: "settings", settings: { mode } };
   }
-  if (["model", "effort", "reasoning"].includes(match[1]) && argument) {
-    const key = match[1] === "model" ? "model" : "effort";
+  if (["model", "effort", "reasoning"].includes(name) && argument) {
+    const key = name === "model" ? "model" : "effort";
     return { type: "settings", settings: { [key]: argument === "default" && !(agent === "claude" && key === "model") ? null : argument } };
   }
   if (agent !== "codex") return null; // Preserve Claude's installed commands and plugin aliases.
-  if (match[1] === "app") throw new Error("Open /app without arguments in the web composer to hand off the saved session. This is not agent input.");
-  if (match[1] === "approve") throw new Error("Open /approve without arguments and confirm a specific denied action. Plain messages cannot grant approval.");
-  if (match[1] === "feedback") throw new Error("Open /feedback without arguments to review and explicitly send a report. Plain messages cannot submit diagnostics.");
-  if (match[1] === "logout") throw new Error("Open /logout without arguments, inspect the native account and confirm sign-out. Plain messages cannot clear credentials.");
-  if (match[1] === "personality" && argument) return { type: "settings", settings: { personality: argument } };
-  if (match[1] === "fast") {
+  if (name === "app") throw new Error("Open /app without arguments in the web composer to hand off the saved session. This is not agent input.");
+  if (name === "approve") throw new Error("Open /approve without arguments and confirm a specific denied action. Plain messages cannot grant approval.");
+  if (name === "feedback") throw new Error("Open /feedback without arguments to review and explicitly send a report. Plain messages cannot submit diagnostics.");
+  if (name === "logout") throw new Error("Open /logout without arguments, inspect the native account and confirm sign-out. Plain messages cannot clear credentials.");
+  if (name === "personality" && argument) return { type: "settings", settings: { personality: argument } };
+  if (name === "fast") {
     if (argument && !["on", "off"].includes(argument)) throw new Error("Use /fast, /fast on, or /fast off");
     return { type: "fast", action: argument || "toggle" };
   }
-  if (match[1] === "init") return { type: "init", prompt: `Inspect this repository and create or improve its AGENTS.md contributor instructions. Preserve existing instructions and user edits. Describe only commands, conventions, tests and architecture you actually verify in the repository. Keep the document concise and specific. Do not overwrite unrelated files.${argument ? `\n\nAdditional instructions:\n${argument}` : ""}` };
-  if (match[1] === "review") {
+  if (name === "init") return { type: "init", prompt: `Inspect this repository and create or improve its AGENTS.md contributor instructions. Preserve existing instructions and user edits. Describe only commands, conventions, tests and architecture you actually verify in the repository. Keep the document concise and specific. Do not overwrite unrelated files.${argument ? `\n\nAdditional instructions:\n${argument}` : ""}` };
+  if (name === "review") {
     let target = { type: "uncommittedChanges" };
     if (argument.startsWith("--base")) {
       const branch = /^--base\s+(\S+)$/.exec(argument)?.[1];
@@ -49,7 +51,7 @@ export function messageCommand(agent, text) {
     } else if (argument) target = { type: "custom", instructions: argument };
     return { type: "review", target };
   }
-  if (match[1] !== "goal") return null;
+  if (name !== "goal") return null;
   if (!argument) return { type: "goal", action: "get" };
   if (["pause", "resume", "clear"].includes(argument)) return { type: "goal", action: argument, prompt: argument === "resume" ? "Continue working toward the current goal." : "" };
   const objective = argument.replace(/^edit(?:\s+|$)/, "");

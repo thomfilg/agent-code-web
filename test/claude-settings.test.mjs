@@ -200,7 +200,7 @@ async function fixture(t, { fake = false, host = false } = {}) {
   models.codex = async () => ({ models: [{ id: "gpt-5.6-sol", efforts: ["high"] }] });
   const broker = new CapabilityBroker({ ttlMs: 120000 }), calls = [];
   const f = { calls, starts: 0 };
-  const manager = new RuntimeManager({ store, config, models, broker, gatewayOrigin: "http://127.0.0.1:9", adapterFactory: params => {
+  const manager = new RuntimeManager({ store, config, models, broker, commands: { list: async () => ({ commands: [{ name: "debug" }] }) }, gatewayOrigin: "http://127.0.0.1:9", adapterFactory: params => {
     f.hooks = params.hooks;
     if (!fake) return new ClaudeAdapter({ ...params, store, config, broker, gatewayOrigin: "http://127.0.0.1:9" });
     f.adapter = { start: async () => { f.starts++; }, send: async (text, settings) => { calls.push({ text, settings }); await f.gate?.promise; return { text: "Native fixture response", nativeSettings: /^\/(?:config|update-config|doctor|checkup)(?:\s|$)/.test(text) ? { model: "sonnet", mode: "plan" } : undefined }; }, stop: async () => f.gate?.resolve() };

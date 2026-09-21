@@ -541,8 +541,6 @@ async function createChat(event) {
   let initialPrompt = $("#initial-prompt").value.trim();
   if (!initialPrompt && !chatControls.attachments().length && !chatControls.uploads.has(chatControls.draftKey())) { $("#initial-prompt").focus(); return; }
   let initialCommand;
-  try { initialCommand = firstChatCommand(initialPrompt, $("#agent-select").value); }
-  catch (error) { $("#create-chat-error").textContent = error.message; return; }
   newSlashComposer.close();
   const attachmentDraftKey = chatControls.draftKey();
   state.creatingChat = true;
@@ -567,8 +565,15 @@ async function createChat(event) {
     }
     if (attachmentDraftKey !== chatControls.newDraftKey()) throw new Error("The company changed. Your files are kept in their original company's draft.");
     const payload = workspaceSettings.payload();
-    // Selection may have changed while model preferences were saving.
-    initialCommand = firstChatCommand(initialPrompt, payload.agent);
+    // Any leading slash is command syntax. Validate against the selected
+    // account's effective pre-chat catalog before creating a conversation.
+    if (initialPrompt.trim().startsWith("/")) {
+      const query = new URLSearchParams({ agent: payload.agent });
+      if (payload.agentAccountId) query.set("agentAccountId", payload.agentAccountId);
+      const catalog = await api(`/api/new-chat/commands?${query}`);
+      if (state.selection !== selection || state.active) throw new Error("The chat selection changed while its command catalog was loading. Your command was not sent.");
+      initialCommand = firstChatCommand(initialPrompt, payload.agent, catalog.commands);
+    } else initialCommand = null;
     const { chat } = await api("/api/chats", { method: "POST", body: JSON.stringify(payload) });
     // The permission mode belongs to this chat draft. Never silently inherit
     // Auto or Plan when the user starts a separate conversation.

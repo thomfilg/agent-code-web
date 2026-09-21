@@ -7,8 +7,10 @@ The same admission rule now applies before chat creation, on an idle chat and at
 queue insertion: an exact slash prefix must resolve to a Relay control, native
 command or installed Codex skill. Unknown names such as `/qualquerporra` fail
 before a user message, queue item, worker start or model turn is created. Absolute
-paths such as `/tmp/project` remain ordinary text because they are not slash
-command names.
+paths at the beginning of a draft are also command syntax and fail validation;
+write them inside an ordinary sentence such as `inspect /tmp/project`. Command
+arguments are preserved after the first whitespace, so `/foo bar` always resolves
+or rejects `/foo` and can never become an ordinary agent prompt.
 
 Native behavior is checked against the installed Codex 0.154.0 app-server schema,
 the official [command reference](https://learn.chatgpt.com/docs/developer-commands)

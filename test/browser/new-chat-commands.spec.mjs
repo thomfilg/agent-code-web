@@ -63,9 +63,19 @@ test("draft slash autocomplete handles arrows, Tab, Escape and provider/account 
   await page.locator("#new-agent-account").selectOption("account-claude");
   await input.fill("/goal"); await expect(page.locator("#new-slash-status")).toContainText("No matches");
   await input.fill("/fixture"); await expect(page.locator("#new-slash-options")).toContainText("/fixture-native");
-  await expect(page.locator("#new-slash-options [role=option]")).toHaveAttribute("aria-disabled", "true");
+  await expect(page.locator("#new-slash-options [role=option]")).toHaveAttribute("aria-disabled", "false");
   expect(f.catalogs).toContainEqual({ agent: "codex", account: "account-codex" }); expect(f.catalogs).toContainEqual({ agent: "claude", account: "account-claude" });
   expect(f.creates).toEqual([]); expect(f.messages).toEqual([]); expect(f.effects).toEqual([]);
+});
+
+test("a selected-account native command can be the first message and keeps its exact arguments", async ({ page }) => {
+  const { f } = await fixture(page);
+  await page.locator("#new-agent-account").selectOption("account-claude");
+  await page.locator("#initial-prompt").fill("/fixture-native exact args");
+  await page.locator("#initial-prompt").press("Enter");
+  await expect.poll(() => f.messages.length).toBe(1);
+  expect(f.creates).toHaveLength(1);
+  expect(f.messages[0]).toEqual({ text: "/fixture-native exact args", attachments: [] });
 });
 
 test("bare first /goal opens the existing goal control once, not a literal message or worker request", async ({ page }) => {

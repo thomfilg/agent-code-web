@@ -164,7 +164,7 @@ async function managerFixture(t, host = false) {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const config = testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "60000", ...(host ? { CLAUDE_AUTH_MODE: "host" } : {}) }), broker = new CapabilityBroker({ ttlMs: 60000 });
   const f = { calls: [] };
-  const manager = new RuntimeManager({ store, config, broker, adapterFactory: () => ({ start: async () => {}, stop: async () => f.gate?.resolve(), send: async text => { f.calls.push(text); await f.gate?.promise; if (f.error) throw Error(f.error); return { text: "Verified native MCP outcome" }; } }) });
+  const manager = new RuntimeManager({ store, config, broker, commands: { list: async () => ({ commands: [{ name: "mcp" }] }) }, adapterFactory: () => ({ start: async () => {}, stop: async () => f.gate?.resolve(), send: async text => { f.calls.push(text); await f.gate?.promise; if (f.error) throw Error(f.error); return { text: "Verified native MCP outcome" }; } }) });
   t.after(() => manager.shutdown()); const chat = await manager.createChat({ agent: "claude", title: "MCP test" });
   return Object.assign(f, { store, config, broker, manager, chat });
 }
