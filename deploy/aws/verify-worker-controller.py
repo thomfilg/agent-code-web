@@ -366,7 +366,7 @@ def application_probe(request):
             client.input(2, {'method': 'initialized', 'params': {}})
             application_at('initialize-status')
             transport_status = client.request('status', {'processInstanceId': receipt['processInstanceId']})
-            if transport_status.get('inputSeq') != 2 or transport_status.get('pid') != receipt['pid']:
+            if transport_status.get('inputAcceptedThrough') != 2 or transport_status.get('pid') != receipt['pid']:
                 application_failure()
             if client.cursor:
                 application_at('initialize-ack')
@@ -393,7 +393,7 @@ def application_probe(request):
                 application_failure()
             transport_status = client.request('status', {'processInstanceId': receipt['processInstanceId']})
             application_at('no-replay')
-            if transport_status.get('inputSeq') != 3 or transport_status.get('pid') != receipt['pid']:
+            if transport_status.get('inputAcceptedThrough') != 3 or transport_status.get('pid') != receipt['pid']:
                 application_failure()
             if client.cursor:
                 client.request('ackOutput', {'processInstanceId': receipt['processInstanceId'], 'seq': client.cursor})
@@ -403,10 +403,10 @@ def application_probe(request):
             transport_status = {}
             while time.monotonic() < deadline:
                 transport_status = client.request('status', {'processInstanceId': receipt['processInstanceId']})
-                if transport_status.get('exited') is True:
+                if transport_status.get('state') == 'exited':
                     break
                 time.sleep(0.1)
-            if transport_status.get('exited') is not True:
+            if transport_status.get('state') != 'exited':
                 application_failure()
             if client.cursor:
                 client.request('ackOutput', {'processInstanceId': receipt['processInstanceId'], 'seq': client.cursor})
