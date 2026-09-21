@@ -21,6 +21,7 @@ test("AWS template keeps state, controller and untrusted workers separated", () 
   const statements = r.ControllerRole.Properties.Policies.flatMap(p => p.PolicyDocument.Statement);
   assert.equal(statements.some(s => JSON.stringify(s.Action).includes("PassRole")), false);
   const stop = statements.find(s => s.Action.includes("ec2:StopInstances"));
+  assert.ok(stop.Action.includes("ec2:ModifyInstanceAttribute"));
   assert.equal(stop.Condition.StringEquals["ec2:ResourceTag/AgentRelayDeployment"].Ref, "AWS::StackName");
   assert.equal(stop.Condition.StringEquals["ec2:ResourceTag/ManagedBy"], "agent-relay");
   const images = statements.find(s => s.Action === "ec2:RunInstances" && JSON.stringify(s.Resource).includes("image/*"));
