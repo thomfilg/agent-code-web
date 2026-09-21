@@ -46,7 +46,10 @@ export function safeBakerAwsFailure(args, error) {
   const operation = knownAwsOperation(args);
   const match = typeof error?.stderr === "string" && error.stderr.match(/^An error occurred \(([A-Za-z0-9.]+)\) when calling the ([A-Za-z0-9]+) operation(?: \(reached max retries: \d+\))?:/m);
   let category = "unclassified";
-  if (operation && match?.[2] === operation.apiAction && awsErrorCodes.has(match[1]) && (match[1] !== "InvocationDoesNotExist" || operation.service === "ssm" && operation.action === "get-command-invocation")) category = match[1];
+  const hibernationWarming = operation?.service === "ec2" && operation.action === "stop-instances" && typeof error?.stderr === "string"
+    && /An error occurred \([A-Za-z0-9.]+\) when calling the StopInstances operation: Instance i-[a-f0-9]{8,17} is not ready to hibernate yet, retry in a few minutes\s*$/m.test(error.stderr);
+  if (hibernationWarming) category = "hibernation-warming";
+  else if (operation && match?.[2] === operation.apiAction && awsErrorCodes.has(match[1]) && (match[1] !== "InvocationDoesNotExist" || operation.service === "ssm" && operation.action === "get-command-invocation")) category = match[1];
   else if (error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") category = "output-limit";
   else if (error?.code === "ETIMEDOUT" || error?.killed === true && error?.signal === "SIGTERM") category = "timeout";
   else if (error?.code === "ENOENT") category = "executable-unavailable";

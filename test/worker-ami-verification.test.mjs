@@ -55,7 +55,7 @@ function fixture({ account = "123456789012", stackOutputs = outputs, controllerO
     }
     if (args.includes("get-command-invocation")) { if (shutdownBeforeCleanup) state = "shutting-down"; return reply({ Status: commandFailed ? "Failed" : "Success", ResponseCode: commandFailed ? 1 : 0, StandardOutputContent: JSON.stringify(result), StandardErrorContent: "DO NOT PRINT PRIVATE OUTPUT" }); }
     if (args.includes("stop-instances")) {
-      if (hibernationWarmupFailures-- > 0) throw Object.assign(Error("PRIVATE HIBERNATION DETAIL"), { code: "Client.UnsupportedOperation" });
+      if (hibernationWarmupFailures-- > 0) throw Object.assign(Error("PRIVATE HIBERNATION DETAIL"), { code: "hibernation-warming" });
       state = "stopped"; return "";
     }
     if (args.includes("start-instances")) { state = "running"; return ""; }

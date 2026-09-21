@@ -218,7 +218,7 @@ async function verifyImage(o, { run = defaultRun, sleep = ms => new Promise(reso
         await aws("ec2", "stop-instances", ...(hibernation ? ["--hibernate"] : []), "--instance-ids", workerId);
         break;
       } catch (error) {
-        const warming = hibernation && ["UnsupportedOperation", "Client.UnsupportedOperation"].includes(error.code);
+        const warming = hibernation && error.code === "hibernation-warming";
         if (!warming || attempt === stopAttempts - 1) throw error;
         if (attempt === 0) log("Worker passed the fresh audit but EC2 hibernation is still warming up; retrying the exact instance.");
         await sleep(15_000);

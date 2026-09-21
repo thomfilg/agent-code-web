@@ -296,6 +296,18 @@ test("shared AWS failure classifier recognizes verifier operations without expos
   });
   assert.equal(error.message, "AWS ssm/send-command failed (InvalidParameterValue); private diagnostics suppressed");
   assert.doesNotMatch(error.message, /PRIVATE/);
+
+  const warming = safeBakerAwsFailure(["--profile", "PRIVATE-PROFILE", "--region", "us-east-2", "--no-cli-pager", "ec2", "stop-instances", "--hibernate", "--instance-ids", "i-aaaaaaaaaaaaaaaaa"], {
+    stderr: "An error occurred (UnsupportedOperation) when calling the StopInstances operation: Instance i-aaaaaaaaaaaaaaaaa is not ready to hibernate yet, retry in a few minutes",
+  });
+  assert.equal(warming.code, "hibernation-warming");
+  assert.equal(warming.message, "AWS ec2/stop-instances failed (hibernation-warming); private diagnostics suppressed");
+  assert.doesNotMatch(warming.message, /i-aaaaaaaa|PRIVATE/);
+
+  const permanentlyUnsupported = safeBakerAwsFailure(["ec2", "stop-instances"], {
+    stderr: "An error occurred (UnsupportedOperation) when calling the StopInstances operation: PRIVATE-UNSUPPORTED-REASON",
+  });
+  assert.equal(permanentlyUnsupported.code, "UnsupportedOperation");
 });
 
 test("AMI baker supports IAM default chain and rejects failed bootstrap without publishing image", async () => {
