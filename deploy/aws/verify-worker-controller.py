@@ -325,7 +325,10 @@ def application_probe(request):
     try:
         if phase == 'fresh':
             application_at('launch')
-            receipt = client.request('launch', {'spec': {'command': '/usr/local/bin/codex',
+            codex_path = shutil.which('codex', path='/usr/local/bin:/usr/bin:/bin')
+            if codex_path not in ('/usr/local/bin/codex', '/usr/bin/codex') or not os.access(codex_path, os.X_OK):
+                application_failure()
+            receipt = client.request('launch', {'spec': {'command': codex_path,
                 'args': ['app-server', '-c', 'cli_auth_credentials_store="ephemeral"'], 'cwd': '/tmp',
                 'env': {'HOME': str(home), 'CODEX_HOME': str(home), 'PATH': '/usr/local/bin:/usr/bin:/bin',
                         'LANG': 'C.UTF-8', 'USER': 'agent'}}})

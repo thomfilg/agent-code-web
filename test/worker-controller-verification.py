@@ -80,7 +80,7 @@ class ControllerProbeTest(unittest.TestCase):
 
     def test_embedded_worker_application_probe_is_valid_python(self):
         compile(probe.WORKER_PROBE, '<worker-application-probe>', 'exec')
-        self.assertIn("'/usr/local/bin/codex'", probe.WORKER_PROBE)
+        self.assertIn("('/usr/local/bin/codex', '/usr/bin/codex')", probe.WORKER_PROBE)
         self.assertIn("'thread/list'", probe.WORKER_PROBE)
         self.assertIn("'applicationTransport': True", probe.WORKER_PROBE)
 
