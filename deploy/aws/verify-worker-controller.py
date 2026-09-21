@@ -299,7 +299,15 @@ def application_probe(request):
              'expiresAt': int(time.time() * 1000) + 55000, 'credential': credential}
     install_supervisor(request, phase)
     application_at('status')
-    status = supervisor_control({'action': 'status'})
+    status = None
+    for attempt in range(20):
+        try:
+            status = supervisor_control({'action': 'status'})
+            break
+        except RuntimeError:
+            if attempt == 19:
+                raise
+            time.sleep(0.25)
     if status.get('protocol') != 'relay-worker-supervisor/1' or status.get('version') != 'v3' or not isinstance(status.get('daemonInstanceId'), str):
         application_failure()
     if phase == 'fresh':

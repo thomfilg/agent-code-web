@@ -189,7 +189,13 @@ export class Ec2Executor {
       const install = workerSupervisorShell(`test -d \"$XDG_RUNTIME_DIR\" && install -d -m 700 /home/agent/.config/systemd/user && printf %s ${shellQuote(unit)} | base64 -d > /home/agent/.config/systemd/user/agent-relay-worker-supervisor.service && chmod 600 /home/agent/.config/systemd/user/agent-relay-worker-supervisor.service && systemctl --user daemon-reload && systemctl --user enable --now agent-relay-worker-supervisor.service && systemctl --user is-active --quiet agent-relay-worker-supervisor.service`);
       await this.backend.sshCapture(this.host, install, this.instance.InstanceId); check();
     }
-    const status = await this.#supervisorControl({ action: "status" });
+    let status, statusFailure;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      check();
+      try { status = await this.#supervisorControl({ action: "status" }); statusFailure = null; break; }
+      catch (error) { statusFailure = error; if (attempt < 19) await new Promise(resolve => setTimeout(resolve, 250)); }
+    }
+    if (statusFailure) throw new Error("EC2 worker supervisor did not open its control socket");
     let receipt;
     try { receipt = typeof status === "string" ? JSON.parse(status) : status; } catch { throw new Error("EC2 worker supervisor returned an invalid status receipt"); }
     if (receipt?.protocol !== "relay-worker-supervisor/1" || receipt.version !== workerSupervisorVersion || typeof receipt.configured !== "boolean" || typeof receipt.daemonInstanceId !== "string") throw new Error("EC2 worker supervisor failed its startup check");
