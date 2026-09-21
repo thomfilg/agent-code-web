@@ -166,6 +166,12 @@ button { border: 0; cursor: pointer; }
 .runtime-copy > div { min-width: 0; }
 .runtime-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; flex: none; margin-left: 10px; }
 .runtime-actions button { font-size: 11px; padding: 7px 10px; }
+.runtime-actions .runtime-link { min-height: 0; padding: 3px 2px; border-bottom: 1px solid transparent; color: var(--faint); background: transparent; }
+.runtime-actions .runtime-link:hover { color: var(--muted); border-bottom-color: var(--line-bright); }
+.runtime-actions .runtime-stop:hover { color: var(--red); border-bottom-color: rgba(245,139,131,.35); }
+.runtime-actions .runtime-icon { width: 26px; height: 26px; display: grid; place-items: center; padding: 4px; border: 0; border-radius: 5px; color: var(--faint); background: transparent; }
+.runtime-actions .runtime-icon:hover { color: var(--text); background: var(--panel-soft); }
+.runtime-actions .runtime-icon svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .chat-row.deleting { opacity: .65; }
 @media (max-width: 520px) {
   .runtime-banner { flex-wrap: wrap; gap: 9px; }

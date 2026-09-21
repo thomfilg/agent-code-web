@@ -84,10 +84,6 @@
               <button type="button" id="syntax-theme-button">Syntax theme</button>
               <button type="button" id="pets-button">Pets</button>
               <button type="button" id="vim-button" aria-pressed="false">Enable Vim editing</button>
-              <p class="control-group-label">Worker</p>
-              <button type="button" id="resize-worker-button">Machine size</button>
-              <button type="button" id="desktop-app-button" hidden>Open in desktop app</button>
-              <button type="button" id="stop-button">Stop worker</button>
               <p class="control-group-label danger-label">Danger zone</p>
               <button type="button" class="danger" id="delete-button" aria-label="Delete chat">Delete</button>
             </div></details>
@@ -167,6 +163,9 @@
             </div>
             <div class="runtime-actions">
               <div class="countdown" id="countdown"></div>
+              <button type="button" id="resize-worker-button" class="runtime-link" aria-label="Change machine size">Machine size⌄</button>
+              <button type="button" id="stop-button" class="runtime-link runtime-stop" hidden>Stop worker</button>
+              <button type="button" id="desktop-app-button" class="runtime-icon" aria-label="Open in desktop app" title="Open in desktop app" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="12" rx="1.5"/><path d="M8 20h8M12 16.5V20"/></svg></button>
               <button type="button" id="wake-worker" class="secondary-button">Wake environment</button>
             </div>
             <div class="chat-pet" id="chat-pet" role="group" aria-label="Current chat pet" hidden></div>

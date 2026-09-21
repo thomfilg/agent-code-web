@@ -35,14 +35,14 @@ test("an EC2 chat offers priced machine sizes and applies a resize immediately i
   const chat = await openFixture(page, [], { environmentId: "env-fixture", runtimeMetadata: { backend: "ec2", instanceType: "t3.medium" } });
   const resize = Promise.withResolvers(); let request;
   await page.route(`**/api/chats/${chat.id}/worker-size`, async route => { request = route.request().postDataJSON(); await resize.promise; await route.fulfill({ status: 202, json: { chat: { ...chat, workerInstanceType: "m7i.xlarge", workerResize: { status: "resizing", instanceType: "m7i.xlarge" } } } }); });
-  await page.getByLabel("Chat settings", { exact: true }).click();
-  await page.getByRole("button", { name: "Machine size · t3.medium", exact: true }).click();
+  await expect(page.locator("#runtime-banner #resize-worker-button")).toHaveText("t3.medium⌄");
+  await page.locator("#runtime-banner #resize-worker-button").click();
   const dialog = page.getByRole("dialog", { name: "Machine size" }), size = page.getByRole("combobox", { name: "EC2 instance", exact: true });
   await expect(size.locator("option")).toHaveText([/2 vCPU.*4 GiB.*\$0\.0416\/hour/, /4 vCPU.*16 GiB.*\$0\.2016\/hour.*Recommended/]);
   await size.selectOption("m7i.xlarge"); await expect(dialog).toContainText("$0.2016/hour");
   await page.getByRole("button", { name: "Resize and restart", exact: true }).click();
   await expect(dialog).not.toBeVisible();
-  await expect(page.locator("#resize-worker-button")).toHaveText("Machine · resizing to m7i.xlarge");
+  await expect(page.locator("#resize-worker-button")).toHaveText("resizing → m7i.xlarge");
   await expect.poll(() => request).toEqual({ instanceType: "m7i.xlarge" });
   resize.resolve();
 });

@@ -296,14 +296,16 @@ function renderActive() {
     : chat.status === "idle" && chat.idleKeepAwakeReason ? "Ready" : chat.status;
   elements.detail.textContent = chat.statusDetail || "";
   elements.statusDot.className = `status-dot ${chat.status}`;
-  $("#stop-button").disabled = false;
+  const stopButton = $("#stop-button");
+  stopButton.hidden = !["starting", "running", "idle", "waiting"].includes(chat.status);
+  stopButton.disabled = false;
   const resizeButton = $("#resize-worker-button");
   resizeButton.hidden = state.config.workerBackend !== "ec2";
   const environment = workspaceSettings.environments?.find(item => item.id === chat.environmentId);
   const machineType = chat.workerResize?.status === "failed" ? chat.runtimeMetadata?.instanceType || environment?.instanceType || workspaceSettings.defaultInstanceType
     : chat.workerInstanceType || chat.runtimeMetadata?.instanceType || environment?.instanceType || workspaceSettings.defaultInstanceType;
-  resizeButton.textContent = chat.workerResize?.status === "resizing" || chat.workerResize?.status === "queued" ? `Machine · resizing to ${chat.workerResize.instanceType}`
-    : chat.workerResize?.status === "failed" ? `Machine resize failed · ${machineType || "retry"}` : `Machine size · ${machineType || "choose"}`;
+  resizeButton.textContent = chat.workerResize?.status === "resizing" || chat.workerResize?.status === "queued" ? `resizing → ${chat.workerResize.instanceType}`
+    : chat.workerResize?.status === "failed" ? `${machineType || "machine"} · retry⌄` : `${machineType || "machine size"}⌄`;
   $("#delete-button").disabled = false;
   $("#delete-button").removeAttribute("aria-busy");
   const busy = ["running", "starting"].includes(chat.status);

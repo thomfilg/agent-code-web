@@ -6,9 +6,9 @@ export class RuntimeWake {
   }
   isWaiting(chatId) { return this.pending.has(chatId) || this.waiting.has(chatId); }
   render(chat) {
-    this.button.hidden = !chat;
-    if (!chat) return;
+    if (!chat) { this.button.hidden = true; return; }
     const pending = this.pending.has(chat.id), asleep = ["stopped", "error"].includes(chat.status);
+    this.button.hidden = !pending && !asleep;
     const suspension = chat.suspension?.status;
     this.button.disabled = pending || !asleep || chat.archived || chat.workflowState === "archived" || this.unavailable(chat.id);
     this.button.textContent = pending ? (suspension === "hibernated" ? "Resuming…" : "Waking…")
