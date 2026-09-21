@@ -21,7 +21,7 @@ const awsOperations = {
   iam: ["get-instance-profile", "get-role", "list-attached-role-policies", "list-role-policies"],
   ssm: ["describe-instance-information", "send-command", "get-command-invocation"],
 };
-const awsErrorCodes = new Set(["InvalidParameterValue", "InvalidParameterCombination", "UnauthorizedOperation", "AccessDenied", "AccessDeniedException", "ExpiredToken", "ExpiredTokenException", "InvalidClientTokenId", "RequestExpired", "RequestLimitExceeded", "Throttling", "ThrottlingException", "ServiceUnavailable", "InternalError", "InvalidAMIID.NotFound", "InvalidInstanceID.NotFound", "InvocationDoesNotExist"]);
+const awsErrorCodes = new Set(["InvalidParameterValue", "InvalidParameterCombination", "UnsupportedOperation", "Client.UnsupportedOperation", "UnauthorizedOperation", "AccessDenied", "AccessDeniedException", "ExpiredToken", "ExpiredTokenException", "InvalidClientTokenId", "RequestExpired", "RequestLimitExceeded", "Throttling", "ThrottlingException", "ServiceUnavailable", "InternalError", "InvalidAMIID.NotFound", "InvalidInstanceID.NotFound", "InvocationDoesNotExist"]);
 
 function knownAwsOperation(args) {
   let index = 0;

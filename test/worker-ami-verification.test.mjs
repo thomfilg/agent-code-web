@@ -15,7 +15,7 @@ function receipt(payload) {
     audit: { schema: 1, valid: true, finalized: true, cloudInitDisabled: true, ssmDisabled: true, credentialsAbsent: true, transportKeyMatches: true, freshIdentity: true, heartbeatEnabled: true, watchdogActive: true, metadataReachable: false, machine: "a".repeat(64), hostKeys: { "ssh_host_ed25519_key.pub": "b".repeat(64) } } };
 }
 
-function fixture({ account = "123456789012", stackOutputs = outputs, controllerOverride = {}, imageOverride = {}, networkOverride = {}, workerOverride = {}, mutateReceipt = r => r, commandFailed = false, driftAfterLaunch = false, noCleanup = false, detachedShutdown = false, shutdownBeforeCleanup = false, driftDuringCleanup = false, markerFailure = false, markerReadbackFailure = false, imageDrift = {}, volumeStuck = false, volumeDrift = false, hibernation = false } = {}) {
+function fixture({ account = "123456789012", stackOutputs = outputs, controllerOverride = {}, imageOverride = {}, networkOverride = {}, workerOverride = {}, mutateReceipt = r => r, commandFailed = false, driftAfterLaunch = false, noCleanup = false, detachedShutdown = false, shutdownBeforeCleanup = false, driftDuringCleanup = false, markerFailure = false, markerReadbackFailure = false, imageDrift = {}, volumeStuck = false, volumeDrift = false, hibernation = false, hibernationWarmupFailures = 0 } = {}) {
   const calls = [], requests = [];
   let workerTags, state = "running", result, acceptanceTags = [], imageReads = 0;
   const run = async args => {
@@ -54,7 +54,10 @@ function fixture({ account = "123456789012", stackOutputs = outputs, controllerO
       return reply({ Command: { CommandId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" } });
     }
     if (args.includes("get-command-invocation")) { if (shutdownBeforeCleanup) state = "shutting-down"; return reply({ Status: commandFailed ? "Failed" : "Success", ResponseCode: commandFailed ? 1 : 0, StandardOutputContent: JSON.stringify(result), StandardErrorContent: "DO NOT PRINT PRIVATE OUTPUT" }); }
-    if (args.includes("stop-instances")) { state = "stopped"; return ""; }
+    if (args.includes("stop-instances")) {
+      if (hibernationWarmupFailures-- > 0) throw Object.assign(Error("PRIVATE HIBERNATION DETAIL"), { code: "Client.UnsupportedOperation" });
+      state = "stopped"; return "";
+    }
     if (args.includes("start-instances")) { state = "running"; return ""; }
     if (args.includes("terminate-instances")) { if (!noCleanup) state = detachedShutdown ? "shutting-down" : "terminated"; return ""; }
     throw new Error("Unexpected fixture AWS call");
@@ -137,6 +140,35 @@ test("dedicated hibernation acceptance proves one native process survives and ma
   const tags = JSON.parse(f.calls.find(call => call.includes("create-tags"))[f.calls.find(call => call.includes("create-tags")).indexOf("--tags") + 1]);
   assert.deepEqual(tags.map(tag => tag.Key), ["AgentRelayHibernationAcceptance", "AgentRelayHibernationAcceptanceId"]);
   assert.doesNotMatch(JSON.stringify(result) + logs.join(""), /knownHosts|AAAAFixturePublicKey/);
+});
+
+test("hibernation retries only the bounded EC2 warmup response and rechecks exact worker ownership", async () => {
+  const f = fixture({ hibernation: true, hibernationWarmupFailures: 2 });
+  const sleeps = [], logs = [];
+  const result = await verifyHibernationImage(options, { run: f.run, sleep: async ms => sleeps.push(ms), log: line => logs.push(line) });
+  assert.equal(result.accepted, true);
+  assert.equal(f.calls.filter(call => call.includes("stop-instances")).length, 3);
+  assert.deepEqual(sleeps.filter(ms => ms === 15_000), [15_000, 15_000]);
+  assert.equal(logs.filter(line => line.includes("hibernation is still warming up")).length, 1);
+  const firstStop = f.calls.findIndex(call => call.includes("stop-instances"));
+  const thirdStop = f.calls.findLastIndex(call => call.includes("stop-instances"));
+  assert.ok(f.calls.slice(firstStop + 1, thirdStop).some(call => call.includes("describe-instances") && call.includes(workerId)));
+  assert.doesNotMatch(JSON.stringify(result) + logs.join(""), /PRIVATE HIBERNATION DETAIL/);
+});
+
+test("hibernation warmup retry is bounded and unrelated stop errors are immediate", async () => {
+  const warming = fixture({ hibernation: true, hibernationWarmupFailures: 20 });
+  await assert.rejects(verifyHibernationImage(options, { run: warming.run, sleep: async () => {} }), /PRIVATE HIBERNATION DETAIL/);
+  assert.equal(warming.calls.filter(call => call.includes("stop-instances")).length, 13);
+
+  const unrelated = fixture({ hibernation: true });
+  let failed = false;
+  const run = async args => {
+    if (!failed && args.includes("stop-instances")) { failed = true; throw Object.assign(Error("UNRELATED"), { code: "AccessDenied" }); }
+    return unrelated.run(args);
+  };
+  await assert.rejects(verifyHibernationImage(options, { run, sleep: async () => {} }), /UNRELATED/);
+  assert.equal(unrelated.calls.filter(call => call.includes("stop-instances")).length, 0);
 });
 
 test("hibernation acceptance rejects missing candidate evidence and changed native process identity without marking", async () => {

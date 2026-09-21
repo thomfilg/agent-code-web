@@ -211,8 +211,19 @@ async function verifyImage(o, { run = defaultRun, sleep = ms => new Promise(reso
     if (new Set(disposableVolumes).size !== disposableVolumes.length) throw new Error("Acceptance worker disks are ambiguous");
     for (const volumeId of disposableVolumes) await volume(volumeId);
     const fresh = await probe("fresh");
-    await worker();
-    await aws("ec2", "stop-instances", ...(hibernation ? ["--hibernate"] : []), "--instance-ids", workerId);
+    const stopAttempts = hibernation ? 13 : 1;
+    for (let attempt = 0; attempt < stopAttempts; attempt++) {
+      await worker();
+      try {
+        await aws("ec2", "stop-instances", ...(hibernation ? ["--hibernate"] : []), "--instance-ids", workerId);
+        break;
+      } catch (error) {
+        const warming = hibernation && ["UnsupportedOperation", "Client.UnsupportedOperation"].includes(error.code);
+        if (!warming || attempt === stopAttempts - 1) throw error;
+        if (attempt === 0) log("Worker passed the fresh audit but EC2 hibernation is still warming up; retrying the exact instance.");
+        await sleep(15_000);
+      }
+    }
     await poll("test worker stopped", async () => (await worker()).State?.Name === "stopped");
     await worker();
     await aws("ec2", "start-instances", "--instance-ids", workerId);
