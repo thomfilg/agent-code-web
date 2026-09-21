@@ -197,6 +197,27 @@ test("an active EC2 chat resizes its existing worker and wakes on the selected m
   assert.equal(store.get(chat.id).status, "idle");
 });
 
+test("a failed EC2 resize restores the previous size and wakes the chat instead of leaving it stopped", async t => {
+  const root = await temporaryDirectory(t), config = testConfig(root), store = new ChatStore(root); await store.initialize();
+  config.workerBackend = "ec2";
+  const acquisitions = [];
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10_000 }), gatewayOrigin: "http://localhost",
+    workerBackend: {
+      resize: async () => { throw new Error("fixture resize denied"); },
+      acquire: async chat => { acquisitions.push(chat.workerInstanceType); return { metadata: { backend: "ec2", instanceId: "i-fixture", instanceType: chat.workerInstanceType } }; },
+      sleep: async () => ({ instanceId: "i-fixture", stopped: true }), destroy: async () => {},
+    },
+    adapterFactory: () => ({ start: async () => {}, send: async () => ({ text: "ready" }), stop: async () => {} }) });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "codex" });
+  await manager.resizeWorker(chat.id, "m7i.xlarge");
+  await waitFor(() => store.get(chat.id).workerResize?.status === "failed" && store.get(chat.id).status === "idle");
+  assert.equal(store.get(chat.id).workerInstanceType, "t3.medium");
+  assert.equal(store.get(chat.id).workerResize.instanceType, "m7i.xlarge");
+  assert.deepEqual(acquisitions, ["t3.medium"]);
+  assert.equal(store.get(chat.id).queuePaused, false);
+});
+
 test("chat deletion is durable even when worker stop and infrastructure cleanup fail", async t => {
   const root = await temporaryDirectory(t), records = new MemoryRecords(), store = new ChatStore(root, records); await store.initialize();
   const config = testConfig(root); config.idleTimeoutMs = 60_000;

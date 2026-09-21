@@ -2231,17 +2231,19 @@ export class RuntimeManager extends EventEmitter {
     const existing = this.#workerResizes.get(chatId);
     if (existing) {
       existing.next = instanceType;
-      const updated = await this.store.update(chatId, { workerInstanceType: instanceType, workerResize: { status: "queued", instanceType, requestedAt: nowIso() } });
+      const updated = await this.store.update(chatId, { workerInstanceType: instanceType,
+        workerResize: { status: "queued", instanceType, queueWasPaused: existing.queueWasPaused, restartAfterResize: true, requestedAt: nowIso() } });
       this.publishChat(updated); return updated;
     }
     const wasAwake = this.#runtimes.has(chatId) || this.#executors.has(chatId) || this.#awakeWorkers.has(chatId)
       || chat.suspension?.nativeRetained === true || chat.suspension?.browserRetained === true
       || ["running", "starting", "idle", "waiting"].includes(chat.status);
-    const wasQueuePaused = Boolean(chat.queuePaused);
+    const wasQueuePaused = ["failed", "queued"].includes(chat.workerResize?.status) && typeof chat.workerResize.queueWasPaused === "boolean"
+      ? chat.workerResize.queueWasPaused : chat.workerResize?.status === "failed" ? false : Boolean(chat.queuePaused);
     const updated = await this.store.update(chatId, { workerInstanceType: instanceType,
-      workerResize: { status: "resizing", instanceType, requestedAt: nowIso() } });
+      workerResize: { status: "resizing", instanceType, queueWasPaused: wasQueuePaused, restartAfterResize: true, requestedAt: nowIso() } });
     this.publishChat(updated);
-    const action = { instanceType, next: null };
+    const action = { instanceType, next: null, queueWasPaused: wasQueuePaused };
     this.#workerResizes.set(chatId, action);
     action.promise = (async () => {
       try {
@@ -2253,15 +2255,23 @@ export class RuntimeManager extends EventEmitter {
           workerResize: { status: "resized", instanceType, completedAt: nowIso() },
         }));
         this.publishChat(resized);
-        if (wasAwake) {
-          const admission = await this.wake(chatId);
-          await admission.completion;
-        }
+        const admission = await this.wake(chatId);
+        await admission.completion;
         const completed = await this.store.update(chatId, { queuePaused: wasQueuePaused, workerResize: { status: "completed", instanceType, completedAt: nowIso() } });
         this.publishChat(completed);
         if (!wasQueuePaused) void this.#drainQueue(chatId);
       } catch (error) {
-        if (this.store.get(chatId)) this.publishChat(await this.store.update(chatId, { workerResize: { status: "failed", instanceType, error: errorMessage(error), completedAt: nowIso() } }));
+        const current = this.store.get(chatId);
+        if (current) {
+          const actualType = validateWorkerInstanceType(current.runtimeMetadata?.instanceType || chat.runtimeMetadata?.instanceType, this.config.ec2.instanceType);
+          this.publishChat(await this.store.update(chatId, { workerInstanceType: actualType, queuePaused: wasQueuePaused,
+            workerResize: { status: "failed", instanceType, queueWasPaused: wasQueuePaused, restartAfterResize: true, error: errorMessage(error), completedAt: nowIso() } }));
+          try { const admission = await this.wake(chatId); await admission.completion; }
+          catch (recoveryError) {
+            if (this.store.get(chatId)) this.publishChat(await this.store.update(chatId, currentChat => ({ workerResize: { ...currentChat.workerResize, recoveryError: errorMessage(recoveryError) } })));
+          }
+          if (!wasQueuePaused) void this.#drainQueue(chatId);
+        }
       } finally {
         this.#workerResizes.delete(chatId);
         if (action.next && action.next !== instanceType && this.store.get(chatId)) void this.resizeWorker(chatId, action.next);
