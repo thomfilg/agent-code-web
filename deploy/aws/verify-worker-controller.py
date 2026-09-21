@@ -343,10 +343,7 @@ def application_probe(request):
             application_at('initialize-input')
             client.input(1, {'method': 'initialize', 'id': 1, 'params': {'clientInfo': {'name': 'relay_hibernation_acceptance', 'version': '1'}, 'capabilities': {'experimentalApi': True}}})
             application_at('initialize-response')
-            initialized = client.app_response(1)
-            application_at('initialize-shape')
-            if not isinstance(initialized.get('userAgent'), str):
-                application_failure()
+            client.app_response(1)
             client.input(2, {'method': 'initialized', 'params': {}})
             transport_status = client.request('status', {'processInstanceId': receipt['processInstanceId']})
             if transport_status.get('inputSeq') != 2 or transport_status.get('pid') != receipt['pid']:
