@@ -17,7 +17,7 @@ export const EC2_USER_DATA_MAX_BYTES = 16 * 1024;
 const awsOperations = {
   sts: ["get-caller-identity"],
   cloudformation: ["describe-stacks", "describe-stack-resource"],
-  ec2: ["describe-instances", "describe-subnets", "describe-security-groups", "describe-images", "describe-key-pairs", "run-instances", "create-image", "terminate-instances"],
+  ec2: ["describe-instances", "describe-subnets", "describe-security-groups", "describe-images", "describe-key-pairs", "get-console-output", "run-instances", "create-image", "terminate-instances"],
   iam: ["get-instance-profile", "get-role", "list-attached-role-policies", "list-role-policies"],
   ssm: ["describe-instance-information", "send-command", "get-command-invocation"],
 };
@@ -70,6 +70,24 @@ export function safeBootstrapReceipt(output) {
     if (value.kind !== "relay-worker-bootstrap" || value.schema !== 1 || !["done", "running", "error", "disabled", "not run", "unknown"].includes(value.status) || !Array.isArray(value.failedModules) || value.failedModules.some(stage => !stages.includes(stage)) || typeof value.sshOrderingCycle !== "boolean" || checkNames.some(key => typeof value.checks?.[key] !== "boolean")) return null;
     return { status: value.status, failedModules: [...new Set(value.failedModules)], checks: Object.fromEntries(checkNames.map(key => [key, value.checks[key]])), sshOrderingCycle: value.sshOrderingCycle };
   } catch { return null; }
+}
+
+const finalizerStages = new Set(["initial", "transport-key", "builder-identity", "ssm-disable", "ssm-purge", "filesystem-scrub", "identity-scrub", "credential-scan", "service-enable", "finalize-marker", "poweroff"]);
+export function safeFinalizerReceipt(output) {
+  if (typeof output !== "string" || output.length > 1_048_576) return null;
+  const candidates = [output];
+  if (/^[A-Za-z0-9+/=\r\n]+$/.test(output)) {
+    try { candidates.push(Buffer.from(output.replaceAll(/\s/g, ""), "base64").toString("utf8")); } catch {}
+  }
+  const receipts = new Set();
+  for (const candidate of candidates) for (const line of candidate.split(/\r?\n/)) {
+    if (line === "AGENT_RELAY_FINALIZER_OK_V1") receipts.add("ok");
+    const failed = line.match(/^AGENT_RELAY_FINALIZER_FAILED_V1 stage=([a-z-]+)$/);
+    if (failed && finalizerStages.has(failed[1])) receipts.add(`failed:${failed[1]}`);
+  }
+  if (receipts.size !== 1) return null;
+  const [receipt] = receipts;
+  return receipt === "ok" ? { ok: true } : { ok: false, stage: receipt.slice(7) };
 }
 
 export function parseOptions(args) {
@@ -239,6 +257,11 @@ export async function bakeWorkerImage(options, { run = runBakerAws, sleep = ms =
     log("Pinned CLIs verified. Scheduling credential scrub and builder shutdown.");
     await ssm(["set -eu", "systemd-run --unit=agent-relay-image-finalize --on-active=15s /usr/local/sbin/agent-web-finalize-image"], "60");
     await poll("sanitized builder shutdown", async () => (await builder()).State?.Name === "stopped");
+    const finalizer = await poll("sanitized builder finalizer receipt", async () => {
+      const consoleOutput = await json("ec2", "get-console-output", "--instance-id", builderId, "--latest");
+      return safeFinalizerReceipt(consoleOutput?.Output);
+    });
+    if (!finalizer.ok) throw new Error(`Builder finalizer failed (${finalizer.stage}); no image was created`);
     // No StopInstances: an interrupted scrub must fail, not produce an AMI.
     const imageId = await json("ec2", "create-image", "--instance-id", builderId, "--name", o.name,
       "--description", "Agent Relay private worker: no credentials; deployment-specific SSH public key",

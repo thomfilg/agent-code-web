@@ -3,12 +3,12 @@ import test from "node:test";
 import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { bakeWorkerImage, parseOptions, safeBootstrapReceipt, gzipWorkerUserData, EC2_USER_DATA_MAX_BYTES, safeBakerAwsFailure, runBakerAws } from "../deploy/aws/bake-worker-ami.mjs";
+import { bakeWorkerImage, parseOptions, safeBootstrapReceipt, safeFinalizerReceipt, gzipWorkerUserData, EC2_USER_DATA_MAX_BYTES, safeBakerAwsFailure, runBakerAws } from "../deploy/aws/bake-worker-ami.mjs";
 
 const required = ["--expected-account", "123456789012", "--deployment", "relay-fixture", "--subnet-id", "subnet-aaaaaaaaaaaaaaaaa", "--security-group-id", "sg-aaaaaaaaaaaaaaaaa", "--key-name", "relay-fixture-worker", "--builder-instance-profile", "relay-fixture-builder", "--base-image-id", "ami-aaaaaaaaaaaaaaaaa"];
 const builderId = "i-aaaaaaaaaaaaaaaaa";
 const imageId = "ami-bbbbbbbbbbbbbbbbb";
-function fixture({ commandFailed = false, neverStops = false, foreignBuilder = false, baseOverride = {}, keyOverride = {}, account = "123456789012", subnetOverride = {}, groupOverride = {}, stackOverride = {}, roleOverride = {}, extraPolicy = false, terminationStates = ["shutting-down", "terminated"], mutateInstance = value => value, invocationNotVisible = false, externalTermination = false, detachedWhileTerminating = false } = {}) {
+function fixture({ commandFailed = false, neverStops = false, foreignBuilder = false, baseOverride = {}, keyOverride = {}, account = "123456789012", subnetOverride = {}, groupOverride = {}, stackOverride = {}, roleOverride = {}, extraPolicy = false, terminationStates = ["shutting-down", "terminated"], mutateInstance = value => value, invocationNotVisible = false, externalTermination = false, detachedWhileTerminating = false, finalizerOutput = "AGENT_RELAY_FINALIZER_OK_V1\n" } = {}) {
   const calls = [];
   let tags;
   let sent = 0;
@@ -49,6 +49,7 @@ function fixture({ commandFailed = false, neverStops = false, foreignBuilder = f
       return JSON.stringify([mutateInstance(value, { terminationRequested, calls })]);
     }
     if (args.includes("describe-instance-information")) return JSON.stringify([{ InstanceId: builderId, PingStatus: "Online" }]);
+    if (args.includes("get-console-output")) return JSON.stringify({ Output: Buffer.from(finalizerOutput).toString("base64") });
     if (args.includes("send-command")) { sent++; return JSON.stringify({ Command: { CommandId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" } }); }
     if (args.includes("get-command-invocation")) {
       if (invocationNotVisible && invocationPolls++ === 0) throw safeBakerAwsFailure(args, { stderr: "An error occurred (InvocationDoesNotExist) when calling the GetCommandInvocation operation: PRIVATE FIXTURE" });
@@ -143,6 +144,18 @@ test("AMI cleanup observes exact terminal state with detached network but never 
     assert.equal(logs.some(line => line.startsWith("Confirmed termination")), false);
     assert.equal(f.calls.filter(call => call.includes("terminate-instances")).length, 1);
   }
+});
+
+test("AMI creation requires one sanitized successful finalizer receipt after stopped state", async () => {
+  for (const finalizerOutput of ["", "PRIVATE OUTPUT", "AGENT_RELAY_FINALIZER_FAILED_V1 stage=service-enable\n", "AGENT_RELAY_FINALIZER_OK_V1\nAGENT_RELAY_FINALIZER_FAILED_V1 stage=poweroff\n"]) {
+    const f = fixture({ finalizerOutput });
+    await assert.rejects(bakeWorkerImage(parseOptions(required), { run: f.run, sleep: async () => {}, pollLimit: 2 }), error => !error.message.includes("PRIVATE OUTPUT"));
+    assert.equal(f.calls.some(call => call.includes("create-image")), false);
+    assert.equal(f.calls.filter(call => call.includes("terminate-instances")).length, 1);
+  }
+  assert.deepEqual(safeFinalizerReceipt("boot noise\nAGENT_RELAY_FINALIZER_OK_V1\n"), { ok: true });
+  assert.deepEqual(safeFinalizerReceipt(Buffer.from("AGENT_RELAY_FINALIZER_FAILED_V1 stage=ssm-purge\n").toString("base64")), { ok: false, stage: "ssm-purge" });
+  assert.equal(safeFinalizerReceipt("AGENT_RELAY_FINALIZER_FAILED_V1 stage=PRIVATE\n"), null);
 });
 
 test("hibernation bake accepts Canonical's current Jammy namespace, overrides gp2 with encrypted gp3, and cannot claim production acceptance", async () => {
@@ -329,7 +342,8 @@ test("AMI preflight rejects wrong AWS account, foreign resources and excessive b
 test("worker recipe removes builder identity, generates new host keys and does not need final IMDS", async () => {
   const recipe = await readFile(new URL("../deploy/aws/worker-cloud-init.yaml", import.meta.url), "utf8");
   for (const required of ["@openai/codex@0.154.0", "@anthropic-ai/claude-code@2.1.222", "cloud-init.disabled", "cloud-init clean --logs --seed --machine-id", "/var/lib/amazon/ssm", "/root/.aws", "ssh_host_${kind}_key", "ssh-keygen -A", "IMAGE_FINALIZED", "agent-web-heartbeat.service"]) assert.ok(recipe.includes(required), required);
-  assert.ok(recipe.indexOf("Credential filename scan failed") < recipe.indexOf("systemctl poweroff"));
+  assert.ok(recipe.indexOf("Credential filename scan failed") < recipe.indexOf("AGENT_RELAY_FINALIZER_OK_V1"));
+  assert.ok(recipe.indexOf("AGENT_RELAY_FINALIZER_OK_V1") < recipe.lastIndexOf("systemctl poweroff"));
   assert.equal(recipe.includes("@openai/codex @anthropic-ai"), false);
   assert.ok(recipe.includes('agent ALL=(root) NOPASSWD: /usr/local/sbin/agent-web-audit-image ""'));
   assert.ok(recipe.includes("if os.geteuid() != 0 or len(sys.argv) != 1:"));

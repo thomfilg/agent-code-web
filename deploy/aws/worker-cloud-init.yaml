@@ -53,11 +53,25 @@ write_files:
     content: |
       #!/bin/sh
       set -eu
+      stage=initial
+      finalizer_exit() {
+        code=$?
+        [ "$code" -eq 0 ] && return
+        printf 'AGENT_RELAY_FINALIZER_FAILED_V1 stage=%s\n' "$stage" > /dev/console 2>/dev/null || true
+        sync || true
+        # This is the disposable image builder only. A failed scrub must never
+        # remain billable after removing SSM/SSH, and no failure marker permits
+        # the baker to create an image from this stopped instance.
+        systemctl poweroff --force --force >/dev/null 2>&1 || true
+      }
+      trap finalizer_exit EXIT
+      trap 'exit 1' HUP INT TERM
       [ "$(id -u)" -eq 0 ]
       test -f /opt/agent-web/BUILD_PENDING
       test -f /opt/agent-web/READY
       # Only the selected deployment PUBLIC key is retained. Final workers have
       # IMDS disabled and therefore cannot depend on cloud-init key injection.
+      stage=transport-key
       install -d -o ubuntu -g ubuntu -m 0700 /home/ubuntu/.ssh
       printf '%s' '__RELAY_WORKER_PUBLIC_KEY_BASE64__' | base64 -d > /home/ubuntu/.ssh/authorized_keys
       chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
@@ -65,6 +79,7 @@ write_files:
       test -s /home/ubuntu/.ssh/authorized_keys
       # Public hashes only: acceptance must prove fresh worker identity differs
       # from this builder, not merely that a marker file exists.
+      stage=builder-identity
       python3 - <<'PY'
       import hashlib, json, pathlib
       digest = lambda value: hashlib.sha256(value).hexdigest()
@@ -75,6 +90,7 @@ write_files:
       touch /etc/cloud/cloud-init.disabled
       # SSM is a builder-only transport. This finalizer is scheduled AFTER its
       # SendCommand has completed so no agent state/credentials enter the AMI.
+      stage=ssm-disable
       systemctl disable --now agent-web-idle-watchdog.timer
       for unit in amazon-ssm-agent.service snap.amazon-ssm-agent.amazon-ssm-agent.service; do
         systemctl disable --now "$unit" 2>/dev/null || true
@@ -85,6 +101,7 @@ write_files:
       done
       # Builder-only package removal. --purge is essential: ordinary snap
       # removal creates an automatic snapshot containing the registration.
+      stage=ssm-purge
       if command -v snap >/dev/null 2>&1; then
         snap_inventory=$(timeout 30 snap list 2>/dev/null) || { echo 'Builder snap inventory failed.' >&2; exit 1; }
         if printf '%s\n' "$snap_inventory" | grep -q '^amazon-ssm-agent[[:space:]]'; then
@@ -103,6 +120,7 @@ write_files:
       for binary in /snap/amazon-ssm-agent/current /usr/bin/amazon-ssm-agent /usr/local/bin/amazon-ssm-agent; do
         [ ! -e "$binary" ] && [ ! -L "$binary" ] || { echo 'Builder SSM package remains.' >&2; exit 1; }
       done
+      stage=filesystem-scrub
       systemctl daemon-reload
       systemctl mask amazon-ssm-agent.service snap.amazon-ssm-agent.amazon-ssm-agent.service
       cloud-init clean --logs --seed --machine-id
@@ -127,18 +145,24 @@ write_files:
       [ "$(stat -c '%U:%G' /home/ubuntu/.ssh)" = ubuntu:ubuntu ] && [ "$(stat -c '%U:%G' /home/ubuntu/.ssh/authorized_keys)" = ubuntu:ubuntu ] || { echo 'Worker transport key ownership changed.' >&2; exit 1; }
       [ "$(stat -c '%a' /home/ubuntu/.ssh)" = 700 ] && [ "$(stat -c '%a' /home/ubuntu/.ssh/authorized_keys)" = 600 ] || { echo 'Worker transport key permissions changed.' >&2; exit 1; }
       printf '%s' '__RELAY_WORKER_PUBLIC_KEY_BASE64__' | base64 -d | cmp -s - /home/ubuntu/.ssh/authorized_keys || { echo 'Worker transport public key changed.' >&2; exit 1; }
+      stage=identity-scrub
       # Remove builder host identity only after the transport key boundary.
       for kind in rsa ecdsa ed25519; do
         rm -f -- "/etc/ssh/ssh_host_${kind}_key" "/etc/ssh/ssh_host_${kind}_key.pub"
       done
       test -z "$(find /etc/ssh -maxdepth 1 -type f -name 'ssh_host_*_key' -print -quit)"
       # Names only, never contents; any unexpected credential file fails closed.
+      stage=credential-scan
       suspect=$(find /root /home /opt/agent-web -type f \( -name auth.json -o -name .credentials.json -o -name credentials -o -name id_rsa -o -name id_ed25519 -o -name '*.pem' \) -print -quit)
       [ -z "$suspect" ] || { echo 'Credential filename scan failed; no AMI may be created.' >&2; exit 1; }
+      stage=service-enable
       systemctl enable agent-web-heartbeat.service agent-web-idle-watchdog.timer agent-web-hostkeys.service
+      stage=finalize-marker
       rm -f /opt/agent-web/BUILD_PENDING
       touch /opt/agent-web/IMAGE_FINALIZED
       sync
+      printf '%s\n' AGENT_RELAY_FINALIZER_OK_V1 > /dev/console
+      stage=poweroff
       systemctl poweroff
   - path: /usr/local/sbin/agent-web-audit-image
     owner: root:root
