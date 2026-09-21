@@ -549,7 +549,9 @@ fresh session. The target provider's default model/effort are selected.
 
 - **Mode:** Claude uses native Auto, Accept edits, and Plan permissions. Codex
   uses documented collaboration modes and a read-only sandbox for Plan;
-  Auto/Accept edits retain on-request approvals, not an approval bypass.
+  Auto runs non-interactively inside its workspace-write/no-network sandbox, so
+  a command that needs broader access fails back to the agent instead of opening
+  an approval card. Accept edits retains on-request user approvals.
 - **Effort:** a compact label opens a discrete slider and accessible selector
   for the chosen model's available levels.
 - **Claude Fast:** `/fast`, `/fast on` and `/fast off` control this chat's

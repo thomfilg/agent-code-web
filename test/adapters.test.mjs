@@ -119,6 +119,7 @@ test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers ap
   assert.equal(turnParams.effort, "high");
   assert.deepEqual(turnParams.sandboxPolicy, { type: "readOnly" });
   assert.equal(turnParams.collaborationMode.mode, "plan");
+  assert.equal(turnParams.approvalPolicy, "on-request"); assert.equal(turnParams.approvalsReviewer, "user");
   assert.deepEqual(turnParams.input[1], { type: "localImage", path: "/tmp/image.png" });
   assert.equal(sessionId, "thr_fixture");
   assert.equal(result.text, "hello world");
@@ -129,11 +130,11 @@ test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers ap
   assert.equal((await adapter.compact()).status, "completed");
   await adapter.send("default mode", { model: "fixture-gpt" });
   assert.equal(turnParams.collaborationMode.mode, "default"); assert.equal(turnParams.sandboxPolicy.type, "workspaceWrite");
-  assert.equal(turnParams.approvalsReviewer, "auto_review");
+  assert.equal(turnParams.approvalsReviewer, "auto_review"); assert.equal(turnParams.approvalPolicy, "never");
   await adapter.send("explicit edits", { model: "fixture-gpt", mode: "accept_edits" });
   assert.equal(turnParams.approvalsReviewer, "user"); assert.equal(turnParams.approvalPolicy, "on-request");
   await adapter.send("automatic reviews", { model: "fixture-gpt", mode: "auto" });
-  assert.equal(turnParams.approvalsReviewer, "auto_review"); assert.equal(turnParams.approvalPolicy, "on-request"); assert.equal(turnParams.sandboxPolicy.type, "workspaceWrite");
+  assert.equal(turnParams.approvalsReviewer, "auto_review"); assert.equal(turnParams.approvalPolicy, "never"); assert.equal(turnParams.sandboxPolicy.type, "workspaceWrite");
   await adapter.stop();
 
   const resumedChat = { ...chat, agentSessionId: sessionId };

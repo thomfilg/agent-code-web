@@ -54,8 +54,17 @@ production chat was used by these tests.
 
 ## Remaining acceptance
 
-This closes the first-turn Edits hard-code. It does **not** claim that the real
-provider classifier will allow the user's exact `grep`/environment-inspection
-case. That final item-27 acceptance still requires an explicitly selected live
-account and observation that the native action completes without a manual
-approval card, while Edits and Plan retain their intended behavior.
+The first deployed follow-up exposed a second gap: Codex received the native
+automatic reviewer but retained `approvalPolicy: on-request`, so a reviewer
+escalation could still surface a manual approval card in Auto. Auto now sends
+`approvalPolicy: never` on main and child turns. Its workspace-write and
+no-network sandbox remains unchanged; requests for broader access fail back to
+the agent. Edits and Plan retain on-request behavior. The exact live-account
+command remains the final acceptance gate.
+
+`node scripts/smoke-real-codex-auto.mjs` also passed against installed Codex
+0.155.0 with deterministic loopback inference: the native shell completed the
+reported workspace-root `rg --files` shape under Auto, emitted no approval
+request, made no automatic-review call and retained the workspace-write / no-
+network sandbox. This uses no product account, paid inference or user files;
+deployed selected-account observation remains the final live gate.

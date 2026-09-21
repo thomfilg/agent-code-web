@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { codexApprovalSettings } from "./codex-permissions.mjs";
 import { publicRequest, responseFor } from "./agent-requests.mjs";
 import { clampText, errorMessage, redact } from "./utils.mjs";
 import { extractResponse } from "./response-protocol.mjs";
@@ -186,7 +187,7 @@ export class CodexAgentThreads {
       this.#check();
       const active = current.data?.find(turn => turn.status === "inProgress");
       const start = () => this.#nativeRequest("turn/start", { threadId: id, clientUserMessageId: requestId, input: [{ type: "text", text }],
-        approvalPolicy: "on-request", approvalsReviewer: mode === "auto" ? "auto_review" : "user",
+        ...codexApprovalSettings(mode),
         sandboxPolicy: mode === "plan" ? { type: "readOnly" } : { type: "workspaceWrite", writableRoots: [this.workspace], networkAccess: false },
         collaborationMode: { mode: mode === "plan" ? "plan" : "default", settings: { model: entry.model || this.model, reasoning_effort: entry.effort, developer_instructions: null } },
       }, 10000);

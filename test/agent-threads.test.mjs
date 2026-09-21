@@ -93,6 +93,7 @@ test("agent input starts or steers only the chosen thread, deduplicates retries 
   assert.equal(rpc.calls.filter(call => call.method === "turn/start").length, 1);
   const start = rpc.calls.find(call => call.method === "turn/start").params;
   assert.equal(start.threadId, "child"); assert.equal(start.sandboxPolicy.type, "readOnly"); assert.equal(start.collaborationMode.settings.model, "fixture-model");
+  assert.equal(start.approvalPolicy, "on-request"); assert.equal(start.approvalsReviewer, "user");
   assert.equal(start.collaborationMode.settings.reasoning_effort, "high");
   await agents.send("child", { text: "Follow-up", requestId: "request-followup" }, "auto");
   assert.equal(rpc.calls.filter(call => call.method === "turn/steer").length, 1);
@@ -156,7 +157,7 @@ test("a child finishing between read and steer safely starts one fresh turn inst
   const input = { requestId: "finish-race-request", text: "Next input" };
   await agents.send("child", input, "auto"); await agents.send("child", input, "auto");
   const started = rpc.calls.filter(call => call.method === "turn/start");
-  assert.equal(started.length, 1); assert.equal(started[0].params.approvalsReviewer, "auto_review");
+  assert.equal(started.length, 1); assert.equal(started[0].params.approvalsReviewer, "auto_review"); assert.equal(started[0].params.approvalPolicy, "never");
 });
 
 test("reconnected observers recover only verified saved transcripts, without restoring approvals or trusting saved membership", async t => {

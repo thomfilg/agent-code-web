@@ -19,6 +19,7 @@ import { CodexMemories } from "../codex-memories.mjs";
 import { createCodexImportControls } from "../codex-import-runtime.mjs";
 import { importedTranscript } from "../codex-import-chat.mjs";
 import { codexFeedbackPolicy } from "../codex-feedback.mjs";
+import { codexApprovalSettings } from "../codex-permissions.mjs";
 import { codexLogoutPolicy, logoutHash } from "../codex-logout.mjs";
 import { inspectCodexAuthFile } from "../codex-auth-files.mjs";
 import { planProgress } from "../tab-title.mjs";
@@ -635,8 +636,7 @@ export class CodexAdapter {
         ...(effort ? { effort } : {}),
         ...(serviceTier !== undefined ? { serviceTier } : {}),
         ...(personality ? { personality } : {}),
-        approvalPolicy: "on-request",
-        approvalsReviewer: mode === "auto" ? "auto_review" : "user",
+        ...codexApprovalSettings(mode),
         sandboxPolicy: mode === "plan" ? { type: "readOnly" } : { type: "workspaceWrite", writableRoots: [this.workspace], networkAccess: false },
         collaborationMode: { mode: mode === "plan" ? "plan" : "default", settings: { model: model || this.config.codex.model, reasoning_effort: effort || null, developer_instructions: null } },
       };
