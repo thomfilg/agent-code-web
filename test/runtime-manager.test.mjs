@@ -269,6 +269,24 @@ test("controller startup verifies persisted EC2 workers are physically stopped b
   assert.equal(store.get(hibernated.id).suspension.status, "hibernated", "verified hibernation survives a controller restart");
 });
 
+test("background EC2 reconciliation reports stopping before a slow provider confirmation", async t => {
+  const root = await temporaryDirectory(t), config = testConfig(root), store = new ChatStore(root); await store.initialize();
+  config.workerBackend = "ec2";
+  const chat = await store.create({ agent: "codex", title: "Slow restored worker" });
+  await store.update(chat.id, { runtimeMetadata: { backend: "ec2", instanceId: "i-12345678", instanceType: "t3.large" } });
+  const release = Promise.withResolvers();
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10_000 }), gatewayOrigin: "http://localhost",
+    workerBackend: { sleep: async () => { await release.promise; return { instanceId: "i-12345678", stopped: true }; }, destroy: async () => {} },
+    adapterFactory: () => assert.fail("reconciliation must not start an agent") });
+  t.after(() => manager.shutdown());
+  await manager.reconcileStoppedWorkers({ background: true });
+  assert.equal(store.get(chat.id).status, "stopping");
+  assert.match(store.get(chat.id).statusDetail, /Verifying|Stopping EC2 worker/);
+  release.resolve();
+  await waitFor(() => store.get(chat.id).status === "stopped");
+  assert.equal(store.get(chat.id).workerLifecycle.result.cleanup, "stopped");
+});
+
 test("chat deletion is durable even when worker stop and infrastructure cleanup fail", async t => {
   const root = await temporaryDirectory(t), records = new MemoryRecords(), store = new ChatStore(root, records); await store.initialize();
   const config = testConfig(root); config.idleTimeoutMs = 60_000;

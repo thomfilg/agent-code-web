@@ -982,7 +982,7 @@ export async function createAgentWebServer(options = {}) {
       agentAccounts,
       adapterFactory: options.adapterFactory || null,
     });
-    await manager.reconcileStoppedWorkers();
+    await manager.reconcileStoppedWorkers({ background: true });
     void manager.retryDeletionCleanup().catch(error => console.error("worker deletion cleanup:", errorMessage(error)));
     manager.browsers = new SharedBrowsers({ store, config, acquire: chatId => manager.browserExecutor(chatId), onIdle: chatId => manager.browserIdle(chatId), isActive: chatId => manager.presence.has(chatId), onViewers: chatId => manager.refreshActivity(chatId), ...options.browserOptions });
     manager.browsers.personal = new BrowserConnections({ records, store, ttlMs: config.sessionCapabilityTtlMs, validateCompany: async (user, companyId) => (await resources.forOwner(user.id)).companies.get(companyId) });

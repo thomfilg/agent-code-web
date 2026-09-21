@@ -2238,15 +2238,21 @@ export class RuntimeManager extends EventEmitter {
     }
   }
 
-  async reconcileStoppedWorkers() {
+  async reconcileStoppedWorkers({ background = false } = {}) {
     if (this.config.workerBackend !== "ec2") return;
-    await Promise.all(this.store.list().filter(current => current.runtimeMetadata?.instanceId && current.suspension?.status !== "hibernated").map(async chat => {
+    const chats = this.store.list().filter(current => current.runtimeMetadata?.instanceId && current.suspension?.status !== "hibernated");
+    await Promise.all(chats.map(async chat => this.publishChat(await this.store.update(chat.id, {
+      status: "stopping", statusDetail: "Verifying that the EC2 machine is stopped", idleDeadlineAt: null, idleKeepAwakeReason: null,
+    }))));
+    const completion = Promise.all(chats.map(async chat => {
       try { await this.stop(chat.id, "reconcile"); }
       catch (error) {
         if (!this.store.get(chat.id)) return;
         await this.#setStatus(chat.id, "error", `Could not verify that the EC2 machine is stopped: ${errorMessage(error)}`, null);
       }
     }));
+    if (background) { void completion; return; }
+    await completion;
   }
 
   async resizeWorker(chatId, requestedType) {
