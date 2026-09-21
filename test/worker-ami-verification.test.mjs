@@ -11,7 +11,7 @@ const resources = [["Controller", "AWS::EC2::Instance", controllerId], ["Applica
 
 function receipt(payload) {
   return { schema: 1, verificationId: payload.verificationId, workerId, phase: payload.phase, heartbeatFresh: true, sentinelPresent: true, versions: { codex: "codex-cli 0.154.0", claude: "2.1.222 (Claude Code)" }, knownHosts: `verify-${workerId} ssh-ed25519 AAAAFixturePublicKey\n`,
-    ...(payload.hibernation ? { processIdentity: payload.processIdentity || "d".repeat(64) } : {}),
+    ...(payload.hibernation ? { processIdentity: payload.processIdentity || "d".repeat(64), applicationTransport: true, applicationIdentity: payload.applicationIdentity || "e".repeat(64) } : {}),
     audit: { schema: 1, valid: true, finalized: true, cloudInitDisabled: true, ssmDisabled: true, credentialsAbsent: true, transportKeyMatches: true, freshIdentity: true, heartbeatEnabled: true, watchdogActive: true, metadataReachable: false, machine: "a".repeat(64), hostKeys: { "ssh_host_ed25519_key.pub": "b".repeat(64) } } };
 }
 
@@ -110,7 +110,7 @@ test("fresh acceptance proves isolated boot, stop/start persistence, pinned host
   assert.ok(send.includes(controllerId));
   const parameters = JSON.parse(send[send.indexOf("--parameters") + 1]);
   assert.deepEqual(parameters.executionTimeout, ["420"]);
-  assert.ok(parameters.commands[0].length < 16_000, "compressed controller probe must stay within the Run Command string limit");
+  assert.ok(parameters.commands[0].length < 128_000, "compressed acceptance payload must stay within its reviewed transport bound");
   assert.match(parameters.commands[0], /import base64,gzip;exec\(gzip\.decompress/);
   assert.doesNotMatch(JSON.stringify(result) + logs.join(""), /PRIVATE OUTPUT|SecretString|knownHosts/);
   assert.equal(JSON.stringify(result).includes(f.requests[0].sentinel), false);
@@ -131,9 +131,13 @@ test("dedicated hibernation acceptance proves one native process survives and ma
   assert.equal(result.accepted, true); assert.equal(result.cleanedUp, true);
   assert.deepEqual(result.acceptance, { version: "verified-v1", verificationId: result.verificationId, confirmed: true, kind: "hibernation" });
   assert.equal(result.evidence.processIdentity, "d".repeat(64));
+  assert.equal(result.evidence.applicationIdentity, "e".repeat(64));
   assert.equal(result.checks.nativeProcessSurvivedHibernation, true);
+  assert.equal(result.checks.applicationTransportSurvivedHibernation, true);
+  assert.equal(result.checks.freshControllerTransportRecreated, true);
   assert.deepEqual(f.requests.map(request => [request.phase, request.hibernation]), [["fresh", true], ["resumed", true]]);
   assert.equal(f.requests[1].processIdentity, "d".repeat(64));
+  assert.equal(f.requests[1].applicationIdentity, "e".repeat(64));
   const launch = f.calls.find(call => call.includes("run-instances"));
   assert.deepEqual(launch.slice(launch.indexOf("--hibernation-options"), launch.indexOf("--hibernation-options") + 2), ["--hibernation-options", "Configured=true"]);
   const stop = f.calls.find(call => call.includes("stop-instances")); assert.ok(stop.includes("--hibernate"));

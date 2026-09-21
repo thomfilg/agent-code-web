@@ -19,6 +19,7 @@ class ControllerProbeTest(unittest.TestCase):
     def run_probe(self, *, fail_ssh=False, resumed=False, missing_pin=False, mismatch_key=False, ssh_result=None, ssh_exception=None):
         request = {'verificationId': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'phase': 'resumed' if resumed else 'fresh',
                    'workerId': 'i-aaaaaaaaaaaaaaaaa', 'host': '10.84.2.22', 'region': 'us-east-2', 'account': '123456789012',
+                   'deployment': 'relay-fixture',
                    'secretArn': 'arn:aws:secretsmanager:us-east-2:123456789012:secret:fixture',
                    'publicKey': 'ssh-ed25519 AAAAFixturePublicKey', 'sentinel': 'fixture-sentinel', 'hibernation': False}
         known = 'verify-i-aaaaaaaaaaaaaaaaa ssh-ed25519 AAAAFixturePublicKey\n'
@@ -76,6 +77,12 @@ class ControllerProbeTest(unittest.TestCase):
 
     def test_fresh_key_stays_local_and_tempfs_is_cleaned(self):
         self.run_probe()
+
+    def test_embedded_worker_application_probe_is_valid_python(self):
+        compile(probe.WORKER_PROBE, '<worker-application-probe>', 'exec')
+        self.assertIn("'/usr/local/bin/codex'", probe.WORKER_PROBE)
+        self.assertIn("'thread/list'", probe.WORKER_PROBE)
+        self.assertIn("'applicationTransport': True", probe.WORKER_PROBE)
 
     def test_resume_pins_previous_public_host_key(self):
         self.run_probe(resumed=True)

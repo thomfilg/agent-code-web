@@ -10,15 +10,15 @@ import { gzipSync } from "node:zlib";
 import { safeBakerAwsFailure } from "./bake-worker-ami.mjs";
 import { assertWorkerImage, workerAcceptanceVersion, workerImageIdentity, workerImageTags } from "../../src/worker-image.mjs";
 import { workerHibernationAcceptance, workerHibernationAcceptanceId, workerHibernationCandidate } from "../../src/worker-suspension.mjs";
-import { workerSupervisorVersion } from "../../src/worker-supervisor-service.mjs";
+import { workerSupervisorFiles, workerSupervisorUnit, workerSupervisorVersion } from "../../src/worker-supervisor-service.mjs";
 
 const execute = promisify(execFile);
 const privateIp = value => isIP(value) === 4 && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(value);
 const tagsOf = resource => Object.fromEntries((resource?.Tags || []).map(({ Key, Value }) => [Key, Value]));
 const quote = value => `'${String(value).replaceAll("'", `'"'"'`)}'`;
 const imageTags = { ManagedBy: "agent-relay", CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" };
-const probeFailureCategories = new Set(["worker-user", "native-version", "image-audit", "heartbeat", "sentinel", "native-process", "invalid-receipt", "ssh-host-key", "ssh-permission-denied", "ssh-connection-refused", "ssh-network-unreachable", "remote-command-missing", "ssh-transport", "remote-command-failed", "ssh-probe-timeout", "ssh-executable-unavailable"]);
-const probeStages = new Set(["request", "identity", "native-version", "image-audit-run", "image-audit-json", "image-audit-validation", "heartbeat", "sentinel", "receipt"]);
+const probeFailureCategories = new Set(["worker-user", "native-version", "image-audit", "heartbeat", "sentinel", "native-process", "application-transport", "invalid-receipt", "ssh-host-key", "ssh-permission-denied", "ssh-connection-refused", "ssh-network-unreachable", "remote-command-missing", "ssh-transport", "remote-command-failed", "ssh-probe-timeout", "ssh-executable-unavailable"]);
+const probeStages = new Set(["request", "identity", "native-version", "image-audit-run", "image-audit-json", "image-audit-validation", "heartbeat", "sentinel", "native-process", "application-transport", "receipt"]);
 const exceptionClasses = new Set(["RuntimeError", "JSONDecodeError", "FileNotFoundError", "PermissionError", "TimeoutExpired", "CalledProcessError", "OSError", "ValueError", "TypeError", "KeyError", "IndexError", "AttributeError", "NameError", "UnboundLocalError", "ImportError", "ModuleNotFoundError", "UnicodeDecodeError", "AssertionError"]);
 
 function safeProbeFailure(output) {
@@ -61,6 +61,8 @@ export function verifyReceipt(receipt, { verificationId, workerId, phase, previo
   if (hibernation && (!/^[a-f0-9]{64}$/.test(receipt.processIdentity || "") || previous && receipt.processIdentity !== previous.processIdentity)) {
     throw new Error("Worker native process identity did not survive hibernation");
   }
+  if (hibernation && (receipt.applicationTransport !== true || !/^[a-f0-9]{64}$/.test(receipt.applicationIdentity || "")
+    || previous && receipt.applicationIdentity !== previous.applicationIdentity)) throw new Error("Worker application transport did not survive hibernation");
   return receipt;
 }
 
@@ -129,6 +131,11 @@ async function verifyImage(o, { run = defaultRun, sleep = ms => new Promise(reso
   }
   await controller();
   const controllerScript = await readFile(new URL("verify-worker-controller.py", import.meta.url), "utf8");
+  const supervisorSources = Object.fromEntries(await Promise.all(workerSupervisorFiles.map(async name => [name,
+    await readFile(new URL(`../../src/${name}`, import.meta.url), "utf8")])));
+  const supervisorBundle = gzipSync(Buffer.from(JSON.stringify({ schema: 1, version: workerSupervisorVersion,
+    files: supervisorSources, unit: workerSupervisorUnit })), { level: 9, mtime: 0 }).toString("base64");
+  if (supervisorBundle.length > 32_768) throw new Error("Worker supervisor acceptance bundle exceeds its fixed transport limit");
   const verificationId = randomUUID(), sentinel = randomUUID(), chatId = `chat_${randomBytes(16).toString("hex")}`;
   let workerId;
   let workerHost;
@@ -168,8 +175,8 @@ async function verifyImage(o, { run = defaultRun, sleep = ms => new Promise(reso
     const current = await worker();
     if (current.State?.Name !== "running" || !privateIp(current.PrivateIpAddress)) throw new Error("Test worker is not privately reachable/running");
     workerHost = current.PrivateIpAddress;
-    const payload = { account: o.account, region: o.region, secretArn: outputs.SecretArn, verificationId, workerId, host: workerHost, publicKey, phase, sentinel, hibernation,
-      ...(previous ? { knownHosts: previous.knownHosts, processIdentity: previous.processIdentity } : {}) };
+    const payload = { account: o.account, region: o.region, deployment: o.deployment, secretArn: outputs.SecretArn, verificationId, workerId, host: workerHost, publicKey, phase, sentinel, hibernation, supervisorBundle,
+      ...(previous ? { knownHosts: previous.knownHosts, processIdentity: previous.processIdentity, applicationIdentity: previous.applicationIdentity } : {}) };
     // Run Command has a bounded string parameter. Compress the inspected helper
     // before base64 so growth cannot silently turn every probe into an API-side
     // validation failure before a Command ID exists.
@@ -231,10 +238,10 @@ async function verifyImage(o, { run = defaultRun, sleep = ms => new Promise(reso
     const resumed = await probe("resumed", fresh);
     receipt = { accepted: true, schema: 1, account: o.account, region: o.region, deployment: o.deployment, imageId: o.imageId, verificationId, workerId, controllerId: outputs.ControllerInstanceId,
       checks: { freshBoot: true, disabledMetadata: true, noInstanceRole: true, privateNetwork: true, credentialScrub: true, pinnedNativeVersions: true, freshMachineAndHostIdentity: true,
-        ...(hibernation ? { machineIdentitySurvivedHibernation: true, nativeProcessSurvivedHibernation: true, sentinelSurvivedHibernation: true }
+        ...(hibernation ? { machineIdentitySurvivedHibernation: true, nativeProcessSurvivedHibernation: true, applicationTransportSurvivedHibernation: true, freshControllerTransportRecreated: true, sentinelSurvivedHibernation: true }
           : { identitySurvivedStopStart: true, sentinelSurvivedStopStart: true }), heartbeatFreshAfterBoot: true, controllerSecretStayedLocal: true },
       evidence: { freshCommandId: fresh.commandId, resumedCommandId: resumed.commandId, machineHash: resumed.audit.machine, hostKeyHashes: resumed.audit.hostKeys,
-        ...(hibernation ? { processIdentity: resumed.processIdentity } : {}) }, promptsSent: false, accountImports: false };
+        ...(hibernation ? { processIdentity: resumed.processIdentity, applicationIdentity: resumed.applicationIdentity } : {}) }, promptsSent: false, accountImports: false };
   } catch (error) {
     primaryFailure = error;
     throw error;
