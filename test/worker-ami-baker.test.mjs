@@ -339,7 +339,7 @@ test("AMI preflight rejects wrong AWS account, foreign resources and excessive b
 
 test("worker recipe removes builder identity, generates new host keys and does not need final IMDS", async () => {
   const recipe = await readFile(new URL("../deploy/aws/worker-cloud-init.yaml", import.meta.url), "utf8");
-  for (const required of ["@openai/codex@0.154.0", "@anthropic-ai/claude-code@2.1.222", "cloud-init.disabled", "cloud-init clean --logs --seed --machine-id", "/var/lib/amazon/ssm", "/root/.aws", "ssh_host_${kind}_key", "ssh-keygen -A", "IMAGE_FINALIZED", "agent-web-heartbeat.service"]) assert.ok(recipe.includes(required), required);
+  for (const required of ["@openai/codex@0.154.0", "@anthropic-ai/claude-code@2.1.222", "cloud-init.disabled", "cloud-init clean --logs --seed --machine-id", "/var/lib/amazon/ssm", "/root/.aws", "-name 'ssh_host_*_key'", "-name 'ssh_host_*_key.pub'", "ssh-keygen -A", "IMAGE_FINALIZED", "agent-web-heartbeat.service"]) assert.ok(recipe.includes(required), required);
   assert.ok(recipe.includes("for device in /dev/ttyS0 /dev/console"));
   assert.ok(recipe.indexOf("Credential filename scan failed") < recipe.indexOf("AGENT_RELAY_FINALIZER_OK_V1"));
   assert.ok(recipe.indexOf("AGENT_RELAY_FINALIZER_OK_V1") < recipe.lastIndexOf("systemctl poweroff"));

@@ -163,10 +163,11 @@ write_files:
       stage=service-enable
       systemctl enable agent-web-heartbeat.service agent-web-idle-watchdog.timer agent-web-hostkeys.service
       stage=identity-scrub
-      for kind in rsa ecdsa ed25519; do
-        rm -f -- "/etc/ssh/ssh_host_${kind}_key" "/etc/ssh/ssh_host_${kind}_key.pub"
-      done
-      test -z "$(find /etc/ssh -maxdepth 1 -type f -name 'ssh_host_*_key' -print -quit)"
+      # Jammy can retain additional host-key algorithms beyond the ordinary
+      # rsa/ecdsa/ed25519 trio. Delete only OpenSSH's exact host-key filename
+      # family, including links, then require no private or public key remains.
+      find /etc/ssh -maxdepth 1 \( -type f -o -type l \) \( -name 'ssh_host_*_key' -o -name 'ssh_host_*_key.pub' \) -delete
+      test -z "$(find /etc/ssh -maxdepth 1 \( -name 'ssh_host_*_key' -o -name 'ssh_host_*_key.pub' \) -print -quit)"
       stage=finalize-marker
       rm -f /opt/agent-web/BUILD_PENDING
       touch /opt/agent-web/IMAGE_FINALIZED
