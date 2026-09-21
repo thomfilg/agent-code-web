@@ -34,8 +34,9 @@ EXCEPTION_CLASSES = ('RuntimeError', 'JSONDecodeError', 'FileNotFoundError', 'Pe
                      'KeyError', 'IndexError', 'AttributeError', 'NameError', 'UnboundLocalError',
                      'ImportError', 'ModuleNotFoundError', 'UnicodeDecodeError', 'AssertionError')
 APPLICATION_STAGES = ('bundle', 'service', 'status', 'configure', 'connect', 'launch', 'attach',
-                      'initialize-input', 'initialize-response', 'initialize-shape', 'checkpoint',
-                      'takeover', 'read', 'no-replay', 'terminate', 'release')
+                      'initialize-input', 'initialize-response', 'initialize-error', 'initialize-frame',
+                      'initialize-timeout', 'checkpoint', 'takeover', 'read', 'read-error', 'read-frame',
+                      'read-timeout', 'no-replay', 'terminate', 'release')
 
 
 class ProbeFailure(RuntimeError):
@@ -269,15 +270,23 @@ class ApplicationClient:
             return response['result']
         application_failure()
 
-    def app_response(self, response_id):
+    def app_response(self, response_id, stage):
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             for message in self.messages:
                 if message.get('id') == response_id and 'method' not in message:
                     if message.get('error'):
+                        application_at(stage + '-error')
                         application_failure()
                     return message.get('result')
-            self.frame()
+            try:
+                self.frame()
+            except socket.timeout:
+                continue
+            except RuntimeError:
+                application_at(stage + '-frame')
+                raise
+        application_at(stage + '-timeout')
         application_failure()
 
     def input(self, sequence, message):
@@ -351,7 +360,7 @@ def application_probe(request):
             application_at('initialize-input')
             client.input(1, {'method': 'initialize', 'id': 1, 'params': {'clientInfo': {'name': 'relay_hibernation_acceptance', 'version': '1'}, 'capabilities': {'experimentalApi': True}}})
             application_at('initialize-response')
-            client.app_response(1)
+            client.app_response(1, 'initialize')
             client.input(2, {'method': 'initialized', 'params': {}})
             transport_status = client.request('status', {'processInstanceId': receipt['processInstanceId']})
             if transport_status.get('inputSeq') != 2 or transport_status.get('pid') != receipt['pid']:
@@ -375,7 +384,7 @@ def application_probe(request):
                 application_failure()
             application_at('read')
             client.input(3, {'method': 'thread/list', 'id': 2, 'params': {'limit': 1}})
-            listed = client.app_response(2)
+            listed = client.app_response(2, 'read')
             if not isinstance(listed, dict) or not isinstance(listed.get('data'), list):
                 application_failure()
             transport_status = client.request('status', {'processInstanceId': receipt['processInstanceId']})
@@ -513,7 +522,7 @@ except Exception as error:
         failure['auditChecks'] = audit_checks
         failure['credentialFailureCounts'] = credential_counts
         failure['metadataProbe'] = metadata_probe
-    if failure['reason'] == 'application transport did not survive hibernation' and application_stage in ('bundle', 'service', 'status', 'configure', 'connect', 'launch', 'attach', 'initialize-input', 'initialize-response', 'initialize-shape', 'checkpoint', 'takeover', 'read', 'no-replay', 'terminate', 'release'):
+    if failure['reason'] == 'application transport did not survive hibernation' and application_stage in ('bundle', 'service', 'status', 'configure', 'connect', 'launch', 'attach', 'initialize-input', 'initialize-response', 'initialize-error', 'initialize-frame', 'initialize-timeout', 'checkpoint', 'takeover', 'read', 'read-error', 'read-frame', 'read-timeout', 'no-replay', 'terminate', 'release'):
         failure['applicationStage'] = application_stage
     print(json.dumps(failure))
     sys.exit(1)
