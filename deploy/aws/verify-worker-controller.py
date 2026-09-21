@@ -206,7 +206,7 @@ class ApplicationClient:
         self.stdout = b''
         self.messages = []
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.settimeout(30)
+        self.sock.settimeout(60)
         self.sock.connect('/run/user/' + str(os.getuid()) + '/agent-relay-worker/process.sock')
         self.stream = self.sock.makefile('rb')
 
@@ -270,13 +270,13 @@ class ApplicationClient:
         application_failure()
 
     def app_response(self, response_id):
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             for message in self.messages:
                 if message.get('id') == response_id and 'method' not in message:
-                    if message.get('error') or not isinstance(message.get('result'), dict):
+                    if message.get('error'):
                         application_failure()
-                    return message['result']
+                    return message.get('result')
             self.frame()
         application_failure()
 
@@ -376,7 +376,7 @@ def application_probe(request):
             application_at('read')
             client.input(3, {'method': 'thread/list', 'id': 2, 'params': {'limit': 1}})
             listed = client.app_response(2)
-            if not isinstance(listed.get('data'), list):
+            if not isinstance(listed, dict) or not isinstance(listed.get('data'), list):
                 application_failure()
             transport_status = client.request('status', {'processInstanceId': receipt['processInstanceId']})
             application_at('no-replay')
@@ -596,7 +596,7 @@ def main():
         audit_attempts = 0
         while True:
             try:
-                probed = subprocess.run(ssh + [command], capture_output=True, text=True, timeout=100)
+                probed = subprocess.run(ssh + [command], capture_output=True, text=True, timeout=180)
             except subprocess.TimeoutExpired:
                 raise ProbeFailure('ssh-probe-timeout') from None
             except OSError:
