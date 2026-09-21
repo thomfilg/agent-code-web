@@ -7,6 +7,12 @@ import { createInterface } from "node:readline";
 import path from "node:path";
 import os from "node:os";
 
+// A freshly resumed or just-booted EC2 worker can still be settling disk and
+// CPU activity when Chrome opens its private debugging pipe. Ordinary CDP
+// actions keep the tighter bound; only the initial version handshake gets the
+// longer cold-start allowance.
+export const browserProtocolTimeout = method => method === "Browser.getVersion" ? 60_000 : 20_000;
+
 export class ChromeBrowser extends EventEmitter {
   constructor({ executable = "google-chrome", profile = null, ProjectionPolicy = null } = {}) {
     super(); this.executable = executable; this.profile = profile; this.ProjectionPolicy = ProjectionPolicy;
@@ -90,7 +96,7 @@ export class ChromeBrowser extends EventEmitter {
     if (this.failed) return Promise.reject(this.failed);
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Chrome ${method} timed out`)); }, 20000);
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Chrome ${method} timed out`)); }, browserProtocolTimeout(method));
       this.pending.set(id, { resolve, reject, timer, onResponse });
       this.child.stdio[3].write(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }) + "\0");
     });

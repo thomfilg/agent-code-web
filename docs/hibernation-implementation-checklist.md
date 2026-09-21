@@ -160,7 +160,7 @@ part of the committed baseline used by this document.
 - [x] Obtain/confirm explicit scope for disposable cloud verification; identify
   exact account, deployment, image and resources. Never use the active user
   worker, its browser profile, user credentials or live conversation as fixtures.
-- [ ] Run Node and Chrome with ephemeral in-memory sentinels; record safe hashes,
+- [x] Run Node and Chrome with ephemeral in-memory sentinels; record safe hashes,
   process/start identity, browser JS state and counters before/after actual
   hibernation. A restarted process with the same files must fail acceptance.
 - [ ] Exercise actual application transport and prompt-free wake after more than

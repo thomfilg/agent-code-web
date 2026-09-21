@@ -24,7 +24,10 @@ export class BrowserProcess extends EventEmitter {
     this.ready = new Promise((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
     this.ready.catch(() => {});
     this.chromeStoppedReceipt=new Promise(resolve=>{this.resolveChromeStopped=resolve;});
-    this.timer = setTimeout(() => this.fail(new Error("Shared Chrome startup timed out")), 30000);
+    // The worker's private Browser.getVersion handshake allows a bounded
+    // 60-second EC2 cold start. Keep this outer timer slightly longer so the
+    // transport does not preempt the more precise worker diagnostic.
+    this.timer = setTimeout(() => this.fail(new Error("Shared Chrome startup timed out")), 75000);
     const lines = createInterface({ input: child.stdout });
     lines.on("line", line => {
       let message; try { message = JSON.parse(line); } catch { return; }

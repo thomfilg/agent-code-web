@@ -16,7 +16,7 @@ spec.loader.exec_module(probe)
 
 
 class ControllerProbeTest(unittest.TestCase):
-    def run_probe(self, *, fail_ssh=False, resumed=False, missing_pin=False, mismatch_key=False, ssh_result=None, ssh_exception=None):
+    def run_probe(self, *, fail_ssh=False, resumed=False, missing_pin=False, mismatch_key=False, ssh_result=None, ssh_results=None, ssh_exception=None):
         request = {'verificationId': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'phase': 'resumed' if resumed else 'fresh',
                    'workerId': 'i-aaaaaaaaaaaaaaaaa', 'host': '10.84.2.22', 'region': 'us-east-2', 'account': '123456789012',
                    'deployment': 'relay-fixture',
@@ -56,6 +56,8 @@ class ControllerProbeTest(unittest.TestCase):
                 known_file.write_text(known)
             if ssh_exception:
                 raise ssh_exception
+            if ssh_results is not None:
+                return ssh_results.pop(0)
             return ssh_result or types.SimpleNamespace(returncode=1 if fail_ssh else 0, stdout=json.dumps({'audit': {'valid': True}}), stderr='PRIVATE-ERROR-FIXTURE')
 
         output = io.StringIO()
@@ -83,6 +85,14 @@ class ControllerProbeTest(unittest.TestCase):
         self.assertIn("('/usr/local/bin/codex', '/usr/bin/codex')", probe.WORKER_PROBE)
         self.assertIn("'thread/list'", probe.WORKER_PROBE)
         self.assertIn("'applicationTransport': True", probe.WORKER_PROBE)
+        self.assertIn("'shared-chrome'", probe.WORKER_PROBE)
+        self.assertIn("browser-worker.mjs", probe.WORKER_PROBE)
+        self.assertIn("globalThis.__relayHibernation", probe.WORKER_PROBE)
+        self.assertIn("'browserTransport': True", probe.WORKER_PROBE)
+        self.assertIn("browser_keepalive", probe.WORKER_PROBE)
+        self.assertIn("select.select([self.sock]", probe.WORKER_PROBE)
+        self.assertIn("def browser_start_failure(value):", probe.WORKER_PROBE)
+        self.assertIn("application_at('browser-ready-fatal')", probe.WORKER_PROBE)
 
     def test_resume_pins_previous_public_host_key(self):
         self.run_probe(resumed=True)
@@ -137,6 +147,15 @@ class ControllerProbeTest(unittest.TestCase):
             'reason': 'image scrub audit failed', 'auditChecks': {'ssmDisabled': False}}), stderr='PRIVATE-SECRET'))
         self.assertEqual(calls, 3)
         self.assertEqual(sleeps, [2, 2])
+
+    def test_native_version_boot_contention_gets_only_a_bounded_pre_side_effect_retry(self):
+        timed_out = types.SimpleNamespace(returncode=1, stdout=json.dumps({
+            'reason': 'invalid-worker-receipt', 'probeStage': 'native-version',
+            'exceptionClass': 'TimeoutExpired'}), stderr='PRIVATE-SECRET')
+        passed = types.SimpleNamespace(returncode=0, stdout=json.dumps({'audit': {'valid': True}}), stderr='')
+        calls, sleeps = self.run_probe(ssh_results=[timed_out, passed])
+        self.assertEqual(calls, 2)
+        self.assertEqual(sleeps, [2])
 
     def test_credential_counts_and_metadata_diagnostics_are_bounded_allowlists(self):
         for metadata in ('http-403-denied', 'PRIVATE-SECRET'):
@@ -214,11 +233,26 @@ class ControllerProbeTest(unittest.TestCase):
             self.assertEqual(result['diagnostic'], {'stage': 'worker-probe', 'category': 'invalid-receipt', 'exitCode': 1})
 
     def test_application_transport_diagnostic_exposes_only_fixed_substage(self):
-        for stage in ('initialize-response', 'PRIVATE-STAGE'):
+        for stage in ('initialize-response', 'browser-identity', 'PRIVATE-STAGE'):
             value = {'reason': 'application transport did not survive hibernation', 'applicationStage': stage,
                      'private': 'PRIVATE-SECRET'}
             result = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(value), stderr='PRIVATE-STDERR')))
-            self.assertEqual(result['diagnostic'].get('applicationStage'), 'initialize-response' if stage == 'initialize-response' else None)
+            self.assertEqual(result['diagnostic'].get('applicationStage'), stage if stage in ('initialize-response', 'browser-identity') else None)
+            self.assertNotIn('PRIVATE-', json.dumps(result))
+
+        for detail in ('output-identity', 'PRIVATE-FRAME'):
+            value = {'reason': 'application transport did not survive hibernation', 'applicationFrame': detail,
+                     'private': 'PRIVATE-SECRET'}
+            result = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(value), stderr='PRIVATE-STDERR')))
+            self.assertEqual(result['diagnostic'].get('applicationFrame'), 'output-identity' if detail == 'output-identity' else None)
+            self.assertNotIn('PRIVATE-', json.dumps(result))
+
+        for failure in ('sandbox', 'PRIVATE-BROWSER'):
+            value = {'reason': 'application transport did not survive hibernation',
+                     'applicationStage': 'browser-ready-fatal', 'browserFailure': failure,
+                     'private': 'PRIVATE-SECRET'}
+            result = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(value), stderr='PRIVATE-STDERR')))
+            self.assertEqual(result['diagnostic'].get('browserFailure'), 'sandbox' if failure == 'sandbox' else None)
             self.assertNotIn('PRIVATE-', json.dumps(result))
 
 

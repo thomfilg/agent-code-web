@@ -3,11 +3,17 @@ import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {PassThrough} from 'node:stream';
 import {BrowserProcess} from '../src/shared-browser.mjs';
-import {ChromeBrowser} from '../src/browser-worker.mjs';
+import {ChromeBrowser,browserProtocolTimeout} from '../src/browser-worker.mjs';
 import {acquireGuestProjection} from '../src/guest-browser-projection.mjs';
 import {waitFor} from './helpers.mjs';
 import WebSocket from 'ws';
 import {once} from 'node:events';
+
+test('only the initial Chrome handshake receives the bounded EC2 cold-start allowance',()=>{
+  assert.equal(browserProtocolTimeout('Browser.getVersion'),60000);
+  assert.equal(browserProtocolTimeout('Target.getTargets'),20000);
+  assert.equal(browserProtocolTimeout('Runtime.evaluate'),20000);
+});
 
 test('private projection admits bounded renderer utilities but rejects oversize before writing; UI budget is unchanged',async t=>{
   const child=Object.assign(new EventEmitter(),{stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough()}),browser=new BrowserProcess(child);

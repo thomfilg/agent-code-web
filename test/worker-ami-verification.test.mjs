@@ -11,7 +11,8 @@ const resources = [["Controller", "AWS::EC2::Instance", controllerId], ["Applica
 
 function receipt(payload) {
   return { schema: 1, verificationId: payload.verificationId, workerId, phase: payload.phase, heartbeatFresh: true, sentinelPresent: true, versions: { codex: "codex-cli 0.154.0", claude: "2.1.222 (Claude Code)" }, knownHosts: `verify-${workerId} ssh-ed25519 AAAAFixturePublicKey\n`,
-    ...(payload.hibernation ? { processIdentity: payload.processIdentity || "d".repeat(64), applicationTransport: true, applicationIdentity: payload.applicationIdentity || "e".repeat(64) } : {}),
+    ...(payload.hibernation ? { processIdentity: payload.processIdentity || "d".repeat(64), applicationTransport: true, applicationIdentity: payload.applicationIdentity || "e".repeat(64),
+      browserTransport: true, browserProcessIdentity: payload.browserProcessIdentity || "f".repeat(64), browserStateIdentity: payload.browserStateIdentity || "a".repeat(64), browserCounter: payload.phase === "fresh" ? 1 : 2 } : {}),
     audit: { schema: 1, valid: true, finalized: true, cloudInitDisabled: true, ssmDisabled: true, credentialsAbsent: true, transportKeyMatches: true, freshIdentity: true, heartbeatEnabled: true, watchdogActive: true, metadataReachable: false, machine: "a".repeat(64), hostKeys: { "ssh_host_ed25519_key.pub": "b".repeat(64) } } };
 }
 
@@ -132,12 +133,19 @@ test("dedicated hibernation acceptance proves one native process survives and ma
   assert.deepEqual(result.acceptance, { version: "verified-v1", verificationId: result.verificationId, confirmed: true, kind: "hibernation" });
   assert.equal(result.evidence.processIdentity, "d".repeat(64));
   assert.equal(result.evidence.applicationIdentity, "e".repeat(64));
+  assert.equal(result.evidence.browserProcessIdentity, "f".repeat(64));
+  assert.equal(result.evidence.browserStateIdentity, "a".repeat(64));
+  assert.equal(result.evidence.browserCounter, 2);
   assert.equal(result.checks.nativeProcessSurvivedHibernation, true);
   assert.equal(result.checks.applicationTransportSurvivedHibernation, true);
+  assert.equal(result.checks.browserProcessSurvivedHibernation, true);
+  assert.equal(result.checks.browserRendererStateSurvivedHibernation, true);
   assert.equal(result.checks.freshControllerTransportRecreated, true);
   assert.deepEqual(f.requests.map(request => [request.phase, request.hibernation]), [["fresh", true], ["resumed", true]]);
   assert.equal(f.requests[1].processIdentity, "d".repeat(64));
   assert.equal(f.requests[1].applicationIdentity, "e".repeat(64));
+  assert.equal(f.requests[1].browserProcessIdentity, "f".repeat(64));
+  assert.equal(f.requests[1].browserStateIdentity, "a".repeat(64));
   const launch = f.calls.find(call => call.includes("run-instances"));
   assert.deepEqual(launch.slice(launch.indexOf("--hibernation-options"), launch.indexOf("--hibernation-options") + 2), ["--hibernation-options", "Configured=true"]);
   const stop = f.calls.find(call => call.includes("stop-instances")); assert.ok(stop.includes("--hibernate"));
@@ -175,15 +183,17 @@ test("hibernation warmup retry is bounded and unrelated stop errors are immediat
   assert.equal(unrelated.calls.filter(call => call.includes("stop-instances")).length, 0);
 });
 
-test("hibernation acceptance rejects missing candidate evidence and changed native process identity without marking", async () => {
+test("hibernation acceptance rejects missing candidate evidence and changed process or renderer identity without marking", async () => {
   const ordinary = fixture();
   await assert.rejects(verifyHibernationImage(options, { run: ordinary.run, sleep: async () => {} }), /candidate recipe/);
   assert.equal(ordinary.calls.some(call => call.includes("run-instances") || call.includes("create-tags")), false);
 
-  const changed = fixture({ hibernation: true, mutateReceipt: receipt => receipt.phase === "resumed" ? { ...receipt, processIdentity: "e".repeat(64) } : receipt });
-  await assert.rejects(verifyHibernationImage(options, { run: changed.run, sleep: async () => {} }), /receipt failed validation/);
-  assert.equal(changed.calls.filter(call => call.includes("terminate-instances")).length, 1);
-  assert.equal(changed.calls.some(call => call.includes("create-tags")), false);
+  for (const field of ["processIdentity", "browserProcessIdentity", "browserStateIdentity"]) {
+    const changed = fixture({ hibernation: true, mutateReceipt: receipt => receipt.phase === "resumed" ? { ...receipt, [field]: "c".repeat(64) } : receipt });
+    await assert.rejects(verifyHibernationImage(options, { run: changed.run, sleep: async () => {} }), /receipt failed validation/);
+    assert.equal(changed.calls.filter(call => call.includes("terminate-instances")).length, 1);
+    assert.equal(changed.calls.some(call => call.includes("create-tags")), false);
+  }
 });
 
 test("hibernation acceptance dry-run is read-only and names its process continuity gate", async () => {
@@ -320,11 +330,25 @@ test("probe failure details expose only fixed stages/classes and bounded helper 
 });
 
 test("application transport failure exposes only an allowlisted substage", async () => {
-  for (const applicationStage of ["initialize-response", "PRIVATE-STAGE"]) {
+  for (const applicationStage of ["initialize-response", "browser-identity", "PRIVATE-STAGE"]) {
     const f = fixture({ hibernation: true, commandFailed: true, mutateReceipt: () => ({ diagnostic: { stage: "worker-probe", category: "application-transport", exitCode: 1, probeStage: "application-transport", applicationStage } }) });
     await assert.rejects(verifyHibernationImage(options, { run: f.run, sleep: async () => {} }), error => {
-      assert.equal(error.message.includes("application stage: initialize-response"), applicationStage === "initialize-response");
+      assert.equal(error.message.includes(`application stage: ${applicationStage}`), applicationStage !== "PRIVATE-STAGE");
       assert.doesNotMatch(error.message, /PRIVATE-STAGE/); return true;
+    });
+  }
+  for (const applicationFrame of ["output-identity", "PRIVATE-FRAME"]) {
+    const f = fixture({ hibernation: true, commandFailed: true, mutateReceipt: () => ({ diagnostic: { stage: "worker-probe", category: "application-transport", exitCode: 1, probeStage: "application-transport", applicationFrame } }) });
+    await assert.rejects(verifyHibernationImage(options, { run: f.run, sleep: async () => {} }), error => {
+      assert.equal(error.message.includes("application frame: output-identity"), applicationFrame === "output-identity");
+      assert.doesNotMatch(error.message, /PRIVATE-FRAME/); return true;
+    });
+  }
+  for (const browserFailure of ["sandbox", "PRIVATE-BROWSER"]) {
+    const f = fixture({ hibernation: true, commandFailed: true, mutateReceipt: () => ({ diagnostic: { stage: "worker-probe", category: "application-transport", exitCode: 1, probeStage: "application-transport", applicationStage: "browser-ready-fatal", browserFailure } }) });
+    await assert.rejects(verifyHibernationImage(options, { run: f.run, sleep: async () => {} }), error => {
+      assert.equal(error.message.includes("browser failure: sandbox"), browserFailure === "sandbox");
+      assert.doesNotMatch(error.message, /PRIVATE-BROWSER/); return true;
     });
   }
 });

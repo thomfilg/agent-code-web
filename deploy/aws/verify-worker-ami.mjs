@@ -33,9 +33,11 @@ function safeProbeFailure(output) {
     const stage = probeStages.has(diagnostic.probeStage) ? diagnostic.probeStage : "";
     const exceptions = ["exceptionClass", "helperExceptionClass"].filter(key => exceptionClasses.has(diagnostic[key])).map(key => `${key}=${diagnostic[key]}`);
     const helperLine = stage === "image-audit-json" && Number.isInteger(diagnostic.helperLine) && diagnostic.helperLine >= 1 && diagnostic.helperLine <= 10000 ? diagnostic.helperLine : null;
-    const applicationStages = new Set(["bundle", "service", "status", "configure", "connect", "launch", "attach", "initialize-input", "initialize-response", "initialize-error", "initialize-frame", "initialize-timeout", "initialize-notify", "initialize-status", "initialize-ack", "checkpoint", "takeover", "read", "read-error", "read-frame", "read-timeout", "no-replay", "terminate", "release"]);
+    const applicationStages = new Set(["bundle", "service", "status", "configure", "connect", "launch", "attach", "initialize-input", "initialize-response", "initialize-error", "initialize-frame", "initialize-timeout", "initialize-notify", "initialize-status", "initialize-ack", "checkpoint", "takeover", "read", "read-error", "read-frame", "read-timeout", "no-replay", "terminate", "release", "native-terminate", "browser-configure", "browser-connect", "browser-launch", "browser-attach", "browser-ready", "browser-ready-fatal", "browser-ready-frame", "browser-ready-timeout", "browser-state-input", "browser-state-response", "browser-state-error", "browser-state-frame", "browser-state-timeout", "browser-identity", "browser-takeover", "browser-no-replay", "browser-terminate", "browser-release"]);
     const applicationStage = diagnostic.category === "application-transport" && applicationStages.has(diagnostic.applicationStage) ? diagnostic.applicationStage : "";
-    return `; ${diagnostic.category}${Number.isInteger(diagnostic.exitCode) && diagnostic.exitCode >= -255 && diagnostic.exitCode <= 255 ? ` (exit ${diagnostic.exitCode})` : ""}${audit.length ? `; audit checks: ${audit.join(", ")}` : ""}${counts.length ? `; credential counts: ${counts.join(", ")}` : ""}${metadata ? `; metadata probe: ${metadata}` : ""}${stage ? `; probe stage: ${stage}` : ""}${applicationStage ? `; application stage: ${applicationStage}` : ""}${exceptions.length ? `; ${exceptions.join(", ")}` : ""}${helperLine ? `; helper line: ${helperLine}` : ""}`;
+    const applicationFrame = diagnostic.category === "application-transport" && ["line", "json", "envelope", "output-identity", "output-data", "output-size", "stdout-json"].includes(diagnostic.applicationFrame) ? diagnostic.applicationFrame : "";
+    const browserFailure = diagnostic.category === "application-transport" && ["executable", "sandbox", "chrome-exited", "startup-timeout", "worker-fatal"].includes(diagnostic.browserFailure) ? diagnostic.browserFailure : "";
+    return `; ${diagnostic.category}${Number.isInteger(diagnostic.exitCode) && diagnostic.exitCode >= -255 && diagnostic.exitCode <= 255 ? ` (exit ${diagnostic.exitCode})` : ""}${audit.length ? `; audit checks: ${audit.join(", ")}` : ""}${counts.length ? `; credential counts: ${counts.join(", ")}` : ""}${metadata ? `; metadata probe: ${metadata}` : ""}${stage ? `; probe stage: ${stage}` : ""}${applicationStage ? `; application stage: ${applicationStage}` : ""}${applicationFrame ? `; application frame: ${applicationFrame}` : ""}${browserFailure ? `; browser failure: ${browserFailure}` : ""}${exceptions.length ? `; ${exceptions.join(", ")}` : ""}${helperLine ? `; helper line: ${helperLine}` : ""}`;
   } catch { return ""; }
 }
 
@@ -65,6 +67,12 @@ export function verifyReceipt(receipt, { verificationId, workerId, phase, previo
   }
   if (hibernation && (receipt.applicationTransport !== true || !/^[a-f0-9]{64}$/.test(receipt.applicationIdentity || "")
     || previous && receipt.applicationIdentity !== previous.applicationIdentity)) throw new Error("Worker application transport did not survive hibernation");
+  if (hibernation && (receipt.browserTransport !== true || !/^[a-f0-9]{64}$/.test(receipt.browserProcessIdentity || "")
+    || !/^[a-f0-9]{64}$/.test(receipt.browserStateIdentity || "") || ![1, 2].includes(receipt.browserCounter)
+    || phase === "fresh" && receipt.browserCounter !== 1 || phase === "resumed" && receipt.browserCounter !== 2
+    || previous && (receipt.browserProcessIdentity !== previous.browserProcessIdentity || receipt.browserStateIdentity !== previous.browserStateIdentity))) {
+    throw new Error("Worker browser process and renderer state did not survive hibernation");
+  }
   return receipt;
 }
 
@@ -135,8 +143,9 @@ async function verifyImage(o, { run = defaultRun, sleep = ms => new Promise(reso
   const controllerScript = await readFile(new URL("verify-worker-controller.py", import.meta.url), "utf8");
   const supervisorSources = Object.fromEntries(await Promise.all(workerSupervisorFiles.map(async name => [name,
     await readFile(new URL(`../../src/${name}`, import.meta.url), "utf8")])));
+  const browserWorker = await readFile(new URL("../../src/browser-worker.mjs", import.meta.url), "utf8");
   const supervisorBundle = gzipSync(Buffer.from(JSON.stringify({ schema: 1, version: workerSupervisorVersion,
-    files: supervisorSources, unit: workerSupervisorUnit })), { level: 9, mtime: 0 }).toString("base64");
+    files: supervisorSources, browserWorker, unit: workerSupervisorUnit })), { level: 9, mtime: 0 }).toString("base64");
   if (supervisorBundle.length > 32_768) throw new Error("Worker supervisor acceptance bundle exceeds its fixed transport limit");
   const verificationId = randomUUID(), sentinel = randomUUID(), chatId = `chat_${randomBytes(16).toString("hex")}`;
   let workerId;
@@ -178,7 +187,8 @@ async function verifyImage(o, { run = defaultRun, sleep = ms => new Promise(reso
     if (current.State?.Name !== "running" || !privateIp(current.PrivateIpAddress)) throw new Error("Test worker is not privately reachable/running");
     workerHost = current.PrivateIpAddress;
     const payload = { account: o.account, region: o.region, deployment: o.deployment, secretArn: outputs.SecretArn, verificationId, workerId, host: workerHost, publicKey, phase, sentinel, hibernation, supervisorBundle,
-      ...(previous ? { knownHosts: previous.knownHosts, processIdentity: previous.processIdentity, applicationIdentity: previous.applicationIdentity } : {}) };
+      ...(previous ? { knownHosts: previous.knownHosts, processIdentity: previous.processIdentity, applicationIdentity: previous.applicationIdentity,
+        browserProcessIdentity: previous.browserProcessIdentity, browserStateIdentity: previous.browserStateIdentity } : {}) };
     // Run Command has a bounded string parameter. Compress the inspected helper
     // before base64 so growth cannot silently turn every probe into an API-side
     // validation failure before a Command ID exists.
@@ -240,10 +250,11 @@ async function verifyImage(o, { run = defaultRun, sleep = ms => new Promise(reso
     const resumed = await probe("resumed", fresh);
     receipt = { accepted: true, schema: 1, account: o.account, region: o.region, deployment: o.deployment, imageId: o.imageId, verificationId, workerId, controllerId: outputs.ControllerInstanceId,
       checks: { freshBoot: true, disabledMetadata: true, noInstanceRole: true, privateNetwork: true, credentialScrub: true, pinnedNativeVersions: true, freshMachineAndHostIdentity: true,
-        ...(hibernation ? { machineIdentitySurvivedHibernation: true, nativeProcessSurvivedHibernation: true, applicationTransportSurvivedHibernation: true, freshControllerTransportRecreated: true, sentinelSurvivedHibernation: true }
+        ...(hibernation ? { machineIdentitySurvivedHibernation: true, nativeProcessSurvivedHibernation: true, applicationTransportSurvivedHibernation: true, browserProcessSurvivedHibernation: true, browserRendererStateSurvivedHibernation: true, freshControllerTransportRecreated: true, sentinelSurvivedHibernation: true }
           : { identitySurvivedStopStart: true, sentinelSurvivedStopStart: true }), heartbeatFreshAfterBoot: true, controllerSecretStayedLocal: true },
       evidence: { freshCommandId: fresh.commandId, resumedCommandId: resumed.commandId, machineHash: resumed.audit.machine, hostKeyHashes: resumed.audit.hostKeys,
-        ...(hibernation ? { processIdentity: resumed.processIdentity, applicationIdentity: resumed.applicationIdentity } : {}) }, promptsSent: false, accountImports: false };
+        ...(hibernation ? { processIdentity: resumed.processIdentity, applicationIdentity: resumed.applicationIdentity,
+          browserProcessIdentity: resumed.browserProcessIdentity, browserStateIdentity: resumed.browserStateIdentity, browserCounter: resumed.browserCounter } : {}) }, promptsSent: false, accountImports: false };
   } catch (error) {
     primaryFailure = error;
     throw error;

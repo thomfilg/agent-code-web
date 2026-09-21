@@ -37,7 +37,15 @@ APPLICATION_STAGES = ('bundle', 'service', 'status', 'configure', 'connect', 'la
                       'initialize-input', 'initialize-response', 'initialize-error', 'initialize-frame',
                       'initialize-timeout', 'initialize-notify', 'initialize-status', 'initialize-ack',
                       'checkpoint', 'takeover', 'read', 'read-error', 'read-frame',
-                      'read-timeout', 'no-replay', 'terminate', 'release')
+                      'read-timeout', 'no-replay', 'terminate', 'release', 'native-terminate',
+                      'browser-configure', 'browser-connect', 'browser-launch', 'browser-attach',
+                      'browser-ready', 'browser-ready-fatal', 'browser-ready-frame', 'browser-ready-timeout',
+                      'browser-state-input', 'browser-state-response', 'browser-state-error',
+                      'browser-state-frame', 'browser-state-timeout', 'browser-identity',
+                      'browser-takeover', 'browser-no-replay', 'browser-terminate', 'browser-release')
+APPLICATION_FRAME_DETAILS = ('line', 'json', 'envelope', 'output-identity', 'output-data',
+                             'output-size', 'stdout-json')
+BROWSER_FAILURES = ('executable', 'sandbox', 'chrome-exited', 'startup-timeout', 'worker-fatal')
 
 
 class ProbeFailure(RuntimeError):
@@ -68,6 +76,10 @@ class ProbeFailure(RuntimeError):
                 self.diagnostic['helperLine'] = details['helperLine']
             if category == 'application-transport' and details.get('applicationStage') in APPLICATION_STAGES:
                 self.diagnostic['applicationStage'] = details['applicationStage']
+            if category == 'application-transport' and details.get('applicationFrame') in APPLICATION_FRAME_DETAILS:
+                self.diagnostic['applicationFrame'] = details['applicationFrame']
+            if category == 'application-transport' and details.get('browserFailure') in BROWSER_FAILURES:
+                self.diagnostic['browserFailure'] = details['browserFailure']
 
 
 def probe_failure(result):
@@ -111,11 +123,13 @@ def failure_receipt(error):
 
 
 WORKER_PROBE = r'''
-import base64, hashlib, json, os, pathlib, re, shutil, socket, subprocess, sys, time, zlib
+import base64, hashlib, json, os, pathlib, re, select, shutil, socket, subprocess, sys, time, zlib
 audit_checks = {}
 credential_counts = {}
 metadata_probe = None
 application_stage = 'bundle'
+application_frame_detail = None
+browser_failure = None
 stage = 'request'
 audit = None
 exception_classes = ('RuntimeError', 'JSONDecodeError', 'FileNotFoundError', 'PermissionError', 'TimeoutExpired', 'CalledProcessError', 'OSError', 'ValueError', 'TypeError', 'KeyError', 'IndexError', 'AttributeError', 'NameError', 'UnboundLocalError', 'ImportError', 'ModuleNotFoundError', 'UnicodeDecodeError', 'AssertionError')
@@ -126,6 +140,28 @@ def application_failure():
 def application_at(value):
     global application_stage
     application_stage = value
+
+def application_frame_failure(value):
+    global application_frame_detail
+    application_frame_detail = value
+    application_failure()
+
+def browser_start_failure(value):
+    global browser_failure
+    message = value.get('message', '') if isinstance(value, dict) else ''
+    lowered = message.lower() if isinstance(message, str) else ''
+    if 'enoent' in lowered or 'no such file' in lowered:
+        browser_failure = 'executable'
+    elif 'sandbox' in lowered or 'namespace' in lowered:
+        browser_failure = 'sandbox'
+    elif 'timed out' in lowered:
+        browser_failure = 'startup-timeout'
+    elif 'chrome exited' in lowered:
+        browser_failure = 'chrome-exited'
+    else:
+        browser_failure = 'worker-fatal'
+    application_at('browser-ready-fatal')
+    application_failure()
 
 SUPERVISOR_FILES = ('worker-process-anchor.mjs', 'worker-process-supervisor.mjs',
                     'worker-transport-wire.mjs', 'worker-supervisor-paths.mjs',
@@ -147,7 +183,7 @@ def install_supervisor(request, phase):
         bundle = json.loads(raw)
     except (ValueError, TypeError, OSError, json.JSONDecodeError):
         application_failure()
-    if bundle.get('schema') != 1 or bundle.get('version') != 'v3' or set(bundle.get('files', {})) != set(SUPERVISOR_FILES) or not isinstance(bundle.get('unit'), str):
+    if bundle.get('schema') != 1 or bundle.get('version') != 'v3' or set(bundle.get('files', {})) != set(SUPERVISOR_FILES) or not isinstance(bundle.get('browserWorker'), str) or not isinstance(bundle.get('unit'), str):
         application_failure()
     root = pathlib.Path('/opt/agent-web/supervisor-code')
     unit = pathlib.Path('/home/agent/.config/systemd/user/agent-relay-worker-supervisor.service')
@@ -167,6 +203,16 @@ def install_supervisor(request, phase):
                 output.write(content)
         elif not target.is_file() or target.is_symlink() or target.read_text() != content:
             application_failure()
+    browser_source = bundle['browserWorker']
+    if len(browser_source.encode()) > 65536:
+        application_failure()
+    browser_target = root / 'browser-worker.mjs'
+    if phase == 'fresh':
+        fd = os.open(browser_target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, 'w') as output:
+            output.write(browser_source)
+    elif not browser_target.is_file() or browser_target.is_symlink() or browser_target.read_text() != browser_source:
+        application_failure()
     if phase == 'fresh':
         fd = os.open(unit, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(fd, 'w') as output:
@@ -199,11 +245,12 @@ def supervisor_control(value):
     return parsed
 
 class ApplicationClient:
-    def __init__(self, identity, credential, receipt=None, cursor=0):
+    def __init__(self, identity, credential, receipt=None, cursor=0, process_id='native-agent'):
         self.identity = identity
         self.credential = credential
         self.receipt = receipt
         self.cursor = cursor
+        self.process_id = process_id
         self.counter = 0
         self.stdout = b''
         self.messages = []
@@ -221,22 +268,22 @@ class ApplicationClient:
     def frame(self):
         line = self.stream.readline(262145)
         if not line or len(line) > 262144 or not line.endswith(b'\n'):
-            application_failure()
+            application_frame_failure('line')
         try:
             value = json.loads(line)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            application_failure()
+            application_frame_failure('json')
         if not isinstance(value, dict):
-            application_failure()
+            application_frame_failure('envelope')
         if value.get('event') == 'output':
-            if not self.receipt or value.get('supervisorInstanceId') != self.receipt.get('supervisorInstanceId') or value.get('processId') != 'native-agent' or value.get('processInstanceId') != self.receipt.get('processInstanceId') or value.get('seq') != self.cursor + 1 or value.get('channel') not in ('stdout', 'stderr', 'exit'):
-                application_failure()
+            if not self.receipt or value.get('supervisorInstanceId') != self.receipt.get('supervisorInstanceId') or value.get('processId') != self.process_id or value.get('processInstanceId') != self.receipt.get('processInstanceId') or value.get('seq') != self.cursor + 1 or value.get('channel') not in ('stdout', 'stderr', 'exit'):
+                application_frame_failure('output-identity')
             try:
                 data = base64.b64decode(value.get('data', ''), validate=True)
             except (ValueError, TypeError):
-                application_failure()
+                application_frame_failure('output-data')
             if len(data) > 16384:
-                application_failure()
+                application_frame_failure('output-size')
             self.cursor = value['seq']
             if value['channel'] == 'stdout':
                 self.stdout += data
@@ -245,7 +292,7 @@ class ApplicationClient:
                     try:
                         message = json.loads(line)
                     except (json.JSONDecodeError, UnicodeDecodeError):
-                        application_failure()
+                        application_frame_failure('stdout-json')
                     if isinstance(message, dict):
                         self.messages.append(message)
             return None
@@ -255,7 +302,7 @@ class ApplicationClient:
         self.counter += 1
         request_id = 'acceptance-' + str(self.counter)
         value = {'protocol': 'relay-worker-process/1', 'id': request_id, 'action': action,
-                 'processId': 'native-agent', 'identity': self.identity, 'lease': self.credential}
+                 'processId': self.process_id, 'identity': self.identity, 'lease': self.credential}
         value.update(fields or {})
         encoded = (json.dumps(value, separators=(',', ':')) + '\n').encode()
         if len(encoded) > 262144:
@@ -271,7 +318,7 @@ class ApplicationClient:
             return response['result']
         application_failure()
 
-    def app_response(self, response_id, stage):
+    def line_response(self, response_id, stage):
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             for message in self.messages:
@@ -279,11 +326,49 @@ class ApplicationClient:
                     if message.get('error'):
                         application_at(stage + '-error')
                         application_failure()
-                    return message.get('result')
+                    return message
             try:
                 self.frame()
             except socket.timeout:
                 continue
+            except RuntimeError:
+                application_at(stage + '-frame')
+                raise
+        application_at(stage + '-timeout')
+        application_failure()
+
+    def app_response(self, response_id, stage):
+        return self.line_response(response_id, stage).get('result')
+
+    def event(self, name, stage, keepalive=None):
+        deadline = time.monotonic() + 120
+        last_keepalive = time.monotonic()
+        while time.monotonic() < deadline:
+            for message in self.messages:
+                if message.get('event') == name:
+                    return message.get('value')
+                if name == 'ready' and message.get('event') in ('fatal', 'closed', 'chromeStopped'):
+                    browser_start_failure(message.get('value'))
+            if keepalive and time.monotonic() - last_keepalive >= 10:
+                try:
+                    keepalive()
+                    self.request('status', {'processInstanceId': self.receipt['processInstanceId']})
+                except OSError:
+                    application_at(stage + '-frame')
+                    application_frame_failure('line')
+                except RuntimeError:
+                    application_at(stage + '-frame')
+                    raise
+                last_keepalive = time.monotonic()
+                continue
+            try:
+                readable, _, _ = select.select([self.sock], [], [], 5)
+                if not readable:
+                    continue
+                self.frame()
+            except OSError:
+                application_at(stage + '-frame')
+                application_frame_failure('line')
             except RuntimeError:
                 application_at(stage + '-frame')
                 raise
@@ -295,6 +380,67 @@ class ApplicationClient:
         self.request('input', {'processInstanceId': self.receipt['processInstanceId'], 'seq': sequence,
                               'data': base64.b64encode(data).decode()})
 
+def process_record(pid):
+    raw = pathlib.Path('/proc/' + str(pid) + '/stat').read_text()
+    fields = raw[raw.rfind(') ') + 2:].split()
+    command = pathlib.Path('/proc/' + str(pid) + '/cmdline').read_bytes().split(b'\0')
+    return {'pid': pid, 'ppid': int(fields[1]), 'start': fields[19], 'command': command}
+
+def browser_process_state(worker_pid):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            records = {}
+            for item in pathlib.Path('/proc').iterdir():
+                if item.name.isdigit():
+                    try:
+                        record = process_record(int(item.name)); records[record['pid']] = record
+                    except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError, IndexError):
+                        pass
+            descendants = {worker_pid}
+            changed = True
+            while changed:
+                changed = False
+                for record in records.values():
+                    if record['ppid'] in descendants and record['pid'] not in descendants:
+                        descendants.add(record['pid']); changed = True
+            selected = [records[pid] for pid in descendants if pid in records]
+            # Chrome's zygote may rewrite descendant argv into one space-joined
+            # /proc cmdline field. Classify fixed flags across the complete byte
+            # sequence rather than assuming one NUL-delimited flag per entry.
+            command_line = lambda record: b'\0'.join(record['command'])
+            browsers = [record for record in selected if b'--remote-debugging-pipe' in command_line(record) and b'--type=' not in command_line(record)]
+            renderers = [record for record in selected if b'--type=renderer' in command_line(record)]
+            worker = records.get(worker_pid)
+            if worker and len(browsers) == 1 and renderers:
+                renderer = min(renderers, key=lambda value: value['pid'])
+                return {'boot': pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                        'worker': {'pid': worker['pid'], 'start': worker['start']},
+                        'browser': {'pid': browsers[0]['pid'], 'start': browsers[0]['start']},
+                        'renderer': {'pid': renderer['pid'], 'start': renderer['start']}}
+        except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError, IndexError):
+            pass
+        time.sleep(0.1)
+    application_failure()
+
+def process_state_hash(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+def terminate_application(client, receipt, label):
+    application_at(label + '-terminate')
+    client.request('terminate', {'processInstanceId': receipt['processInstanceId']})
+    deadline = time.monotonic() + 15
+    transport_status = {}
+    while time.monotonic() < deadline:
+        transport_status = client.request('status', {'processInstanceId': receipt['processInstanceId']})
+        if transport_status.get('state') == 'exited':
+            break
+        time.sleep(0.1)
+    if transport_status.get('state') != 'exited':
+        application_failure()
+    if client.cursor:
+        client.request('ackOutput', {'processInstanceId': receipt['processInstanceId'], 'seq': client.cursor})
+
 def application_probe(request):
     verification_id = request['verificationId']
     phase = request['phase']
@@ -304,9 +450,10 @@ def application_probe(request):
                 'chatId': 'acceptance-chat', 'workerId': request['workerId'], 'provider': 'codex',
                 'accountId': 'acceptance-account', 'attemptId': 'acceptance-' + verification_id}
     generation = 1 if phase == 'fresh' else 2
-    credential = base64.urlsafe_b64encode(hashlib.sha256(('lease:' + phase + ':' + verification_id).encode()).digest()).decode().rstrip('=')
-    lease = {'id': 'acceptance-' + phase, 'generation': generation,
-             'expiresAt': int(time.time() * 1000) + 55000, 'credential': credential}
+    def lease_for(process_id):
+        credential = base64.urlsafe_b64encode(hashlib.sha256(('lease:' + phase + ':' + process_id + ':' + verification_id).encode()).digest()).decode().rstrip('=')
+        return {'id': 'acceptance-' + phase + '-' + process_id, 'generation': generation,
+                'expiresAt': int(time.time() * 1000) + 55000, 'credential': credential}
     install_supervisor(request, phase)
     application_at('status')
     status = None
@@ -333,14 +480,16 @@ def application_probe(request):
         if status.get('configured') is not True or status.get('daemonInstanceId') != state.get('daemonInstanceId') or status.get('supervisorInstanceId') != state.get('receipt', {}).get('supervisorInstanceId'):
             application_failure()
         processes = status.get('processes')
-        if not isinstance(processes, list) or len(processes) != 1 or processes[0].get('processInstanceId') != state.get('receipt', {}).get('processInstanceId'):
+        indexed = {item.get('processId'): item for item in processes} if isinstance(processes, list) else {}
+        if set(indexed) != {'native-agent', 'shared-chrome'} or indexed['native-agent'].get('processInstanceId') != state.get('receipt', {}).get('processInstanceId') or indexed['shared-chrome'].get('processInstanceId') != state.get('browserReceipt', {}).get('processInstanceId'):
             application_failure()
+    native_lease = lease_for('native-agent')
     application_at('configure')
-    configured = supervisor_control({'action': 'configure', 'identity': identity, 'processId': 'native-agent', 'lease': lease})
+    configured = supervisor_control({'action': 'configure', 'identity': identity, 'processId': 'native-agent', 'lease': native_lease})
     if configured.get('configured') is not True or configured.get('daemonInstanceId') != status['daemonInstanceId'] or configured.get('processId') != 'native-agent' or configured.get('lease', {}).get('generation') != generation:
         application_failure()
     application_at('connect')
-    client = ApplicationClient(identity, credential, state.get('receipt') if state else None, state.get('cursor', 0) if state else 0)
+    client = ApplicationClient(identity, native_lease['credential'], state.get('receipt') if state else None, state.get('cursor', 0) if state else 0)
     try:
         if phase == 'fresh':
             application_at('launch')
@@ -371,11 +520,7 @@ def application_probe(request):
             if client.cursor:
                 application_at('initialize-ack')
                 client.request('ackOutput', {'processInstanceId': receipt['processInstanceId'], 'seq': client.cursor})
-            application_at('checkpoint')
             state = {'daemonInstanceId': status['daemonInstanceId'], 'receipt': receipt, 'cursor': client.cursor}
-            fd = os.open(state_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            with os.fdopen(fd, 'w') as target:
-                json.dump(state, target, sort_keys=True, separators=(',', ':'))
         else:
             application_at('takeover')
             receipt = state['receipt']
@@ -397,30 +542,110 @@ def application_probe(request):
                 application_failure()
             if client.cursor:
                 client.request('ackOutput', {'processInstanceId': receipt['processInstanceId'], 'seq': client.cursor})
-            application_at('terminate')
-            client.request('terminate', {'processInstanceId': receipt['processInstanceId']})
-            deadline = time.monotonic() + 15
-            transport_status = {}
-            while time.monotonic() < deadline:
-                transport_status = client.request('status', {'processInstanceId': receipt['processInstanceId']})
-                if transport_status.get('state') == 'exited':
-                    break
-                time.sleep(0.1)
-            if transport_status.get('state') != 'exited':
+        browser_lease = lease_for('shared-chrome')
+        application_at('browser-configure')
+        browser_configured = supervisor_control({'action': 'configure', 'identity': identity, 'processId': 'shared-chrome', 'lease': browser_lease})
+        if browser_configured.get('configured') is not True or browser_configured.get('daemonInstanceId') != status['daemonInstanceId'] or browser_configured.get('supervisorInstanceId') != configured.get('supervisorInstanceId') or browser_configured.get('processId') != 'shared-chrome' or browser_configured.get('lease', {}).get('generation') != generation:
+            application_failure()
+        def browser_keepalive():
+            browser_lease['expiresAt'] = int(time.time() * 1000) + 55000
+            renewed = supervisor_control({'action': 'configure', 'identity': identity, 'processId': 'shared-chrome', 'lease': browser_lease})
+            if renewed.get('configured') is not True or renewed.get('processId') != 'shared-chrome' or renewed.get('lease', {}).get('generation') != generation:
                 application_failure()
-            if client.cursor:
-                client.request('ackOutput', {'processInstanceId': receipt['processInstanceId'], 'seq': client.cursor})
-            application_at('release')
-            released = supervisor_control({'action': 'release', 'processId': 'native-agent',
-                                           'processInstanceId': receipt['processInstanceId'], 'leaseId': lease['id']})
-            if released.get('released') is not True or supervisor_control({'action': 'reset'}).get('reset') is not True:
-                application_failure()
-            state_path.unlink()
-            shutil.rmtree(home)
+        application_at('browser-connect')
+        browser_client = ApplicationClient(identity, browser_lease['credential'], state.get('browserReceipt') if state else None, state.get('browserCursor', 0) if state else 0, 'shared-chrome')
+        try:
+            browser_token = hashlib.sha256(('browser-state:' + verification_id).encode()).hexdigest()
+            browser_state_identity = hashlib.sha256(('renderer:' + browser_token).encode()).hexdigest()
+            if phase == 'fresh':
+                application_at('browser-launch')
+                browser_receipt = browser_client.request('launch', {'spec': {'command': '/usr/bin/node',
+                    'args': ['--input-type=module', '-e', "import {runBrowserWorker} from 'file:///opt/agent-web/supervisor-code/browser-worker.mjs'; await runBrowserWorker();"],
+                    'cwd': '/tmp', 'env': {'HOME': str(home), 'PATH': '/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8',
+                                             'AGENT_CHROME_BIN': '/usr/bin/google-chrome'}}})
+                browser_client.receipt = browser_receipt
+                if browser_receipt.get('protocol') != 'relay-worker-process/1' or browser_receipt.get('processId') != 'shared-chrome' or not isinstance(browser_receipt.get('pid'), int):
+                    application_failure()
+                application_at('browser-attach')
+                attached = browser_client.request('attach', {'processInstanceId': browser_receipt['processInstanceId'], 'committedOutputSeq': 0})
+                if attached.get('processInstanceId') != browser_receipt['processInstanceId']:
+                    application_failure()
+                application_at('browser-ready')
+                ready = browser_client.event('ready', 'browser-ready', browser_keepalive)
+                if not isinstance(ready, dict) or not isinstance(ready.get('tabs'), list):
+                    application_failure()
+                expression = "(() => { globalThis.__relayHibernation = { token: " + json.dumps(browser_token) + ", counter: 1 }; return {...globalThis.__relayHibernation}; })()"
+                application_at('browser-state-input')
+                browser_client.input(1, {'id': 1, 'action': 'evaluate', 'params': {'expression': expression}})
+                application_at('browser-state-response')
+                browser_value = browser_client.line_response(1, 'browser-state').get('value')
+                if browser_value != {'token': browser_token, 'counter': 1}:
+                    application_failure()
+                browser_counter = 1
+                application_at('browser-identity')
+                browser_state = browser_process_state(browser_receipt['pid'])
+                browser_process_identity = process_state_hash(browser_state)
+                browser_status = browser_client.request('status', {'processInstanceId': browser_receipt['processInstanceId']})
+                if browser_status.get('inputAcceptedThrough') != 1 or browser_status.get('pid') != browser_receipt['pid']:
+                    application_failure()
+                if browser_client.cursor:
+                    browser_client.request('ackOutput', {'processInstanceId': browser_receipt['processInstanceId'], 'seq': browser_client.cursor})
+                state.update({'browserReceipt': browser_receipt, 'browserCursor': browser_client.cursor,
+                              'browserProcess': browser_state, 'browserStateIdentity': browser_state_identity})
+                application_at('checkpoint')
+                fd = os.open(state_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                with os.fdopen(fd, 'w') as target:
+                    json.dump(state, target, sort_keys=True, separators=(',', ':'))
+            else:
+                application_at('browser-takeover')
+                browser_receipt = state['browserReceipt']
+                inspected = browser_client.request('inspect')
+                stable = ('supervisorInstanceId', 'processInstanceId', 'processId', 'pid', 'startedAt', 'groupAnchor')
+                if any(inspected.get(key) != browser_receipt.get(key) for key in stable):
+                    application_failure()
+                attached = browser_client.request('attach', {'processInstanceId': browser_receipt['processInstanceId'], 'committedOutputSeq': state['browserCursor']})
+                if attached.get('processInstanceId') != browser_receipt['processInstanceId']:
+                    application_failure()
+                application_at('browser-identity')
+                browser_state = browser_process_state(browser_receipt['pid'])
+                browser_process_identity = process_state_hash(browser_state)
+                if browser_state != state.get('browserProcess') or browser_state_identity != state.get('browserStateIdentity'):
+                    application_failure()
+                expression = "(() => { const value = globalThis.__relayHibernation; if (!value || value.token !== " + json.dumps(browser_token) + " || value.counter !== 1) return null; value.counter += 1; return {...value}; })()"
+                application_at('browser-state-input')
+                browser_client.input(2, {'id': 2, 'action': 'evaluate', 'params': {'expression': expression}})
+                application_at('browser-state-response')
+                browser_value = browser_client.line_response(2, 'browser-state').get('value')
+                if browser_value != {'token': browser_token, 'counter': 2}:
+                    application_failure()
+                browser_counter = 2
+                browser_status = browser_client.request('status', {'processInstanceId': browser_receipt['processInstanceId']})
+                application_at('browser-no-replay')
+                if browser_status.get('inputAcceptedThrough') != 2 or browser_status.get('pid') != browser_receipt['pid']:
+                    application_failure()
+                if browser_client.cursor:
+                    browser_client.request('ackOutput', {'processInstanceId': browser_receipt['processInstanceId'], 'seq': browser_client.cursor})
+                terminate_application(browser_client, browser_receipt, 'browser')
+                terminate_application(client, receipt, 'native')
+                application_at('browser-release')
+                browser_released = supervisor_control({'action': 'release', 'processId': 'shared-chrome',
+                    'processInstanceId': browser_receipt['processInstanceId'], 'leaseId': browser_lease['id']})
+                application_at('release')
+                native_released = supervisor_control({'action': 'release', 'processId': 'native-agent',
+                    'processInstanceId': receipt['processInstanceId'], 'leaseId': native_lease['id']})
+                if browser_released.get('released') is not True or native_released.get('released') is not True or supervisor_control({'action': 'reset'}).get('reset') is not True:
+                    application_failure()
+                state_path.unlink()
+                shutil.rmtree(home)
+        finally:
+            browser_client.close()
     finally:
         client.close()
-    stable_receipt = {key: receipt.get(key) for key in ('supervisorInstanceId', 'processInstanceId', 'processId', 'pid', 'startedAt', 'groupAnchor')}
-    return hashlib.sha256(json.dumps(stable_receipt, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    native_stable = {key: receipt.get(key) for key in ('supervisorInstanceId', 'processInstanceId', 'processId', 'pid', 'startedAt', 'groupAnchor')}
+    browser_stable = {key: browser_receipt.get(key) for key in ('supervisorInstanceId', 'processInstanceId', 'processId', 'pid', 'startedAt', 'groupAnchor')}
+    application_identity = hashlib.sha256(json.dumps({'native': native_stable, 'browser': browser_stable}, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return {'applicationIdentity': application_identity, 'browserProcessIdentity': browser_process_identity,
+            'browserStateIdentity': browser_state_identity, 'browserCounter': browser_counter}
 
 try:
     request = json.loads(sys.argv[1])
@@ -463,6 +688,9 @@ try:
         raise RuntimeError('worker sentinel mismatch')
     process_identity = None
     application_identity = None
+    browser_process_identity = None
+    browser_state_identity = None
+    browser_counter = None
     if request.get('hibernation') is True:
         stage = 'native-process'
         marker = 'relay-hibernation-' + request['verificationId']
@@ -494,13 +722,20 @@ try:
         if (request['phase'] == 'resumed' and request.get('processIdentity') != process_identity) or not same_process or not same_kernel:
             raise RuntimeError('native process did not survive hibernation')
         stage = 'application-transport'
-        application_identity = application_probe(request)
-        if request['phase'] == 'resumed' and request.get('applicationIdentity') != application_identity:
+        application = application_probe(request)
+        application_identity = application['applicationIdentity']
+        browser_process_identity = application['browserProcessIdentity']
+        browser_state_identity = application['browserStateIdentity']
+        browser_counter = application['browserCounter']
+        if request['phase'] == 'resumed' and (request.get('applicationIdentity') != application_identity or request.get('browserProcessIdentity') != browser_process_identity or request.get('browserStateIdentity') != browser_state_identity):
             raise RuntimeError('application transport did not survive hibernation')
     stage = 'receipt'
     print(json.dumps({'audit': receipt, 'versions': versions, 'heartbeatFresh': fresh, 'sentinelPresent': persisted,
                       **({'processIdentity': process_identity, 'applicationTransport': True,
-                          'applicationIdentity': application_identity} if process_identity else {})}))
+                          'applicationIdentity': application_identity, 'browserTransport': True,
+                          'browserProcessIdentity': browser_process_identity,
+                          'browserStateIdentity': browser_state_identity,
+                          'browserCounter': browser_counter} if process_identity else {})}))
 except Exception as error:
     reasons = ('wrong worker user', 'native version mismatch', 'image scrub audit failed', 'boot heartbeat is stale',
                'worker sentinel mismatch', 'native process did not survive hibernation',
@@ -526,8 +761,12 @@ except Exception as error:
         failure['auditChecks'] = audit_checks
         failure['credentialFailureCounts'] = credential_counts
         failure['metadataProbe'] = metadata_probe
-    if failure['reason'] == 'application transport did not survive hibernation' and application_stage in ('bundle', 'service', 'status', 'configure', 'connect', 'launch', 'attach', 'initialize-input', 'initialize-response', 'initialize-error', 'initialize-frame', 'initialize-timeout', 'initialize-notify', 'initialize-status', 'initialize-ack', 'checkpoint', 'takeover', 'read', 'read-error', 'read-frame', 'read-timeout', 'no-replay', 'terminate', 'release'):
+    if failure['reason'] == 'application transport did not survive hibernation' and application_stage in ('bundle', 'service', 'status', 'configure', 'connect', 'launch', 'attach', 'initialize-input', 'initialize-response', 'initialize-error', 'initialize-frame', 'initialize-timeout', 'initialize-notify', 'initialize-status', 'initialize-ack', 'checkpoint', 'takeover', 'read', 'read-error', 'read-frame', 'read-timeout', 'no-replay', 'terminate', 'release', 'native-terminate', 'browser-configure', 'browser-connect', 'browser-launch', 'browser-attach', 'browser-ready', 'browser-ready-fatal', 'browser-ready-frame', 'browser-ready-timeout', 'browser-state-input', 'browser-state-response', 'browser-state-error', 'browser-state-frame', 'browser-state-timeout', 'browser-identity', 'browser-takeover', 'browser-no-replay', 'browser-terminate', 'browser-release'):
         failure['applicationStage'] = application_stage
+    if failure['reason'] == 'application transport did not survive hibernation' and application_frame_detail in ('line', 'json', 'envelope', 'output-identity', 'output-data', 'output-size', 'stdout-json'):
+        failure['applicationFrame'] = application_frame_detail
+    if failure['reason'] == 'application transport did not survive hibernation' and browser_failure in ('executable', 'sandbox', 'chrome-exited', 'startup-timeout', 'worker-fatal'):
+        failure['browserFailure'] = browser_failure
     print(json.dumps(failure))
     sys.exit(1)
 '''
@@ -541,7 +780,8 @@ def main():
         raise RuntimeError('Controller bootstrap is not ready')
     if not re.fullmatch(r'[a-f0-9-]{36}', request['verificationId']) or request['phase'] not in ('fresh', 'resumed'):
         raise RuntimeError('Invalid verification request')
-    if type(request.get('hibernation')) is not bool or request['phase'] == 'resumed' and request['hibernation'] and not re.fullmatch(r'[a-f0-9]{64}', request.get('processIdentity', '')):
+    continuity = ('processIdentity', 'applicationIdentity', 'browserProcessIdentity', 'browserStateIdentity')
+    if type(request.get('hibernation')) is not bool or request['phase'] == 'resumed' and request['hibernation'] and any(not re.fullmatch(r'[a-f0-9]{64}', request.get(key, '')) for key in continuity):
         raise RuntimeError('Invalid verification request')
     if request['hibernation'] and (not isinstance(request.get('supervisorBundle'), str) or len(request['supervisorBundle']) > 32768):
         raise RuntimeError('Invalid supervisor acceptance bundle')
@@ -604,17 +844,33 @@ def main():
             worker_request['processIdentity'] = request['processIdentity']
         if request.get('applicationIdentity'):
             worker_request['applicationIdentity'] = request['applicationIdentity']
+        if request.get('browserProcessIdentity'):
+            worker_request['browserProcessIdentity'] = request['browserProcessIdentity']
+        if request.get('browserStateIdentity'):
+            worker_request['browserStateIdentity'] = request['browserStateIdentity']
         command = 'python3 -I -c ' + shlex.quote(WORKER_PROBE) + ' ' + shlex.quote(json.dumps(worker_request))
         deadline = time.monotonic() + 240
         audit_attempts = 0
+        native_warmup_attempts = 0
         while True:
             try:
-                probed = subprocess.run(ssh + [command], capture_output=True, text=True, timeout=180)
+                probed = subprocess.run(ssh + [command], capture_output=True, text=True, timeout=300)
             except subprocess.TimeoutExpired:
                 raise ProbeFailure('ssh-probe-timeout') from None
             except OSError:
                 raise ProbeFailure('ssh-executable-unavailable') from None
             failure = probe_failure(probed) if probed.returncode else None
+            if (failure and failure.diagnostic.get('category') == 'invalid-receipt'
+                    and failure.diagnostic.get('probeStage') == 'native-version'
+                    and failure.diagnostic.get('exceptionClass') == 'TimeoutExpired'):
+                native_warmup_attempts += 1
+                # SSH can become ready while the just-booted image is still
+                # contending on disk for the installed CLI. This stage runs
+                # before any sentinel or application process is created, so a
+                # tightly bounded retry cannot replay acceptance side effects.
+                if native_warmup_attempts < 3 and time.monotonic() < deadline:
+                    time.sleep(2)
+                    continue
             if failure and failure.diagnostic['category'] == 'image-audit':
                 audit_attempts += 1
                 # A just-booted systemd unit can settle after SSH is available.
