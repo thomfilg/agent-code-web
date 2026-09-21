@@ -129,6 +129,7 @@ export async function createAgentWebServer(options = {}) {
   const sseClients = new Set();
   const sidebarClients = new Set();
   let stopping;
+  let initializing = true;
   let draining = false;
   let activeMutations = 0;
   let browserAttachments = 0;
@@ -177,7 +178,7 @@ export async function createAgentWebServer(options = {}) {
   };
   await googleAuth.initialize();
   const ready = readinessProbe({ records, directories: [store.dataDir, store.chatsDir],
-    configured: () => !stopping && !draining && (!googleAuth.enabled || googleAuth.info().configured) });
+    configured: () => !initializing && !stopping && !draining && (!googleAuth.enabled || googleAuth.info().configured) });
 
   const server = http.createServer(async (request, response) => {
     closeIncompleteRequestAfterResponse(request, response);
@@ -981,6 +982,7 @@ export async function createAgentWebServer(options = {}) {
       agentAccounts,
       adapterFactory: options.adapterFactory || null,
     });
+    await manager.reconcileStoppedWorkers();
     void manager.retryDeletionCleanup().catch(error => console.error("worker deletion cleanup:", errorMessage(error)));
     manager.browsers = new SharedBrowsers({ store, config, acquire: chatId => manager.browserExecutor(chatId), onIdle: chatId => manager.browserIdle(chatId), isActive: chatId => manager.presence.has(chatId), onViewers: chatId => manager.refreshActivity(chatId), ...options.browserOptions });
     manager.browsers.personal = new BrowserConnections({ records, store, ttlMs: config.sessionCapabilityTtlMs, validateCompany: async (user, companyId) => (await resources.forOwner(user.id)).companies.get(companyId) });
@@ -1007,6 +1009,7 @@ export async function createAgentWebServer(options = {}) {
     await manager.githubEvents?.initialize();
     manager.pullRequests.start();
     manager.githubEvents?.process();
+    initializing = false;
     return { host: config.host, port, url: `http://${config.host.includes(":") ? `[${config.host}]` : config.host}:${port}` };
   }
 

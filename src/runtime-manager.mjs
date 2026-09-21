@@ -2108,6 +2108,11 @@ export class RuntimeManager extends EventEmitter {
     }
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("chat not found"), { statusCode: 404 });
+    // Stop owns the active turn once it fences this lifecycle. A provider send
+    // can remain pending forever after its process is gone; do not let that
+    // stale promise keep Wake/resize blocked or leave tools looking live.
+    const stoppedTurn = this.#submissions.get(chatId);
+    if (stoppedTurn) stoppedTurn.cancelled = true;
     // An idle request must never enter destructive Stop, even when suspension
     // support or diagnostic persistence fails. Manual/revocation Stop is separate.
     if (reason === "idle-timeout" && this.config.idlePolicy === "hibernate") return this.#suspensionUnavailable(chatId);
@@ -2198,6 +2203,16 @@ export class RuntimeManager extends EventEmitter {
       throw error;
     }
     this.broker.revokeChat(chatId);
+    if (stoppedTurn && this.#submissions.get(chatId) === stoppedTurn) {
+      this.#submissions.delete(chatId);
+      stoppedTurn.resolve();
+    }
+    this.#queued.delete(chatId);
+    const settled = await this.store.update(chatId, current => ({ messages: current.messages.map(message =>
+      message.kind === "tool" && message.meta?.state === "running"
+        ? { ...message, meta: { ...message.meta, state: "completed", interrupted: true, resultMissing: true } }
+        : message) }));
+    this.publishChat(settled);
     await this.store.update(chatId, current => {
       const metadata = observed?.instanceId && current.runtimeMetadata ? { ...current.runtimeMetadata, instanceId: observed.instanceId } : current.runtimeMetadata;
       const worker = workerIdentityFromMetadata(metadata);
@@ -2206,7 +2221,8 @@ export class RuntimeManager extends EventEmitter {
         ...(worker ? { worker } : {}),
       }, nowIso()) };
     });
-    const detail = reason === "idle-timeout" ? "Stopped after idle timeout" : "Stopped manually";
+    const detail = reason === "idle-timeout" ? "Stopped after idle timeout"
+      : reason === "reconcile" ? "Machine stop verified after control plane restart" : "Stopped manually";
     await this.#setStatus(chatId, "stopped", detail, null);
     await this.store.update(chatId, current => ({ suspension: current.suspension ? { ...current.suspension,
       status: "stopped", stoppedAt: nowIso(), nativeRetained: false, browserRetained: false } : current.suspension }));
@@ -2218,8 +2234,19 @@ export class RuntimeManager extends EventEmitter {
       if (stopped) this.#previewBlocked.delete(chatId); else this.#previewBlocked.add(chatId);
       const pending = this.#previewStops.get(chatId) - 1;
       if (pending) this.#previewStops.set(chatId, pending); else this.#previewStops.delete(chatId);
-      if (!['deleted', 'shutdown'].includes(reason)) void this.#drainQueue(chatId);
+      if (!['deleted', 'shutdown', 'reconcile'].includes(reason)) void this.#drainQueue(chatId);
     }
+  }
+
+  async reconcileStoppedWorkers() {
+    if (this.config.workerBackend !== "ec2") return;
+    await Promise.all(this.store.list().filter(current => current.runtimeMetadata?.instanceId).map(async chat => {
+      try { await this.stop(chat.id, "reconcile"); }
+      catch (error) {
+        if (!this.store.get(chat.id)) return;
+        await this.#setStatus(chat.id, "error", `Could not verify that the EC2 machine is stopped: ${errorMessage(error)}`, null);
+      }
+    }));
   }
 
   async resizeWorker(chatId, requestedType) {
@@ -2248,6 +2275,7 @@ export class RuntimeManager extends EventEmitter {
     action.promise = (async () => {
       try {
         if (wasAwake || !["stopped", "error"].includes(this.store.get(chatId)?.status)) await this.stop(chatId, "resize");
+        else await this.workerBackend.sleep(this.store.get(chatId));
         const result = await this.workerBackend.resize(this.store.get(chatId), instanceType);
         const resized = await this.store.update(chatId, current => ({
           workerInstanceType: instanceType,

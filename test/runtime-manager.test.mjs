@@ -218,6 +218,53 @@ test("a failed EC2 resize restores the previous size and wakes the chat instead 
   assert.equal(store.get(chat.id).queuePaused, false);
 });
 
+test("Stop releases a hung turn, settles its tools, and lets a stopped EC2 worker resize", async t => {
+  const root = await temporaryDirectory(t), config = testConfig(root), store = new ChatStore(root); await store.initialize();
+  config.workerBackend = "ec2";
+  let hooks, sleeps = 0;
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10_000 }), gatewayOrigin: "http://localhost",
+    workerBackend: {
+      acquire: async chat => ({ metadata: { backend: "ec2", instanceId: "i-12345678", instanceType: chat.workerInstanceType || "t3.medium" } }),
+      sleep: async () => { sleeps++; return { instanceId: "i-12345678", stopped: true }; },
+      resize: async (_chat, instanceType) => ({ instanceId: "i-12345678", instanceType, resized: true }), destroy: async () => {},
+    },
+    adapterFactory: params => { hooks = params.hooks; return { start: async () => {}, stop: async () => {},
+      send: async () => { await hooks.onEvent({ type: "tool", itemId: "hung-command", tool: "command", title: "pnpm install", state: "running" }); return new Promise(() => {}); } }; },
+  });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "codex" });
+  await manager.submit(chat.id, "start a command");
+  await waitFor(() => store.get(chat.id).messages.some(message => message.meta?.itemId === "hung-command"));
+  await manager.stop(chat.id);
+  assert.equal(store.get(chat.id).status, "stopped");
+  assert.equal(manager.isBusy(chat.id), false);
+  assert.deepEqual(store.get(chat.id).messages.find(message => message.meta?.itemId === "hung-command").meta,
+    { type: "tool", itemId: "hung-command", tool: "command", title: "pnpm install", state: "completed", interrupted: true, resultMissing: true });
+  await manager.resizeWorker(chat.id, "m7i.xlarge");
+  await waitFor(() => store.get(chat.id).workerResize?.status === "completed");
+  assert.equal(store.get(chat.id).status, "idle");
+  assert.equal(store.get(chat.id).runtimeMetadata.instanceType, "m7i.xlarge");
+  assert.equal(sleeps, 2, "manual Stop and stopped-state resize both verify the physical EC2 state");
+});
+
+test("controller startup verifies persisted EC2 workers are physically stopped before reporting ready", async t => {
+  const root = await temporaryDirectory(t), config = testConfig(root), store = new ChatStore(root); await store.initialize();
+  config.workerBackend = "ec2";
+  const chat = await store.create({ agent: "codex", title: "Restored worker" });
+  await store.update(chat.id, { runtimeMetadata: { backend: "ec2", instanceId: "i-12345678", instanceType: "t3.large" } });
+  let sleeps = 0;
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10_000 }), gatewayOrigin: "http://localhost",
+    workerBackend: { sleep: async () => { sleeps++; return { instanceId: "i-12345678", stopped: true }; }, destroy: async () => {} },
+    adapterFactory: () => assert.fail("startup reconciliation must not start an agent") });
+  t.after(() => manager.shutdown());
+  await manager.reconcileStoppedWorkers();
+  const reconciled = store.get(chat.id);
+  assert.equal(sleeps, 1); assert.equal(reconciled.status, "stopped");
+  assert.equal(reconciled.statusDetail, "Machine stop verified after control plane restart");
+  assert.equal(reconciled.workerLifecycle.state, "stopped");
+  assert.equal(reconciled.workerLifecycle.result.cleanup, "stopped");
+});
+
 test("chat deletion is durable even when worker stop and infrastructure cleanup fail", async t => {
   const root = await temporaryDirectory(t), records = new MemoryRecords(), store = new ChatStore(root, records); await store.initialize();
   const config = testConfig(root); config.idleTimeoutMs = 60_000;

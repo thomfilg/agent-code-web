@@ -42,9 +42,32 @@ test("an EC2 chat offers priced machine sizes and applies a resize immediately i
   await size.selectOption("m7i.xlarge"); await expect(dialog).toContainText("$0.2016/hour");
   await page.getByRole("button", { name: "Resize and restart", exact: true }).click();
   await expect(dialog).not.toBeVisible();
-  await expect(page.locator("#resize-worker-button")).toHaveText("resizing → m7i.xlarge");
+  await expect(page.locator("#resize-worker-button")).toHaveText("Resizing to m7i.xlarge…");
   await expect.poll(() => request).toEqual({ instanceType: "m7i.xlarge" });
   resize.resolve();
+});
+
+test("a stopped EC2 chat states the physical outcome and explains an interrupted resize", async ({ page }) => {
+  await page.route("**/api/config", async route => {
+    const response = await route.fetch(), config = await response.json(); config.workerBackend = "ec2";
+    await route.fulfill({ json: config });
+  });
+  await page.route("**/api/environments", route => route.fulfill({ json: {
+    environments: [{ id: "env-fixture", name: "Fixture", backend: "ec2", instanceType: "t3.medium", companies: [], variables: [], software: [] }], software: [],
+    instances: [{ id: "t3.medium", vcpu: 2, memoryGiB: 4, usdPerHour: 0.0416, burstable: true }], defaultInstanceType: "t3.medium", region: "us-east-2",
+  } }));
+  await openFixture(page, [{ id: "tool-1", role: "tool", kind: "tool", text: "pnpm install", meta: { itemId: "command-1", tool: "command", state: "completed", interrupted: true, resultMissing: true } }], {
+    status: "stopped", statusDetail: "Stopped manually", environmentId: "env-fixture",
+    runtimeMetadata: { backend: "ec2", instanceType: "t3.medium" },
+    workerLifecycle: { state: "stopped", result: { cleanup: "stopped" } },
+    workerResize: { status: "failed", instanceType: "t3.medium", error: "EC2 worker must be stopped before changing its machine size" },
+  });
+  await expect(page.locator("#runtime-status")).toHaveText("Machine stopped");
+  await expect(page.locator("#runtime-detail")).toHaveText("EC2 instance is off. The resize did not complete; choose a machine size to retry.");
+  await expect(page.locator("#resize-worker-button")).toHaveText("t3.medium · resize failed⌄");
+  await expect(page.locator("#messages .inline-tool-group > summary")).toHaveText("Ran 1 command");
+  await page.locator("#resize-worker-button").click();
+  await expect(page.locator("#worker-size-error")).toHaveText("The EC2 machine was still running. It will be stopped automatically before retrying.");
 });
 
 test("command controls edit goals, queue native commands and retain drafts on delayed controls", async ({ page }) => {

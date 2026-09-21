@@ -289,12 +289,18 @@ function renderActive() {
   const account = workspaceSettings.accounts?.find(item => item.id === chat.agentAccountId);
   elements.meta.textContent = `${agentLabel(chat.agent)}${account ? ` · ${account.name}` : ""}${runtimeLabel} · ${chat.workspace}`;
   const suspensionStatus = chat.suspension?.status;
+  const machineStopped = state.config.workerBackend === "ec2" && chat.status === "stopped"
+    && chat.workerLifecycle?.state === "stopped" && chat.workerLifecycle?.result?.cleanup === "stopped";
   elements.status.textContent = suspensionStatus === "hibernating" ? "hibernating"
     : suspensionStatus === "hibernated" && chat.status === "starting" ? "resuming"
     : suspensionStatus === "hibernated" ? "hibernated"
     : suspensionStatus === "failed" && chat.status === "error" ? "hibernation failed"
+    : machineStopped ? "Machine stopped"
     : chat.status === "idle" && chat.idleKeepAwakeReason ? "Ready" : chat.status;
-  elements.detail.textContent = chat.statusDetail || "";
+  elements.detail.textContent = machineStopped
+    ? chat.workerResize?.status === "failed" ? "EC2 instance is off. The resize did not complete; choose a machine size to retry."
+      : `EC2 instance is off${chat.statusDetail ? ` · ${chat.statusDetail}` : ""}`
+    : chat.statusDetail || "";
   elements.statusDot.className = `status-dot ${chat.status}`;
   const stopButton = $("#stop-button");
   stopButton.hidden = !["starting", "running", "idle", "waiting"].includes(chat.status);
@@ -304,8 +310,9 @@ function renderActive() {
   const environment = workspaceSettings.environments?.find(item => item.id === chat.environmentId);
   const machineType = chat.workerResize?.status === "failed" ? chat.runtimeMetadata?.instanceType || environment?.instanceType || workspaceSettings.defaultInstanceType
     : chat.workerInstanceType || chat.runtimeMetadata?.instanceType || environment?.instanceType || workspaceSettings.defaultInstanceType;
-  resizeButton.textContent = chat.workerResize?.status === "resizing" || chat.workerResize?.status === "queued" ? `resizing → ${chat.workerResize.instanceType}`
-    : chat.workerResize?.status === "failed" ? `${machineType || "machine"} · retry⌄` : `${machineType || "machine size"}⌄`;
+  resizeButton.textContent = chat.workerResize?.status === "resizing" || chat.workerResize?.status === "queued" ? `Resizing to ${chat.workerResize.instanceType}…`
+    : chat.workerResize?.status === "failed" ? `${machineType || "Machine"} · resize failed⌄` : `${machineType || "machine size"}⌄`;
+  resizeButton.title = chat.workerResize?.status === "failed" ? "The previous resize failed. Open to retry." : "Change machine size";
   $("#delete-button").disabled = false;
   $("#delete-button").removeAttribute("aria-busy");
   const busy = ["running", "starting"].includes(chat.status);
@@ -1007,7 +1014,12 @@ $("#resize-worker-button").addEventListener("click", () => {
   }));
   const environment = workspaceSettings.environments?.find(item => item.id === chat.environmentId);
   workerSizeSelect.value = chat.workerInstanceType || chat.runtimeMetadata?.instanceType || environment?.instanceType || workspaceSettings.defaultInstanceType || instances[0].id;
-  $("#worker-size-error").textContent = ""; renderWorkerSizeDescription(); workerSizeDialog.showModal();
+  const resizeError = chat.workerResize?.error || "";
+  $("#worker-size-error").textContent = chat.workerResize?.status === "failed"
+    ? /UnauthorizedOperation|not authorized/i.test(resizeError) ? "AWS denied the previous resize request. Choose a size to retry."
+      : /must be stopped|Stop the worker/i.test(resizeError) ? "The EC2 machine was still running. It will be stopped automatically before retrying."
+      : "The previous resize did not complete. Choose a size to retry."
+    : ""; renderWorkerSizeDescription(); workerSizeDialog.showModal();
 });
 workerSizeSelect.addEventListener("change", renderWorkerSizeDescription);
 $("#worker-size-form").addEventListener("submit", event => {

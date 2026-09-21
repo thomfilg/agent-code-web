@@ -41,7 +41,7 @@ export class ToolActivity {
     for (const message of messages) {
       const meta = message.meta || {}, itemKey = `${key}:${meta.itemId || message.id}`;
       const details = el("details", undefined, "tool-details"); details.dataset.toolItem = itemKey; details.open = this.openItems.has(itemKey);
-      const state = meta.state === "running" ? "Running" : meta.failed || (meta.exitCode != null && meta.exitCode !== 0) ? "Failed" : meta.resultMissing ? "Result not reported" : "";
+      const state = meta.state === "running" ? "Running" : meta.interrupted ? "Interrupted when worker stopped" : meta.failed || (meta.exitCode != null && meta.exitCode !== 0) ? "Failed" : meta.resultMissing ? "Result not reported" : "";
       const title = meta.title || message.text || meta.tool || "Tool";
       details.append(el("summary", `${title.length > 120 ? `${title.slice(0, 117)}…` : title}${state ? ` · ${state}` : ""}`));
       if (meta.input || commands) details.append(el("pre", meta.input || `$ ${title}`, "tool-input"));
@@ -77,7 +77,7 @@ export class ToolActivity {
     document.querySelector("#tools-title").textContent = `Tools used: ${messages.length}`;
     for (const [index, message] of messages.entries()) {
       const meta = message.meta || {}, details = el("details", undefined, "tool-details"); details.dataset.id = meta.itemId || message.id; details.open = opened.has(details.dataset.id);
-      const status = meta.state === "running" ? "Running" : meta.failed || (meta.exitCode != null && meta.exitCode !== 0) ? "Failed / denied" : meta.resultMissing ? "Result not reported" : "Finished";
+      const status = meta.state === "running" ? "Running" : meta.interrupted ? "Interrupted when worker stopped" : meta.failed || (meta.exitCode != null && meta.exitCode !== 0) ? "Failed / denied" : meta.resultMissing ? "Result not reported" : "Finished";
       details.append(el("summary", `${index + 1}. ${meta.tool || "Tool"} · ${status}`), el("p", meta.title || message.text));
       if (meta.input) details.append(el("h4", "Input"), el("pre", meta.input, "tool-output"));
       if (meta.output) details.append(el("h4", "Result"), el("pre", meta.output, "tool-output"));
