@@ -95,6 +95,7 @@ export class RuntimeManager extends EventEmitter {
   #workerIdleTimers = new Map();
   #modeChanges = new Map();
   #workerResizes = new Map();
+  #workerReconciliations = new Map();
 
   #assertNativeAccount(chatId, expectedRuntime = null) {
     const chat = this.store.get(chatId);
@@ -1897,6 +1898,7 @@ export class RuntimeManager extends EventEmitter {
         text: errorMessage(error),
       });
       this.#emit(chatId, { type: "turn_failed", message });
+      if (error.fatalRuntime === true && this.#runtimes.get(chatId) === runtime) await this.#fatal(chatId, error);
     } finally {
       if (commandAction?.approval) await this.approvals.cancel(chatId, commandAction.approval.id).catch(() => {});
       if (turn.cancelled && runtime.generation === generation && this.#runtimes.get(chatId) === runtime) {
@@ -2245,7 +2247,15 @@ export class RuntimeManager extends EventEmitter {
       status: "stopping", statusDetail: "Verifying that the EC2 machine is stopped", idleDeadlineAt: null, idleKeepAwakeReason: null,
     }))));
     const completion = Promise.all(chats.map(async chat => {
-      try { await this.stop(chat.id, "reconcile"); }
+      try {
+        const operation = this.stop(chat.id, "reconcile");
+        this.#workerReconciliations.set(chat.id, operation);
+        try { await operation; }
+        finally { if (this.#workerReconciliations.get(chat.id) === operation) this.#workerReconciliations.delete(chat.id); }
+        if (["resizing", "queued", "resized"].includes(chat.workerResize?.status) && chat.workerResize?.instanceType) {
+          await this.resizeWorker(chat.id, chat.workerResize.instanceType);
+        }
+      }
       catch (error) {
         if (!this.store.get(chat.id)) return;
         await this.#setStatus(chat.id, "error", `Could not verify that the EC2 machine is stopped: ${errorMessage(error)}`, null);
@@ -2265,28 +2275,31 @@ export class RuntimeManager extends EventEmitter {
     if (existing) {
       existing.next = instanceType;
       const updated = await this.store.update(chatId, { workerInstanceType: instanceType,
-        workerResize: { status: "queued", instanceType, queueWasPaused: existing.queueWasPaused, restartAfterResize: true, requestedAt: nowIso() } });
+        workerResize: { status: "queued", phase: "stopping", instanceType, queueWasPaused: existing.queueWasPaused, restartAfterResize: true, requestedAt: nowIso() } });
       this.publishChat(updated); return updated;
     }
     const wasAwake = this.#runtimes.has(chatId) || this.#executors.has(chatId) || this.#awakeWorkers.has(chatId)
       || chat.suspension?.nativeRetained === true || chat.suspension?.browserRetained === true
       || ["running", "starting", "idle", "waiting"].includes(chat.status);
-    const wasQueuePaused = ["failed", "queued"].includes(chat.workerResize?.status) && typeof chat.workerResize.queueWasPaused === "boolean"
+    const wasQueuePaused = typeof chat.workerResize?.queueWasPaused === "boolean"
       ? chat.workerResize.queueWasPaused : chat.workerResize?.status === "failed" ? false : Boolean(chat.queuePaused);
-    const updated = await this.store.update(chatId, { workerInstanceType: instanceType,
-      workerResize: { status: "resizing", instanceType, queueWasPaused: wasQueuePaused, restartAfterResize: true, requestedAt: nowIso() } });
+    const updated = await this.store.update(chatId, { workerInstanceType: instanceType, startupProgress: null,
+      workerResize: { status: "resizing", phase: "stopping", instanceType, queueWasPaused: wasQueuePaused, restartAfterResize: true, requestedAt: nowIso() } });
     this.publishChat(updated);
     const action = { instanceType, next: null, queueWasPaused: wasQueuePaused };
     this.#workerResizes.set(chatId, action);
     action.promise = (async () => {
       try {
-        if (wasAwake || !["stopped", "error"].includes(this.store.get(chatId)?.status)) await this.stop(chatId, "resize");
+        const reconciliation = this.#workerReconciliations.get(chatId);
+        if (reconciliation) await reconciliation;
+        else if (wasAwake || !["stopped", "error"].includes(this.store.get(chatId)?.status)) await this.stop(chatId, "resize");
         else await this.workerBackend.sleep(this.store.get(chatId));
+        this.publishChat(await this.store.update(chatId, current => ({ workerResize: { ...current.workerResize, status: "resizing", phase: "resizing" } })));
         const result = await this.workerBackend.resize(this.store.get(chatId), instanceType);
         const resized = await this.store.update(chatId, current => ({
           workerInstanceType: instanceType,
           runtimeMetadata: { ...(current.runtimeMetadata || {}), ...(result.instanceId ? { instanceId: result.instanceId } : {}), instanceType },
-          workerResize: { status: "resized", instanceType, completedAt: nowIso() },
+          workerResize: { status: "resized", phase: "starting", instanceType, completedAt: nowIso() },
         }));
         this.publishChat(resized);
         const admission = await this.wake(chatId);

@@ -61,6 +61,21 @@ test("fatal worker exit drains accepted deltas, retains commentary once, and per
   } finally { await f.manager.shutdown(); }
 });
 
+test("a fatal native startup error cannot leave the chat falsely Ready", async t => {
+  const f = await fixture(t, "claude");
+  try {
+    const { adapter, turn } = await f.start();
+    adapter.turn.reject(Object.assign(Error("Claude authentication was rejected during startup."), { fatalRuntime: true }));
+    await turn.completion;
+    await waitFor(() => f.store.get(f.chat.id).status === "error");
+    const chat = f.store.get(f.chat.id);
+    assert.equal(chat.queuePaused, true);
+    assert.match(chat.statusDetail, /authentication was rejected/);
+    assert.notEqual(chat.status, "idle");
+    assert.equal(adapter.stops, 1);
+  } finally { await f.manager.shutdown(); }
+});
+
 test("failure flushes native response metadata without exposing it or saving a late final result", async t => {
   const f = await fixture(t, "codex");
   try {

@@ -43,6 +43,12 @@ test("an EC2 chat offers priced machine sizes and applies a resize immediately i
   await page.getByRole("button", { name: "Resize and restart", exact: true }).click();
   await expect(dialog).not.toBeVisible();
   await expect(page.locator("#resize-worker-button")).toHaveText("Resizing to m7i.xlarge…");
+  await expect(page.locator("#machine-resize-notice")).toBeVisible();
+  await expect(page.locator("#machine-resize-notice")).toContainText("Restarting the machine — hang tight");
+  await expect(page.locator("[data-resize-step=stopping]")).toHaveClass(/active/);
+  await expect(page.locator("#runtime-status")).toHaveText("Changing machine to m7i.xlarge");
+  await expect(page.locator("#runtime-detail")).toHaveText("Step 1 of 3 · Stopping current machine");
+  await expect(page.locator("#startup-progress")).toBeHidden();
   await expect.poll(() => request).toEqual({ instanceType: "m7i.xlarge" });
   resize.resolve();
 });

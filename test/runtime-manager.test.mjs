@@ -287,6 +287,54 @@ test("background EC2 reconciliation reports stopping before a slow provider conf
   assert.equal(store.get(chat.id).workerLifecycle.result.cleanup, "stopped");
 });
 
+test("resize joins startup reconciliation and resumes an interrupted resize without racing Stop", async t => {
+  const root = await temporaryDirectory(t), config = testConfig(root), store = new ChatStore(root); await store.initialize();
+  config.workerBackend = "ec2";
+  const chat = await store.create({ agent: "codex", title: "Resize during reconciliation" });
+  await store.update(chat.id, { runtimeMetadata: { backend: "ec2", instanceId: "i-12345678", instanceType: "t3.medium" } });
+  const release = Promise.withResolvers(); let sleeps = 0, resizes = 0;
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10_000 }), gatewayOrigin: "http://localhost",
+    workerBackend: {
+      sleep: async () => { sleeps++; await release.promise; return { instanceId: "i-12345678", stopped: true }; },
+      resize: async (_chat, instanceType) => { resizes++; return { instanceId: "i-12345678", instanceType, resized: true }; },
+      acquire: async current => ({ metadata: { backend: "ec2", instanceId: "i-12345678", instanceType: current.workerInstanceType } }), destroy: async () => {},
+    }, adapterFactory: () => ({ start: async () => {}, send: async () => ({ text: "ready" }), stop: async () => {} }) });
+  t.after(() => manager.shutdown());
+  await manager.reconcileStoppedWorkers({ background: true });
+  const accepted = await manager.resizeWorker(chat.id, "t3.large");
+  assert.equal(accepted.workerResize.phase, "stopping");
+  assert.equal(store.get(chat.id).startupProgress, null);
+  await waitFor(() => sleeps === 1);
+  assert.equal(sleeps, 1, "resize shares the in-flight reconciliation stop");
+  release.resolve();
+  await waitFor(() => store.get(chat.id).workerResize?.status === "completed");
+  assert.equal(sleeps, 1); assert.equal(resizes, 1);
+  assert.equal(store.get(chat.id).runtimeMetadata.instanceType, "t3.large");
+});
+
+test("controller restart resumes a persisted in-progress resize", async t => {
+  const root = await temporaryDirectory(t), config = testConfig(root), store = new ChatStore(root); await store.initialize();
+  config.workerBackend = "ec2";
+  const chat = await store.create({ agent: "codex", title: "Interrupted resize" });
+  await store.update(chat.id, { status: "stopping", queuePaused: true, workerInstanceType: "t3.large",
+    runtimeMetadata: { backend: "ec2", instanceId: "i-12345678", instanceType: "t3.medium" },
+    workerResize: { status: "resizing", phase: "stopping", instanceType: "t3.large", queueWasPaused: false } });
+  const calls = [];
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10_000 }), gatewayOrigin: "http://localhost",
+    workerBackend: {
+      sleep: async () => { calls.push("sleep"); return { instanceId: "i-12345678", stopped: true }; },
+      resize: async (_chat, instanceType) => { calls.push(`resize:${instanceType}`); return { instanceId: "i-12345678", instanceType, resized: true }; },
+      acquire: async current => { calls.push(`acquire:${current.workerInstanceType}`); return { metadata: { backend: "ec2", instanceId: "i-12345678", instanceType: current.workerInstanceType } }; },
+      destroy: async () => {},
+    }, adapterFactory: () => ({ start: async () => {}, send: async () => ({ text: "ready" }), stop: async () => {} }) });
+  t.after(() => manager.shutdown());
+  await manager.reconcileStoppedWorkers();
+  await waitFor(() => store.get(chat.id).workerResize?.status === "completed");
+  assert.deepEqual(calls, ["sleep", "sleep", "resize:t3.large", "acquire:t3.large"]);
+  assert.equal(store.get(chat.id).queuePaused, false);
+  assert.equal(store.get(chat.id).runtimeMetadata.instanceType, "t3.large");
+});
+
 test("chat deletion is durable even when worker stop and infrastructure cleanup fail", async t => {
   const root = await temporaryDirectory(t), records = new MemoryRecords(), store = new ChatStore(root, records); await store.initialize();
   const config = testConfig(root); config.idleTimeoutMs = 60_000;

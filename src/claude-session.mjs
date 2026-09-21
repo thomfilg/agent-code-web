@@ -17,6 +17,20 @@ const flagSettings = args => {
   return { ...settings, effortLevel: flag(args, "--effort") || null };
 };
 
+const startupFailure = stderr => {
+  const text = String(stderr || "");
+  const message = /auth|oauth|token|credential|log\s*in|unauthorized|\b401\b/i.test(text)
+    ? "Claude authentication was rejected during startup. Reconnect the selected Claude account and retry."
+    : /unknown (?:option|argument)|unrecognized (?:option|argument)|invalid (?:option|argument)/i.test(text)
+      ? "The installed Claude CLI rejected its startup options. Update the worker image before retrying."
+      : /(?:invalid|failed to (?:parse|load)).{0,80}(?:config|setting|plugin)|(?:config|setting|plugin).{0,80}(?:invalid|failed)/is.test(text)
+        ? "Claude could not load this chat's private configuration or plugins. Review the Claude configuration and retry."
+        : /out of memory|cannot allocate memory|\benomem\b/i.test(text)
+          ? "Claude could not start because the worker ran out of memory. Choose a larger machine and retry."
+          : "Claude exited before its control channel initialized. Retry after checking the selected account and Claude configuration.";
+  return Object.assign(Error(message), { code: "CLAUDE_STARTUP_EXIT", fatalRuntime: true });
+};
+
 // The SDK has no scheduled-task snapshot/change control. Native
 // diagnostics report restoration, automatic deletion and expiry without an
 // extra user turn, model call, transcript replay or controller-side scheduler.
@@ -43,6 +57,7 @@ export class ClaudeSession {
     this.onBackgroundEvent = onBackgroundEvent;
     this.onNativeAgentEvent = onNativeAgentEvent;
     this.control = new ClaudeControlChannel(child, controlTimeoutMs);
+    this.startupStderr = "";
     this.requests = requestHooks ? new ClaudeRequests(child, requestHooks, cwd) : null;
     this.closed = new Promise(resolve => { this.resolveClosed = resolve; });
     this.lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -94,10 +109,15 @@ export class ClaudeSession {
         return;
       }
       if (/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z \[(?:DEBUG|INFO|WARN|ERROR|VERBOSE)\] /.test(line)) this.trackScheduleDiagnostic(line);
-      else this.active?.stderr.write(`${line}\n`);
+      else if (this.active) this.active.stderr.write(`${line}\n`);
+      else this.startupStderr = `${this.startupStderr}${line}\n`.slice(-16_000);
     };
     child.stderr.on("data", chunk => {
-      if (!diagnostics) { this.active?.stderr.write(chunk); return; }
+      if (!diagnostics) {
+        if (this.active) this.active.stderr.write(chunk);
+        else this.startupStderr = `${this.startupStderr}${String(chunk)}`.slice(-16_000);
+        return;
+      }
       const lines = (stderr + decoder.write(chunk)).split("\n"); stderr = lines.pop();
       for (const line of lines) {
         if (!dropping && line.length <= 8192) stderrLine(line);
@@ -503,6 +523,9 @@ export class ClaudeSession {
       this.active = turn;
       this.requests?.resume();
       return turn;
+    } catch (error) {
+      if (error?.code === "CLAUDE_CONTROL_CLOSED" && this.ended && !this.stopping) throw startupFailure(this.startupStderr);
+      throw error;
     } finally { this.pending = false; }
   }
 

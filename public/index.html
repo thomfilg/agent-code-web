@@ -153,6 +153,18 @@
         </section>
 
         <section class="conversation" id="conversation" hidden>
+          <div class="machine-resize-notice" id="machine-resize-notice" role="status" aria-live="assertive" hidden>
+            <div class="machine-resize-symbol" aria-hidden="true">↻</div>
+            <div class="machine-resize-copy">
+              <strong>Restarting the machine — hang tight</strong>
+              <span id="machine-resize-detail">Your chat is safe. This can take a few minutes.</span>
+              <ol class="machine-resize-steps" aria-label="Machine resize progress">
+                <li data-resize-step="stopping">Stopping</li>
+                <li data-resize-step="resizing">Changing size</li>
+                <li data-resize-step="starting">Starting</li>
+              </ol>
+            </div>
+          </div>
           <div class="runtime-banner" id="runtime-banner">
             <div class="runtime-copy">
               <span class="status-dot" id="status-dot"></span>

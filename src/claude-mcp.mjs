@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+const stopped = () => Object.assign(Error("Claude MCP control channel stopped"), { code: "CLAUDE_CONTROL_CLOSED" });
+
 export function claudeMcpRequest(text) {
   const match = /^\/mcp(?:\s+([\s\S]*))?$/.exec(text.trim());
   if (!match) return null;
@@ -19,14 +21,14 @@ export class ClaudeControlChannel {
     child.stdin.on("error", this.onClose);
   }
   request(subtype, fields = {}, { onSuccess, timeoutMs = this.timeoutMs } = {}) {
-    if (this.closed || !this.child.stdin.writable) return Promise.reject(Error("Claude MCP control channel stopped"));
+    if (this.closed || !this.child.stdin.writable) return Promise.reject(stopped());
     const id = randomUUID();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(Error(`Claude ${subtype} control timed out`)); }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, onSuccess, subtype });
       this.child.stdin.write(`${JSON.stringify({ type: "control_request", request_id: id, request: { subtype, ...fields } })}\n`, error => {
         if (!error || !this.pending.has(id)) return;
-        clearTimeout(timer); this.pending.delete(id); reject(Error("Claude MCP control channel stopped"));
+        clearTimeout(timer); this.pending.delete(id); reject(stopped());
       });
     });
   }
@@ -56,7 +58,7 @@ export class ClaudeControlChannel {
   close() {
     if (this.closed) return;
     this.closed = true;
-    for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(Error("Claude MCP control channel stopped")); }
+    for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(stopped()); }
     this.pending.clear();
     this.child.removeListener("close", this.onClose); this.child.removeListener("error", this.onClose);
     // Keep the stdin error handler until the stream closes; late EPIPE must not

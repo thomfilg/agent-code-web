@@ -289,15 +289,34 @@ function renderActive() {
   const account = workspaceSettings.accounts?.find(item => item.id === chat.agentAccountId);
   elements.meta.textContent = `${agentLabel(chat.agent)}${account ? ` · ${account.name}` : ""}${runtimeLabel} · ${chat.workspace}`;
   const suspensionStatus = chat.suspension?.status;
+  const resizing = ["resizing", "queued", "resized"].includes(chat.workerResize?.status);
+  const resizePhase = chat.workerResize?.phase || (chat.workerResize?.status === "resized" ? "starting" : "stopping");
+  const resizeTarget = chat.workerResize?.instanceType || chat.workerInstanceType || "the selected size";
+  const resizeNotice = $("#machine-resize-notice");
+  resizeNotice.hidden = !resizing;
+  if (resizing) {
+    const phaseIndex = ["stopping", "resizing", "starting"].indexOf(resizePhase);
+    $("#machine-resize-detail").textContent = resizePhase === "stopping" ? `Stopping the current machine before changing to ${resizeTarget}. Your chat is safe.`
+      : resizePhase === "resizing" ? `The machine is off. Applying ${resizeTarget} now.`
+      : `The ${resizeTarget} machine is starting. The agent will continue when it is ready.`;
+    for (const step of resizeNotice.querySelectorAll("[data-resize-step]")) {
+      const index = ["stopping", "resizing", "starting"].indexOf(step.dataset.resizeStep);
+      step.classList.toggle("completed", index < phaseIndex);
+      step.classList.toggle("active", index === phaseIndex);
+    }
+  }
   const machineStopped = state.config.workerBackend === "ec2" && chat.status === "stopped"
     && chat.workerLifecycle?.state === "stopped" && chat.workerLifecycle?.result?.cleanup === "stopped";
-  elements.status.textContent = suspensionStatus === "hibernating" ? "hibernating"
+  elements.status.textContent = resizing ? `Changing machine to ${resizeTarget}`
+    : suspensionStatus === "hibernating" ? "hibernating"
     : suspensionStatus === "hibernated" && chat.status === "starting" ? "resuming"
     : suspensionStatus === "hibernated" ? "hibernated"
     : suspensionStatus === "failed" && chat.status === "error" ? "hibernation failed"
     : machineStopped ? "Machine stopped"
     : chat.status === "idle" && chat.idleKeepAwakeReason ? "Ready" : chat.status;
-  elements.detail.textContent = machineStopped
+  elements.detail.textContent = resizing ? (resizePhase === "stopping" ? "Step 1 of 3 · Stopping current machine"
+    : resizePhase === "resizing" ? "Step 2 of 3 · Changing machine size" : "Step 3 of 3 · Starting new machine")
+    : machineStopped
     ? chat.workerResize?.status === "failed" ? "EC2 instance is off. The resize did not complete; choose a machine size to retry."
       : `EC2 instance is off${chat.statusDetail ? ` · ${chat.statusDetail}` : ""}`
     : chat.statusDetail || "";
@@ -1027,7 +1046,8 @@ $("#worker-size-form").addEventListener("submit", event => {
   const chat = state.active, instanceType = workerSizeSelect.value;
   if (!chat || !instanceType) return;
   const previous = chat;
-  state.active = { ...chat, workerInstanceType: instanceType, workerResize: { status: "resizing", instanceType, requestedAt: new Date().toISOString() } };
+  state.active = { ...chat, workerInstanceType: instanceType, startupProgress: null,
+    workerResize: { status: "resizing", phase: "stopping", instanceType, requestedAt: new Date().toISOString() } };
   workerSizeDialog.close(); renderActive();
   void api(`/api/chats/${chat.id}/worker-size`, { method: "PATCH", body: JSON.stringify({ instanceType }) }).then(({ chat: updated }) => {
     if (state.active?.id === updated.id && (updated.revision || 0) >= (state.active.revision || 0)) { state.active = { ...state.active, ...updated }; renderActive(); }
@@ -1042,7 +1062,8 @@ function renderWorkingStatus() {
   $("#working-status").hidden = !text;
 }
 function renderStartupProgress() {
-  startupProgress.update(state.deletingChats.has(state.active?.id) ? null : state.active);
+  const resizing = ["resizing", "queued", "resized"].includes(state.active?.workerResize?.status);
+  startupProgress.update(state.deletingChats.has(state.active?.id) || resizing ? null : state.active);
 }
 setInterval(() => { if (!document.hidden) { renderWorkingStatus(); renderStartupProgress(); } }, 1000);
 document.addEventListener("keydown", event => {

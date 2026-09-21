@@ -24,6 +24,7 @@ function transport(f) {
     child.exitCode = code; child.signalCode = signal; child.stdout.end(); child.stderr.end();
     child.emit("exit", code, signal); child.emit("close", code, signal);
   };
+  f.close = close;
   child.kill = signal => { f.signals.push(signal); setImmediate(() => close(null, signal)); };
   child.stdin.on("finish", () => setImmediate(() => close(0, null)));
   f.complete = (text = "Application turn completed.", failed = false) => {
@@ -263,6 +264,20 @@ test("native initialization commands and early system metadata survive before th
   f.adapter.backgroundEvent({ type: "command_catalog", commands: [{ name: "late" }] });
   f.adapter.backgroundEvent({ type: "system", subtype: "init", slash_commands: ["late"] });
   assert.equal(f.events.length, count, "A stopped adapter cannot publish a late catalog");
+});
+
+test("native startup exit classifies stderr without exposing it and requires runtime recovery", async t => {
+  const f = await fixture(t, { interactive: true }); f.hold = "initialize";
+  const sending = f.adapter.send("Start the task");
+  await waitFor(() => f.controls?.some(packet => packet.request.subtype === "initialize"));
+  f.child.stderr.write("OAuth token rejected for private-user@example.test at /private/profile/settings.json\n");
+  f.close(1, null);
+  await assert.rejects(sending, error => {
+    assert.equal(error.code, "CLAUDE_STARTUP_EXIT"); assert.equal(error.fatalRuntime, true);
+    assert.match(error.message, /authentication was rejected/);
+    assert.doesNotMatch(error.message, /private-user|private\/profile|OAuth token/);
+    return true;
+  });
 });
 
 test("missing initialize commands do not erase a previously known catalog", async t => {
