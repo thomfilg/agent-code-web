@@ -290,6 +290,14 @@ test("AWS process failures expose only fixed operation/category names, never std
   assert.equal(unknown.message, "AWS operation failed (unclassified); private diagnostics suppressed");
 });
 
+test("shared AWS failure classifier recognizes verifier operations without exposing arguments", () => {
+  const error = safeBakerAwsFailure(["--profile", "PRIVATE-PROFILE", "--region", "us-east-2", "--no-cli-pager", "ssm", "send-command", "--parameters", "PRIVATE-PAYLOAD"], {
+    stderr: "An error occurred (InvalidParameterValue) when calling the SendCommand operation: PRIVATE-DETAIL",
+  });
+  assert.equal(error.message, "AWS ssm/send-command failed (InvalidParameterValue); private diagnostics suppressed");
+  assert.doesNotMatch(error.message, /PRIVATE/);
+});
+
 test("AMI baker supports IAM default chain and rejects failed bootstrap without publishing image", async () => {
   const f = fixture({ commandFailed: true });
   await assert.rejects(bakeWorkerImage(parseOptions(required), { run: f.run, sleep: async () => {} }), error => /SSM command failed/.test(error.message) && !error.message.includes("must never"));

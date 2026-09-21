@@ -16,8 +16,8 @@ export const CLI_VERSIONS = { codex: "0.154.0", claude: "2.1.222" };
 export const EC2_USER_DATA_MAX_BYTES = 16 * 1024;
 const awsOperations = {
   sts: ["get-caller-identity"],
-  cloudformation: ["describe-stacks", "describe-stack-resource"],
-  ec2: ["describe-instances", "describe-subnets", "describe-security-groups", "describe-images", "describe-key-pairs", "get-console-output", "run-instances", "create-image", "terminate-instances"],
+  cloudformation: ["describe-stacks", "describe-stack-resource", "list-stack-resources"],
+  ec2: ["describe-instances", "describe-subnets", "describe-security-groups", "describe-images", "describe-key-pairs", "describe-volumes", "get-console-output", "run-instances", "create-image", "stop-instances", "start-instances", "terminate-instances", "create-tags"],
   iam: ["get-instance-profile", "get-role", "list-attached-role-policies", "list-role-policies"],
   ssm: ["describe-instance-information", "send-command", "get-command-invocation"],
 };

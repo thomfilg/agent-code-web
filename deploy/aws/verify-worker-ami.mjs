@@ -6,6 +6,8 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { gzipSync } from "node:zlib";
+import { safeBakerAwsFailure } from "./bake-worker-ami.mjs";
 import { assertWorkerImage, workerAcceptanceVersion, workerImageIdentity, workerImageTags } from "../../src/worker-image.mjs";
 import { workerHibernationAcceptance, workerHibernationAcceptanceId, workerHibernationCandidate } from "../../src/worker-suspension.mjs";
 import { workerSupervisorVersion } from "../../src/worker-supervisor-service.mjs";
@@ -65,8 +67,9 @@ export function verifyReceipt(receipt, { verificationId, workerId, phase, previo
 async function defaultRun(args) {
   try { return (await execute(process.env.AWS_BIN || "aws", args, { timeout: 65_000, maxBuffer: 1_048_576, env: { ...process.env, AWS_PAGER: "", AWS_CLI_AUTO_PROMPT: "off" } })).stdout.trim(); }
   catch (error) {
-    if (String(error.stderr).includes("InvocationDoesNotExist")) throw new Error("InvocationDoesNotExist");
-    throw new Error("AWS worker acceptance command failed; private diagnostics suppressed");
+    const safe = safeBakerAwsFailure(args, error);
+    if (safe.code === "InvocationDoesNotExist") throw new Error("InvocationDoesNotExist");
+    throw safe;
   }
 }
 
@@ -167,7 +170,11 @@ async function verifyImage(o, { run = defaultRun, sleep = ms => new Promise(reso
     workerHost = current.PrivateIpAddress;
     const payload = { account: o.account, region: o.region, secretArn: outputs.SecretArn, verificationId, workerId, host: workerHost, publicKey, phase, sentinel, hibernation,
       ...(previous ? { knownHosts: previous.knownHosts, processIdentity: previous.processIdentity } : {}) };
-    const code = `import base64;exec(base64.b64decode('${Buffer.from(controllerScript).toString("base64")}'))`;
+    // Run Command has a bounded string parameter. Compress the inspected helper
+    // before base64 so growth cannot silently turn every probe into an API-side
+    // validation failure before a Command ID exists.
+    const compressedController = gzipSync(Buffer.from(controllerScript), { level: 9, mtime: 0 });
+    const code = `import base64,gzip;exec(gzip.decompress(base64.b64decode('${compressedController.toString("base64")}')))`;
     const command = `python3 -I -c ${quote(code)} ${quote(Buffer.from(JSON.stringify(payload)).toString("base64"))}`;
     const sent = await json("ssm", "send-command", "--instance-ids", outputs.ControllerInstanceId, "--document-name", "AWS-RunShellScript", "--timeout-seconds", "120", "--parameters", JSON.stringify({ commands: [command], executionTimeout: ["420"] }));
     const commandId = sent.Command?.CommandId;

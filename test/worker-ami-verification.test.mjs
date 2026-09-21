@@ -107,6 +107,8 @@ test("fresh acceptance proves isolated boot, stop/start persistence, pinned host
   assert.ok(send.includes(controllerId));
   const parameters = JSON.parse(send[send.indexOf("--parameters") + 1]);
   assert.deepEqual(parameters.executionTimeout, ["420"]);
+  assert.ok(parameters.commands[0].length < 16_000, "compressed controller probe must stay within the Run Command string limit");
+  assert.match(parameters.commands[0], /import base64,gzip;exec\(gzip\.decompress/);
   assert.doesNotMatch(JSON.stringify(result) + logs.join(""), /PRIVATE OUTPUT|SecretString|knownHosts/);
   assert.equal(JSON.stringify(result).includes(f.requests[0].sentinel), false);
   const markerIndex = f.calls.findIndex(call => call.includes("create-tags"));
