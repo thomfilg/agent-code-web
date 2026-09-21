@@ -2240,7 +2240,7 @@ export class RuntimeManager extends EventEmitter {
 
   async reconcileStoppedWorkers() {
     if (this.config.workerBackend !== "ec2") return;
-    await Promise.all(this.store.list().filter(current => current.runtimeMetadata?.instanceId).map(async chat => {
+    await Promise.all(this.store.list().filter(current => current.runtimeMetadata?.instanceId && current.suspension?.status !== "hibernated").map(async chat => {
       try { await this.stop(chat.id, "reconcile"); }
       catch (error) {
         if (!this.store.get(chat.id)) return;

@@ -252,6 +252,9 @@ test("controller startup verifies persisted EC2 workers are physically stopped b
   config.workerBackend = "ec2";
   const chat = await store.create({ agent: "codex", title: "Restored worker" });
   await store.update(chat.id, { runtimeMetadata: { backend: "ec2", instanceId: "i-12345678", instanceType: "t3.large" } });
+  const hibernated = await store.create({ agent: "codex", title: "Retained hibernation" });
+  await store.update(hibernated.id, { runtimeMetadata: { backend: "ec2", instanceId: "i-87654321", instanceType: "t3.large" },
+    suspension: { status: "hibernated", nativeRetained: true } });
   let sleeps = 0;
   const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10_000 }), gatewayOrigin: "http://localhost",
     workerBackend: { sleep: async () => { sleeps++; return { instanceId: "i-12345678", stopped: true }; }, destroy: async () => {} },
@@ -263,6 +266,7 @@ test("controller startup verifies persisted EC2 workers are physically stopped b
   assert.equal(reconciled.statusDetail, "Machine stop verified after control plane restart");
   assert.equal(reconciled.workerLifecycle.state, "stopped");
   assert.equal(reconciled.workerLifecycle.result.cleanup, "stopped");
+  assert.equal(store.get(hibernated.id).suspension.status, "hibernated", "verified hibernation survives a controller restart");
 });
 
 test("chat deletion is durable even when worker stop and infrastructure cleanup fail", async t => {
