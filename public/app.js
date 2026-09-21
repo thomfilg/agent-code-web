@@ -63,6 +63,7 @@ const state = {
   stream: null,
   liveTools: new Map(),
   queueActions: new Map(),
+  optimisticQueueSends: new Map(),
   eventSource: null,
   deletingChats: new Set(),
 };
@@ -143,6 +144,13 @@ function updateChatSummary(chat) {
   renderChats();
 }
 
+function reconcileOptimisticQueueSend(chat, message = null) {
+  const action = chat && state.optimisticQueueSends.get(chat.id);
+  if (!action) return;
+  const delivered = candidate => action.message && candidate?.role === "user" && candidate.text === action.message.text && candidate.createdAt >= action.message.createdAt;
+  if (chat.queueError || delivered(message) || chat.messages?.some(delivered)) state.optimisticQueueSends.delete(chat.id);
+}
+
 function renderMessage(message, streaming = false) {
   if (message.kind === "tool") {
     const running = message.meta?.state === "running";
@@ -194,6 +202,8 @@ function renderMessages() {
   toolActivity.captureExpanded();
   elements.messages.replaceChildren();
   const persisted = (state.active.messages || []).filter(message => !message.meta?.renderingSample && !(message.meta?.segmentedTurn && !message.text?.trim() && !message.meta?.finalAnswer?.text));
+  const optimistic = state.optimisticQueueSends.get(state.active.id);
+  if (optimistic?.message && !persisted.some(message => message.role === "user" && message.text === optimistic.message.text && message.createdAt >= optimistic.message.createdAt)) persisted.push(optimistic.message);
   if (!persisted.length && !state.stream && !state.liveTools.size) {
     messageWindow.update(state.active.id, []);
     toolActivity.update(state.active.id, new Map());
@@ -231,6 +241,7 @@ function renderApproval() {
 
 function renderActive() {
   const chat = state.active;
+  reconcileOptimisticQueueSend(chat);
   savedPrompts.sync();
   $("#companies-page").hidden = state.page !== "companies";
   statusline.render();
@@ -340,15 +351,32 @@ function renderActive() {
 
 function renderQueue() {
   const root = $("#message-queue"), chat = state.active; root.replaceChildren();
-  if (!chat?.queuedMessages?.length) return;
-  root.append(node("strong", "", `${chat.queuePaused ? "Paused queue" : "Queued messages"} · ${chat.queuedMessages.length}`));
+  const optimistic = chat && state.optimisticQueueSends.get(chat.id);
+  const queuedMessages = (chat?.queuedMessages || []).filter(item => !optimistic?.ids.has(item.id));
+  if (!queuedMessages.length) return;
+  root.append(node("strong", "", `${chat.queuePaused ? "Paused queue" : "Queued messages"} · ${queuedMessages.length}`));
   const pending = state.queueActions.get(chat.id);
   const edit = async body => {
     if (state.queueActions.has(chat.id)) return;
     if (body.sendNowId) {
-      // Send all now is admitted synchronously by the controller. Do not show
-      // a fake loading state while the native turn is being interrupted.
-      void api(`/api/chats/${chat.id}/queue`, { method: "PATCH", body: JSON.stringify(body) }).catch(error => toast(error.message));
+      // The click is the user's handoff point. Move the whole ordinary queue
+      // into the transcript immediately while the controller interrupts the
+      // native turn in the background. Live events replace this optimistic
+      // message with the durable one; an admission error restores the queue.
+      const priority = chat.queuedMessages.find(item => item.id === body.sendNowId);
+      const ordered = priority ? [priority, ...chat.queuedMessages.filter(item => item.id !== priority.id)] : [...chat.queuedMessages];
+      const ordinary = ordered.filter(item => !item.githubEventId && !item.nativeApprovalId);
+      const text = ordinary.map(item => item.text).join("\n\n---\n\n");
+      const action = {
+        ids: new Set(chat.queuedMessages.map(item => item.id)),
+        message: text ? { id: `send-now-${Date.now()}`, role: "user", kind: "message", text, createdAt: new Date().toISOString(), meta: { authorship: "user", optimisticSendNow: true } } : null,
+      };
+      state.optimisticQueueSends.set(chat.id, action); renderQueue(); renderMessages();
+      void api(`/api/chats/${chat.id}/queue`, { method: "PATCH", body: JSON.stringify(body) }).catch(error => {
+        if (state.optimisticQueueSends.get(chat.id) === action) state.optimisticQueueSends.delete(chat.id);
+        if (state.active?.id === chat.id) { renderQueue(); renderMessages(); }
+        toast(error.message);
+      });
       return;
     }
     state.queueActions.set(chat.id, body); renderQueue();
@@ -359,7 +387,7 @@ function renderQueue() {
     finally { state.queueActions.delete(chat.id); if (state.active?.id === chat.id) renderQueue(); }
   };
   if (chat.queuePaused) { const resume = node("button", "secondary-button", "Resume queue"); resume.type = "button"; resume.disabled = Boolean(pending); resume.onclick = () => edit({ resume: true }); root.append(resume); }
-  for (const item of chat.queuedMessages) {
+  for (const item of queuedMessages) {
     const row = node("div", "queue-row"), remove = node("button", "small-icon", "×"), sendNow = node("button", "queue-send-now", "Send all now");
     row.dataset.queueId = item.id;
     const preview = node("span", "queue-text", item.text); preview.title = item.text;
@@ -436,6 +464,7 @@ function connectEvents(chatId) {
       if ((event.chat.revision || 0) < (state.active.revision || 0) || event.chat.updatedAt < state.active.updatedAt) return;
       const commandsChanged = (event.chat.commandCatalogRevision || 0) !== (state.active.commandCatalogRevision || 0);
       state.active = { ...state.active, ...event.chat };
+      reconcileOptimisticQueueSend(state.active);
       updateChatSummary(event.chat);
       renderActive();
       if (commandsChanged) slashComposer.refresh(chatId);
@@ -446,6 +475,7 @@ function connectEvents(chatId) {
       const index = state.active.messages.findIndex((message) => message.id === event.message.id);
       if (index >= 0) state.active.messages[index] = event.message;
       else state.active.messages.push(event.message);
+      reconcileOptimisticQueueSend(state.active, event.message);
       renderMessages();
     } else if (event.type === "turn_started") {
       state.liveTools.clear();

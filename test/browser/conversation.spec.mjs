@@ -417,7 +417,7 @@ test("Send all now prioritizes the clicked message, sends the full queue and nev
   await page.route(`**/api/chats/${chat.id}/queue`, async route => {
     patches.push(route.request().postDataJSON());
     if (fail) return route.fulfill({ status: 503, json: { error: "Retry sending this queued message" } });
-    await route.continue();
+    await route.fulfill({ status: 202, json: { chat } });
   });
   const selected = page.locator('[data-queue-id="queued-two"]');
   await expect(selected.getByRole("button", { name: "Send all now", exact: true })).toBeVisible();
@@ -427,9 +427,12 @@ test("Send all now prioritizes the clicked message, sends the full queue and nev
   fail = false; await selected.getByRole("button", { name: "Send all now", exact: true }).click();
   await expect(page.getByRole("button", { name: "Sending…", exact: true })).toHaveCount(0);
   expect(patches).toEqual([{ sendNowId: "queued-two" }, { sendNowId: "queued-two" }]);
-  // The request is fire-and-forget; rows disappear only when the controller's
-  // live event arrives. There is deliberately no local loading/disabled state.
-  await expect(page.locator(".queue-row")).toHaveCount(3);
+  // Admission is immediate: the complete queue moves into the transcript
+  // before the native agent has acknowledged interruption.
+  await expect(page.locator(".queue-row")).toHaveCount(0);
+  await expect(page.locator(".message.user").last()).toContainText("Do this now");
+  await expect(page.locator(".message.user").last()).toContainText("Do this later");
+  await expect(page.locator(".message.user").last()).toContainText("Then this");
   await expect(input).toHaveValue("An unfinished draft");
 });
 
