@@ -54,10 +54,19 @@ write_files:
       #!/bin/sh
       set -eu
       stage=initial
+      emit_finalizer_receipt() {
+        message=$1
+        # Nitro console output is captured from the first serial port. Keep the
+        # ordinary console as a fallback, but never include command output,
+        # paths, credentials or free-form errors in this one-way receipt.
+        for device in /dev/ttyS0 /dev/console; do
+          [ -c "$device" ] && printf '%s\n' "$message" > "$device" 2>/dev/null || true
+        done
+      }
       finalizer_exit() {
         code=$?
         [ "$code" -eq 0 ] && return
-        printf 'AGENT_RELAY_FINALIZER_FAILED_V1 stage=%s\n' "$stage" > /dev/console 2>/dev/null || true
+        emit_finalizer_receipt "AGENT_RELAY_FINALIZER_FAILED_V1 stage=$stage"
         sync || true
         # This is the disposable image builder only. A failed scrub must never
         # remain billable after removing SSM/SSH, and no failure marker permits
@@ -161,7 +170,7 @@ write_files:
       rm -f /opt/agent-web/BUILD_PENDING
       touch /opt/agent-web/IMAGE_FINALIZED
       sync
-      printf '%s\n' AGENT_RELAY_FINALIZER_OK_V1 > /dev/console
+      emit_finalizer_receipt AGENT_RELAY_FINALIZER_OK_V1
       stage=poweroff
       systemctl poweroff
   - path: /usr/local/sbin/agent-web-audit-image

@@ -154,8 +154,8 @@ export async function bakeWorkerImage(options, { run = runBakerAws, sleep = ms =
     }
     return instance;
   }
-  async function poll(label, check) {
-    for (let attempt = 0; attempt < pollLimit; attempt++) {
+  async function poll(label, check, limit = pollLimit) {
+    for (let attempt = 0; attempt < limit; attempt++) {
       const value = await check();
       if (value) return value;
       if (attempt % 6 === 0) log(`Waiting for ${label}...`);
@@ -260,7 +260,7 @@ export async function bakeWorkerImage(options, { run = runBakerAws, sleep = ms =
     const finalizer = await poll("sanitized builder finalizer receipt", async () => {
       const consoleOutput = await json("ec2", "get-console-output", "--instance-id", builderId, "--latest");
       return safeFinalizerReceipt(consoleOutput?.Output);
-    });
+    }, Math.min(pollLimit, 12));
     if (!finalizer.ok) throw new Error(`Builder finalizer failed (${finalizer.stage}); no image was created`);
     // No StopInstances: an interrupted scrub must fail, not produce an AMI.
     const imageId = await json("ec2", "create-image", "--instance-id", builderId, "--name", o.name,
