@@ -45,6 +45,7 @@ import { zipSync } from "fflate";
 import { readinessProbe } from "./readiness.mjs";
 import { closeIncompleteRequestAfterResponse } from "./http-request-lifecycle.mjs";
 import { AppPreviews } from "./app-previews.mjs";
+import { CompanyPlugins } from "./company-plugins.mjs";
 
 const MIME = {
   ".css": "text/css; charset=utf-8",
@@ -149,10 +150,11 @@ export async function createAgentWebServer(options = {}) {
   const mcps = new McpConnections(records, { ttlMs: config.sessionCapabilityTtlMs, companies });
   const publicOrigin = config.publicOrigin ? safeMcpUrl(config.publicOrigin).origin : null;
   const environments = new Environments(records, config.workerBackend, mcps);
+  const companyPlugins = options.companyPlugins || new CompanyPlugins(records, { companies, config, inspect: options.inspectPluginSource });
   const models = options.models || new ModelCatalog(config, agentAccounts);
   const attachments = new Attachments(records, store);
   const commands = options.commands || new CommandCatalog(config, models);
-  const resources = new UserServices({ records, config, identity: googleAuth, store, legacy: { records, github, mcps, environments, organization, companies }, changed: sidebarChanged,
+  const resources = new UserServices({ records, config, identity: googleAuth, store, legacy: { records, github, mcps, environments, organization, companies, plugins: companyPlugins }, changed: sidebarChanged,
     githubChanged: (ownerId, id) => githubWorkers.revokeConnection(ownerId, id) });
   const githubWorkers = new GitHubWorkerGateway({ store, servicesFor: chat => resources.forOwner(chat.ownerId), ttlMs: config.sessionCapabilityTtlMs,
     ...(options.githubWorkerFetch ? { fetchImpl: options.githubWorkerFetch } : {}) });
@@ -306,7 +308,7 @@ export async function createAgentWebServer(options = {}) {
       const user = url.pathname.startsWith("/api/") ? await browserUsers.session(request) : null;
       if (googleAuth.enabled && url.pathname.startsWith("/api/") && !user) return json(response, 401, { error: "Sign in with Google to use Relay" });
       if (url.pathname.startsWith("/api/")) {
-      const { github, mcps, environments, organization, records, companies } = await resources.forOwner(user?.id);
+      const { github, mcps, environments, organization, records, companies, plugins } = await resources.forOwner(user?.id);
       // Authentication/resource lookup can outlive shutdown's stream cleanup.
       // Do not let an already accepted request open a new SSE stream afterward.
       if (stopping || draining) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
@@ -433,6 +435,12 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/companies" && request.method === "POST") return json(response, 201, { company: await companies.save(await bodyJson(request, 4000)) });
       const companyRoute = /^\/api\/companies\/([a-z0-9-]{1,39})$/.exec(url.pathname);
       if (companyRoute && request.method === "PATCH") return json(response, 200, { company: await companies.save(await bodyJson(request, 4000), companyRoute[1]) });
+      if (url.pathname === "/api/company-plugins" && request.method === "GET") return json(response, 200, { marketplaces: await plugins.list(url.searchParams.get("companyId") || null) });
+      if (url.pathname === "/api/company-plugins/inspect" && request.method === "POST") return json(response, 200, { marketplace: await plugins.preview((await bodyJson(request, 4000)).source) });
+      if (url.pathname === "/api/company-plugins" && request.method === "POST") return json(response, 201, { marketplace: await plugins.save(await bodyJson(request, config.maxBodyBytes)) });
+      const companyPluginRoute = /^\/api\/company-plugins\/(plugin_[a-f0-9-]{36})$/.exec(url.pathname);
+      if (companyPluginRoute && request.method === "PATCH") return json(response, 200, { marketplace: await plugins.save(await bodyJson(request, config.maxBodyBytes), companyPluginRoute[1]) });
+      if (companyPluginRoute && request.method === "DELETE") { await plugins.remove(companyPluginRoute[1]); return json(response, 200, { removed: true }); }
       if (url.pathname === "/api/github" && request.method === "GET") return json(response, 200, await github.status());
       if (url.pathname === "/api/mcps" && request.method === "GET") return json(response, 200, { connections: await mcps.list() });
       if (url.pathname === "/api/mcps/presets" && request.method === "GET") return json(response, 200, { presets: MCP_PRESETS });
@@ -515,10 +523,12 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/new-chat/commands" && request.method === "GET") {
         const agent = url.searchParams.get("agent");
         if (!["codex", "claude", "mock"].includes(agent) || agent === "mock" && !config.enableMock) return json(response, 400, { error: "Choose an available agent" });
+        const companyId = url.searchParams.get("companyId") || null;
+        if (companyId) await companies.get(companyId);
         const context = { agent, ownerId: user?.id, agentAccountId: url.searchParams.get("agentAccountId") || null };
         // Fixture command services may only implement existing-chat discovery;
         // the built-in draft path remains readonly and account-scoped.
-        return json(response, 200, await (commands.newChat ? commands : new CommandCatalog(config, models)).newChat(context));
+        return json(response, 200, await (commands.newChat ? commands : new CommandCatalog(config, models)).newChat(context, await plugins.commands(companyId, agent)));
       }
       if (url.pathname === "/api/chats" && request.method === "GET") {
         return json(response, 200, { chats: visibleChats().map(summary) });
@@ -721,7 +731,11 @@ export async function createAgentWebServer(options = {}) {
           const body = await bodyJson(request, config.maxBodyBytes);
           return json(response, 202, { chat: await manager.enqueue(chatId, body.text, body.attachments || []) });
         }
-        if (tail === "queue" && request.method === "PATCH") return json(response, 200, { chat: await manager.editQueue(chatId, await bodyJson(request, config.maxBodyBytes)) });
+        if (tail === "queue" && request.method === "PATCH") {
+          const body = await bodyJson(request, config.maxBodyBytes);
+          if (body.sendNowId !== undefined) return json(response, 202, { chat: manager.startQueuedNow(chatId, body.sendNowId) });
+          return json(response, 200, { chat: await manager.editQueue(chatId, body) });
+        }
         if (tail === "repositories" && request.method === "POST") return json(response, 200, { chat: await manager.addRepository(chatId, await bodyJson(request, config.maxBodyBytes)) });
         if (tail === "changes" && request.method === "GET") {
           const chat = store.get(chatId);
@@ -788,6 +802,11 @@ export async function createAgentWebServer(options = {}) {
         }
         if (tail === "messages" && request.method === "POST") {
           const body = await bodyJson(request, config.maxBodyBytes);
+          const current = store.get(chatId);
+          if (manager.isBusy(chatId) || ["starting", "running", "stopping"].includes(current?.status) || current?.queuedMessages?.length) {
+            const chat = await manager.enqueue(chatId, body.text, body.attachments || []);
+            return json(response, 202, { accepted: true, queued: true, chat });
+          }
           const submitted = await manager.submit(chatId, body.text, body.attachments || []);
           submitted.completion.catch((error) => console.error(`turn ${chatId}:`, errorMessage(error)));
           return json(response, 202, { accepted: true, message: submitted.message });
@@ -955,6 +974,7 @@ export async function createAgentWebServer(options = {}) {
       agentAccounts,
       adapterFactory: options.adapterFactory || null,
     });
+    void manager.retryDeletionCleanup().catch(error => console.error("worker deletion cleanup:", errorMessage(error)));
     manager.browsers = new SharedBrowsers({ store, config, acquire: chatId => manager.browserExecutor(chatId), onIdle: chatId => manager.browserIdle(chatId), isActive: chatId => manager.presence.has(chatId), onViewers: chatId => manager.refreshActivity(chatId), ...options.browserOptions });
     manager.browsers.personal = new BrowserConnections({ records, store, ttlMs: config.sessionCapabilityTtlMs, validateCompany: async (user, companyId) => (await resources.forOwner(user.id)).companies.get(companyId) });
     manager.browsers.personal.on("viewers", chatId => { void manager.refreshActivity(chatId).catch(() => {}); });

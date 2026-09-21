@@ -44,10 +44,12 @@ export class ChatRepositoryPicker {
     const chat = this.getChat(); if (!chat) return;
     const version = ++this.version;
     const current = () => version === this.version && this.menu.open && this.getChat()?.id === chat.id;
-    this.save = null; this.status = null; this.panel.replaceChildren(el("p", "muted", "Loading repositories…"));
+    this.save = null; this.status = null;
+    if (!this.repositoryCache) this.panel.replaceChildren();
     try {
       const { repositories } = await this.api(`/api/github/repositories${refresh ? "?refresh=1" : ""}`);
       if (!current()) return;
+      this.repositoryCache = repositories;
       const searchRow = el("div", "repository-search"), search = el("input"); search.type = "search";
       search.placeholder = "Search repositories…"; search.setAttribute("aria-label", "Search repositories to add");
       const reload = el("button", "small-icon", "↻"); reload.type = "button"; reload.setAttribute("aria-label", "Refresh chat repositories"); reload.onclick = () => this.load(true);

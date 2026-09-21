@@ -5,6 +5,7 @@ export const STARTUP_STAGES = Object.freeze({
   workspace: "Preparing workspace",
   software: "Preparing software",
   setup: "Running setup script",
+  plugins: "Installing company plugins",
   agent: "Starting agent",
 });
 

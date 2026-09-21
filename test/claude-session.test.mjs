@@ -1428,6 +1428,11 @@ test("application replies retain one CLI and apply next-turn mode/model/effort w
   assert.notEqual(f.inputs[0].uuid, f.inputs[1].uuid);
   assert.deepEqual(f.controls.map(packet => packet.request), [{ subtype: "initialize", forwardSubagentText: true }, { subtype: "set_permission_mode", mode: "plan" },
     { subtype: "set_model", model: "haiku" }, { subtype: "apply_flag_settings", settings: { effortLevel: "low" } }]);
+  const controls = f.controls.length;
+  f.hold = "set_permission_mode";
+  await f.adapter.send("Same settings must not wait for another control", { mode: "plan", model: "haiku", effort: "low" });
+  assert.equal(f.controls.length, controls);
+  assert.equal(f.inputs.at(-1).message.content, "Same settings must not wait for another control");
   assert.deepEqual(f.sessions, [session]); assert.equal(f.adapter.capability, capability);
   assert(!JSON.stringify(f.launches).includes(f.config.claude.providerKey));
   await f.adapter.stop(); assert.equal(f.broker.validate(capability, "anthropic"), null);
@@ -1494,10 +1499,11 @@ test("application capabilities reject changed accounts, profiles, owners and com
 test("expiry during native settings rejects unsubmitted input without leaving a stuck logical application turn", async t => {
   const f = await fixture(t); await f.adapter.send("/run Keep the application running");
   const token = f.adapter.capability;
-  f.hold = "set_model";
-  const pending = f.adapter.send("Never submit this input"), rejected = assert.rejects(pending, /temporary gateway access expired/);
-  await waitFor(() => f.controls.at(-1).request.subtype === "set_model");
-  f.broker.revoke(token); f.respond(f.controls.at(-1)); await rejected;
+  f.hold = "set_permission_mode";
+  const pending = f.adapter.send("Never submit this input", { mode: "plan" }), rejected = assert.rejects(pending, /temporary gateway access expired/);
+  await waitFor(() => f.controls.at(-1).request.subtype === "set_permission_mode");
+  f.broker.revoke(token); assert.equal(f.broker.validate(token, "anthropic"), null);
+  f.respond(f.controls.at(-1)); await rejected;
   assert.equal(f.inputs.length, 1); assert.equal(f.adapter.applicationSession.active, null);
   assert.equal(f.child.exitCode, null); assert.equal(f.launches.length, 1);
   await f.adapter.stop(); f.hold = null;
@@ -1520,7 +1526,7 @@ test("Stop revokes before slow shutdown and cannot revoke a replacement capabili
 test("background output is independent of a turn waiting for native controls and usage is not counted twice", async t => {
   const f = await fixture(t); await f.adapter.send("/run Launch app");
   f.hold = "apply_flag_settings";
-  const running = f.adapter.send("/verify New user input");
+  const running = f.adapter.send("/verify New user input", { effort: "high" });
   await waitFor(() => f.controls.some(packet => packet.request.subtype === f.hold));
   f.complete("A background task ended.");
   assert.equal(f.inputs.length, 1); assert.equal(f.events.filter(event => event.type === "background_response").length, 1);

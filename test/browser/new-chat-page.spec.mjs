@@ -37,7 +37,7 @@ async function choose(page) {
   await page.getByRole("button", { name: "Add repositories", exact: true }).click();
 }
 
-test("new chat is inline, workspace chips are compact, and first send shows progress before the server responds", async ({ page }) => {
+test("new chat is inline, workspace chips are compact, and first send never locks the draft while the server responds", async ({ page }) => {
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   const f = await fixture(page); f.gate = Promise.withResolvers(); f.messageGate = Promise.withResolvers();
   try {
@@ -50,9 +50,9 @@ test("new chat is inline, workspace chips are compact, and first send shows prog
     await page.locator("#initial-prompt").fill("Build the dashboard");
     await page.screenshot({ path: test.info().outputPath("new-chat-desktop.png"), fullPage: true });
     await page.locator("#initial-prompt").press("Enter");
-    await expect(page.locator("#new-chat-progress")).toContainText("Build the dashboard");
-    await expect(page.locator("#new-chat-status")).toHaveText("Preparing your chat…");
-    await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", true);
+    await expect(page.locator("#new-chat-progress")).toBeHidden();
+    await expect(page.locator("#new-chat-status")).toBeEmpty();
+    await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", false);
     await page.locator("#new-chat-form").dispatchEvent("submit"); await expect.poll(() => f.calls.create.length).toBe(1);
     expect(f.calls.create[0].mode).toBe("auto");
     f.gate.resolve(); await expect(page.locator("#conversation")).toBeVisible();

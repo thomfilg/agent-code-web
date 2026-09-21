@@ -11,7 +11,7 @@ export class SlashComposer {
     this.input.addEventListener("blur", () => { clearTimeout(this.blurTimer); this.blurTimer = setTimeout(() => { if (!composerHasFocus(this.input)) this.close(); }, 150); });
     if (trigger) trigger.onclick = () => { document.querySelectorAll(".control-menu[open]").forEach(n => n.open = false); this.input.value = "/"; this.input.focus(); this.update(); };
   }
-  key() { const chat = this.context(); return `${chat?.id}:${chat?.agent}:${chat?.agentAccountId || ""}:${chat?.model || "default"}:${chat?.commandCatalogRevision || 0}`; }
+  key() { const chat = this.context(); return `${chat?.id}:${chat?.agent}:${chat?.agentAccountId || ""}:${chat?.companyId || ""}:${chat?.model || "default"}:${chat?.commandCatalogRevision || 0}`; }
   refresh(chatId) {
     const reopen = this.context()?.id === chatId && !this.menu.hidden && composerHasFocus(this.input);
     this.invalidate(chatId);

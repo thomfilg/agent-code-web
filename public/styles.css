@@ -550,10 +550,35 @@ dialog { max-height: calc(100dvh - 28px); }
 .company-settings-section { text-align: left; min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text); cursor: pointer; }
 .company-settings-section span { display: block; margin-top: 8px; font-size: 12px; overflow-wrap: anywhere; }
 .company-settings-section:hover { border-color: var(--lime); }
+#company-plugins-dialog { width: min(820px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: hidden; }
+.company-plugins-card { width: 100%; min-width: 0; max-height: calc(100dvh - 32px); overflow: hidden; }
+.company-plugins-card > * { min-width: 0; max-width: 100%; }
+#company-plugins-overview, #company-plugin-form { min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+#company-plugin-form { display: flex; flex-direction: column; gap: 12px; }
+#company-plugin-list { display: grid; gap: 8px; margin: 12px 0; }
+.company-plugin-marketplace { display: grid; gap: 6px; width: 100%; padding: 14px; text-align: left; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 9px; }
+.company-plugin-marketplace:hover { border-color: var(--lime); }
+.company-plugin-source-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.company-plugin-source-row button { white-space: nowrap; }
+#company-plugin-selection { margin: 4px 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.company-plugin-columns, .company-plugin-row { display: grid; grid-template-columns: minmax(0, 1fr) 74px 74px; align-items: center; gap: 8px; padding: 10px 12px; }
+.company-plugin-columns { color: var(--muted); background: var(--panel); font-size: 11px; }
+.company-plugin-columns strong:not(:first-child) { text-align: center; }
+.company-plugin-row + .company-plugin-row { border-top: 1px solid var(--line); }
+.company-plugin-row > div { display: grid; gap: 4px; min-width: 0; }
+.company-plugin-row span { overflow-wrap: anywhere; font-size: 11px; }
+.company-plugin-provider { display: grid; place-items: center; }
+.dialog-card .company-plugin-provider input { width: 17px; height: 17px; margin: 0; accent-color: var(--lime); }
+.company-plugin-hook-note { font-size: 11px; line-height: 1.5; }
+.company-plugin-footer { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px 0 0; background: var(--panel-raised); border-top: 1px solid var(--line); }
+.company-plugin-footer [role=status] { flex: 1; font-size: 11px; }
+.company-plugin-footer .danger { margin-right: auto; }
+.company-plugins-card button:disabled { opacity: .45; cursor: default; }
 .company-settings-context { color: var(--muted); font-size: 12px; }
 [data-company-scoped="true"] #mcp-company-filter, [data-company-scoped="true"] #mcp-manage-companies,
 [data-company-scoped="true"] #github-company-filter, [data-company-scoped="true"] #github-manage-companies { display: none; }
 @media (max-width: 540px) { .company-settings-grid { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .company-plugin-columns, .company-plugin-row { grid-template-columns: minmax(0, 1fr) 58px 58px; padding-inline: 8px; } .company-plugin-source-row { grid-template-columns: 1fr; } }
 .browser-options { flex-wrap: wrap; }
 .browser-options select { padding: 7px; font-size: 11px; }
 .browser-options button { padding: 7px 9px; font-size: 11px; }
@@ -961,6 +986,8 @@ dialog { max-height: calc(100dvh - 28px); }
 .composer-actions .usage-menu > summary { width: 32px; height: 34px; border: 1px solid #ffffff0c; border-radius: 8px; }
 .composer #usage-ring { width: 16px; height: 16px; }
 .composer .send-button { width: 36px; height: 36px; border-radius: 10px; }
+.composer .interrupt-button { background: #322c22; color: #efc36b; border: 1px solid #efc36b60; }
+.composer .interrupt-button path { fill: currentColor; stroke-width: 0; }
 .composer .send-button[aria-label="Stop agent"] { background: #322c22; color: #efc36b; border: 1px solid #efc36b60; }
 .composer .send-button[aria-label="Stop agent"] path { fill: currentColor; stroke-width: 0; }
 @container (max-width: 540px) {

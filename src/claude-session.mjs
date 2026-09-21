@@ -11,6 +11,11 @@ import { claudeCommandMetadata } from "./command-catalog.mjs";
 import { applyUltracode } from "./claude-ultracode.mjs";
 
 const flag = (args, name) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
+const flagSettings = args => {
+  let settings;
+  try { settings = JSON.parse(flag(args, "--settings") || "{}"); } catch { settings = {}; }
+  return { ...settings, effortLevel: flag(args, "--effort") || null };
+};
 
 // The SDK has no scheduled-task snapshot/change control. Native
 // diagnostics report restoration, automatic deletion and expiry without an
@@ -26,6 +31,7 @@ export const CLAUDE_SCHEDULE_DIAGNOSTICS = ["--debug-to-stderr"];
 export class ClaudeSession {
   constructor(child, args, env, onBackgroundEvent = () => {}, { controlTimeoutMs = 30000, requestHooks, cwd, onSchedulesChanged = () => {}, onWorkflowsChanged = () => {}, onNativeAgentEvent = null, onNativeAgentClose = null } = {}) {
     this.child = child; this.args = args; this.env = env; this.active = null; this.pending = false;
+    this.applied = { permissionMode: flag(args, "--permission-mode"), model: flag(args, "--model") || "default", settings: flagSettings(args) };
     this.sessionId = flag(args, "--session-id") || flag(args, "--resume");
     this.controlTimeoutMs = controlTimeoutMs;
     this.scheduledJobs = new Set(); this.scheduleCalls = new Map(); this.onSchedulesChanged = onSchedulesChanged;
@@ -415,10 +421,16 @@ export class ClaudeSession {
         if (env.CLAUDE_CODE_EFFORT_LEVEL !== this.env.CLAUDE_CODE_EFFORT_LEVEL) {
           throw Error("The worker's Claude effort environment changed. Stop the application session before retrying to apply it; its running applications have not been stopped.");
         }
-        await this.control.request("set_permission_mode", { mode: flag(args, "--permission-mode") });
-        await this.control.request("set_model", { model: flag(args, "--model") || "default" });
-        const settings = JSON.parse(flag(args, "--settings") || "{}");
-        settings.effortLevel = flag(args, "--effort") || null;
+        const permissionMode = flag(args, "--permission-mode"), model = flag(args, "--model") || "default";
+        if (permissionMode !== this.applied.permissionMode) {
+          await this.control.request("set_permission_mode", { mode: permissionMode });
+          this.applied.permissionMode = permissionMode;
+        }
+        if (model !== this.applied.model) {
+          await this.control.request("set_model", { model });
+          this.applied.model = model;
+        }
+        const settings = flagSettings(args);
         const enableGatewayFast = env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK === "1" && this.env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK !== "1";
         if (enableGatewayFast) {
           // Only the adapter's fresh authenticated account check supplies this
@@ -430,7 +442,10 @@ export class ClaudeSession {
           if (typeof existing !== "object" || Array.isArray(existing)) throw Error("Cannot verify native Fast environment; retry after checking the Claude session.");
           settings.env = { ...existing, CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK: "1" };
         }
-        await this.control.request("apply_flag_settings", { settings });
+        if (JSON.stringify(settings) !== JSON.stringify(this.applied.settings)) {
+          await this.control.request("apply_flag_settings", { settings });
+          this.applied.settings = settings;
+        }
         if (enableGatewayFast) this.env = { ...this.env, CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK: "1" };
       }
       checkSelection();

@@ -3,6 +3,7 @@ import { McpConnections } from "./mcp-connections.mjs";
 import { Environments } from "./environments.mjs";
 import { ChatOrganization } from "./chat-organization.mjs";
 import { Companies } from "./companies.mjs";
+import { CompanyPlugins } from "./company-plugins.mjs";
 
 // Keep IDs and encrypted payloads intact. Only the record namespace changes;
 // there is deliberately no fallback to another user's credentials or settings.
@@ -44,11 +45,12 @@ export class UserServices {
     const mcps = new McpConnections(records, { ttlMs: this.config.sessionCapabilityTtlMs, companies });
     const environments = new Environments(records, this.config.workerBackend, mcps);
     const organization = new ChatOrganization({ records, store: this.store, changed: this.changed });
+    const plugins = new CompanyPlugins(records, { companies, config: this.config });
     environments.onSaved = environment => {
       for (const chat of this.store.list()) if (chat.ownerId === ownerId && chat.environmentId === environment.id) mcps.restrictChat(chat.id, []);
     };
     await environments.initialize();
-    const services = { records, github, mcps, environments, organization, companies };
+    const services = { records, github, mcps, environments, organization, companies, plugins };
     this.ready.set(ownerId, services); return services;
   }
   all() { return [this.legacy, ...this.ready.values()]; }

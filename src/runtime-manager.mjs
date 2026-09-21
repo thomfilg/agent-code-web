@@ -60,6 +60,7 @@ const agentScopeBinding = chat => JSON.stringify([runtimeAccountBinding(chat), c
   companyForChat(chat), (chat.repositories || []).map(repository => [repository.id || null, repository.fullName || null,
     repository.githubConnectionId || null, repository.branch || null])]);
 const HIBERNATION_CAPABILITIES = "hibernation-capabilities";
+const DELETION_CLEANUP = "worker-deletion-cleanup";
 function retainedCapabilities(record, chat) {
   if (record?.schema !== 1 || record.binding !== agentScopeBinding(chat) || record.agent !== chat.agent
     || record.sessionId !== (chat.agentSessionId || null)) {
@@ -157,14 +158,12 @@ export class RuntimeManager extends EventEmitter {
       if (removeId !== undefined || resume) throw new Error("Choose one queue action at a time");
       return this.sendQueuedNow(chatId, sendNowId);
     }
-    if (this.#sendingNow.has(chatId) || this.#interruptions.has(chatId)) throw Object.assign(new Error("The agent is changing turns; please wait"), { statusCode: 409 });
     const removed = this.store.get(chatId)?.queuedMessages?.find(item => item.id === removeId);
+    if (removed && this.#queueClaims.get(chatId) === removeId) throw Object.assign(new Error("This queued message is already being sent"), { statusCode: 409 });
     if (removed?.githubEventId) {
-      if (this.#queueClaims.get(chatId) === removeId) throw Object.assign(new Error("This GitHub notification is already being sent"), { statusCode: 409 });
       await this.githubEvents.dismiss(chatId, removed.githubEventId);
     }
     if (removed?.nativeApprovalId) {
-      if (this.#queueClaims.get(chatId) === removeId) throw Object.assign(new Error("This approval retry is already being sent"), { statusCode: 409 });
       await this.approvals.cancel(chatId, removed.nativeApprovalId);
     }
     const chat = await this.store.update(chatId, current => ({
@@ -182,7 +181,7 @@ export class RuntimeManager extends EventEmitter {
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     const pending = this.#sendingNow.get(chatId);
     if (pending?.id === itemId) return pending.promise;
-    if (pending || this.#interruptions.has(chatId) || this.#switching.has(chatId) || chat.status === "stopping") throw Object.assign(new Error("This chat is already changing; please wait"), { statusCode: 409 });
+    if (pending) throw Object.assign(new Error("Another queued message is already being sent now"), { statusCode: 409 });
     if (chat.archived) throw Object.assign(new Error("Unarchive this chat before sending a message"), { statusCode: 409 });
     const item = typeof itemId === "string" && chat.queuedMessages?.find(entry => entry.id === itemId);
     if (!item) throw Object.assign(new Error("Queued message not found; it may already have been sent"), { statusCode: 404 });
@@ -196,34 +195,125 @@ export class RuntimeManager extends EventEmitter {
     return action.promise;
   }
 
+  startQueuedNow(chatId, itemId) {
+    const operation = this.sendQueuedNow(chatId, itemId);
+    void operation.catch(async error => {
+      if (error.name === "AbortError") return;
+      const chat = this.store.get(chatId);
+      if (!chat) return;
+      this.publishChat(await this.store.update(chatId, { queuePaused: true, queueError: errorMessage(error) }));
+    });
+    return this.store.get(chatId);
+  }
+
   async #sendQueuedNow(chatId, item, action) {
     const version = this.#lifecycleVersions.get(chatId) || 0;
+    const runtime = this.#runtimes.get(chatId);
+    const interruptTimeoutMs = this.config.sendNowInterruptTimeoutMs || 2_000;
+    let forced = false;
+    const interrupt = async () => {
+      const adapter = runtime?.adapter;
+      if (!adapter) return;
+      if (!adapter.interrupt) throw new Error("This agent does not support turn interruption");
+      const graceful = Promise.resolve().then(() => adapter.interrupt());
+      let timer;
+      try {
+        await Promise.race([graceful, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Agent interruption timed out")), interruptTimeoutMs);
+        })]);
+      } catch (error) {
+        if (!adapter.forceInterrupt) throw error;
+        forced = true;
+        await adapter.forceInterrupt();
+        void graceful.catch(() => {});
+      } finally { clearTimeout(timer); }
+    };
+
+    // Send now supersedes a permission control or a regular Stop already in
+    // flight. Never reject the user's priority message with a transition 409.
+    const modeChange = this.#modeChanges.get(chatId);
+    if (modeChange) {
+      runtime?.adapter.cancelPermissionModeChange?.();
+      await interrupt();
+      await modeChange.done.promise;
+    }
+    const existingInterruption = this.#interruptions.get(chatId);
+    if (existingInterruption) await existingInterruption.catch(() => {});
+    if (this.#switching.has(chatId) || this.store.get(chatId)?.status === "stopping") {
+      const queued = this.store.get(chatId)?.queuedMessages || [];
+      const priority = queued.find(entry => entry.id === item.id);
+      if (priority) this.publishChat(await this.store.update(chatId, {
+        queuePaused: false, queueError: null,
+        queuedMessages: [priority, ...queued.filter(entry => entry.id !== priority.id)],
+      }));
+      return this.store.get(chatId);
+    }
     const turn = this.#submissions.get(chatId);
     if (turn) {
       turn.cancelled = true;
       try {
-        const adapter = this.#runtimes.get(chatId)?.adapter;
         // Interrupt the provider turn, not the worker/VM or shared Chrome.
-        if (adapter) {
-          if (!adapter.interrupt) throw new Error("This agent does not support turn interruption");
-          await adapter.interrupt();
-        }
+        await interrupt();
       } catch (error) { turn.cancelled = false; throw error; }
-      await turn.done;
+      if (!forced) await turn.done;
+      else {
+        let timer;
+        const settled = await Promise.race([turn.done.then(() => true), new Promise(resolve => {
+          timer = setTimeout(() => resolve(false), interruptTimeoutMs);
+        })]);
+        clearTimeout(timer);
+        if (!settled && this.#submissions.get(chatId) === turn) {
+          // The native owner is already gone. Do not let unrelated cleanup in
+          // the abandoned turn hold the user's priority input indefinitely.
+          runtime.generation += 1;
+          runtime.busy = false;
+          runtime.eventQueue = Promise.resolve();
+          this.#submissions.delete(chatId);
+          this.#queued.delete(chatId);
+          turn.resolve();
+        }
+      }
       this.#emit(chatId, { type: "turn_interrupted" });
     } else {
-      const runtime = this.#runtimes.get(chatId);
       if (runtime?.adapter.isBackgroundBusy?.()) {
-        await runtime.adapter.interrupt();
+        await interrupt();
         await runtime.eventQueue;
         this.#emit(chatId, { type: "turn_interrupted" });
       }
     }
     await this.#draining.get(chatId);
-    if (version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(new Error("Send now cancelled because the chat was stopped"), { name: "AbortError", statusCode: 409 });
-    // Keep the existing paused/running policy and the order of all other items.
-    await this.#submitQueued(chatId, item, action);
+    if (version !== (this.#lifecycleVersions.get(chatId) || 0)) {
+      this.publishChat(await this.store.update(chatId, { queuePaused: false, queueError: null }));
+      return this.store.get(chatId);
+    }
+    // Send now is a queue-wide action. The clicked item gets priority, then
+    // every ordinary queued message is delivered in the same next turn. Items
+    // with delivery protocols (PR events/approval retries) remain separate and
+    // continue automatically afterward.
+    this.publishChat(await this.store.update(chatId, { queuePaused: false, queueError: null }));
+    const queued = this.store.get(chatId)?.queuedMessages || [];
+    const priority = queued.find(entry => entry.id === item.id) || queued[0];
+    if (!priority) return this.store.get(chatId);
+    const ordinary = [priority, ...queued.filter(entry => entry.id !== priority.id)]
+      .filter(entry => !entry.githubEventId && !entry.nativeApprovalId);
+    const combinedText = ordinary.map(entry => entry.text).join("\n\n---\n\n");
+    if (!priority.githubEventId && !priority.nativeApprovalId && ordinary.length > 1 && combinedText.length <= 100_000) {
+      await this.#submitQueuedBatch(chatId, ordinary, combinedText, action);
+    } else await this.#submitQueued(chatId, priority, action);
     return this.store.get(chatId);
+  }
+
+  async #submitQueuedBatch(chatId, items, text, action) {
+    const ids = new Set(items.map(item => item.id));
+    const attachmentIds = [...new Set(items.flatMap(item => item.attachmentIds || []))];
+    this.#queueClaims.set(chatId, items[0].id);
+    try {
+      const submitted = await this.#submit(chatId, text, attachmentIds, action);
+      this.publishChat(await this.store.update(chatId, current => ({
+        queuedMessages: (current.queuedMessages || []).filter(entry => !ids.has(entry.id)),
+      })));
+      return submitted;
+    } finally { this.#queueClaims.delete(chatId); }
   }
 
   async #submitQueued(chatId, item, action = null) {
@@ -1013,7 +1103,7 @@ export class RuntimeManager extends EventEmitter {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     if (!this.availableAgents(chat.ownerId).some(item => item.id === agent && item.enabled)) throw new Error("Choose an enabled agent for this user");
-    if (this.isBusy(chatId) || chat.status === "stopping") throw Object.assign(new Error("Stop the working agent before switching"), { statusCode: 409 });
+    if (this.#switching.has(chatId)) throw Object.assign(new Error("An agent switch is already being applied"), { statusCode: 409 });
     const agentAccountId = ["codex", "claude"].includes(agent) ? input.agentAccountId ?? (agent === chat.agent ? chat.agentAccountId : null) : null;
     if (agentAccountId || this.config.google?.enabled && ["codex", "claude"].includes(agent)) {
       if (!agentAccountId) throw new Error(`Choose a ${agent === "claude" ? "Claude" : "Codex"} account for this chat in Agent accounts`);
@@ -1077,7 +1167,7 @@ export class RuntimeManager extends EventEmitter {
       }
       if (runtime && chat.agent === "claude") this.#assertNativeAccount(chatId, runtime);
     };
-    const pending = { acknowledged: false, latest: null };
+    const pending = { acknowledged: false, latest: null, done: Promise.withResolvers() };
     this.#modeChanges.set(chatId, pending);
     try {
       check();
@@ -1098,7 +1188,7 @@ export class RuntimeManager extends EventEmitter {
       } while (pending.latest && updated.mode !== pending.latest);
       if (applied && runtime.modeState) Object.assign(runtime.modeState, { mode: updated.mode, revision: updated.modeSettingsRevision, conflict: false });
       this.publishChat(updated); return updated;
-    } finally { this.#modeChanges.delete(chatId); void this.#drainQueue(chatId); }
+    } finally { this.#modeChanges.delete(chatId); pending.done.resolve(); void this.#drainQueue(chatId); }
   }
 
   #checkClaudeConfiguration(chat, text, attachments) {
@@ -1557,8 +1647,10 @@ export class RuntimeManager extends EventEmitter {
     turn.done = turn.promise;
     this.#submissions.set(chatId, turn);
     const finish = () => {
-      this.#queued.delete(chatId);
-      this.#submissions.delete(chatId);
+      if (this.#submissions.get(chatId) === turn) {
+        this.#queued.delete(chatId);
+        this.#submissions.delete(chatId);
+      }
       turn.resolve();
       void this.#drainQueue(chatId);
     };
@@ -1836,7 +1928,8 @@ export class RuntimeManager extends EventEmitter {
   async #interruptTurn(chatId) {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
-    if (chat.status === "stopping" || this.#sendingNow.has(chatId) || this.#switching.has(chatId)) throw Object.assign(new Error("This chat is already changing; please wait"), { statusCode: 409 });
+    if (this.#sendingNow.has(chatId)) return this.#sendingNow.get(chatId).promise;
+    if (chat.status === "stopping" || this.#switching.has(chatId)) return chat;
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const turn = this.#submissions.get(chatId);
     if (turn) turn.cancelled = true;
@@ -2122,6 +2215,7 @@ export class RuntimeManager extends EventEmitter {
       if (stopped) this.#previewBlocked.delete(chatId); else this.#previewBlocked.add(chatId);
       const pending = this.#previewStops.get(chatId) - 1;
       if (pending) this.#previewStops.set(chatId, pending); else this.#previewStops.delete(chatId);
+      if (!['deleted', 'shutdown'].includes(reason)) void this.#drainQueue(chatId);
     }
   }
 
@@ -2152,7 +2246,12 @@ export class RuntimeManager extends EventEmitter {
   async remove(chatId) {
     const chat = this.store.get(chatId);
     if (!chat) return false;
-    await this.stop(chatId, "deleted");
+    // Deleting the product record is the user action. Stopping/destroying the
+    // worker is best-effort infrastructure cleanup and must never hold the UI
+    // hostage behind a stale lease or an unresponsive native process.
+    let cleanupError = null;
+    try { await this.stop(chatId, "deleted"); }
+    catch (error) { cleanupError = error; }
     this.presence.remove(chatId);
     if (chat.agent !== "mock") {
       let workerLifecycleGeneration;
@@ -2170,15 +2269,45 @@ export class RuntimeManager extends EventEmitter {
         await this.store.update(chatId, current => ({ workerLifecycle: finishWorkerLifecycle(current.workerLifecycle, {
           generation: workerLifecycleGeneration, action: "destroy", status: "failed", mutation: "none", cleanup: "failed",
         }, nowIso()) })).catch(() => {});
-        throw error;
+        cleanupError ||= error;
       }
     }
+    if (cleanupError && this.store.records) await this.store.records.put(DELETION_CLEANUP, chatId, {
+      id: chatId, createdAt: nowIso(), attempts: 0, error: errorMessage(cleanupError).slice(0, 500),
+    }).catch(() => {});
     const removed = await this.store.remove(chatId);
     this.agentThreads.forget(chatId);
     await this.attachments?.removeChat(chatId);
     this.#emit(chatId, { type: "chat_deleted", chatId });
     this.#events.delete(chatId);
+    if (cleanupError) void this.retryDeletionCleanup().catch(() => {});
     return removed;
+  }
+
+  async retryDeletionCleanup() {
+    if (!this.store.records) return;
+    let remaining = false;
+    for (const pending of await this.store.records.list(DELETION_CLEANUP)) {
+      if (!/^chat_[a-f0-9]{32}$/.test(pending?.id || "")) {
+        await this.store.records.delete(DELETION_CLEANUP, pending?.id || "invalid").catch(() => {});
+        continue;
+      }
+      try {
+        await this.workerBackend.destroy({ id: pending.id });
+        await this.store.records.delete(DELETION_CLEANUP, pending.id);
+      } catch (error) {
+        remaining = true;
+        await this.store.records.put(DELETION_CLEANUP, pending.id, {
+          ...pending, attempts: (pending.attempts || 0) + 1, lastAttemptAt: nowIso(), error: errorMessage(error).slice(0, 500),
+        }).catch(() => {});
+      }
+    }
+    clearTimeout(this.deletionCleanupTimer);
+    this.deletionCleanupTimer = null;
+    if (remaining) {
+      this.deletionCleanupTimer = setTimeout(() => { void this.retryDeletionCleanup().catch(() => {}); }, 60_000);
+      this.deletionCleanupTimer.unref?.();
+    }
   }
 
   async respond(chatId, requestId, input = {}) {
@@ -2200,6 +2329,7 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async shutdown() {
+    clearTimeout(this.deletionCleanupTimer);
     this.githubWorkers?.shutdown();
     this.previewActivity.close();
     this.presence.clear();
@@ -2335,6 +2465,13 @@ export class RuntimeManager extends EventEmitter {
             : await mcps.runtime(chatId, ids, executor.gatewayOrigin || this.gatewayOrigin, chat);
         }
         checkCancelled();
+      }
+      if (executor && !recoveringNative) {
+        const pluginService = (await this.servicesFor(chat)).plugins;
+        if (pluginService && await pluginService.configured(chat)) {
+          checkCancelled();
+          await this.#startupTask(chatId, "plugins", version, async () => { checkCancelled(); await pluginService.prepare(executor, chat); checkCancelled(); });
+        }
       }
       if (executor && this.browsers) {
         if (recoveringNative && !retained.browser) throw new Error("The retained Shared Browser capability is unavailable; use Stop before continuing");

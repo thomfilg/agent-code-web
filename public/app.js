@@ -49,6 +49,7 @@ import { agentAccountLabel } from "./agent-account-options.js";
 import { ChatRepositoryPicker } from "./chat-repository-picker.js";
 import { CompaniesPage } from "./companies.js";
 import { CompanySettings } from "./company-settings.js";
+import { CompanyPluginSettings } from "./company-plugins.js";
 import { workingStatus, canInterruptWithEscape } from "./working-status.js";
 import { StartupProgress } from "./startup-progress.js";
 import { SavedPromptPicker } from "./saved-prompts.js";
@@ -282,26 +283,26 @@ function renderActive() {
     : suspensionStatus === "hibernated" ? "hibernated"
     : suspensionStatus === "failed" && chat.status === "error" ? "hibernation failed"
     : chat.status === "idle" && chat.idleKeepAwakeReason ? "Ready" : chat.status;
-  const deleting = state.deletingChats.has(chat.id);
-  elements.detail.textContent = deleting ? "Deleting chat · waiting for its worker to stop…" : chat.statusDetail || "";
+  elements.detail.textContent = chat.statusDetail || "";
   elements.statusDot.className = `status-dot ${chat.status}`;
-  $("#stop-button").disabled = deleting || chat.status === "stopped";
-  $("#delete-button").disabled = deleting;
-  $("#delete-button").setAttribute("aria-busy", String(deleting));
-  const switching = state.switchingChat === chat.id;
-  const firstMessagePending = state.initialMessageChat === chat.id;
+  $("#stop-button").disabled = false;
+  $("#delete-button").disabled = false;
+  $("#delete-button").removeAttribute("aria-busy");
   const busy = ["running", "starting"].includes(chat.status);
   renderWorkingStatus();
-  const unavailable = deleting || switching || chat.status === "stopping" || chat.workflowState === "archived";
-  elements.send.disabled = unavailable || firstMessagePending || runtimeWake.isWaiting(chat.id) || interruptingChats.has(chat.id);
-  elements.input.disabled = unavailable;
-  elements.send.type = busy ? "button" : "submit";
-  elements.send.setAttribute("aria-label", interruptingChats.has(chat.id) ? "Stopping agent turn" : busy ? "Stop agent" : "Send message");
-  elements.send.title = busy ? (chat.queuedMessages?.length ? "Interrupt this turn and send the next queued message" : "Interrupt this turn; keep the environment running") : "Send message";
-  elements.send.querySelector("path").setAttribute("d", busy ? "M7 7h10v10H7z" : "m5 12 7-7 7 7M12 5v14");
-  $("#queue-message").hidden = !busy || runtimeWake.isWaiting(chat.id); $("#queue-message").disabled = unavailable || firstMessagePending;
+  // Runtime transitions never lock the composer. Submitting while the agent is
+  // busy is an ordinary queue operation; the controller owns serialization.
+  elements.send.disabled = false;
+  elements.input.disabled = false;
+  elements.send.type = "submit";
+  elements.send.setAttribute("aria-label", busy ? "Queue message" : "Send message");
+  elements.send.title = busy ? "Queue message" : "Send message";
+  elements.send.querySelector("path").setAttribute("d", "m5 12 7-7 7 7M12 5v14");
+  $("#interrupt-button").hidden = !busy;
+  $("#interrupt-button").disabled = false;
+  $("#queue-message").hidden = !busy; $("#queue-message").disabled = false;
   renderKeyboardHints();
-  elements.input.placeholder = chat.workflowState === "archived" ? "Archived · unarchive this chat to continue" : "Ask your agent to build, inspect, or fix something…";
+  elements.input.placeholder = chat.workflowState === "archived" ? "Send to unarchive and continue…" : "Ask your agent to build, inspect, or fix something…";
   const namedAccounts = state.config.features?.agentAccounts && chat.agent !== "mock";
   if (namedAccounts) {
     const accounts = workspaceSettings.accounts?.filter(item => item.status === "connected") || [];
@@ -321,14 +322,13 @@ function renderActive() {
   elements.agentPicker.value = namedAccounts ? chat.agentAccountId || "" : chat.agent;
   elements.agentPicker.classList.toggle("account-select", namedAccounts);
   const noAgent = [...elements.agentPicker.options].every(option => option.disabled);
-  elements.agentPicker.disabled = noAgent || switching || firstMessagePending || ["running", "starting", "stopping"].includes(chat.status);
-  elements.agentPicker.title = noAgent ? "Connect an agent in Agent accounts" : elements.agentPicker.disabled ? "Stop the working agent before switching" : "Switch agent · conversation and workspace are retained";
+  elements.agentPicker.disabled = noAgent;
+  elements.agentPicker.title = noAgent ? "Connect an agent in Agent accounts" : "Switch agent · conversation and workspace are retained";
   const accountButton = $("#chat-agent-account");
   accountButton.hidden = !state.config.features?.agentAccounts || chat.agent === "mock";
   accountButton.textContent = "⚙"; accountButton.setAttribute("aria-label", "Manage chat agent accounts");
-  accountButton.disabled = switching;
+  accountButton.disabled = false;
   activeModelPicker.setAgent(state.config.features?.agentAccounts && ["codex", "claude"].includes(chat.agent) && (!account || account.status !== "connected") ? null : chat.agent, chat);
-  if (switching) { activeModelPicker.model.disabled = true; activeModelPicker.effort.disabled = true; }
   renderMessages();
   renderApproval();
   tickCountdown();
@@ -345,6 +345,12 @@ function renderQueue() {
   const pending = state.queueActions.get(chat.id);
   const edit = async body => {
     if (state.queueActions.has(chat.id)) return;
+    if (body.sendNowId) {
+      // Send all now is admitted synchronously by the controller. Do not show
+      // a fake loading state while the native turn is being interrupted.
+      void api(`/api/chats/${chat.id}/queue`, { method: "PATCH", body: JSON.stringify(body) }).catch(error => toast(error.message));
+      return;
+    }
     state.queueActions.set(chat.id, body); renderQueue();
     try {
       const result = await api(`/api/chats/${chat.id}/queue`, { method: "PATCH", body: JSON.stringify(body) });
@@ -354,12 +360,12 @@ function renderQueue() {
   };
   if (chat.queuePaused) { const resume = node("button", "secondary-button", "Resume queue"); resume.type = "button"; resume.disabled = Boolean(pending); resume.onclick = () => edit({ resume: true }); root.append(resume); }
   for (const item of chat.queuedMessages) {
-    const row = node("div", "queue-row"), remove = node("button", "small-icon", "×"), sendNow = node("button", "queue-send-now", pending?.sendNowId === item.id ? "Sending…" : "Send now");
+    const row = node("div", "queue-row"), remove = node("button", "small-icon", "×"), sendNow = node("button", "queue-send-now", "Send all now");
     row.dataset.queueId = item.id;
     const preview = node("span", "queue-text", item.text); preview.title = item.text;
     sendNow.type = remove.type = "button";
     sendNow.disabled = remove.disabled = Boolean(pending);
-    sendNow.title = "Interrupt the current turn and send this message next";
+    sendNow.title = "Interrupt the current turn, send this message first, then send the rest of the queue";
     sendNow.onclick = () => edit({ sendNowId: item.id });
     remove.setAttribute("aria-label", "Remove queued message"); remove.onclick = () => edit({ removeId: item.id });
     row.append(preview, sendNow, remove); root.append(row);
@@ -496,7 +502,7 @@ async function resolveRequest(payload, target) {
 }
 
 async function openNewChat({ closeSidebar = true, project } = {}) {
-  if (!state.newChatReady) { toast("Relay is still loading. Try again in a moment."); return; }
+  if (!state.newChatReady) { state.pendingNewChat = { closeSidebar, project }; return; }
   if (state.creatingChat || state.openingNewChat) return;
   const selection = state.selection = (state.selection || 0) + 1;
   if (state.active) { state.chatDrafts ||= new Map(); state.chatDrafts.set(state.active.id, elements.input.value); }
@@ -504,10 +510,10 @@ async function openNewChat({ closeSidebar = true, project } = {}) {
   history.replaceState(null, "", "#new"); renderChats(); renderActive();
   if (closeSidebar) elements.sidebar.classList.remove("open");
   $("#create-chat-error").textContent = "";
-  state.openingNewChat = true; $("#new-chat-fields").disabled = true; $("#new-chat-status").textContent = "Loading accounts and repositories…";
+  state.openingNewChat = true; $("#new-chat-status").textContent = "";
   try { await workspaceSettings.openNew(project, { validWhile: () => state.selection === selection }); renderSecurityHint(); if (state.selection === selection) $("#initial-prompt").focus(); }
   catch (error) { $("#create-chat-error").textContent = error.message; }
-  finally { state.openingNewChat = false; $("#new-chat-fields").disabled = false; $("#new-chat-status").textContent = ""; }
+  finally { state.openingNewChat = false; $("#new-chat-status").textContent = ""; }
 }
 
 async function openCompanies() {
@@ -545,11 +551,7 @@ async function createChat(event) {
   const attachmentDraftKey = chatControls.draftKey();
   state.creatingChat = true;
   const selection = state.selection;
-  $("#new-chat-fields").disabled = true; elements.newForm.setAttribute("aria-busy", "true");
-  $("#new-chat-progress").hidden = false; $("#new-chat-overview").hidden = true;
-  $("#new-chat-progress .new-chat-prompt").textContent = initialPrompt;
   $("#initial-prompt").value = ""; $("#initial-prompt").style.height = "auto";
-  $("#new-chat-status").textContent = "Preparing your chat…";
   $("#create-chat-error").textContent = "";
   try {
     await chatControls.waitForUploads(attachmentDraftKey);
@@ -570,6 +572,7 @@ async function createChat(event) {
     if (initialPrompt.trim().startsWith("/")) {
       const query = new URLSearchParams({ agent: payload.agent });
       if (payload.agentAccountId) query.set("agentAccountId", payload.agentAccountId);
+      const companyId = selectedNewChatCompany(); if (companyId) query.set("companyId", companyId);
       const catalog = await api(`/api/new-chat/commands?${query}`);
       if (state.selection !== selection || state.active) throw new Error("The chat selection changed while its command catalog was loading. Your command was not sent.");
       initialCommand = firstChatCommand(initialPrompt, payload.agent, catalog.commands);
@@ -639,8 +642,7 @@ async function createChat(event) {
     }
   } catch (error) { $("#initial-prompt").value = initialPrompt; $("#create-chat-error").textContent = error.message; }
   finally {
-    state.creatingChat = false; $("#new-chat-fields").disabled = false; elements.newForm.removeAttribute("aria-busy");
-    $("#new-chat-progress").hidden = true; $("#new-chat-overview").hidden = false; $("#new-chat-status").textContent = "";
+    state.creatingChat = false;
     workspaceSettings.updateCreateAvailability();
     chatControls.renderAttachments();
   }
@@ -670,8 +672,15 @@ async function forkFromComposer(chatId, text) {
 
 async function sendMessage(event) {
   event.preventDefault();
-  if (!state.active || state.waitingForUploads || state.initialMessageChat === state.active.id) return;
-  if (runtimeWake.isWaiting(state.active.id)) { toast("The environment is waking up. Your draft is kept; send it when ready."); return; }
+  if (!state.active || state.waitingForUploads) return;
+  if (state.active.workflowState === "archived") {
+    const id = state.active.id;
+    try {
+      const { chat } = await api(`/api/chats/${id}`, { method: "PATCH", body: JSON.stringify({ archived: false }) });
+      updateChatSummary(chat);
+      if (state.active?.id === id) state.active = { ...state.active, ...chat };
+    } catch (error) { toast(error.message); return; }
+  }
   const waitingChat = state.active.id;
   if (chatControls.uploads.has(waitingChat)) {
     state.waitingForUploads = true;
@@ -793,7 +802,8 @@ async function sendMessage(event) {
     try { if (await runWebCommand(text)) { if (state.selection === selection && state.active?.id === chatId && elements.input.value.trim() === text) { elements.input.value = ""; resizeInput(); } return; } }
     catch (error) { toast(error.message); return; } // Failed controls keep the typed command.
   }
-  const queued = ["starting", "running", "stopping"].includes(state.active.status) || state.active.queuedMessages?.length;
+  const queued = ["starting", "running", "stopping"].includes(state.active.status) || state.active.queuedMessages?.length
+    || state.initialMessageChat === chatId || runtimeWake.isWaiting(chatId);
   elements.input.value = "";
   messageHistory.reset();
   resizeInput();
@@ -869,7 +879,7 @@ function toast(message, { outsideDialog = false } = {}) {
 
 async function boot() {
   state.newChatReady = false;
-  $("#new-chat-button").disabled = true; $("#new-chat-button").title = "Loading your accounts and repositories…";
+  $("#new-chat-button").disabled = false; $("#new-chat-button").title = "New chat";
   setupPanelResizers();
   const auth = await api("/api/auth");
   googleLogin.render(auth);
@@ -896,6 +906,7 @@ async function boot() {
   }
   await workspaceSettings.loadCurrent();
   state.newChatReady = true;
+  $("#new-chat-fields").disabled = false;
   $("#new-chat-button").disabled = false; $("#new-chat-button").title = "New chat";
   $("#isolation-label").textContent = state.config.workerBackend === "ec2"
     ? "One EC2 worker per chat"
@@ -903,8 +914,10 @@ async function boot() {
   renderChats();
   // A user can open the mobile drawer while startup settings are loading.
   // Automatic initial selection must not undo that explicit interaction.
-  const linkedChat = state.chats.find(chat => location.hash === `#chat=${chat.id}`);
-  if (location.hash === "#companies") await openCompanies();
+  const linkedChat = state.chats.find(chat => location.hash === `#chat=${chat.id}`), pendingNewChat = state.pendingNewChat;
+  state.pendingNewChat = null;
+  if (pendingNewChat) await openNewChat(pendingNewChat);
+  else if (location.hash === "#companies") await openCompanies();
   else if (linkedChat) await selectChat(linkedChat.id, { closeSidebar: false });
   else await openNewChat({ closeSidebar: false });
 }
@@ -932,14 +945,14 @@ const interruptingChats = new Set();
 async function interruptAgent() {
   const id = state.active?.id;
   if (!id || interruptingChats.has(id)) return;
-  interruptingChats.add(id); elements.send.disabled = true; elements.send.setAttribute("aria-label", "Stopping agent turn");
+  interruptingChats.add(id);
   try {
     const { chat } = await api(`/api/chats/${id}/interrupt`, { method: "POST", body: "{}" });
     if (chat) { updateChatSummary(chat); if (state.active?.id === id && (chat.revision || 0) >= (state.active.revision || 0)) state.active = chat; }
   } catch (error) { toast(`Could not interrupt the agent: ${error.message}`); }
   finally { interruptingChats.delete(id); if (state.active?.id === id) renderActive(); }
 }
-elements.send.addEventListener("click", () => { if (elements.send.type === "button") void interruptAgent(); });
+$("#interrupt-button").addEventListener("click", () => void interruptAgent());
 function renderWorkingStatus() {
   const text = workingStatus(state.active, state.liveTools);
   $("#working-status").textContent = text;
@@ -995,19 +1008,24 @@ $("#stop-button").addEventListener("click", async () => {
   try { await api(`/api/chats/${state.active.id}/stop`, { method: "POST", body: "{}" }); }
   catch (error) { toast(error.message); }
 });
-async function deleteChat(chat) {
+async function deleteChat(chat, { confirmed = false } = {}) {
   if (chat && state.deletingChats.has(chat.id)) return false;
-  if (!chat || !confirm(`Permanently delete “${chat.title}”, its messages, and its workspace files? Any running agent will be stopped. This cannot be undone.`)) return false;
+  if (!chat || !confirmed && !confirm(`Permanently delete “${chat.title}”, its messages, and its workspace files? Any running agent will be stopped. This cannot be undone.`)) return false;
   const id = chat.id;
-  state.deletingChats.add(id); renderChats(); renderActive();
-  try {
-    await api(`/api/chats/${id}`, { method: "DELETE" });
-    await forgetChat(id);
+  // Deletion is immediate from the user's perspective. Worker shutdown and
+  // workspace cleanup continue in the request without trapping the UI in a
+  // modal or a synthetic "deleting" chat state.
+  state.deletingChats.add(id);
+  await forgetChat(id);
+  void api(`/api/chats/${id}`, { method: "DELETE" }).then(() => {
+    state.deletingChats.delete(id);
     toast("Chat and workspace permanently deleted.");
-    return true;
-  } finally {
-    state.deletingChats.delete(id); renderChats(); renderActive();
-  }
+  }).catch(async error => {
+    state.deletingChats.delete(id);
+    toast(`${error.message} The chat was restored; retry deletion.`);
+    await sidebar.refresh().catch(() => {});
+  });
+  return true;
 }
 async function forgetChat(id) {
   vimComposer.forget(id);
@@ -1101,7 +1119,8 @@ const browserConnectionSettings = new BrowserConnectionSettings({ api, state, to
   },
   chatUpdated: chat => { updateChatSummary(chat); if (state.active?.id === chat.id) { state.active = chat; renderActive(); } },
 });
-const companySettings = new CompanySettings({ api, state, workspace: workspaceSettings, mcps: mcpSettings, browsers: browserConnectionSettings });
+const companyPluginSettings = new CompanyPluginSettings({ api });
+const companySettings = new CompanySettings({ api, state, workspace: workspaceSettings, mcps: mcpSettings, browsers: browserConnectionSettings, plugins: companyPluginSettings });
 const savedPrompts = new SavedPromptPicker({ api, toast, context: () => {
   const selection = state.active || { repositories: workspaceSettings.selected }, companyId = companyForChat(selection);
   const repository = selection.repositories?.[0]?.fullName;
@@ -1150,13 +1169,17 @@ const vimComposer = new VimComposer({ input: elements.input, getChatId: () => st
 });
 $("#keymap-button").addEventListener("click", () => void keymap.open().catch(error => toast(error.message)));
 const slashComposer = new SlashComposer({ state, api });
+function selectedNewChatCompany() {
+  return companyForChat({ repositories: workspaceSettings.selected }) || workspaceSettings.selectedEnvironment()?.companies?.[0] || workspaceSettings.selectionCompany || "";
+}
 const newSlashComposer = new SlashComposer({ state, api, input: $("#initial-prompt"), prefix: "new-slash", trigger: null,
-  context: () => state.active ? null : { id: "new", agent: $("#agent-select").value, agentAccountId: $("#new-agent-account").value },
+  context: () => state.active ? null : { id: "new", agent: $("#agent-select").value, agentAccountId: $("#new-agent-account").value, companyId: selectedNewChatCompany() },
   caption: chat => `${{ codex: "Codex", claude: "Claude", mock: "Mock agent" }[chat.agent] || "Choose an agent"} · new chat · selected account`,
-  catalog: chat => chat.agent ? api(`/api/new-chat/commands?agent=${encodeURIComponent(chat.agent)}${chat.agentAccountId ? `&agentAccountId=${encodeURIComponent(chat.agentAccountId)}` : ""}`) : Promise.resolve(newChatCommands(null)),
+  catalog: chat => chat.agent ? api(`/api/new-chat/commands?agent=${encodeURIComponent(chat.agent)}${chat.agentAccountId ? `&agentAccountId=${encodeURIComponent(chat.agentAccountId)}` : ""}${chat.companyId ? `&companyId=${encodeURIComponent(chat.companyId)}` : ""}`) : Promise.resolve(newChatCommands(null)),
 });
 for (const id of ["#agent-select", "#new-agent-account"]) $(id).addEventListener("change", () => newSlashComposer.refresh("new"));
 window.addEventListener("relay-new-chat-selection-changed", () => newSlashComposer.refresh("new"));
+window.addEventListener("relay-company-plugins-changed", () => newSlashComposer.refresh("new"));
 const workspaceContext = new WorkspaceContext({ state, api, controls: chatControls, toast });
 const nativeApps = new NativeAppsPicker({ state, api, controls: chatControls, toast });
 const nativePlugins = new NativePluginsPicker({ state, api, controls: chatControls, changed: chatId => slashComposer.invalidate(chatId) });
@@ -1198,19 +1221,28 @@ const activeModelPicker = new ModelPicker({ root: $("#composer-model-controls"),
   updateChatSummary(chat);
   if (state.active?.id === id) state.active = { ...state.active, ...chat };
 } });
+let requestedAgentSwitch = null;
+let agentSwitchRunning = false;
 elements.agentPicker.addEventListener("change", async () => {
   const chat = state.active; if (!chat) return;
   const account = state.config.features?.agentAccounts && chat.agent !== "mock" ? workspaceSettings.accounts?.find(item => item.id === elements.agentPicker.value && item.status === "connected") : null;
-  const agent = account?.provider || elements.agentPicker.value;
-  if (agent === chat.agent && (!account || account.id === chat.agentAccountId)) return;
-  state.switchingChat = chat.id; renderActive();
+  requestedAgentSwitch = { chatId: chat.id, agent: account?.provider || elements.agentPicker.value, agentAccountId: account?.id || null };
+  if (agentSwitchRunning) return;
+  agentSwitchRunning = true;
   try {
-    await activeModelPicker.saving;
-    const result = await api(`/api/chats/${chat.id}/agent`, { method: "PATCH", body: JSON.stringify({ agent, ...(account ? { agentAccountId: account.id } : {}) }) });
-    updateChatSummary(result.chat);
-    if (state.active?.id === chat.id) { state.active = result.chat; state.stream = null; state.liveTools.clear(); }
-  } catch (error) { toast(error.message); }
-  finally { state.switchingChat = null; activeModelPicker.key = null; renderActive(); }
+    while (requestedAgentSwitch) {
+      const requested = requestedAgentSwitch; requestedAgentSwitch = null;
+      const current = state.chats.find(item => item.id === requested.chatId) || (state.active?.id === requested.chatId ? state.active : null);
+      if (!current || requested.agent === current.agent && requested.agentAccountId === (current.agentAccountId || null)) continue;
+      state.switchingChat = requested.chatId;
+      try {
+        await activeModelPicker.saving;
+        const result = await api(`/api/chats/${requested.chatId}/agent`, { method: "PATCH", body: JSON.stringify({ agent: requested.agent, ...(requested.agentAccountId ? { agentAccountId: requested.agentAccountId } : {}) }) });
+        updateChatSummary(result.chat);
+        if (state.active?.id === requested.chatId) { state.active = result.chat; state.stream = null; state.liveTools.clear(); }
+      } catch (error) { toast(error.message); }
+    }
+  } finally { agentSwitchRunning = false; state.switchingChat = null; activeModelPicker.key = null; renderActive(); }
 });
 setInterval(tickCountdown, 1000);
 

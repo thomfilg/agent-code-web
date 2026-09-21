@@ -190,9 +190,10 @@ test("delete errors stay actionable and deleting the last chat clears its previe
     return route.continue();
   });
   page.once("dialog", dialog => dialog.accept()); await page.locator("#organize-delete-chat").click();
-  await expect(page.locator("#organize-error")).toContainText("Please retry"); await expect(page.locator("#organize-delete-chat")).toBeEnabled();
+  await expect(page.locator("#organize-dialog")).not.toBeVisible(); await expect(page.locator("#toasts")).toContainText("Please retry");
   expect((await page.request.get(`/api/chats/${chat.id}`)).ok()).toBe(true);
-  failDelete = false; page.once("dialog", dialog => dialog.accept()); await page.locator("#organize-delete-chat").click();
+  await expect(page.locator(`.chat-row[data-chat-id="${chat.id}"]`)).toHaveCount(1);
+  failDelete = false; await page.getByRole("button", { name: `Organize ${chat.title}`, exact: true }).click(); page.once("dialog", dialog => dialog.accept()); await page.locator("#organize-delete-chat").click();
   await expect(page.locator("#organize-dialog")).not.toBeVisible(); await expect(page.locator("#new-chat-page")).toBeVisible();
   await expect(page.locator("#initial-prompt")).toBeVisible();
   await expect(page.locator("#preview-panel")).not.toBeVisible(); await expect(page.locator("#preview-content iframe")).toHaveCount(0);
@@ -408,42 +409,42 @@ test("Compact stays available for working and stopped agents, queues /compact, a
     await expect(page.getByLabel("Message", { exact: true })).toHaveValue("Keep this draft");
   }
 });
-test("Send now targets one queued message, retains the others and preserves drafts on failure and retry", async ({ page }) => {
+test("Send all now prioritizes the clicked message, sends the full queue and never shows a loading lock", async ({ page }) => {
   const queuedMessages = [{ id: "queued-one", text: "Do this later" }, { id: "queued-two", text: "Do this now" }, { id: "queued-three", text: "Then this" }];
   const chat = await openFixture(page, [], { status: "running", queuedMessages });
   const input = page.getByLabel("Message", { exact: true }); await input.fill("An unfinished draft");
-  const patches = []; let fail = true, release;
-  const gate = new Promise(resolve => { release = resolve; });
+  const patches = []; let fail = true;
   await page.route(`**/api/chats/${chat.id}/queue`, async route => {
     patches.push(route.request().postDataJSON());
     if (fail) return route.fulfill({ status: 503, json: { error: "Retry sending this queued message" } });
-    await gate;
-    await route.fulfill({ json: { chat: { ...chat, status: "running", revision: 1000, queuedMessages: [queuedMessages[0], queuedMessages[2]] } } });
+    await route.continue();
   });
   const selected = page.locator('[data-queue-id="queued-two"]');
-  await expect(selected.getByRole("button", { name: "Send now", exact: true })).toBeVisible();
-  await selected.getByRole("button", { name: "Send now", exact: true }).click();
+  await expect(selected.getByRole("button", { name: "Send all now", exact: true })).toBeVisible();
+  await selected.getByRole("button", { name: "Send all now", exact: true }).click();
   await expect(page.locator("#toasts")).toContainText("Retry sending");
   await expect(page.locator(".queue-row")).toHaveCount(3); await expect(input).toHaveValue("An unfinished draft");
-  fail = false; await selected.getByRole("button", { name: "Send now", exact: true }).click();
-  await expect(selected.getByRole("button", { name: "Sending…", exact: true })).toBeDisabled();
+  fail = false; await selected.getByRole("button", { name: "Send all now", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Sending…", exact: true })).toHaveCount(0);
   expect(patches).toEqual([{ sendNowId: "queued-two" }, { sendNowId: "queued-two" }]);
-  release(); await expect(selected).toHaveCount(0); await expect(page.locator(".queue-row")).toHaveCount(2);
-  await expect(page.locator(".queue-text")).toHaveText(["Do this later", "Then this"]);
+  // The request is fire-and-forget; rows disappear only when the controller's
+  // live event arrives. There is deliberately no local loading/disabled state.
+  await expect(page.locator(".queue-row")).toHaveCount(3);
   await expect(input).toHaveValue("An unfinished draft");
 });
 
-test("busy composer accepts queued messages and its main button interrupts without stopping the worker", async ({ page }) => {
+test("busy composer keeps send active and exposes a separate interruption without stopping the worker", async ({ page }) => {
   const chat = await openFixture(page, [], { status: "running" });
   let queued = "", interrupted = 0, stopped = 0;
   await page.route(`**/api/chats/${chat.id}/queue`, route => { queued = route.request().postDataJSON().text; return route.fulfill({ json: { chat } }); });
   await page.route(`**/api/chats/${chat.id}/interrupt`, route => { interrupted++; return route.fulfill({ json: { chat: { ...chat, status: "idle" } } }); });
   await page.route(`**/api/chats/${chat.id}/stop`, route => { stopped++; return route.fulfill({ json: { stopped: true } }); });
   const input = page.getByLabel("Message", { exact: true }); await expect(input).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Stop agent", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Queue message", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Interrupt agent", exact: true })).toBeEnabled();
   await input.fill("Do this next"); await input.press("Enter"); await expect.poll(() => queued).toBe("Do this next");
   await input.fill("Keep this unsent draft");
-  await page.getByRole("button", { name: "Stop agent", exact: true }).click(); await expect.poll(() => interrupted).toBe(1);
+  await page.getByRole("button", { name: "Interrupt agent", exact: true }).click(); await expect.poll(() => interrupted).toBe(1);
   await expect(input).toHaveValue("Keep this unsent draft"); expect(stopped).toBe(0); expect(queued).toBe("Do this next");
 });
 test("MCP connection is saved masked and assigned once to its company", async ({ page }) => {

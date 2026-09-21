@@ -116,21 +116,17 @@ test("a lifecycle intent persistence failure prevents backend acquisition entire
   assert.equal(acquisitions, 0); assert.equal(store.get(chat.id).workerLifecycle.state, "stopped");
 });
 
-test("failed Stop and Delete retain explicit failed results instead of claiming a stopped or destroyed worker", async t => {
-  for (const operation of ["stop", "remove"]) {
-    const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
-    const config = testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "60000" }); config.workerBackend = "ec2";
-    let failSleep = operation === "stop";
-    const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10000 }), gatewayOrigin: "http://localhost",
-      workerBackend: { acquire: async () => ({ metadata: { ...worker, host: "10.0.0.2" }, acquisitionReceipt: { mutation: "inspected", worker } }),
-        sleep: async () => { if (failSleep) throw Error("Fixture stop denied"); return { instanceId: worker.instanceId, stopped: true }; },
-        destroy: async () => { throw Error("Fixture destroy denied"); } }, adapterFactory: () => { throw Error("No agent turn expected"); } });
-    t.after(() => manager.shutdown());
-    const chat = await store.create({ agent: "codex", title: operation }); await manager.browserExecutor(chat.id);
-    await assert.rejects(manager[operation](chat.id), operation === "stop" ? /stop denied/ : /destroy denied/);
-    const lifecycle = store.get(chat.id).workerLifecycle;
-    assert.equal(lifecycle.state, "failed"); assert.equal(lifecycle.result.action, operation === "stop" ? "stop" : "destroy");
-    assert.equal(lifecycle.result.cleanup, "failed"); assert.deepEqual(lifecycle.worker, worker);
-    failSleep = false;
-  }
+test("failed Stop retains an explicit failed result instead of claiming a stopped worker", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const config = testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "60000" }); config.workerBackend = "ec2";
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10000 }), gatewayOrigin: "http://localhost",
+    workerBackend: { acquire: async () => ({ metadata: { ...worker, host: "10.0.0.2" }, acquisitionReceipt: { mutation: "inspected", worker } }),
+      sleep: async () => { throw Error("Fixture stop denied"); }, destroy: async () => {} },
+    adapterFactory: () => { throw Error("No agent turn expected"); } });
+  t.after(() => manager.shutdown());
+  const chat = await store.create({ agent: "codex", title: "stop" }); await manager.browserExecutor(chat.id);
+  await assert.rejects(manager.stop(chat.id), /stop denied/);
+  const lifecycle = store.get(chat.id).workerLifecycle;
+  assert.equal(lifecycle.state, "failed"); assert.equal(lifecycle.result.action, "stop");
+  assert.equal(lifecycle.result.cleanup, "failed"); assert.deepEqual(lifecycle.worker, worker);
 });

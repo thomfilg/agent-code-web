@@ -5,11 +5,13 @@ import { prepareChrome } from "./chrome-software.mjs";
 
 export function captureWorker(executor, command, args, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = executor.spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+    const { maxOutput, ...spawnOptions } = options;
+    const child = executor.spawn(command, args, { ...spawnOptions, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
+    const outputLimit = Math.min(Math.max(Number(maxOutput) || 12000, 12000), 128 * 1024);
     const timer = setTimeout(() => { terminateWorker(child).catch(() => {}); reject(new Error("Software setup timed out")); }, 600000);
-    child.stdout.on("data", chunk => { output = (output + chunk).slice(-12000); });
-    child.stderr.on("data", chunk => { output = (output + chunk).slice(-12000); });
+    child.stdout.on("data", chunk => { output = (output + chunk).slice(-outputLimit); });
+    child.stderr.on("data", chunk => { output = (output + chunk).slice(-outputLimit); });
     child.once("error", error => { clearTimeout(timer); reject(error); });
     child.once("close", code => { clearTimeout(timer); code === 0 ? resolve(output.trim()) : reject(new Error(output || `Software setup exited ${code}`)); });
   });

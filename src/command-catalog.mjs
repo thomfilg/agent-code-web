@@ -28,7 +28,7 @@ const reportedCommands = chat => Array.isArray(chat.commandCatalog) && chat.comm
   : (Array.isArray(chat.slashCommands) ? chat.slashCommands : []).filter(name => typeof name === "string").map(name => ({ name }));
 export class CommandCatalog {
   constructor(config, models = null) { this.config = config; this.models = models; this.cache = new Map(); this.pending = new Map(); }
-  async newChat(context) {
+  async newChat(context, installed = []) {
     // Read existing selected-account metadata only. Never call discover(),
     // models.selected(), or a host CLI for an unsaved draft.
     let native = [];
@@ -37,7 +37,7 @@ export class CommandCatalog {
       if (context.agent === "claude") native = (await this.models.accounts.cachedCommands(context.ownerId, context.agentAccountId, context)).commands;
       else await this.models.accounts.select(context.ownerId, context.agentAccountId, context);
     } else if (this.config.google?.enabled && context.agent !== "mock") throw new Error("Choose an agent account first");
-    return newChatCommands(context.agent, native);
+    return newChatCommands(context.agent, [...native, ...installed]);
   }
   async list(chat) {
     // Admission is repeated even on cache hits. Merely opening the menu never

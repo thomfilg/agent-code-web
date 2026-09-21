@@ -49,11 +49,10 @@ export class ChatSidebar {
     $("#organize-form").addEventListener("submit", event => this.saveChat(event));
     $("#archive-chat-button").addEventListener("click", () => this.toggleArchive());
     $("#organize-delete-chat").addEventListener("click", async event => {
-      const control = event.currentTarget;
-      control.disabled = true; control.textContent = "Deleting…"; control.setAttribute("aria-busy", "true");
-      try { if (await this.remove(this.editingChat)) $("#organize-dialog").close(); }
-      catch (error) { $("#organize-error").textContent = error.message; }
-      finally { control.disabled = false; control.textContent = "Delete chat"; control.setAttribute("aria-busy", "false"); }
+      const chat = this.editingChat;
+      if (!confirm(`Permanently delete “${chat.title}”, its messages, and its workspace files? Any running agent will be stopped. This cannot be undone.`)) return;
+      $("#organize-dialog").close();
+      void this.remove(chat, { confirmed: true }).catch(error => this.toast(error.message));
     });
     $("#remove-group-button").addEventListener("click", () => this.removeGroup());
     document.addEventListener("dragend", () => { this.dragging = false; document.querySelectorAll(".drop-over").forEach(item => item.classList.remove("drop-over")); this.scheduleRefresh(); });
@@ -64,10 +63,10 @@ export class ChatSidebar {
     const version = ++this.refreshVersion, preferencesAtStart = this.preferenceVersion, savingAtStart = this.pendingPreferences > 0;
     const result = await this.api("/api/sidebar");
     if (version !== this.refreshVersion || this.dragging) return;
-    this.state.chats = result.chats; this.groups = result.groups;
+    this.state.chats = result.chats.filter(chat => !this.state.deletingChats?.has(chat.id)); this.groups = result.groups;
     if (!this.pendingPreferences && !savingAtStart && preferencesAtStart === this.preferenceVersion) this.preferences = result.preferences;
     this.render();
-    const active = result.chats.find(chat => chat.id === this.state.active?.id);
+    const active = this.state.chats.find(chat => chat.id === this.state.active?.id);
     if (active && (active.revision || 0) >= (this.state.active?.revision || 0)) this.updated(active);
     if ($("#organize-dialog").open && this.editingChat) {
       const chat = result.chats.find(chat => chat.id === this.editingChat.id);
@@ -154,7 +153,6 @@ export class ChatSidebar {
     const pin = button(chat.pinned ? "★" : "☆", `${chat.pinned ? "Unpin" : "Pin"} ${chat.title}`, () => this.patch(chat.id, { pinned: !chat.pinned }).catch(error => this.toast(error.message)));
     pin.setAttribute("aria-pressed", String(Boolean(chat.pinned))); pin.dataset.focusKey = `pin-${chat.id}`;
     const menu = button("⋯", `Organize ${chat.title}`, () => this.editChat(chat)); menu.dataset.focusKey = `organize-${chat.id}`;
-    pin.disabled = Boolean(deleting); menu.disabled = Boolean(deleting);
     controls.append(pin, menu); row.append(select, controls);
     return row;
   }
@@ -252,8 +250,8 @@ export class ChatSidebar {
     const archive = $("#archive-chat-button");
     archive.textContent = chat.archived ? "Unarchive chat" : "Archive chat";
     archive.dataset.archived = String(Boolean(chat.archived));
-    archive.disabled = ["starting", "running", "stopping"].includes(chat.status);
-    archive.title = archive.disabled ? "Stop the working agent before archiving" : "";
+    archive.disabled = false;
+    archive.title = "";
   }
   async toggleArchive() {
     const archive = $("#archive-chat-button"); const archived = archive.dataset.archived !== "true";

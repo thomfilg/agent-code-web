@@ -98,14 +98,19 @@ test("session info rereads counters that arrive while live inspection is pending
 
 async function queueFixture(t, options = {}) {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
-  const calls = []; let release, interruptions = 0, stops = 0;
-  const manager = new RuntimeManager({ store, config: testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "10000" }), broker: new CapabilityBroker({ ttlMs: 10000 }),
+  const calls = []; let release, interruptions = 0, forcedInterruptions = 0, stops = 0;
+  const config = testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "10000" });
+  if (options.interruptTimeoutMs) config.sendNowInterruptTimeoutMs = options.interruptTimeoutMs;
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10000 }),
     adapterFactory: ({ hooks }) => ({ start: async () => {},
       stop: async () => { stops++; release?.({ text: "stopped" }); },
       interrupt: async () => { interruptions++; await options.interrupt?.(); release?.({ text: "interrupted" }); },
+      forceInterrupt: options.forceInterrupt ? async () => { forcedInterruptions++; await options.forceInterrupt(); release?.({ text: "force interrupted" }); } : undefined,
+      setPermissionMode: options.setPermissionMode,
+      cancelPermissionModeChange: options.cancelPermissionModeChange,
       send: text => { calls.push(text); if (options.partial) hooks.onEvent({ type: "assistant_delta", delta: options.partial }); return new Promise(resolve => { release = resolve; }); } }), ...options.manager });
   t.after(() => manager.shutdown()); const chat = await manager.createChat({ agent: "mock" });
-  return { store, manager, chat, calls, complete: () => release?.({ text: "done" }), interruptions: () => interruptions, stops: () => stops };
+  return { store, manager, chat, calls, complete: () => release?.({ text: "done" }), interruptions: () => interruptions, forcedInterruptions: () => forcedInterruptions, stops: () => stops };
 }
 
 test("Send now interrupts only the turn, sends the selected item once, and retains FIFO for the rest", async t => {
@@ -115,11 +120,9 @@ test("Send now interrupts only the turn, sends the selected item once, and retai
   const selected = store.get(chat.id).queuedMessages[1];
   await Promise.all([manager.editQueue(chat.id, { sendNowId: selected.id }), manager.editQueue(chat.id, { sendNowId: selected.id })]);
   await first.completion; await waitFor(() => calls.length === 2);
-  assert.deepEqual(calls, ["first", "third"]); assert.equal(f.interruptions(), 1); assert.equal(f.stops(), 0);
-  assert.deepEqual(store.get(chat.id).queuedMessages.map(m => m.text), ["second", "fourth"]);
+  assert.deepEqual(calls, ["first", "third\n\n---\n\nsecond\n\n---\n\nfourth"]); assert.equal(f.interruptions(), 1); assert.equal(f.stops(), 0);
+  assert.deepEqual(store.get(chat.id).queuedMessages, []);
   await assert.rejects(manager.editQueue(chat.id, { sendNowId: selected.id }), /not found/); assert.equal(f.interruptions(), 1);
-  f.complete(); await waitFor(() => calls.length === 3); assert.equal(calls[2], "second");
-  f.complete(); await waitFor(() => calls.length === 4); assert.equal(calls[3], "fourth");
   f.complete(); await waitFor(() => !manager.isBusy(chat.id)); assert.equal(store.get(chat.id).queuedMessages.length, 0);
 });
 
@@ -130,14 +133,13 @@ test("Stop agent with a queue interrupts once and immediately sends the next FIF
   await manager.enqueue(chat.id, "next request"); await manager.enqueue(chat.id, "last request");
   await Promise.all([manager.interrupt(chat.id), manager.interrupt(chat.id)]);
   await first.completion; await waitFor(() => calls.length === 2);
-  assert.deepEqual(calls, ["original request", "next request"]);
+  assert.deepEqual(calls, ["original request", "next request\n\n---\n\nlast request"]);
   assert.equal(f.interruptions(), 1); assert.equal(f.stops(), 0);
-  assert.deepEqual(store.get(chat.id).queuedMessages.map(item => item.text), ["last request"]);
+  assert.deepEqual(store.get(chat.id).queuedMessages, []);
   assert.equal(store.get(chat.id).messages.filter(message => message.text === "original request").length, 1);
   assert.equal(store.get(chat.id).messages.filter(message => message.meta?.interrupted && message.text === "Work already explained.").length, 1);
   assert.equal(events.filter(event => event.type === "runtime_started").length, 1);
   assert.equal(events.filter(event => event.type === "runtime_stopped").length, 0);
-  f.complete(); await waitFor(() => calls.length === 3); assert.equal(calls[2], "last request");
   f.complete(); await waitFor(() => !manager.isBusy(chat.id));
 });
 
@@ -155,25 +157,28 @@ test("Stop agent without queued input preserves messages and runtime and accepts
   f.complete(); await waitFor(() => !manager.isBusy(chat.id));
 });
 
-test("Send now works on a paused queue without resuming the other messages; invalid IDs do not interrupt", async t => {
+test("Send now resumes the entire paused queue with the selected message first; invalid IDs do not interrupt", async t => {
   const f = await queueFixture(t), { manager, store, chat, calls } = f;
   await store.update(chat.id, { queuePaused: true }); await manager.enqueue(chat.id, "later"); await manager.enqueue(chat.id, "now");
   await assert.rejects(manager.editQueue(chat.id, { sendNowId: "wrong-chat-message" }), /not found/);
   const id = store.get(chat.id).queuedMessages[1].id; await manager.editQueue(chat.id, { sendNowId: id });
-  await waitFor(() => calls.length === 1); f.complete(); await waitFor(() => !manager.isBusy(chat.id));
-  assert.deepEqual(calls, ["now"]); assert.equal(f.interruptions(), 0);
-  assert.equal(store.get(chat.id).queuePaused, true); assert.equal(store.get(chat.id).queuedMessages[0].text, "later");
+  await waitFor(() => calls.length === 1);
+  assert.deepEqual(calls, ["now\n\n---\n\nlater"]); assert.equal(f.interruptions(), 0);
+  f.complete(); await waitFor(() => !manager.isBusy(chat.id));
+  assert.equal(store.get(chat.id).queuePaused, false); assert.equal(store.get(chat.id).queuedMessages.length, 0);
 });
 
-test("manual Stop wins over an in-flight Send now and retains the queued input", async t => {
+test("Send now survives an overlapping manual Stop and dispatches the queued input afterward", async t => {
   let finishInterrupt;
   const f = await queueFixture(t, { interrupt: () => new Promise(resolve => { finishInterrupt = resolve; }) }), { manager, store, chat, calls } = f;
   await manager.submit(chat.id, "first"); await waitFor(() => calls.length === 1);
   await manager.enqueue(chat.id, "never send after stop"); const id = store.get(chat.id).queuedMessages[0].id;
-  const sending = manager.editQueue(chat.id, { sendNowId: id }); const rejected = assert.rejects(sending, /cancelled/);
-  await waitFor(() => finishInterrupt); await manager.stop(chat.id); finishInterrupt(); await rejected;
-  assert.deepEqual(calls, ["first"]); assert.equal(store.get(chat.id).queuePaused, true);
-  assert.equal(store.get(chat.id).queuedMessages[0].id, id); assert.equal(store.get(chat.id).status, "stopped");
+  const sending = manager.editQueue(chat.id, { sendNowId: id });
+  await waitFor(() => finishInterrupt); await manager.stop(chat.id); finishInterrupt(); await sending;
+  await waitFor(() => calls.length === 2);
+  assert.deepEqual(calls, ["first", "never send after stop"]); assert.equal(store.get(chat.id).queuePaused, false);
+  assert.equal(store.get(chat.id).queuedMessages.length, 0);
+  f.complete(); await waitFor(() => !manager.isBusy(chat.id));
 });
 
 test("Send now cancels asynchronous turn preparation before the old prompt reaches an agent", async t => {
@@ -184,6 +189,39 @@ test("Send now cancels asynchronous turn preparation before the old prompt reach
   await manager.enqueue(chat.id, "priority"); const id = store.get(chat.id).queuedMessages[0].id;
   const sending = manager.editQueue(chat.id, { sendNowId: id }); finishSettings({}); await sending;
   await waitFor(() => calls.length === 1); assert.deepEqual(calls, ["priority"]); f.complete(); await waitFor(() => !manager.isBusy(chat.id));
+});
+
+test("Send now force-recycles an unresponsive native turn and sends the priority message", async t => {
+  const never = new Promise(() => {});
+  const f = await queueFixture(t, { interruptTimeoutMs: 10, interrupt: () => never, forceInterrupt: async () => {} });
+  const { manager, store, chat, calls } = f;
+  const first = await manager.submit(chat.id, "stuck native turn"); await waitFor(() => calls.length === 1);
+  await manager.enqueue(chat.id, "send this now"); const id = store.get(chat.id).queuedMessages[0].id;
+  await manager.editQueue(chat.id, { sendNowId: id });
+  await first.completion; await waitFor(() => calls.length === 2);
+  assert.deepEqual(calls, ["stuck native turn", "send this now"]);
+  assert.equal(f.interruptions(), 1); assert.equal(f.forcedInterruptions(), 1); assert.equal(f.stops(), 0);
+  f.complete(); await waitFor(() => !manager.isBusy(chat.id));
+});
+
+test("Send now cancels a stuck permission-mode control before sending the entire queue", async t => {
+  let rejectMode;
+  const f = await queueFixture(t, {
+    setPermissionMode: () => new Promise((_, reject) => { rejectMode = reject; }),
+    cancelPermissionModeChange: () => rejectMode?.(new Error("permission control cancelled")),
+  });
+  const { manager, store, chat, calls } = f;
+  await manager.submit(chat.id, "initialize runtime"); await waitFor(() => calls.length === 1);
+  f.complete(); await waitFor(() => !manager.isBusy(chat.id)); calls.length = 0;
+  const changing = manager.setMode(chat.id, "plan"); const rejected = assert.rejects(changing, /permission control cancelled/); await waitFor(() => rejectMode);
+  await store.update(chat.id, { queuePaused: true });
+  await manager.enqueue(chat.id, "first queued"); await manager.enqueue(chat.id, "second queued");
+  const id = store.get(chat.id).queuedMessages[0].id;
+  await manager.editQueue(chat.id, { sendNowId: id });
+  await rejected;
+  await waitFor(() => calls.length === 1);
+  assert.deepEqual(calls, ["first queued\n\n---\n\nsecond queued"]);
+  f.complete(); await waitFor(() => !manager.isBusy(chat.id));
 });
 
 test("failed Send now keeps its attachments and the selected message for retry", async t => {

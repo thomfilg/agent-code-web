@@ -4,6 +4,7 @@ import test from "node:test";
 import { CapabilityBroker } from "../src/capabilities.mjs";
 import { RuntimeManager } from "../src/runtime-manager.mjs";
 import { ChatStore } from "../src/store.mjs";
+import { MemoryRecords } from "../src/database.mjs";
 import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
 
 test("multiple chats stream independently, persist responses, autosleep, and restart", async (t) => {
@@ -90,8 +91,8 @@ test("native background work queues normal input and Send now interrupts only th
   const selected = await manager.enqueue(chat.id, "Send this now");
   await manager.sendQueuedNow(chat.id, selected.queuedMessages.at(-1).id);
   await waitFor(() => !manager.isBusy(chat.id));
-  assert.equal(interrupted, 1); assert.equal(stopped, 0); assert.deepEqual(sent, ["Schedule", "Send this now"]);
-  assert.deepEqual(store.get(chat.id).queuedMessages.map(item => item.text), ["Keep queued"]);
+  assert.equal(interrupted, 1); assert.equal(stopped, 0); assert.deepEqual(sent, ["Schedule", "Send this now\n\n---\n\nKeep queued"]);
+  assert.deepEqual(store.get(chat.id).queuedMessages, []);
   assert.equal(store.get(chat.id).idleKeepAwakeReason, "schedule");
   background = true; await hooks.onEvent({ type: "background_turn", active: true });
   await manager.stop(chat.id); assert.equal(stopped, 1); assert.equal(store.get(chat.id).status, "stopped");
@@ -168,4 +169,21 @@ test("a non-mock chat acquires, sleeps, resumes, and destroys its worker backend
   await manager.remove(chat.id);
   assert.ok(calls.some(([action]) => action === "sleep"));
   assert.equal(calls.filter(([action]) => action === "destroy").length, 1);
+});
+
+test("chat deletion is durable even when worker stop and infrastructure cleanup fail", async t => {
+  const root = await temporaryDirectory(t), records = new MemoryRecords(), store = new ChatStore(root, records); await store.initialize();
+  const config = testConfig(root); config.idleTimeoutMs = 60_000;
+  let destroys = 0;
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10_000 }), gatewayOrigin: "http://localhost",
+    workerBackend: { acquire: async () => ({ metadata: { backend: "fixture" } }), sleep: async () => { throw new Error("lease denied"); }, destroy: async () => { destroys++; throw new Error("termination unavailable"); } },
+    adapterFactory: () => ({ start: async () => {}, send: async () => ({ text: "working" }), stop: async () => {} }),
+  });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "codex", title: "Delete without UI lock" });
+  await manager.send(chat.id, "start");
+  assert.equal(await manager.remove(chat.id), true);
+  assert.equal(store.get(chat.id), null);
+  assert.ok(destroys >= 1);
+  assert.equal((await records.get("worker-deletion-cleanup", chat.id)).id, chat.id);
 });

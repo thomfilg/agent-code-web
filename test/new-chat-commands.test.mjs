@@ -50,3 +50,16 @@ test("new-chat command HTTP discovery creates no chat or worker and rejects unkn
   const denied = await fetch(`${url}/api/new-chat/commands?agent=claude&agentAccountId=foreign-account`);
   assert(denied.status >= 400); assert.equal(app.store.list().length, before);
 });
+
+test("company-installed plugin commands are available before the first chat exists", async t => {
+  const root = await temporaryDirectory(t), inspectPluginSource = async () => ({ source: "thomfilg/ai-plugin-work", revision: "abc", marketplace: { name: "work-workflow", description: "" }, plugins: [
+    { name: "work-workflow", version: "1", description: "Work", commands: [{ name: "work-workflow:work", aliases: ["work"], description: "Run work" }] },
+  ] });
+  const app = await createAgentWebServer({ config: testConfig(root), inspectPluginSource, adapterFactory: () => assert.fail("Adapter startup forbidden") });
+  const { url } = await app.start(); t.after(() => app.stop());
+  await fetch(`${url}/api/companies`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "acme", name: "Acme" }) });
+  const saved = await fetch(`${url}/api/company-plugins`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ companyId: "acme", source: "thomfilg/ai-plugin-work", targets: { claude: ["work-workflow"], codex: ["work-workflow"] } }) });
+  assert.equal(saved.status, 201);
+  const response = await fetch(`${url}/api/new-chat/commands?agent=claude&companyId=acme`), result = await response.json();
+  assert.equal(response.status, 200); assert.equal(result.commands.find(command => command.name === "work")?.disabled, false); assert.equal(app.store.list().length, 0);
+});

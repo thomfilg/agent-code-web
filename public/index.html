@@ -25,7 +25,7 @@
           <button class="icon-button mobile-only" id="close-sidebar" aria-label="Close chats">×</button>
         </div>
 
-        <button class="new-chat-button" id="new-chat-button" disabled title="Loading your accounts and repositories…">
+        <button class="new-chat-button" id="new-chat-button" disabled title="New chat">
           <span aria-hidden="true">＋</span>
           New chat
           <kbd>⌘ K</kbd>
@@ -150,7 +150,7 @@
               <div id="agent-account-requirement" class="onboarding-hint" hidden><p id="agent-account-hint" class="muted" role="status"></p></div>
             </fieldset>
             <p id="create-chat-error" class="form-error" role="alert"></p>
-            <div class="composer-help"><span id="new-chat-status" role="status">Loading accounts and repositories…</span><span>Enter to send · Shift + Enter for a new line</span></div>
+            <div class="composer-help"><span id="new-chat-status" role="status"></span><span>Enter to send · Shift + Enter for a new line</span></div>
             <details class="new-chat-security"><summary>Account privacy</summary><p id="dialog-security"></p></details>
           </form>
         </section>
@@ -230,6 +230,9 @@
                 </div>
                 <div class="composer-actions">
                 <details class="control-menu upward usage-menu" id="usage-menu"><summary aria-label="Context and usage" title="Context and usage"><span id="usage-ring" aria-hidden="true"></span></summary><div class="control-popover" id="session-usage"><p>Loading usage…</p></div></details>
+                <button class="send-button interrupt-button" id="interrupt-button" type="button" aria-label="Interrupt agent" title="Interrupt the current turn" hidden>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v10H7z"/></svg>
+                </button>
                 <button class="send-button" id="send-button" type="submit" aria-label="Send message">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
                 </button>

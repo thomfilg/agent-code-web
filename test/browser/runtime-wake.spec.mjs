@@ -10,7 +10,7 @@ async function chatFixture(page, request, title) {
   return chat;
 }
 
-test("wake gives immediate feedback, preserves the draft and sends no agent input", async ({ page, request }) => {
+test("wake gives immediate feedback and the composer still accepts queued input", async ({ page, request }) => {
   const errors = [], inputs = []; page.on("pageerror", error => errors.push(error.message));
   page.on("request", req => { if (req.method() === "POST" && /\/api\/chats\/[^/]+\/(messages|queue)$/.test(new URL(req.url()).pathname)) inputs.push(req.url()); });
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -20,14 +20,13 @@ test("wake gives immediate feedback, preserves the draft and sends no agent inpu
   await expect(wake).toBeEnabled(); await page.locator("#message-input").fill("Keep this unsent draft");
   await wake.click(); await expect(page.locator("#wake-worker")).toHaveText("Waking…");
   await expect(page.locator("#wake-worker")).toBeDisabled(); await expect(page.locator("#wake-worker")).toHaveAttribute("aria-busy", "true");
-  await expect(page.locator("#send-button")).toBeDisabled(); await expect(page.locator("#message-input")).toBeEnabled();
-  await page.locator("#composer").evaluate(form => form.requestSubmit()); expect(inputs).toEqual([]);
+  await expect(page.locator("#send-button")).toBeEnabled(); await expect(page.locator("#message-input")).toBeEnabled();
+  await page.locator("#composer").evaluate(form => form.requestSubmit()); await expect.poll(() => inputs.length).toBe(1);
   await page.locator("#wake-worker").evaluate(button => button.click()); expect(calls).toBe(1);
   await page.screenshot({ path: "test-results/runtime-wake-starting-desktop.png" });
   release.resolve(); await expect(page.locator("#runtime-status")).toHaveText("Ready");
-  await expect(page.locator("#runtime-detail")).toContainText("no message sent");
-  await expect(page.locator("#message-input")).toHaveValue("Keep this unsent draft");
-  expect(inputs).toEqual([]); expect((await (await request.get(`/api/chats/${chat.id}`)).json()).chat.messages).toEqual([]);
+  await expect(page.locator("#message-input")).toHaveValue("");
+  expect(inputs[0]).toContain(`/api/chats/${chat.id}/queue`);
   await page.setViewportSize({ width: 320, height: 740 });
   if (await page.locator("#sidebar").evaluate(node => node.classList.contains("open"))) await page.locator("#close-sidebar").click();
   await expect.poll(() => page.locator("#sidebar").evaluate(node => node.getBoundingClientRect().right)).toBeLessThanOrEqual(1);
@@ -65,7 +64,7 @@ test("failed wake can be retried and a late reply cannot replace another chat", 
   await expect(page.locator("#chat-title")).toHaveText("Existing alpha");
 });
 
-test("delete immediately shows progress, prevents repeats and keeps a failed deletion visible", async ({ page, request }) => {
+test("delete dismisses immediately and restores the chat if the request itself fails", async ({ page, request }) => {
   const chat = await chatFixture(page, request, "Delayed deletion"), release = Promise.withResolvers(); let deletes = 0;
   await page.route(`**/api/chats/${chat.id}`, async route => {
     if (route.request().method() !== "DELETE") return route.continue();
@@ -74,15 +73,13 @@ test("delete immediately shows progress, prevents repeats and keeps a failed del
   page.on("dialog", dialog => dialog.accept());
   await page.getByLabel("Chat settings", { exact: true }).click();
   await page.locator("#delete-button").click();
-  await expect(page.locator("#runtime-detail")).toContainText("Deleting chat");
-  await expect(page.locator("#delete-button")).toBeDisabled(); await expect(page.locator("#wake-worker")).toBeDisabled();
   const row = page.locator(`.chat-row[data-chat-id="${chat.id}"]`);
-  await expect(row).toHaveAttribute("aria-busy", "true"); await expect(row).toContainText("Deleting…");
-  await page.locator("#delete-button").evaluate(button => button.click()); expect(deletes).toBe(1);
-  release.resolve(); await expect(page.getByText("Worker stop failed; chat retained", { exact: true })).toBeVisible();
-  await expect(page.locator("#delete-button")).toBeEnabled(); await expect(row).toHaveAttribute("aria-busy", "false");
+  await expect(row).toHaveCount(0); expect(deletes).toBe(1);
+  release.resolve(); await expect(page.locator("#toasts")).toContainText("Worker stop failed; chat retained");
+  await expect(row).toHaveCount(1);
   expect((await request.get(`/api/chats/${chat.id}`)).status()).toBe(200);
-  await page.unroute(`**/api/chats/${chat.id}`); await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#delete-button").click();
+  await page.unroute(`**/api/chats/${chat.id}`); await page.getByRole("button", { name: `Open ${chat.title}`, exact: true }).click();
+  await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#delete-button").click();
   await expect(page.locator(`.chat-row[data-chat-id="${chat.id}"]`)).toHaveCount(0);
   expect((await request.get(`/api/chats/${chat.id}`)).status()).toBe(404);
 });

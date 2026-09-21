@@ -2,7 +2,7 @@ import { elapsedLabel } from "./working-status.js";
 
 const stageLabels = {
   repository: "Repositories", machine: "Machine", connection: "Connection",
-  workspace: "Workspace", software: "Software", setup: "Setup script", agent: "Agent",
+  workspace: "Workspace", software: "Software", setup: "Setup script", plugins: "Plugins", agent: "Agent",
 };
 const timestamp = value => typeof value === "string" && Number.isFinite(Date.parse(value)) ? Date.parse(value) : null;
 

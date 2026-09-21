@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-test("new conversation waits for config and settings, including keyboard shortcuts, then loads repositories", async ({ page }) => {
+test("new conversation accepts navigation immediately and opens it when cached settings refresh", async ({ page }) => {
   const configEntered = Promise.withResolvers(), configReady = Promise.withResolvers();
   const preferencesEntered = Promise.withResolvers(), preferencesReady = Promise.withResolvers();
   const errors = []; let writes = 0;
@@ -16,13 +16,12 @@ test("new conversation waits for config and settings, including keyboard shortcu
   await page.route("**/api/chats", route => { if (route.request().method() === "POST") writes++; return route.continue(); });
   try {
     await page.goto("/"); await configEntered.promise;
-    await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", true); await expect(page.locator("#new-chat-button")).toBeDisabled();
+    await expect(page.locator("#new-chat-button")).toBeEnabled();
     await page.keyboard.press("Control+k"); await expect(page.locator("#new-chat-page")).toBeHidden();
     configReady.resolve(); await preferencesEntered.promise;
-    await expect(page.locator("#new-chat-button")).toBeDisabled();
-    await page.keyboard.press("Control+k"); await expect(page.locator("#new-chat-page")).toBeHidden();
-    preferencesReady.resolve(); await expect(page.locator("#new-chat-button")).toBeEnabled();
-    await page.locator("#new-chat-button").click();
+    await expect(page.locator("#new-chat-button")).toBeEnabled();
+    preferencesReady.resolve();
+    await expect(page.locator("#new-chat-page")).toBeVisible();
     await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", false);
     await page.getByRole("button", { name: "Add repositories", exact: true }).click();
     await expect(page.locator("#repository-results").getByRole("checkbox")).toHaveCount(1);

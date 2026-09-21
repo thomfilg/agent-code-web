@@ -6,8 +6,8 @@ const node = (tag, text, className) => { const result = document.createElement(t
 // A single company context for all connection editors. Existing editors retain
 // their secret handling, OAuth lifecycle and explicit browser-sharing consent.
 export class CompanySettings {
-  constructor({ api, state, workspace, mcps, browsers }) {
-    Object.assign(this, { api, state, workspace, mcps, browsers });
+  constructor({ api, state, workspace, mcps, browsers, plugins }) {
+    Object.assign(this, { api, state, workspace, mcps, browsers, plugins });
     this.dialog = document.createElement("dialog"); this.dialog.id = "company-settings-dialog"; this.dialog.setAttribute("aria-labelledby", "company-settings-title");
     this.dialog.innerHTML = `<div class="dialog-card company-settings-card">
       <div class="dialog-heading"><h2 id="company-settings-title">Settings</h2><button type="button" class="icon-button" aria-label="Close settings">×</button></div>
@@ -34,7 +34,7 @@ export class CompanySettings {
       const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
       const id = tabs[next].id; tabs[next].click(); this.tabs.querySelector(`[id="${id}"]`)?.focus();
     };
-    for (const id of ["mcp-dialog", "github-dialog", "environments-dialog", "browser-connections-dialog"]) $("#" + id).addEventListener("close", () => {
+    for (const id of ["mcp-dialog", "github-dialog", "environments-dialog", "browser-connections-dialog", "company-plugins-dialog"]) $("#" + id).addEventListener("close", () => {
       if (this.dialog.open) void this.load();
     });
   }
@@ -44,11 +44,11 @@ export class CompanySettings {
     const revision = this.loadRevision = (this.loadRevision || 0) + 1;
     this.loading = true; this.error(); $("#settings-retry").hidden = true; this.lock();
     try {
-      const [{ companies }, github, { connections: mcps }, environments, { connections: browsers }] = await Promise.all([
-        this.api("/api/companies"), this.api("/api/github"), this.api("/api/mcps"), this.api("/api/environments"), this.api("/api/browser-connections"),
+      const [{ companies }, github, { connections: mcps }, environments, { connections: browsers }, { marketplaces }] = await Promise.all([
+        this.api("/api/companies"), this.api("/api/github"), this.api("/api/mcps"), this.api("/api/environments"), this.api("/api/browser-connections"), this.api("/api/company-plugins"),
       ]);
       if (revision !== this.loadRevision) return;
-      Object.assign(this, { companies, github: github.connections, connections: mcps, environments: environments.environments, connectionsBrowser: browsers }); this.state.companies = companies;
+      Object.assign(this, { companies, github: github.connections, connections: mcps, environments: environments.environments, connectionsBrowser: browsers, marketplaces }); this.state.companies = companies;
       if (!companies.some(company => company.id === this.companyId)) this.companyId = companies.find(company => company.id === companyForChat(this.state.active || {}))?.id || companies[0]?.id || "";
       this.render();
     } catch (error) { if (revision === this.loadRevision) { this.error(error.message); $("#settings-retry").hidden = false; } }
@@ -73,11 +73,13 @@ export class CompanySettings {
     this.panel.hidden = !this.companyId || !this.form.hidden;
     this.panel.setAttribute("aria-labelledby", `settings-tab-${this.companyId}`);
     const github = this.github.find(item => item.companyId === this.companyId), mcps = this.connections.filter(item => item.companyId === this.companyId), environments = this.environments.filter(item => environmentAllows(item, this.companyId)), browsers = this.connectionsBrowser.filter(item => item.companyId === this.companyId);
+    const plugins = this.marketplaces.filter(item => item.companyId === this.companyId), pluginCount = provider => plugins.reduce((total, item) => total + item.targets[provider].length, 0);
     const cards = [
       ["GitHub", github?.connected ? `Connected · ${github.login}` : "Connect one GitHub account", () => this.workspace.githubAccounts.open(this.companyId)],
       ["MCP connections", mcps.length ? mcps.map(item => item.name).join(" · ") : "Connect your company's tools", () => { const revision = this.navigationRevision = (this.navigationRevision || 0) + 1; return this.mcps.open(this.companyId, { validWhile: () => this.dialog.open && this.navigationRevision === revision }); }],
       ["Environments", environments.length ? environments.map(item => item.name).join(" · ") : "Add an environment", () => { const revision = this.navigationRevision = (this.navigationRevision || 0) + 1; return this.workspace.openEnvironments(undefined, this.companyId, { validWhile: () => this.dialog.open && this.navigationRevision === revision }); }],
       ["Browser connections", browsers.length ? browsers.map(item => item.name).join(" · ") : "Pair a Chrome profile", () => this.browsers.open(this.companyId)],
+      ["Plugins", plugins.length ? `${pluginCount("claude")} for Claude · ${pluginCount("codex")} for Codex` : "Install Claude and Codex plugins", () => { const revision = this.navigationRevision = (this.navigationRevision || 0) + 1; return this.plugins.open(this.companies.find(item => item.id === this.companyId), { validWhile: () => this.dialog.open && this.navigationRevision === revision }); }],
     ];
     this.panel.querySelector(".company-settings-grid").replaceChildren(...cards.map(([title, summary, action]) => {
       const button = node("button", "", "company-settings-section"); button.type = "button"; button.setAttribute("aria-label", title); button.append(node("strong", title), node("span", summary, "muted")); button.onclick = () => { this.navigationRevision = (this.navigationRevision || 0) + 1; return action(); }; return button;

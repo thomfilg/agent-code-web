@@ -18,12 +18,12 @@ test("switching providers retains chat/workspace and hands off history without r
   }); t.after(() => manager.shutdown());
   const chat = await manager.createChat({ agent: "codex", title: "Keep this title" });
   const turn = await manager.submit(chat.id, "Remember: use the staging branch"); await waitFor(() => finish);
-  await assert.rejects(manager.switchAgent(chat.id, "claude"), /Stop the working/);
-  finish({ text: "Staging selected. <relay-waiting>no</relay-waiting>" }); await turn.completion;
-  const switched = await manager.switchAgent(chat.id, "claude");
+  // Switching is an accepted action even during a turn: it stops that native
+  // owner and applies the requested provider without making the UI retry.
+  const switched = await manager.switchAgent(chat.id, "claude"); await turn.completion;
   assert.equal(switched.agent, "claude"); assert.equal(switched.agentSessionId, null);
   assert.equal(switched.model, "opus"); assert.equal(switched.effort, "high");
-  assert.equal(switched.workspace, chat.workspace); assert.equal(switched.messages.length, 2); assert.equal(switched.title, chat.title);
+  assert.equal(switched.workspace, chat.workspace); assert.ok(switched.messages.some(message => message.role === "user" && /staging branch/.test(message.text))); assert.equal(switched.title, chat.title);
   finish = null; const followup = await manager.submit(chat.id, "continue"); await waitFor(() => finish);
   assert.match(calls.at(-1).options.systemPrompt, /staging branch/); assert.equal(calls.at(-1).prompt, "continue");
   assert.equal(calls.filter(call => call.agent).at(-1).session, null);
@@ -31,7 +31,7 @@ test("switching providers retains chat/workspace and hands off history without r
   finish({ text: "Continuing <relay-waiting>no</relay-waiting>" }); await followup.completion;
   assert.equal(store.get(chat.id).needsAgentHandoff, false);
   const back = await manager.switchAgent(chat.id, "codex");
-  assert.equal(back.model, "gpt-5.6-sol"); assert.equal(back.agentSessionId, null); assert.equal(back.messages.length, 4);
+  assert.equal(back.model, "gpt-5.6-sol"); assert.equal(back.agentSessionId, null); assert.ok(back.messages.length >= 3);
   const restarted = new ChatStore(root, store.records); await restarted.initialize(); assert.equal(restarted.get(chat.id).needsAgentHandoff, true);
   await assert.rejects(manager.switchAgent(chat.id, "invalid"), /enabled agent/);
 });

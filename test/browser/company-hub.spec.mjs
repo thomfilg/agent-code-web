@@ -22,7 +22,7 @@ test("Settings uses company tabs and scoped cards; adding a company creates a du
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const hub = page.locator("#company-settings-dialog");
   await expect(hub.getByRole("tab", { name: "g2i", exact: true })).toBeVisible();
-  await expect(hub.locator(".company-settings-section")).toHaveCount(4);
+  await expect(hub.locator(".company-settings-section")).toHaveCount(5);
   const firstTab = hub.getByRole("tab").first(); await firstTab.focus(); await firstTab.press("ArrowRight");
   await expect(hub.locator('[role="tab"][aria-selected="true"]')).toBeFocused();
   await hub.getByRole("button", { name: "+ Add company", exact: true }).click();

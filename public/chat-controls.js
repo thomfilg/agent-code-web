@@ -42,16 +42,18 @@ export class ChatControls {
       if (event.target.closest("button, a")) event.currentTarget.open = false;
     });
     document.querySelectorAll("[data-agent-mode]").forEach(node => node.addEventListener("click", async () => {
+      this.requestedMode = { chatId: this.state.active.id, mode: node.dataset.agentMode };
       if (this.modeChanging) return;
-      const chatId = this.state.active.id;
       this.modeChanging = true;
-      document.querySelectorAll("[data-agent-mode]").forEach(button => { button.disabled = true; });
       try {
-        const { chat } = await this.api(`/api/chats/${chatId}/mode`, { method: "PATCH", body: JSON.stringify({ mode: node.dataset.agentMode }) });
-        if (this.state.active?.id === chatId) { this.updated(chat); $("#mode-menu").open = false; }
-      }
-      catch (error) { this.toast(error.message); }
-      finally { this.modeChanging = false; document.querySelectorAll("[data-agent-mode]").forEach(button => { button.disabled = false; }); }
+        while (this.requestedMode) {
+          const requested = this.requestedMode; this.requestedMode = null;
+          try {
+            const { chat } = await this.api(`/api/chats/${requested.chatId}/mode`, { method: "PATCH", body: JSON.stringify({ mode: requested.mode }) });
+            if (this.state.active?.id === requested.chatId) { this.updated(chat); $("#mode-menu").open = false; }
+          } catch (error) { this.toast(error.message); }
+        }
+      } finally { this.modeChanging = false; }
     }));
     $("#add-attachments").addEventListener("click", () => $("#attachment-input").click());
     $("#attachment-input").addEventListener("change", event => this.attach(event.target.files));

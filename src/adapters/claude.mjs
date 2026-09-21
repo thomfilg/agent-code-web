@@ -723,6 +723,7 @@ export class ClaudeAdapter {
     try {
       await session.control.request("set_permission_mode", { mode: nativeMode }, { onSuccess: result => {
         if (result.mode !== nativeMode) throw Error("Claude did not confirm the selected permission mode");
+        session.applied.permissionMode = nativeMode;
         check(); onAcknowledged();
       } });
       check();
@@ -735,6 +736,11 @@ export class ClaudeAdapter {
     // Pending tools remain native-owned. A mode change is not Approve once.
     // Native control_cancel_request removes prompts that Claude re-evaluates.
     return true;
+  }
+
+  cancelPermissionModeChange() {
+    const session = this.turnSession || this.applicationSession;
+    session?.control.cancel("set_permission_mode", "Claude permission change interrupted by Send now");
   }
 
   async respond(requestId, payload) {
@@ -851,6 +857,31 @@ export class ClaudeAdapter {
     else if (this.turnSession?.pending) await this.turnSession.stop();
     await this.applicationSession?.interruptWorkflows();
     if (this.applicationSession?.backgroundCommand) await this.applicationSession.interruptBackground();
+  }
+
+  async forceInterrupt() {
+    this.activeOutput?.finish(); this.backgroundOutput?.finish();
+    this.activeOutput = null; this.backgroundOutput = null; this.backgroundRequest = null;
+    this.sendVersion += 1;
+    this.modeObserver = null;
+    this.settingsInspection?.abort();
+    this.debugInspection?.abort();
+    this.fastInspection?.abort();
+    this.providerObservation?.(); this.providerObservation = null;
+    this.reviewInterruption = null;
+    (this.turnSession?.requests || this.applicationSession?.requests)?.cancel();
+
+    // A native control can occasionally stop answering even though the CLI
+    // process remains alive. Send now is an explicit priority handoff: recycle
+    // only that CLI owner and resume its last checkpoint on the next send.
+    // The worker, workspace, browser and user-started services remain alive.
+    const child = this.child;
+    const sessions = new Set([this.turnSession, this.applicationSession].filter(Boolean));
+    this.child = null;
+    this.turnSession = null;
+    this.applicationSession = null;
+    if (child && ![...sessions].some(session => session.active === child)) await terminateWorker(child, 0);
+    await Promise.allSettled([...sessions].map(session => session.stop()));
   }
 
   async prepareTransportSuspend() {

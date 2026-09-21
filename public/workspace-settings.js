@@ -11,7 +11,8 @@ const button = (text, action, cls = "secondary-button") => { const e = el("butto
 
 export class WorkspaceSettings {
   constructor({ api, state, toast }) {
-    Object.assign(this, { api, state, toast }); this.selected = []; this.environments = []; this.repositories = []; this.branchCache = new Map(); this.repositoryRequest = 0;
+    Object.assign(this, { api, state, toast }); this.selected = []; this.environments = []; this.repositories = []; this.branchCache = new Map(); this.selectionCache = new Map(); this.repositoryRequest = 0;
+    try { this.lastCompany = localStorage.getItem("relay-last-new-chat-company") || null; } catch { this.lastCompany = null; }
     $("#environment-company").addEventListener("change", event => {
       const companyId = event.target.value;
       if (this.environmentScopedCompanyId && companyId !== this.environmentScopedCompanyId) { event.target.value = this.environmentScopedCompanyId; return; }
@@ -92,6 +93,10 @@ export class WorkspaceSettings {
     this.selectionMemory = saved.selectionMemory === true;
     this.projectAgents = saved.projectAgents || {};
     this.accounts = accounts.accounts;
+    this.snapshotReady = true;
+    const savedCompany = companyForChat(saved.preferences);
+    this.selectionCache ||= new Map();
+    if (savedCompany) this.selectionCache.set(savedCompany, structuredClone(saved.preferences));
     if (!this.draftReady) this.selected = structuredClone(saved.preferences.repositories || []).map(repo => {
       const companyId = github.connections?.find(connection => connection.id === repo.githubConnectionId)?.companyId;
       return { ...repo, ...(companyId ? { companyId } : {}) };
@@ -214,7 +219,10 @@ export class WorkspaceSettings {
   }
   async openNew(project, { validWhile = () => true } = {}) {
     $("#create-chat-error").textContent = "";
-    await this.loadCurrent();
+    // The authenticated account/environment snapshot is already refreshed by
+    // boot and explicit settings changes. Reuse it when opening a draft rather
+    // than blocking every New chat navigation on the same API fan-out.
+    if (!this.snapshotReady) await this.loadCurrent();
     if (!this.draftReady) {
       this.accountProject = undefined;
       if (this.preferences.agent && [...$("#agent-select").options].some(o => o.value === this.preferences.agent)) $("#agent-select").value = this.preferences.agent;
@@ -225,14 +233,27 @@ export class WorkspaceSettings {
     $("#repo-search").value = "";
     this.renderSelected();
     $("#repository-picker .repository-picker-dropdown").open = false;
-    if (this.github.connected) await this.loadRepositories();
+    if (this.github.connected && !this.repositories.length && !this.repositoryLoading) void this.loadRepositories();
     if (this.selectionMemory && validWhile()) {
-      const companyId = project?.companyId || (!this.selectionCompany ? companyForChat({ repositories: this.selected }) : null);
+      const companyId = project?.companyId || this.lastCompany || (!this.selectionCompany ? companyForChat({ repositories: this.selected }) : null);
       if (companyId) await this.restoreSelection({ companyId, ...(project?.repository ? { repository: project.repository } : {}) }, { validWhile });
     }
   }
   async restoreSelection(project, { environmentId, validWhile = () => true } = {}) {
     const version = this.selectionVersion = (this.selectionVersion || 0) + 1;
+    const cached = this.selectionCache.get(project.companyId);
+    // Never render repositories from the previous company under the newly
+    // selected environment while the authoritative snapshot is refreshed.
+    this.selected = structuredClone(cached?.repositories || []);
+    this.selectionCompany = project.companyId;
+    this.lastCompany = project.companyId;
+    try { localStorage.setItem("relay-last-new-chat-company", project.companyId); } catch { /* Browser storage is optional. */ }
+    if (cached) {
+      this.restoredAccount = { key: JSON.stringify([project.companyId, agentProjectKey(cached)]), id: cached.agentAccountId || "" };
+      $("#environment-select").value = environmentId || cached.environmentId || "";
+      $("#agent-select").value = cached.agent || "";
+    }
+    this.renderSelected(); this.renderRepositories();
     this.setRestoringSelection(true); this.updateCreateAvailability();
     try {
       await this.preferenceQueue?.catch(() => {});
@@ -240,6 +261,7 @@ export class WorkspaceSettings {
       const result = await this.api(`/api/preferences/restore?${query}`);
       if (version !== this.selectionVersion || !validWhile()) return;
       const saved = result.selection;
+      this.selectionCache.set(project.companyId, structuredClone(saved));
       this.selectionRestoreError = Boolean(result.warnings?.length);
       this.selected = structuredClone(saved.repositories || []);
       this.selectionCompany = project.companyId;
@@ -310,7 +332,9 @@ export class WorkspaceSettings {
       if (manage) { const action = button("Manage GitHub accounts", () => this.openGitHub()); action.id = "repository-manage-github"; results.append(action); }
       if (retry) { const action = button("Retry loading repositories", () => this.loadRepositories(true)); action.id = "repository-retry"; results.append(action); }
     };
-    if (this.repositoryLoading) return status("Loading repositories…");
+    // Keep cached repository rows visible while a refresh is in flight. An
+    // empty picker is preferable to a blocking/loading interstitial.
+    if (this.repositoryLoading && !this.repositories.length) return;
     if (this.repositoryError) return status("Could not load repositories. Check your GitHub connection and retry.", { error: true, manage: true, retry: true });
     const primaryCompany = companyForChat({ repositories: this.selected }), environment = this.selectedEnvironment();
     // Legacy repository responses have no companyId; retain their old display
@@ -386,6 +410,7 @@ export class WorkspaceSettings {
     this.preferenceQueue = (this.preferenceQueue || Promise.resolve()).catch(() => {}).then(() => this.api("/api/preferences", { method: "PATCH", body: JSON.stringify(body) }));
     try {
       await this.preferenceQueue; this.preferences = body;
+      if (this.selectionCompany) this.selectionCache.set(this.selectionCompany, structuredClone(body));
     } catch (error) {
       if (this.projectAgents?.[project] === remembered) { if (previous) this.projectAgents[project] = previous; else delete this.projectAgents[project]; }
       this.toast(`Could not remember your selection: ${error.message}`);
