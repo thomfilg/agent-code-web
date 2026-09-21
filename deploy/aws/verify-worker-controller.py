@@ -34,7 +34,8 @@ EXCEPTION_CLASSES = ('RuntimeError', 'JSONDecodeError', 'FileNotFoundError', 'Pe
                      'KeyError', 'IndexError', 'AttributeError', 'NameError', 'UnboundLocalError',
                      'ImportError', 'ModuleNotFoundError', 'UnicodeDecodeError', 'AssertionError')
 APPLICATION_STAGES = ('bundle', 'service', 'status', 'configure', 'connect', 'launch', 'attach',
-                      'initialize', 'checkpoint', 'takeover', 'read', 'no-replay', 'terminate', 'release')
+                      'initialize-input', 'initialize-response', 'initialize-shape', 'checkpoint',
+                      'takeover', 'read', 'no-replay', 'terminate', 'release')
 
 
 class ProbeFailure(RuntimeError):
@@ -339,9 +340,11 @@ def application_probe(request):
             attached = client.request('attach', {'processInstanceId': receipt['processInstanceId'], 'committedOutputSeq': 0})
             if attached.get('processInstanceId') != receipt['processInstanceId']:
                 application_failure()
-            application_at('initialize')
+            application_at('initialize-input')
             client.input(1, {'method': 'initialize', 'id': 1, 'params': {'clientInfo': {'name': 'relay_hibernation_acceptance', 'version': '1'}, 'capabilities': {'experimentalApi': True}}})
+            application_at('initialize-response')
             initialized = client.app_response(1)
+            application_at('initialize-shape')
             if not isinstance(initialized.get('userAgent'), str):
                 application_failure()
             client.input(2, {'method': 'initialized', 'params': {}})
@@ -505,7 +508,7 @@ except Exception as error:
         failure['auditChecks'] = audit_checks
         failure['credentialFailureCounts'] = credential_counts
         failure['metadataProbe'] = metadata_probe
-    if failure['reason'] == 'application transport did not survive hibernation' and application_stage in ('bundle', 'service', 'status', 'configure', 'connect', 'launch', 'attach', 'initialize', 'checkpoint', 'takeover', 'read', 'no-replay', 'terminate', 'release'):
+    if failure['reason'] == 'application transport did not survive hibernation' and application_stage in ('bundle', 'service', 'status', 'configure', 'connect', 'launch', 'attach', 'initialize-input', 'initialize-response', 'initialize-shape', 'checkpoint', 'takeover', 'read', 'no-replay', 'terminate', 'release'):
         failure['applicationStage'] = application_stage
     print(json.dumps(failure))
     sys.exit(1)

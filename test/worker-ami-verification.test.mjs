@@ -320,10 +320,10 @@ test("probe failure details expose only fixed stages/classes and bounded helper 
 });
 
 test("application transport failure exposes only an allowlisted substage", async () => {
-  for (const applicationStage of ["initialize", "PRIVATE-STAGE"]) {
+  for (const applicationStage of ["initialize-response", "PRIVATE-STAGE"]) {
     const f = fixture({ hibernation: true, commandFailed: true, mutateReceipt: () => ({ diagnostic: { stage: "worker-probe", category: "application-transport", exitCode: 1, probeStage: "application-transport", applicationStage } }) });
     await assert.rejects(verifyHibernationImage(options, { run: f.run, sleep: async () => {} }), error => {
-      assert.equal(error.message.includes("application stage: initialize"), applicationStage === "initialize");
+      assert.equal(error.message.includes("application stage: initialize-response"), applicationStage === "initialize-response");
       assert.doesNotMatch(error.message, /PRIVATE-STAGE/); return true;
     });
   }
