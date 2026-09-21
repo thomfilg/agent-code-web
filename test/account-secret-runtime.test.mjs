@@ -69,7 +69,7 @@ test("Codex real RPC frames redact every split, renewed/old tokens and failed/st
   const f = await fixture(t, "codex");
   const start = async () => {
     f.events.length = 0; f.requests.length = 0;
-    const running = f.adapter.send("fixture stream", { model: "fixture-gpt" });
+    const running = f.adapter.send("fixture stream", { model: "fixture-gpt", mode: "accept_edits" });
     await waitFor(() => f.requests.length > 0);
     return { running, params: { threadId: f.adapter.threadId, turnId: f.adapter.current.turnId } };
   };
@@ -121,7 +121,7 @@ test("Codex ephemeral side chat inherits the same named-account stream boundary 
   const side = await f.adapter.forkSide({ onEvent: event => events.push(event), onRequest: request => requests.push(request) });
   assert.equal(side.nativeAuthMode, "account"); assert.equal(side.credentialSecrets, f.adapter.credentialSecrets);
   await f.adapter.rpc.request("fixture/accountRefresh", { previousAccountId: "company" });
-  const running = side.send("side fixture", { model: "fixture-gpt" }); await waitFor(() => requests.length);
+  const running = side.send("side fixture", { model: "fixture-gpt", mode: "accept_edits" }); await waitFor(() => requests.length);
   const params = { threadId: side.threadId, turnId: side.current.turnId }, notifications = [];
   for (const token of [firstToken, nextToken]) for (const delta of [token.slice(0, 11), token.slice(11) + " "]) notifications.push({ method: "item/agentMessage/delta", params: { ...params, delta } });
   notifications.push({ method: "turn/completed", params: { ...params, turn: { id: params.turnId, status: "completed" } } });

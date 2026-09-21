@@ -29,8 +29,8 @@ function visibleItem(item, turnId) {
 // IDs, never a shared CODEX_HOME, cwd, sessionId or forkedFromId. Side forks and
 // other Relay chats therefore cannot enter this picker or receive its input.
 export class CodexAgentThreads {
-  constructor({ rpc, root, workspace, model, publish, saved = null, log = () => {}, secrets = null, assertCurrent = null }) {
-    Object.assign(this, { rpc, root, workspace, model, publish, saved, log, secrets, assertCurrent });
+  constructor({ rpc, root, workspace, model, publish, saved = null, log = () => {}, secrets = null, assertCurrent = null, mode = () => "accept_edits" }) {
+    Object.assign(this, { rpc, root, workspace, model, publish, saved, log, secrets, assertCurrent, mode });
     this.entries = new Map(); this.revision = 0; this.epoch = randomUUID(); this.closed = false; this.pending = new Set(); this.queues = new Map();
     this.listeners = {
       notification: message => this.#enqueue(message, false),
@@ -83,6 +83,17 @@ export class CodexAgentThreads {
     }
   }
   busy() { return !this.closed && [...this.entries.values()].some(entry => entry.status === "active" || entry.requests.size || entry.sending); }
+  setPermissionMode(mode) {
+    if (mode !== "auto" || this.closed) return;
+    let changed = false;
+    for (const entry of this.entries.values()) for (const [requestId, request] of entry.requests) {
+      if (request.public.method === "item/tool/requestUserInput") continue;
+      entry.requests.delete(requestId);
+      this.rpc.respond(request.rpcId, request.public.method === "item/permissions/requestApproval" ? { permissions: {} } : { decision: "decline" });
+      changed = true;
+    }
+    if (changed) this.#emit();
+  }
   #remember(thread) {
     let entry = this.entries.get(thread.id);
     if (!entry && this.entries.size >= 200) { this.truncated = true; throw conflict("This chat has more than 200 agent threads; the picker is limited to 200"); }
@@ -238,7 +249,12 @@ export class CodexAgentThreads {
     let entry; try { entry = await this.#authorize(id); } catch { return; }
     if (!supportedRequests.has(message.method)) { this.rpc.respondError(message.id, -32601, `Unsupported agent request: ${message.method}`); return; }
     const requestId = `approval_${message.id}`;
-    entry.requests.set(requestId, { rpcId: message.id, public: publicRequest({ requestId, method: message.method, params: message.params }) });
+    const request = publicRequest({ requestId, method: message.method, params: message.params });
+    if (this.mode() === "auto" && message.method !== "item/tool/requestUserInput") {
+      this.rpc.respond(message.id, message.method === "item/permissions/requestApproval" ? { permissions: {} } : { decision: "decline" });
+      return;
+    }
+    entry.requests.set(requestId, { rpcId: message.id, public: request });
     this.#emit();
   }
   async #notification({ method, params = {} }) {

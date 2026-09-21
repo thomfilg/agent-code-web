@@ -66,7 +66,7 @@ test("stopping Codex archives only its unpublished forks, never the source or a 
 test("native side forks route approvals by thread and detach without stopping their parent RPC", async t => {
   const { root, store, chat } = await fixtureChat(t, "codex");
   const parentRequests = [], sideRequests = [], sessions = [];
-  const adapter = new CodexAdapter({ chat, store, config: testConfig(root, { CODEX_BIN: path.join(fixtureDir, "fake-codex.mjs") }), broker: new CapabilityBroker({ ttlMs: 10000 }), hooks: { onRequest: request => parentRequests.push(request), onSessionId: id => sessions.push(id) } });
+  const adapter = new CodexAdapter({ chat: { ...chat, mode: "accept_edits" }, store, config: testConfig(root, { CODEX_BIN: path.join(fixtureDir, "fake-codex.mjs") }), broker: new CapabilityBroker({ ttlMs: 10000 }), hooks: { onRequest: request => parentRequests.push(request), onSessionId: id => sessions.push(id) } });
   t.after(() => adapter.stop()); await adapter.start();
   const rpc = adapter.rpc, original = rpc.request.bind(rpc), calls = [], responses = [];
   rpc.request = async (method, params, timeout) => {
@@ -155,6 +155,32 @@ test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers ap
   assert.equal(nativeSettings.approvalPolicy, "never"); assert.equal(nativeSettings.approvalsReviewer, "auto_review");
   assert.equal((await resumed.send("resumed")).text, "hello world");
   await resumed.stop();
+});
+
+test("live Codex Auto reaches the native thread and closes stale approval prompts without granting them", async t => {
+  const { root, store, chat } = await fixtureChat(t, "codex");
+  const requests = [], events = [];
+  const adapter = new CodexAdapter({ chat, store, config: testConfig(root, { CODEX_BIN: path.join(fixtureDir, "fake-codex.mjs") }), broker: new CapabilityBroker({ ttlMs: 10000 }), gatewayOrigin: "http://127.0.0.1:9", hooks: {
+    onRequest: request => requests.push(request),
+    onEvent: event => events.push(event),
+  } });
+  t.after(() => adapter.stop()); await adapter.start();
+
+  const pending = adapter.send("manual turn", { mode: "accept_edits" });
+  await waitFor(() => requests.length === 1);
+  let acknowledged = false;
+  assert.equal(await adapter.setPermissionMode("auto", () => {}, () => { acknowledged = true; }), true);
+  assert.equal(acknowledged, true);
+  assert.equal((await pending).text, "hello world");
+  assert.equal(adapter.requests.size, 0);
+  assert.ok(events.some(event => event.type === "request_resolved" && event.requestId === requests[0].requestId));
+  const nativeSettings = (await adapter.rpc.request("fixture/threadSettings", {})).settings;
+  assert.equal(nativeSettings.approvalPolicy, "never");
+  assert.equal(nativeSettings.approvalsReviewer, "auto_review");
+
+  const requestCount = requests.length;
+  assert.equal((await adapter.send("automatic turn", { mode: "auto" })).text, "hello world");
+  assert.equal(requests.length, requestCount, "Auto must not surface a native permission card");
 });
 
 test("Codex compaction waits for completion and can be interrupted using its native turn ID", async t => {
@@ -247,11 +273,11 @@ test("Codex interrupts a turn by its ID and reuses the same app-server and threa
   const adapter = new CodexAdapter({ chat, store, config: testConfig(root, { CODEX_BIN: path.join(fixtureDir, "fake-codex.mjs") }), broker: new CapabilityBroker({ ttlMs: 10000 }), hooks: { onRequest: value => { request = value; } } });
   t.after(() => adapter.stop()); await adapter.start();
   const rpc = adapter.rpc;
-  const sent = adapter.send("interrupt me");
+  const sent = adapter.send("interrupt me", { mode: "accept_edits" });
   const rejected = assert.rejects(sent, /interrupted/);
   await waitFor(() => request); await adapter.interrupt(); await rejected;
   assert.equal(adapter.rpc, rpc); assert.equal(adapter.threadId, "thr_fixture"); assert.equal(adapter.requests.size, 0);
-  request = null; const next = adapter.send("next"); await waitFor(() => request);
+  request = null; const next = adapter.send("next", { mode: "accept_edits" }); await waitFor(() => request);
   await adapter.respond(request.requestId, { decision: "accept" }); assert.equal((await next).text, "hello world");
   await adapter.interrupt(); assert.equal(adapter.rpc, rpc);
 });

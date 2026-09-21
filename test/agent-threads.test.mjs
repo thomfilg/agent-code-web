@@ -127,6 +127,25 @@ test("child approvals and questions never resolve a main or foreign request; que
   assert.equal(agents.snapshot().threads.find(thread => thread.id === "child").messages.at(-1).text, "Completed response");
 });
 
+test("Auto closes stale child approvals without granting them and still surfaces questions", async t => {
+  let mode = "accept_edits";
+  const { rpc, agents } = observer(t, { mode: () => mode }); await agents.refresh();
+  rpc.emit("request", { id: 31, method: "item/commandExecution/requestApproval", params: { threadId: "child", command: "fixture command" } });
+  await waitFor(() => agents.snapshot().threads.find(thread => thread.id === "child")?.pendingRequest);
+  mode = "auto"; agents.setPermissionMode(mode);
+  assert.equal(agents.snapshot().threads.find(thread => thread.id === "child").pendingRequest, null);
+  assert.deepEqual(rpc.responses, [{ id: 31, result: { decision: "decline" } }]);
+
+  rpc.emit("request", { id: 32, method: "item/permissions/requestApproval", params: { threadId: "child", permissions: { network: { enabled: true } } } });
+  await waitFor(() => rpc.responses.length === 2);
+  assert.deepEqual(rpc.responses[1], { id: 32, result: { permissions: {} } });
+  assert.equal(agents.snapshot().threads.find(thread => thread.id === "child").pendingRequest, null);
+
+  rpc.emit("request", { id: 33, method: "item/tool/requestUserInput", params: { threadId: "child", questions: [{ id: "q", question: "Which branch?" }] } });
+  await waitFor(() => agents.snapshot().threads.find(thread => thread.id === "child")?.pendingRequest);
+  assert.equal(agents.snapshot().threads.find(thread => thread.id === "child").pendingRequest.requestId, "approval_33");
+});
+
 test("native parent and nested activity discover agents and surface approvals without opening the picker", async t => {
   const { rpc, agents } = observer(t);
   rpc.notify("item/completed", { threadId: "main", item: { type: "collabAgentToolCall", receiverThreadIds: ["child", "foreign"] } });

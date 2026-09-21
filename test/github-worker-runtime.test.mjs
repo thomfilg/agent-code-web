@@ -185,7 +185,7 @@ test("server → local executor → both native adapters persist only sanitized 
   await (await app.resources.forOwner(null)).companies.save({ id: "company", name: "Company" });
   await app.records.put("connection", "github", { id: "github", token: "controller-private-fixture-not-for-worker", revision: 1, companyId: "company" });
   for (const provider of ["codex", "claude"]) {
-    const chat = await app.store.create({ agent: provider, title: "Real adapters fixture", repositories: [{ ...repo, githubConnectionId: "github" }] });
+    const chat = await app.store.create({ agent: provider, title: "Real adapters fixture", mode: provider === "codex" ? "accept_edits" : "auto", repositories: [{ ...repo, githubConnectionId: "github" }] });
     await app.store.update(chat.id, { workspaceReady: true }); await mkdir(chat.workspace, { recursive: true });
     const turn = await app.manager.submit(chat.id, "all-capabilities");
     if (provider === "codex") {

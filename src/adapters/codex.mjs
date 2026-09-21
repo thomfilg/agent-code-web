@@ -127,6 +127,7 @@ export class CodexAdapter {
     this.createdForks = new Set();
     this.current = null;
     this.requests = new Map();
+    this.mode = chat.mode || "auto";
     this.intentionalStop = false;
     this.goal = null;
     this.children = new Set();
@@ -232,7 +233,7 @@ export class CodexAdapter {
     this.importControls = await createCodexImportControls(this, env, rpc, importWorkerId);
     const imports = this.importControls;
     this.importStop = null;
-    this.agents = new CodexAgentThreads({ rpc, root: () => this.threadId, workspace: this.workspace, model: this.config.codex.model, saved: this.savedAgentThreads,
+    this.agents = new CodexAgentThreads({ rpc, root: () => this.threadId, workspace: this.workspace, model: this.config.codex.model, mode: () => this.mode, saved: this.savedAgentThreads,
       assertCurrent: this.hooks.assertAgentCurrent,
       secrets: authMode === "account" || this.credentialSecrets.size ? this.credentialSecrets : null,
       publish: snapshot => this.hooks.onAgentThreads?.(snapshot), log: text => this.hooks.onLog?.(text) });
@@ -357,7 +358,7 @@ export class CodexAdapter {
   desktopSession(check) { return inspectDesktopSession(this, check); }
 
   async #loadThread() {
-    const mode = this.chat.mode || "auto";
+    const mode = this.mode;
     const common = {
       cwd: this.workspace,
       ...codexApprovalSettings(mode),
@@ -400,6 +401,7 @@ export class CodexAdapter {
     }, 60000);
     if (!result.thread?.id) throw new Error("Codex did not return a side thread ID");
     const child = new CodexAdapter({ chat: this.chat, store: this.store, config: this.config, broker: this.broker, gatewayOrigin: this.gatewayOrigin, executor: this.executor, hooks });
+    child.mode = this.mode;
     child.rpc = rpc; child.threadId = result.thread.id; child.sharedParent = this;
     child.nativeAuthMode = this.nativeAuthMode;
     child.credentialSecrets = this.credentialSecrets;
@@ -598,6 +600,28 @@ export class CodexAdapter {
     if (this.rpc !== rpc || this.threadId !== threadId || this.intentionalStop || !result || typeof result !== "object") throw new Error("The native approval connection changed");
   }
 
+  async setPermissionMode(mode, check = () => {}, acknowledge = () => {}) {
+    check();
+    // A mode selected while the runtime is still starting must still govern
+    // thread/start. RuntimeManager owns validation and persists only after this
+    // method returns, so retaining the requested value here is safe.
+    const rpc = this.rpc, threadId = this.threadId;
+    if (!rpc || !threadId || this.intentionalStop) { this.mode = mode; return false; }
+    await rpc.request("thread/settings/update", {
+      threadId,
+      ...codexApprovalSettings(mode),
+      sandboxPolicy: mode === "plan" ? { type: "readOnly" } : { type: "workspaceWrite", writableRoots: [this.workspace], networkAccess: false },
+      collaborationMode: { mode: mode === "plan" ? "plan" : "default", settings: { model: this.chat.model || this.config.codex.model, reasoning_effort: this.chat.effort || null, developer_instructions: null } },
+    }, 10000);
+    check();
+    if (this.rpc !== rpc || this.threadId !== threadId || this.intentionalStop) throw new Error("The Codex permission connection changed");
+    this.mode = mode;
+    this.agents?.setPermissionMode(mode);
+    acknowledge();
+    if (mode === "auto") this.#declineStaleApprovals();
+    return true;
+  }
+
   async send(text, { model, effort, mode = "auto", images = [], skills = [], appReferences = [], additionalContext = {}, goalDirective = null, reviewTarget = null, serviceTier, personality } = {}) {
     this.assertInputReady();
     if (!this.rpc) await this.start();
@@ -646,6 +670,7 @@ export class CodexAdapter {
       // settings before every turn so Auto remains non-interactive on those
       // continuations too, including for threads created before this fix.
       await this.rpc.request("thread/settings/update", turnSettings, 10000);
+      this.mode = mode;
       if (reviewTarget) {
         // Review is its own native turn, not a prompt asking the main agent to
         // pretend to be the reviewer. Pause an active goal so it cannot start
@@ -953,8 +978,27 @@ export class CodexAdapter {
       return;
     }
     const requestId = `approval_${message.id}`;
+    // Auto is deliberately non-interactive. A request can still arrive from a
+    // turn that began just before a live mode change (or from an older native
+    // continuation). Never display that stale request as if Auto asked the
+    // user, and never silently approve it: deny it and let the agent retry
+    // under the now-persisted automatic-review policy.
+    if (this.mode === "auto" && message.method !== "item/tool/requestUserInput") {
+      this.rpc.respond(message.id, message.method === "item/permissions/requestApproval" ? { permissions: {} } : { decision: "decline" });
+      this.hooks.onEvent?.({ type: "request_resolved", requestId });
+      return;
+    }
     this.requests.set(requestId, { rpcId: message.id, method: message.method });
     this.hooks.onRequest?.({ requestId, method: message.method, params: message.params || {} });
+  }
+
+  #declineStaleApprovals() {
+    for (const [requestId, request] of this.requests) {
+      if (request.method === "item/tool/requestUserInput") continue;
+      this.requests.delete(requestId);
+      this.rpc.respond(request.rpcId, request.method === "item/permissions/requestApproval" ? { permissions: {} } : { decision: "decline" });
+      this.hooks.onEvent?.({ type: "request_resolved", requestId });
+    }
   }
 
   #rejectCurrent(error) {

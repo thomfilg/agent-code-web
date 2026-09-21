@@ -99,7 +99,7 @@ test("Claude gateway-mode subprocess protects capability across every delta spli
 });
 
 test("Codex gateway-mode RPC protects capability across every split, tool fields and side agents without argv or Git persistence", async t => {
-  const f = await adapterFixture(t, "codex"), running = f.adapter.send("fixture"); await waitFor(() => f.requests.length);
+  const f = await adapterFixture(t, "codex"), running = f.adapter.send("fixture", { mode: "accept_edits" }); await waitFor(() => f.requests.length);
   const params = { threadId: f.adapter.threadId, turnId: f.adapter.current.turnId }, notifications = [];
   for (const token of [capability, browserCap, mcpCap]) for (let split = 1; split < token.length; split++) for (const delta of [token.slice(0, split), token.slice(split) + " "]) notifications.push({ method: "item/agentMessage/delta", params: { ...params, delta } });
   notifications.push({ method: "item/completed", params: { ...params, item: { type: "commandExecution", id: "tool", command: capability, aggregatedOutput: capability } } });

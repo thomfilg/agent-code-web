@@ -1082,12 +1082,12 @@ export class RuntimeManager extends EventEmitter {
     try {
       check();
       let applied = false;
-      if (chat.agent === "claude" && runtime?.adapter.setPermissionMode) {
+      if (runtime?.adapter.setPermissionMode) {
         applied = await runtime.adapter.setPermissionMode(mode, check, () => {
           check(); pending.acknowledged = true;
           runtime.permissionEpoch = (runtime.permissionEpoch || 0) + 1;
         });
-        if (!applied && runtime.busy && !nextTurn) throw Object.assign(Error("Claude is starting; retry the permission selection when ready."), { statusCode: 409 });
+        if (chat.agent === "claude" && !applied && runtime.busy && !nextTurn) throw Object.assign(Error("Claude is starting; retry the permission selection when ready."), { statusCode: 409 });
       }
       let updated;
       do {

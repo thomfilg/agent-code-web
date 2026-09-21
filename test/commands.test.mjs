@@ -115,6 +115,24 @@ test("a new chat defaults to Auto, validates explicit permission modes and uses 
   assert.equal(store.list().filter(item => item.title === "Invalid mode").length, 0);
 });
 
+test("permission changes are applied to a live Codex runtime instead of only changing the picker", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const modes = [], calls = [];
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => ({
+    start: async () => {}, stop: async () => {},
+    send: async (text, settings) => { calls.push({ text, settings }); return { text: "Done" }; },
+    setPermissionMode: async (mode, guard, acknowledge) => { guard(); modes.push(mode); acknowledge(); return true; },
+  }) });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "codex", title: "Live Auto" });
+  await manager.send(chat.id, "start runtime");
+  await manager.setMode(chat.id, "accept_edits");
+  await manager.setMode(chat.id, "auto");
+  assert.deepEqual(modes, ["accept_edits", "auto"]);
+  assert.equal(store.get(chat.id).mode, "auto");
+  assert.equal(calls[0].settings.mode, "auto");
+});
+
 test("plan plus task uses read-only mode; goals persist and stream each native continuation separately", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const config = testConfig(root, { CODEX_BIN: fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url)), AGENT_IDLE_TIMEOUT_MS: "10000" });

@@ -53,16 +53,14 @@ test("real worker transport logs in to the chosen account, runs a fixture turn, 
   const response = await post(browser, "/api/chats", { agent: "codex", agentAccountId: id, title: "Account runtime test" });
   const chat = (await response.json()).chat; await app.manager.setMode(chat.id, "auto");
   const first = await app.manager.submit(chat.id, "fixture turn");
-  first.completion.catch(() => {});
-  const request = await waitFor(() => app.store.get(chat.id).pendingRequest);
-  await app.manager.respond(chat.id, request.requestId, { decision: "accept" }); await first.completion;
+  await first.completion;
+  assert.equal(app.store.get(chat.id).pendingRequest, null, "Auto never opens a user approval card");
   assert.equal(app.store.get(chat.id).messages.some(message => message.text.includes("hello world")), true);
   assert.equal(app.broker.size, 0, "native account never creates a gateway capability");
   await app.manager.stop(chat.id, "test-resume");
   const second = await app.manager.submit(chat.id, "fixture resume");
-  second.completion.catch(() => {});
-  const resumed = await waitFor(() => app.store.get(chat.id).pendingRequest);
-  await app.manager.respond(chat.id, resumed.requestId, { decision: "accept" }); await second.completion;
+  await second.completion;
+  assert.equal(app.store.get(chat.id).pendingRequest, null);
   assert.equal(app.store.get(chat.id).agentAccountId, id); assert.equal(app.store.get(chat.id).ownerId, user.id);
   assert.equal((await post(browser, `/api/agent-accounts/${id}/disconnect`)).status, 200);
   assert.equal(app.store.get(chat.id).status, "stopped");
@@ -97,7 +95,7 @@ test("account selection is explicit for old chats, remains user-owned after cont
 test("disconnect stops an active selected-account turn before gated refresh finishes and reconnect resumes its saved session", { timeout: 20000 }, async t => {
   const ctx = await setup(t), { app, browser, user } = ctx, id = await connect(ctx);
   const { chat } = await (await post(browser, "/api/chats", { agent: "codex", agentAccountId: id, title: "Active revocation" })).json();
-  await app.manager.setMode(chat.id, "auto");
+  await app.manager.setMode(chat.id, "accept_edits");
   const turn = await app.manager.submit(chat.id, "fixture turn awaiting approval"); turn.completion.catch(() => {});
   await waitFor(() => app.store.get(chat.id).pendingRequest);
   const session = app.store.get(chat.id).agentSessionId;
@@ -129,9 +127,8 @@ test("account deletion enforces owner and Origin, stops its worker, keeps messag
   const ctx = await setup(t), { app, browser, user } = ctx, id = await connect(ctx);
   const created = await post(browser, "/api/chats", { agent: "codex", agentAccountId: id, title: "Keep my conversation" });
   const { chat } = await created.json(); await app.manager.setMode(chat.id, "auto");
-  const turn = await app.manager.submit(chat.id, "fixture deletion turn"); turn.completion.catch(() => {});
-  const approval = await waitFor(() => app.store.get(chat.id).pendingRequest);
-  await app.manager.respond(chat.id, approval.requestId, { decision: "accept" }); await turn.completion;
+  const turn = await app.manager.submit(chat.id, "fixture deletion turn"); await turn.completion;
+  assert.equal(app.store.get(chat.id).pendingRequest, null);
   const messages = structuredClone(app.store.get(chat.id).messages);
   const replacement = await connect(ctx);
   const member = cookieClient(ctx.url); await member.login(ctx.google, { sub: "member", email: "member@example.com", email_verified: true });
