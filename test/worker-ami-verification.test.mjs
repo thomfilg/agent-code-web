@@ -319,6 +319,16 @@ test("probe failure details expose only fixed stages/classes and bounded helper 
   }
 });
 
+test("application transport failure exposes only an allowlisted substage", async () => {
+  for (const applicationStage of ["initialize", "PRIVATE-STAGE"]) {
+    const f = fixture({ hibernation: true, commandFailed: true, mutateReceipt: () => ({ diagnostic: { stage: "worker-probe", category: "application-transport", exitCode: 1, probeStage: "application-transport", applicationStage } }) });
+    await assert.rejects(verifyHibernationImage(options, { run: f.run, sleep: async () => {} }), error => {
+      assert.equal(error.message.includes("application stage: initialize"), applicationStage === "initialize");
+      assert.doesNotMatch(error.message, /PRIVATE-STAGE/); return true;
+    });
+  }
+});
+
 test("controller probe keeps key retrieval and root-only temporary files local and isolates known hosts", async () => {
   const script = await readFile(new URL("../deploy/aws/verify-worker-controller.py", import.meta.url), "utf8");
   for (const text of ["'/dev/shm'", "0o700", "0o600", "capture_output=True", "'get-secret-value'", "AWS_SHARED_CREDENTIALS_FILE", "'/dev/null'", "ssh-keygen", "'UpdateHostKeys=no'", "'GlobalKnownHostsFile=/dev/null'", "'knownHosts'", "'resumed'", "private diagnostics suppressed"]) assert.ok(script.includes(text), text);

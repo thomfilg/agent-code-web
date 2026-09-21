@@ -213,6 +213,14 @@ class ControllerProbeTest(unittest.TestCase):
             result = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(value), stderr='')))
             self.assertEqual(result['diagnostic'], {'stage': 'worker-probe', 'category': 'invalid-receipt', 'exitCode': 1})
 
+    def test_application_transport_diagnostic_exposes_only_fixed_substage(self):
+        for stage in ('initialize', 'PRIVATE-STAGE'):
+            value = {'reason': 'application transport did not survive hibernation', 'applicationStage': stage,
+                     'private': 'PRIVATE-SECRET'}
+            result = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(value), stderr='PRIVATE-STDERR')))
+            self.assertEqual(result['diagnostic'].get('applicationStage'), 'initialize' if stage == 'initialize' else None)
+            self.assertNotIn('PRIVATE-', json.dumps(result))
+
 
 if __name__ == '__main__':
     unittest.main()

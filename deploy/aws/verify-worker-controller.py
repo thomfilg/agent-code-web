@@ -33,6 +33,8 @@ EXCEPTION_CLASSES = ('RuntimeError', 'JSONDecodeError', 'FileNotFoundError', 'Pe
                      'TimeoutExpired', 'CalledProcessError', 'OSError', 'ValueError', 'TypeError',
                      'KeyError', 'IndexError', 'AttributeError', 'NameError', 'UnboundLocalError',
                      'ImportError', 'ModuleNotFoundError', 'UnicodeDecodeError', 'AssertionError')
+APPLICATION_STAGES = ('bundle', 'service', 'status', 'configure', 'connect', 'launch', 'attach',
+                      'initialize', 'checkpoint', 'takeover', 'read', 'no-replay', 'terminate', 'release')
 
 
 class ProbeFailure(RuntimeError):
@@ -61,6 +63,8 @@ class ProbeFailure(RuntimeError):
                     self.diagnostic[field] = details[field]
             if details.get('probeStage') == 'image-audit-json' and type(details.get('helperLine')) is int and 1 <= details['helperLine'] <= 10000:
                 self.diagnostic['helperLine'] = details['helperLine']
+            if category == 'application-transport' and details.get('applicationStage') in APPLICATION_STAGES:
+                self.diagnostic['applicationStage'] = details['applicationStage']
 
 
 def probe_failure(result):
@@ -108,12 +112,17 @@ import base64, hashlib, json, os, pathlib, re, shutil, socket, subprocess, sys, 
 audit_checks = {}
 credential_counts = {}
 metadata_probe = None
+application_stage = 'bundle'
 stage = 'request'
 audit = None
 exception_classes = ('RuntimeError', 'JSONDecodeError', 'FileNotFoundError', 'PermissionError', 'TimeoutExpired', 'CalledProcessError', 'OSError', 'ValueError', 'TypeError', 'KeyError', 'IndexError', 'AttributeError', 'NameError', 'UnboundLocalError', 'ImportError', 'ModuleNotFoundError', 'UnicodeDecodeError', 'AssertionError')
 
 def application_failure():
     raise RuntimeError('application transport did not survive hibernation')
+
+def application_at(value):
+    global application_stage
+    application_stage = value
 
 SUPERVISOR_FILES = ('worker-process-anchor.mjs', 'worker-process-supervisor.mjs',
                     'worker-transport-wire.mjs', 'worker-supervisor-paths.mjs',
@@ -122,6 +131,7 @@ SUPERVISOR_FILES = ('worker-process-anchor.mjs', 'worker-process-supervisor.mjs'
                     'worker-supervisor-service.mjs')
 
 def install_supervisor(request, phase):
+    application_at('bundle')
     encoded = request.get('supervisorBundle')
     if not isinstance(encoded, str) or len(encoded) > 32768 or not re.fullmatch(r'[A-Za-z0-9+/=]+', encoded):
         application_failure()
@@ -165,6 +175,7 @@ def install_supervisor(request, phase):
     command = ['systemctl', '--user', 'is-active', '--quiet', 'agent-relay-worker-supervisor.service']
     if phase == 'fresh':
         command = ['/bin/sh', '-c', 'systemctl --user daemon-reload && systemctl --user enable --now agent-relay-worker-supervisor.service && systemctl --user is-active --quiet agent-relay-worker-supervisor.service']
+    application_at('service')
     active = subprocess.run(command, capture_output=True, timeout=20, env=environment)
     if active.returncode:
         application_failure()
@@ -286,6 +297,7 @@ def application_probe(request):
     lease = {'id': 'acceptance-' + phase, 'generation': generation,
              'expiresAt': int(time.time() * 1000) + 55000, 'credential': credential}
     install_supervisor(request, phase)
+    application_at('status')
     status = supervisor_control({'action': 'status'})
     if status.get('protocol') != 'relay-worker-supervisor/1' or status.get('version') != 'v3' or not isinstance(status.get('daemonInstanceId'), str):
         application_failure()
@@ -304,12 +316,15 @@ def application_probe(request):
         processes = status.get('processes')
         if not isinstance(processes, list) or len(processes) != 1 or processes[0].get('processInstanceId') != state.get('receipt', {}).get('processInstanceId'):
             application_failure()
+    application_at('configure')
     configured = supervisor_control({'action': 'configure', 'identity': identity, 'processId': 'native-agent', 'lease': lease})
     if configured.get('configured') is not True or configured.get('daemonInstanceId') != status['daemonInstanceId'] or configured.get('processId') != 'native-agent' or configured.get('lease', {}).get('generation') != generation:
         application_failure()
+    application_at('connect')
     client = ApplicationClient(identity, credential, state.get('receipt') if state else None, state.get('cursor', 0) if state else 0)
     try:
         if phase == 'fresh':
+            application_at('launch')
             receipt = client.request('launch', {'spec': {'command': '/usr/local/bin/codex',
                 'args': ['app-server', '-c', 'cli_auth_credentials_store="ephemeral"'], 'cwd': '/tmp',
                 'env': {'HOME': str(home), 'CODEX_HOME': str(home), 'PATH': '/usr/local/bin:/usr/bin:/bin',
@@ -317,9 +332,11 @@ def application_probe(request):
             client.receipt = receipt
             if receipt.get('protocol') != 'relay-worker-process/1' or receipt.get('processId') != 'native-agent' or not isinstance(receipt.get('pid'), int):
                 application_failure()
+            application_at('attach')
             attached = client.request('attach', {'processInstanceId': receipt['processInstanceId'], 'committedOutputSeq': 0})
             if attached.get('processInstanceId') != receipt['processInstanceId']:
                 application_failure()
+            application_at('initialize')
             client.input(1, {'method': 'initialize', 'id': 1, 'params': {'clientInfo': {'name': 'relay_hibernation_acceptance', 'version': '1'}, 'capabilities': {'experimentalApi': True}}})
             initialized = client.app_response(1)
             if not isinstance(initialized.get('userAgent'), str):
@@ -330,11 +347,13 @@ def application_probe(request):
                 application_failure()
             if client.cursor:
                 client.request('ackOutput', {'processInstanceId': receipt['processInstanceId'], 'seq': client.cursor})
+            application_at('checkpoint')
             state = {'daemonInstanceId': status['daemonInstanceId'], 'receipt': receipt, 'cursor': client.cursor}
             fd = os.open(state_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(fd, 'w') as target:
                 json.dump(state, target, sort_keys=True, separators=(',', ':'))
         else:
+            application_at('takeover')
             receipt = state['receipt']
             inspected = client.request('inspect')
             stable = ('supervisorInstanceId', 'processInstanceId', 'processId', 'pid', 'startedAt', 'groupAnchor')
@@ -343,15 +362,18 @@ def application_probe(request):
             attached = client.request('attach', {'processInstanceId': receipt['processInstanceId'], 'committedOutputSeq': state['cursor']})
             if attached.get('processInstanceId') != receipt['processInstanceId']:
                 application_failure()
+            application_at('read')
             client.input(3, {'method': 'thread/list', 'id': 2, 'params': {'limit': 1}})
             listed = client.app_response(2)
             if not isinstance(listed.get('data'), list):
                 application_failure()
             transport_status = client.request('status', {'processInstanceId': receipt['processInstanceId']})
+            application_at('no-replay')
             if transport_status.get('inputSeq') != 3 or transport_status.get('pid') != receipt['pid']:
                 application_failure()
             if client.cursor:
                 client.request('ackOutput', {'processInstanceId': receipt['processInstanceId'], 'seq': client.cursor})
+            application_at('terminate')
             client.request('terminate', {'processInstanceId': receipt['processInstanceId']})
             deadline = time.monotonic() + 15
             transport_status = {}
@@ -364,6 +386,7 @@ def application_probe(request):
                 application_failure()
             if client.cursor:
                 client.request('ackOutput', {'processInstanceId': receipt['processInstanceId'], 'seq': client.cursor})
+            application_at('release')
             released = supervisor_control({'action': 'release', 'processId': 'native-agent',
                                            'processInstanceId': receipt['processInstanceId'], 'leaseId': lease['id']})
             if released.get('released') is not True or supervisor_control({'action': 'reset'}).get('reset') is not True:
@@ -479,6 +502,8 @@ except Exception as error:
         failure['auditChecks'] = audit_checks
         failure['credentialFailureCounts'] = credential_counts
         failure['metadataProbe'] = metadata_probe
+    if failure['reason'] == 'application transport did not survive hibernation' and application_stage in ('bundle', 'service', 'status', 'configure', 'connect', 'launch', 'attach', 'initialize', 'checkpoint', 'takeover', 'read', 'no-replay', 'terminate', 'release'):
+        failure['applicationStage'] = application_stage
     print(json.dumps(failure))
     sys.exit(1)
 '''
