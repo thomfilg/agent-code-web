@@ -111,6 +111,8 @@ test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers ap
   };
   adapter = new CodexAdapter({ chat, store, config, broker, gatewayOrigin: "http://127.0.0.1:9", hooks });
   await adapter.start();
+  let nativeSettings = (await adapter.rpc.request("fixture/threadSettings", {})).settings;
+  assert.equal(nativeSettings.approvalPolicy, "never"); assert.equal(nativeSettings.approvalsReviewer, "auto_review");
   let turnParams;
   const originalRequest = adapter.rpc.request.bind(adapter.rpc);
   adapter.rpc.request = (method, params, timeout) => { if (method === "turn/start") turnParams = params; return originalRequest(method, params, timeout); };
@@ -123,6 +125,8 @@ test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers ap
   assert.deepEqual(turnParams.input[1], { type: "localImage", path: "/tmp/image.png" });
   assert.equal(sessionId, "thr_fixture");
   assert.equal(result.text, "hello world");
+  nativeSettings = (await adapter.rpc.request("fixture/threadSettings", {})).settings;
+  assert.equal(nativeSettings.approvalPolicy, "on-request"); assert.equal(nativeSettings.approvalsReviewer, "user");
   assert.ok(events.some((event) => event.type === "assistant_delta" && event.delta === "hello "));
   assert.ok(events.some((event) => event.type === "tool" && event.state === "completed"));
   assert.ok(events.some(event => event.type === "request_resolved" && event.requestId === "approval_900"));
@@ -135,12 +139,20 @@ test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers ap
   assert.equal(turnParams.approvalsReviewer, "user"); assert.equal(turnParams.approvalPolicy, "on-request");
   await adapter.send("automatic reviews", { model: "fixture-gpt", mode: "auto" });
   assert.equal(turnParams.approvalsReviewer, "auto_review"); assert.equal(turnParams.approvalPolicy, "never"); assert.equal(turnParams.sandboxPolicy.type, "workspaceWrite");
+  nativeSettings = (await adapter.rpc.request("fixture/threadSettings", {})).settings;
+  assert.equal(nativeSettings.approvalPolicy, "never"); assert.equal(nativeSettings.approvalsReviewer, "auto_review");
+  const goalResult = await adapter.send("automatic goal", { model: "fixture-gpt", mode: "auto", goalDirective: { action: "set", objective: "Verify Auto" } });
+  assert.equal(goalResult.turnsHandled, true);
+  nativeSettings = (await adapter.rpc.request("fixture/goalContinuationSettings", {})).settings;
+  assert.equal(nativeSettings.approvalPolicy, "never"); assert.equal(nativeSettings.approvalsReviewer, "auto_review");
   await adapter.stop();
 
   const resumedChat = { ...chat, agentSessionId: sessionId };
   const resumed = new CodexAdapter({ resumedChat, chat: resumedChat, store, config, broker, gatewayOrigin: "http://127.0.0.1:9", hooks: { ...hooks, onSessionId: () => assert.fail("resume should retain session") } });
   adapter = resumed;
   await resumed.start();
+  nativeSettings = (await resumed.rpc.request("fixture/threadSettings", {})).settings;
+  assert.equal(nativeSettings.approvalPolicy, "never"); assert.equal(nativeSettings.approvalsReviewer, "auto_review");
   assert.equal((await resumed.send("resumed")).text, "hello world");
   await resumed.stop();
 });

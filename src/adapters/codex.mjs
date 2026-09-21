@@ -357,10 +357,11 @@ export class CodexAdapter {
   desktopSession(check) { return inspectDesktopSession(this, check); }
 
   async #loadThread() {
+    const mode = this.chat.mode || "auto";
     const common = {
       cwd: this.workspace,
-      approvalPolicy: "on-request",
-      sandbox: "workspace-write",
+      ...codexApprovalSettings(mode),
+      sandbox: mode === "plan" ? "read-only" : "workspace-write",
       ...(this.chat.model || this.nativeAuthMode !== "account" && this.config.codex.model ? { model: this.chat.model || this.config.codex.model } : {}),
       ...(this.nativeAuthMode === "gateway" ? { modelProvider: "agent_gateway" } : {}),
     };
@@ -640,12 +641,16 @@ export class CodexAdapter {
         sandboxPolicy: mode === "plan" ? { type: "readOnly" } : { type: "workspaceWrite", writableRoots: [this.workspace], networkAccess: false },
         collaborationMode: { mode: mode === "plan" ? "plan" : "default", settings: { model: model || this.config.codex.model, reasoning_effort: effort || null, developer_instructions: null } },
       };
+      // turn/start applies settings to the explicit turn, but native /goal
+      // continuations are created by the thread itself. Persist the same
+      // settings before every turn so Auto remains non-interactive on those
+      // continuations too, including for threads created before this fix.
+      await this.rpc.request("thread/settings/update", turnSettings, 10000);
       if (reviewTarget) {
         // Review is its own native turn, not a prompt asking the main agent to
         // pretend to be the reviewer. Pause an active goal so it cannot start
         // an editing continuation as soon as the review finishes.
         if (this.goal?.status === "active") await this.goalAction("pause");
-        await this.rpc.request("thread/settings/update", turnSettings, 10000);
       }
       if (current.interruptRequested) throw new Error("Codex turn interrupted before startup");
       const starting = reviewTarget

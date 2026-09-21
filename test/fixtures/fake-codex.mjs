@@ -7,11 +7,14 @@ let pendingTurn = null;
 let turnCount = 0;
 let goal = null;
 let lastMode = "default";
+let threadSettings = null;
+let goalContinuationSettings = null;
 let externalAccount, refreshRequest;
 let backgroundTerminals = [{ processId: "100", command: "npm run dev TOKEN=fixture-secret", cwd: "/fixture/workspace" }, { processId: "200", command: "npm run test:watch", cwd: "/fixture/workspace" }];
 function goalChanged() { send({ method: "thread/goal/updated", params: { threadId: "thr_fixture", goal } }); }
 function continueGoal() {
   if (!goal || goal.status !== "active" || pendingTurn || lastMode === "plan") return;
+  goalContinuationSettings = structuredClone(threadSettings);
   const turn = { threadId: "thr_fixture", turnId: `turn_goal_${++turnCount}` };
   send({ method: "turn/started", params: { threadId: turn.threadId, turn: { id: turn.turnId, status: "inProgress" } } });
   send({ method: "item/agentMessage/delta", params: { ...turn, delta: "Goal verified complete" } });
@@ -40,6 +43,7 @@ rl.on("line", (line) => {
     if (message.params.complete) pendingTurn = null;
     send({ id: message.id, result: {} });
   } else if (message.method === "thread/start") {
+    threadSettings = message.params;
     send({ id: message.id, result: { model: "fixture-gpt", thread: { id: "thr_fixture" } } });
   } else if (message.method === "thread/fork" && message.params.ephemeral) {
     send({ id: message.id, result: { model: "fixture-gpt", thread: { id: "thr_side_fixture" } } });
@@ -50,10 +54,16 @@ rl.on("line", (line) => {
   } else if (message.method === "thread/read") {
     send({ id: message.id, error: { code: -32602, message: "No descendant thread in this fixture" } });
   } else if (message.method === "thread/resume") {
+    threadSettings = message.params;
     if (message.params.threadId === "thr_missing") send({ id: message.id, error: { code: -32602, message: "Fixture native history is missing" } });
     else send({ id: message.id, result: { thread: { id: message.params.threadId === "thr_wrong_identity" ? "thr_other" : message.params.threadId } } });
   } else if (message.method === "thread/settings/update") {
+    threadSettings = message.params;
     send({ id: message.id, result: { settings: message.params } });
+  } else if (message.method === "fixture/threadSettings") {
+    send({ id: message.id, result: { settings: threadSettings } });
+  } else if (message.method === "fixture/goalContinuationSettings") {
+    send({ id: message.id, result: { settings: goalContinuationSettings } });
   } else if (message.method === "thread/backgroundTerminals/list") {
     send({ id: message.id, result: { data: backgroundTerminals, nextCursor: null } });
   } else if (message.method === "thread/backgroundTerminals/terminate") {
