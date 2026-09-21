@@ -246,8 +246,11 @@ node deploy/aws/verify-worker-hibernation.mjs \
 Remove `--dry-run` for the explicit billable run. It retains all ordinary image,
 network, controller, credential-scrub, ownership and cleanup gates, launches the
 disposable worker with EC2 hibernation configured, starts a unique in-memory
-native process, hibernates the exact instance, and requires the same kernel,
-PID/start identity, SSH identity and sentinel after resume. Only after both
+native process plus an unauthenticated installed Codex app-server behind the
+worker supervisor, hibernates the exact instance, and requires the same kernel,
+PID/start identity, SSH identity, sentinel, application process and committed
+transport cursor after resume. The resumed application check is local and sends
+no provider prompt or account import. Only after both
 probes, exact instance termination and disposable encrypted-volume deletion does
 it publish `AgentRelayHibernationAcceptance=verified-v1` plus the unique receipt
 ID. A normal stop/start or a process reconstructed from disk cannot pass this

@@ -122,7 +122,7 @@ Files: [runtime-manager.mjs](../src/runtime-manager.mjs) `#scheduleIdleStop`,
   Stop/Delete racing the suspend operation. Never count a Node development
   server's existence alone as an active model turn.
 - [x] Verify parser defaults and explicit `AGENT_IDLE_TIMEOUT_MS` overrides.
-- [ ] Verify the effective deployed configuration. Do not change production
+- [x] Verify the effective deployed configuration. Do not change production
   flags yet.
 
 ### 5. Image, watchdog and acceptance promotion
@@ -143,12 +143,12 @@ part of the committed baseline used by this document.
 - [x] Constrain the candidate source against authoritative current provider
   requirements: official Canonical Ubuntu 22.04 amd64, supported T3 family,
   encrypted gp3 root, launch-time hibernation, and root capacity above RAM.
-- [ ] Revalidate the selected regional AMI, instance type and effective disk
+- [x] Revalidate the selected regional AMI, instance type and effective disk
   configuration through the scoped AWS account before the billable cloud probe.
 - [x] Reconcile the orphan watchdog and post-resume heartbeat with the new policy;
   neither may silently full-stop a worker or immediately rehibernate a newly
   resumed machine based on elapsed wall-clock suspension time.
-- [ ] Extend verifier receipts beyond detached Node/Chrome memory to actual
+- [x] Extend verifier receipts beyond detached Node/Chrome memory to actual
   application transport, same-process identity, authorization and no-replay
   checks. Failed or partial evidence must never promote an image.
 - [x] Issue/read back an exact acceptance marker only after complete evidence and
@@ -157,7 +157,7 @@ part of the committed baseline used by this document.
 
 ### 6. Separately coordinated disposable acceptance and activation
 
-- [ ] Obtain/confirm explicit scope for disposable cloud verification; identify
+- [x] Obtain/confirm explicit scope for disposable cloud verification; identify
   exact account, deployment, image and resources. Never use the active user
   worker, its browser profile, user credentials or live conversation as fixtures.
 - [ ] Run Node and Chrome with ephemeral in-memory sentinels; record safe hashes,
@@ -172,7 +172,7 @@ part of the committed baseline used by this document.
 - [ ] Exercise explicit Stop/Delete, failure recovery, stale callbacks, and
   failed rollout/rollback. Confirm no auto full-stop fallback or unintended
   resume of revoked work.
-- [ ] Terminate only exact disposable test resources and confirm attached
+- [x] Terminate only exact disposable test resources and confirm attached
   disposable volumes are removed; preserve receipts without private output.
 - [ ] Publish an evidence-backed activation/migration plan. Existing incompatible
   workers need an explicit migration decision, never silent replacement.
@@ -186,3 +186,7 @@ Completion requires implemented lifecycle, transport, authorization, policy and
 image gates **plus** scoped live process-preservation evidence. A helper, green
 unit suite, candidate AMI, detached memory probe, or this checklist alone does
 not complete the user's hibernation MVP request.
+
+The first live image and application-transport receipt is recorded in
+[EC2 hibernation acceptance](validation-2026-09-21-hibernation-acceptance.md).
+It deliberately leaves the remaining activation items above unchecked.
