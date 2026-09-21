@@ -11,8 +11,8 @@ const resources = [["Controller", "AWS::EC2::Instance", controllerId], ["Applica
 
 function receipt(payload) {
   return { schema: 1, verificationId: payload.verificationId, workerId, phase: payload.phase, heartbeatFresh: true, sentinelPresent: true, versions: { codex: "codex-cli 0.154.0", claude: "2.1.222 (Claude Code)" }, knownHosts: `verify-${workerId} ssh-ed25519 AAAAFixturePublicKey\n`,
-    ...(payload.hibernation ? { processIdentity: payload.processIdentity || "d".repeat(64), applicationTransport: true, applicationIdentity: payload.applicationIdentity || "e".repeat(64),
-      browserTransport: true, browserProcessIdentity: payload.browserProcessIdentity || "f".repeat(64), browserStateIdentity: payload.browserStateIdentity || "a".repeat(64), browserCounter: payload.phase === "fresh" ? 1 : 2 } : {}),
+    ...(payload.hibernation ? { cycle: payload.cycle, processIdentity: payload.processIdentity || "d".repeat(64), applicationTransport: true, applicationIdentity: payload.applicationIdentity || "e".repeat(64),
+      browserTransport: true, browserProcessIdentity: payload.browserProcessIdentity || "f".repeat(64), browserStateIdentity: payload.browserStateIdentity || "a".repeat(64), browserCounter: payload.cycle + 1 } : {}),
     audit: { schema: 1, valid: true, finalized: true, cloudInitDisabled: true, ssmDisabled: true, credentialsAbsent: true, transportKeyMatches: true, freshIdentity: true, heartbeatEnabled: true, watchdogActive: true, metadataReachable: false, machine: "a".repeat(64), hostKeys: { "ssh_host_ed25519_key.pub": "b".repeat(64) } } };
 }
 
@@ -126,29 +126,36 @@ test("ordinary acceptance cannot mark a hibernation candidate", async () => {
   assert.equal(f.calls.some(c => c.includes("run-instances") || c.includes("create-tags")), false);
 });
 
-test("dedicated hibernation acceptance proves one native process survives and marks only the exact candidate", async () => {
+test("dedicated hibernation acceptance proves native and browser state survive two cycles including a two-minute stop", async () => {
   const f = fixture({ hibernation: true }), logs = [];
-  const result = await verifyHibernationImage(options, { run: f.run, sleep: async () => {}, log: line => logs.push(line) });
+  const sleeps = [];
+  const result = await verifyHibernationImage(options, { run: f.run, sleep: async ms => sleeps.push(ms), log: line => logs.push(line) });
   assert.equal(result.accepted, true); assert.equal(result.cleanedUp, true);
   assert.deepEqual(result.acceptance, { version: "verified-v1", verificationId: result.verificationId, confirmed: true, kind: "hibernation" });
   assert.equal(result.evidence.processIdentity, "d".repeat(64));
   assert.equal(result.evidence.applicationIdentity, "e".repeat(64));
   assert.equal(result.evidence.browserProcessIdentity, "f".repeat(64));
   assert.equal(result.evidence.browserStateIdentity, "a".repeat(64));
-  assert.equal(result.evidence.browserCounter, 2);
+  assert.equal(result.evidence.browserCounter, 3);
+  assert.equal(result.evidence.resumedCommandIds.length, 2);
   assert.equal(result.checks.nativeProcessSurvivedHibernation, true);
   assert.equal(result.checks.applicationTransportSurvivedHibernation, true);
   assert.equal(result.checks.browserProcessSurvivedHibernation, true);
   assert.equal(result.checks.browserRendererStateSurvivedHibernation, true);
   assert.equal(result.checks.freshControllerTransportRecreated, true);
-  assert.deepEqual(f.requests.map(request => [request.phase, request.hibernation]), [["fresh", true], ["resumed", true]]);
+  assert.equal(result.checks.controllerTransportRecreatedEachCycle, true);
+  assert.equal(result.checks.repeatedHibernationCycles, true);
+  assert.equal(result.checks.stoppedForMoreThanTwoMinutes, true);
+  assert.deepEqual(f.requests.map(request => [request.phase, request.hibernation, request.cycle, request.finalCycle]), [["fresh", true, 0, false], ["resumed", true, 1, false], ["resumed", true, 2, true]]);
   assert.equal(f.requests[1].processIdentity, "d".repeat(64));
   assert.equal(f.requests[1].applicationIdentity, "e".repeat(64));
   assert.equal(f.requests[1].browserProcessIdentity, "f".repeat(64));
   assert.equal(f.requests[1].browserStateIdentity, "a".repeat(64));
   const launch = f.calls.find(call => call.includes("run-instances"));
   assert.deepEqual(launch.slice(launch.indexOf("--hibernation-options"), launch.indexOf("--hibernation-options") + 2), ["--hibernation-options", "Configured=true"]);
-  const stop = f.calls.find(call => call.includes("stop-instances")); assert.ok(stop.includes("--hibernate"));
+  assert.equal(f.calls.filter(call => call.includes("stop-instances") && call.includes("--hibernate")).length, 2);
+  assert.equal(f.calls.filter(call => call.includes("start-instances")).length, 2);
+  assert.ok(sleeps.includes(125_000));
   const tags = JSON.parse(f.calls.find(call => call.includes("create-tags"))[f.calls.find(call => call.includes("create-tags")).indexOf("--tags") + 1]);
   assert.deepEqual(tags.map(tag => tag.Key), ["AgentRelayHibernationAcceptance", "AgentRelayHibernationAcceptanceId"]);
   assert.doesNotMatch(JSON.stringify(result) + logs.join(""), /knownHosts|AAAAFixturePublicKey/);
@@ -159,7 +166,7 @@ test("hibernation retries only the bounded EC2 warmup response and rechecks exac
   const sleeps = [], logs = [];
   const result = await verifyHibernationImage(options, { run: f.run, sleep: async ms => sleeps.push(ms), log: line => logs.push(line) });
   assert.equal(result.accepted, true);
-  assert.equal(f.calls.filter(call => call.includes("stop-instances")).length, 3);
+  assert.equal(f.calls.filter(call => call.includes("stop-instances")).length, 4);
   assert.deepEqual(sleeps.filter(ms => ms === 15_000), [15_000, 15_000]);
   assert.equal(logs.filter(line => line.includes("hibernation is still warming up")).length, 1);
   const firstStop = f.calls.findIndex(call => call.includes("stop-instances"));

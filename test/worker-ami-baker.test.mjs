@@ -377,6 +377,19 @@ test("worker recipe removes builder identity, generates new host keys and does n
   assert.ok(recipe.includes("DefaultDependencies=no\n      After=local-fs.target\n      Before=ssh.service ssh.socket"));
 });
 
+test("Noble permits only the pinned Codex bwrap to construct sandboxes without disabling AppArmor userns hardening", async () => {
+  const recipe = await readFile(new URL("../deploy/aws/worker-cloud-init.yaml", import.meta.url), "utf8");
+  const helper = "/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap";
+  assert.ok(recipe.includes(`profile codex_bwrap ${helper}`));
+  assert.ok(recipe.includes("profile codex_unpriv_bwrap"));
+  assert.ok(recipe.includes("allow px /** -> codex_bwrap//&codex_unpriv_bwrap"));
+  assert.ok(recipe.includes("audit deny capability"));
+  assert.ok(recipe.includes("apparmor_parser -r /etc/apparmor.d/agent-relay-codex-bwrap"));
+  assert.ok(recipe.includes(`runuser -u agent -- ${helper} --unshare-all`));
+  assert.ok(recipe.includes('VERSION_ID="24.04"'));
+  assert.equal(recipe.includes("apparmor_restrict_unprivileged_userns=0"), false);
+});
+
 test("bootstrap diagnostics expose only fixed stages and booleans, never private output", () => {
   const receipt = { kind: "relay-worker-bootstrap", schema: 1, status: "error", failedModules: ["scripts-user"], sshOrderingCycle: true, checks: Object.fromEntries(["node", "codex", "claude", "docker", "chrome", "readyMarker", "finalizer", "auditHelper", "systemdVerified"].map(key => [key, false])), privateField: "DO-NOT-PRINT" };
   const safe = safeBootstrapReceipt(JSON.stringify(receipt));

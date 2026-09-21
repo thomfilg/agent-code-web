@@ -26,7 +26,7 @@ CREDENTIAL_COUNTS = ('providerAuthFiles', 'sshPrivateKeyFiles', 'pemFiles', 'ssm
                      'unexpectedAuthorizedKeys', 'scanErrors')
 METADATA_RESULTS = ('token-endpoint-accessible', 'http-403-denied', 'http-401-unauthorized',
                     'unexpected-http-response', 'network-unavailable', 'unexpected-network-error')
-PROBE_STAGES = ('request', 'identity', 'native-version', 'image-audit-run', 'image-audit-json',
+PROBE_STAGES = ('request', 'identity', 'native-version', 'native-sandbox', 'image-audit-run', 'image-audit-json',
                 'image-audit-validation', 'heartbeat', 'sentinel', 'native-process',
                 'application-transport', 'receipt')
 EXCEPTION_CLASSES = ('RuntimeError', 'JSONDecodeError', 'FileNotFoundError', 'PermissionError',
@@ -90,6 +90,7 @@ def probe_failure(result):
     except Exception:
         reason = None
     known_checks = {'wrong worker user': 'worker-user', 'native version mismatch': 'native-version',
+                    'native sandbox mismatch': 'native-sandbox',
                     'image scrub audit failed': 'image-audit', 'boot heartbeat is stale': 'heartbeat',
                     'worker sentinel mismatch': 'sentinel', 'native process did not survive hibernation': 'native-process',
                     'application transport did not survive hibernation': 'application-transport',
@@ -444,16 +445,40 @@ def terminate_application(client, receipt, label):
 def application_probe(request):
     verification_id = request['verificationId']
     phase = request['phase']
+    cycle = request['cycle']
+    final_cycle = request['finalCycle']
     state_path = pathlib.Path('/opt/agent-web/verify-' + verification_id + '.application')
     home = pathlib.Path('/tmp/relay-hibernation-' + verification_id)
     identity = {'deploymentId': request['deployment'], 'ownerId': 'acceptance-owner',
                 'chatId': 'acceptance-chat', 'workerId': request['workerId'], 'provider': 'codex',
                 'accountId': 'acceptance-account', 'attemptId': 'acceptance-' + verification_id}
-    generation = 1 if phase == 'fresh' else 2
+    generation = cycle + 1
     def lease_for(process_id):
-        credential = base64.urlsafe_b64encode(hashlib.sha256(('lease:' + phase + ':' + process_id + ':' + verification_id).encode()).digest()).decode().rstrip('=')
-        return {'id': 'acceptance-' + phase + '-' + process_id, 'generation': generation,
+        credential = base64.urlsafe_b64encode(hashlib.sha256(('lease:' + str(cycle) + ':' + process_id + ':' + verification_id).encode()).digest()).decode().rstrip('=')
+        return {'id': 'acceptance-' + str(cycle) + '-' + process_id, 'generation': generation,
                 'expiresAt': int(time.time() * 1000) + 55000, 'credential': credential}
+    def checkpoint_state(value, create=False):
+        application_at('checkpoint')
+        if create:
+            fd = os.open(state_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, 'w') as target:
+                json.dump(value, target, sort_keys=True, separators=(',', ':'))
+                target.flush()
+                os.fsync(target.fileno())
+            return
+        temporary = state_path.with_name(state_path.name + '.next-' + str(os.getpid()))
+        try:
+            fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, 'w') as target:
+                json.dump(value, target, sort_keys=True, separators=(',', ':'))
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(temporary, state_path)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
     install_supervisor(request, phase)
     application_at('status')
     status = None
@@ -477,7 +502,7 @@ def application_probe(request):
             state = json.loads(state_path.read_text())
         except (OSError, json.JSONDecodeError):
             application_failure()
-        if status.get('configured') is not True or status.get('daemonInstanceId') != state.get('daemonInstanceId') or status.get('supervisorInstanceId') != state.get('receipt', {}).get('supervisorInstanceId'):
+        if state.get('cycle') != cycle - 1 or status.get('configured') is not True or status.get('daemonInstanceId') != state.get('daemonInstanceId') or status.get('supervisorInstanceId') != state.get('receipt', {}).get('supervisorInstanceId'):
             application_failure()
         processes = status.get('processes')
         indexed = {item.get('processId'): item for item in processes} if isinstance(processes, list) else {}
@@ -520,7 +545,8 @@ def application_probe(request):
             if client.cursor:
                 application_at('initialize-ack')
                 client.request('ackOutput', {'processInstanceId': receipt['processInstanceId'], 'seq': client.cursor})
-            state = {'daemonInstanceId': status['daemonInstanceId'], 'receipt': receipt, 'cursor': client.cursor}
+            state = {'daemonInstanceId': status['daemonInstanceId'], 'receipt': receipt, 'cursor': client.cursor,
+                     'cycle': 0, 'nativeInputSeq': 2, 'nativeRpcId': 1}
         else:
             application_at('takeover')
             receipt = state['receipt']
@@ -531,17 +557,24 @@ def application_probe(request):
             attached = client.request('attach', {'processInstanceId': receipt['processInstanceId'], 'committedOutputSeq': state['cursor']})
             if attached.get('processInstanceId') != receipt['processInstanceId']:
                 application_failure()
+            native_input_seq = state.get('nativeInputSeq')
+            native_rpc_id = state.get('nativeRpcId')
+            if type(native_input_seq) is not int or type(native_rpc_id) is not int or native_input_seq < 2 or native_rpc_id < 1:
+                application_failure()
+            native_input_seq += 1
+            native_rpc_id += 1
             application_at('read')
-            client.input(3, {'method': 'thread/list', 'id': 2, 'params': {'limit': 1}})
-            listed = client.app_response(2, 'read')
+            client.input(native_input_seq, {'method': 'thread/list', 'id': native_rpc_id, 'params': {'limit': 1}})
+            listed = client.app_response(native_rpc_id, 'read')
             if not isinstance(listed, dict) or not isinstance(listed.get('data'), list):
                 application_failure()
             transport_status = client.request('status', {'processInstanceId': receipt['processInstanceId']})
             application_at('no-replay')
-            if transport_status.get('inputAcceptedThrough') != 3 or transport_status.get('pid') != receipt['pid']:
+            if transport_status.get('inputAcceptedThrough') != native_input_seq or transport_status.get('pid') != receipt['pid']:
                 application_failure()
             if client.cursor:
                 client.request('ackOutput', {'processInstanceId': receipt['processInstanceId'], 'seq': client.cursor})
+            state.update({'cursor': client.cursor, 'nativeInputSeq': native_input_seq, 'nativeRpcId': native_rpc_id})
         browser_lease = lease_for('shared-chrome')
         application_at('browser-configure')
         browser_configured = supervisor_control({'action': 'configure', 'identity': identity, 'processId': 'shared-chrome', 'lease': browser_lease})
@@ -591,11 +624,9 @@ def application_probe(request):
                 if browser_client.cursor:
                     browser_client.request('ackOutput', {'processInstanceId': browser_receipt['processInstanceId'], 'seq': browser_client.cursor})
                 state.update({'browserReceipt': browser_receipt, 'browserCursor': browser_client.cursor,
-                              'browserProcess': browser_state, 'browserStateIdentity': browser_state_identity})
-                application_at('checkpoint')
-                fd = os.open(state_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                with os.fdopen(fd, 'w') as target:
-                    json.dump(state, target, sort_keys=True, separators=(',', ':'))
+                              'browserProcess': browser_state, 'browserStateIdentity': browser_state_identity,
+                              'browserInputSeq': 1, 'browserRpcId': 1, 'browserCounter': 1})
+                checkpoint_state(state, True)
             else:
                 application_at('browser-takeover')
                 browser_receipt = state['browserReceipt']
@@ -611,32 +642,45 @@ def application_probe(request):
                 browser_process_identity = process_state_hash(browser_state)
                 if browser_state != state.get('browserProcess') or browser_state_identity != state.get('browserStateIdentity'):
                     application_failure()
-                expression = "(() => { const value = globalThis.__relayHibernation; if (!value || value.token !== " + json.dumps(browser_token) + " || value.counter !== 1) return null; value.counter += 1; return {...value}; })()"
-                application_at('browser-state-input')
-                browser_client.input(2, {'id': 2, 'action': 'evaluate', 'params': {'expression': expression}})
-                application_at('browser-state-response')
-                browser_value = browser_client.line_response(2, 'browser-state').get('value')
-                if browser_value != {'token': browser_token, 'counter': 2}:
+                browser_input_seq = state.get('browserInputSeq')
+                browser_rpc_id = state.get('browserRpcId')
+                expected_counter = state.get('browserCounter')
+                if type(browser_input_seq) is not int or type(browser_rpc_id) is not int or type(expected_counter) is not int or browser_input_seq < 1 or browser_rpc_id < 1 or expected_counter != cycle:
                     application_failure()
-                browser_counter = 2
+                browser_input_seq += 1
+                browser_rpc_id += 1
+                expression = "(() => { const value = globalThis.__relayHibernation; if (!value || value.token !== " + json.dumps(browser_token) + " || value.counter !== " + str(expected_counter) + ") return null; value.counter += 1; return {...value}; })()"
+                application_at('browser-state-input')
+                browser_client.input(browser_input_seq, {'id': browser_rpc_id, 'action': 'evaluate', 'params': {'expression': expression}})
+                application_at('browser-state-response')
+                browser_value = browser_client.line_response(browser_rpc_id, 'browser-state').get('value')
+                if browser_value != {'token': browser_token, 'counter': expected_counter + 1}:
+                    application_failure()
+                browser_counter = expected_counter + 1
                 browser_status = browser_client.request('status', {'processInstanceId': browser_receipt['processInstanceId']})
                 application_at('browser-no-replay')
-                if browser_status.get('inputAcceptedThrough') != 2 or browser_status.get('pid') != browser_receipt['pid']:
+                if browser_status.get('inputAcceptedThrough') != browser_input_seq or browser_status.get('pid') != browser_receipt['pid']:
                     application_failure()
                 if browser_client.cursor:
                     browser_client.request('ackOutput', {'processInstanceId': browser_receipt['processInstanceId'], 'seq': browser_client.cursor})
-                terminate_application(browser_client, browser_receipt, 'browser')
-                terminate_application(client, receipt, 'native')
-                application_at('browser-release')
-                browser_released = supervisor_control({'action': 'release', 'processId': 'shared-chrome',
-                    'processInstanceId': browser_receipt['processInstanceId'], 'leaseId': browser_lease['id']})
-                application_at('release')
-                native_released = supervisor_control({'action': 'release', 'processId': 'native-agent',
-                    'processInstanceId': receipt['processInstanceId'], 'leaseId': native_lease['id']})
-                if browser_released.get('released') is not True or native_released.get('released') is not True or supervisor_control({'action': 'reset'}).get('reset') is not True:
-                    application_failure()
-                state_path.unlink()
-                shutil.rmtree(home)
+                if final_cycle:
+                    terminate_application(browser_client, browser_receipt, 'browser')
+                    terminate_application(client, receipt, 'native')
+                    application_at('browser-release')
+                    browser_released = supervisor_control({'action': 'release', 'processId': 'shared-chrome',
+                        'processInstanceId': browser_receipt['processInstanceId'], 'leaseId': browser_lease['id']})
+                    application_at('release')
+                    native_released = supervisor_control({'action': 'release', 'processId': 'native-agent',
+                        'processInstanceId': receipt['processInstanceId'], 'leaseId': native_lease['id']})
+                    if browser_released.get('released') is not True or native_released.get('released') is not True or supervisor_control({'action': 'reset'}).get('reset') is not True:
+                        application_failure()
+                    state_path.unlink()
+                    shutil.rmtree(home)
+                else:
+                    state.update({'cycle': cycle, 'browserCursor': browser_client.cursor,
+                                  'browserInputSeq': browser_input_seq, 'browserRpcId': browser_rpc_id,
+                                  'browserCounter': browser_counter})
+                    checkpoint_state(state)
         finally:
             browser_client.close()
     finally:
@@ -659,6 +703,12 @@ try:
         if result.returncode or result.stdout.strip() != expected:
             raise RuntimeError('native version mismatch')
         versions[command] = expected
+    stage = 'native-sandbox'
+    sandbox = subprocess.run(['/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap',
+                              '--unshare-all', '--proc', '/proc', '--dev', '/dev', '--ro-bind', '/', '/', '--', '/bin/true'],
+                             capture_output=True, timeout=30)
+    if sandbox.returncode:
+        raise RuntimeError('native sandbox mismatch')
     stage = 'image-audit-run'
     audit = subprocess.run(['/usr/bin/sudo', '-n', '/usr/local/sbin/agent-web-audit-image'], capture_output=True, text=True, timeout=30)
     stage = 'image-audit-json'
@@ -737,7 +787,7 @@ try:
                           'browserStateIdentity': browser_state_identity,
                           'browserCounter': browser_counter} if process_identity else {})}))
 except Exception as error:
-    reasons = ('wrong worker user', 'native version mismatch', 'image scrub audit failed', 'boot heartbeat is stale',
+    reasons = ('wrong worker user', 'native version mismatch', 'native sandbox mismatch', 'image scrub audit failed', 'boot heartbeat is stale',
                'worker sentinel mismatch', 'native process did not survive hibernation',
                'application transport did not survive hibernation')
     failure = {'error': 'Worker acceptance checks failed; no private diagnostics emitted', 'reason': str(error) if isinstance(error, RuntimeError) and str(error) in reasons else 'invalid-worker-receipt'}
@@ -783,6 +833,14 @@ def main():
     continuity = ('processIdentity', 'applicationIdentity', 'browserProcessIdentity', 'browserStateIdentity')
     if type(request.get('hibernation')) is not bool or request['phase'] == 'resumed' and request['hibernation'] and any(not re.fullmatch(r'[a-f0-9]{64}', request.get(key, '')) for key in continuity):
         raise RuntimeError('Invalid verification request')
+    if request['hibernation']:
+        cycle = request.get('cycle')
+        final_cycle = request.get('finalCycle')
+        valid_cycle = (request['phase'] == 'fresh' and cycle == 0 and final_cycle is False
+                       or request['phase'] == 'resumed' and cycle == 1 and final_cycle is False
+                       or request['phase'] == 'resumed' and cycle == 2 and final_cycle is True)
+        if type(cycle) is not int or type(final_cycle) is not bool or not valid_cycle:
+            raise RuntimeError('Invalid verification request')
     if request['hibernation'] and (not isinstance(request.get('supervisorBundle'), str) or len(request['supervisorBundle']) > 32768):
         raise RuntimeError('Invalid supervisor acceptance bundle')
     if not re.fullmatch(r'i-[a-f0-9]{8,17}', request['workerId']):
@@ -840,6 +898,8 @@ def main():
         worker_request = {key: request[key] for key in ('verificationId', 'phase', 'sentinel', 'hibernation', 'workerId', 'deployment')}
         if request['hibernation']:
             worker_request['supervisorBundle'] = request['supervisorBundle']
+            worker_request['cycle'] = request['cycle']
+            worker_request['finalCycle'] = request['finalCycle']
         if request.get('processIdentity'):
             worker_request['processIdentity'] = request['processIdentity']
         if request.get('applicationIdentity'):
@@ -891,7 +951,8 @@ def main():
         except (ValueError, TypeError):
             raise ProbeFailure('invalid-receipt', probed.returncode) from None
         result.update({'schema': 1, 'verificationId': request['verificationId'], 'workerId': request['workerId'],
-                       'phase': request['phase'], 'knownHosts': known_file.read_text()})
+                       'phase': request['phase'], 'knownHosts': known_file.read_text(),
+                       **({'cycle': request['cycle']} if request['hibernation'] else {})})
         print(json.dumps(result))
 
 

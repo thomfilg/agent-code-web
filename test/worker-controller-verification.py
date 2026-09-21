@@ -83,6 +83,8 @@ class ControllerProbeTest(unittest.TestCase):
     def test_embedded_worker_application_probe_is_valid_python(self):
         compile(probe.WORKER_PROBE, '<worker-application-probe>', 'exec')
         self.assertIn("('/usr/local/bin/codex', '/usr/bin/codex')", probe.WORKER_PROBE)
+        self.assertIn("'native-sandbox'", probe.WORKER_PROBE)
+        self.assertIn("'--unshare-all'", probe.WORKER_PROBE)
         self.assertIn("'thread/list'", probe.WORKER_PROBE)
         self.assertIn("'applicationTransport': True", probe.WORKER_PROBE)
         self.assertIn("'shared-chrome'", probe.WORKER_PROBE)
@@ -177,6 +179,8 @@ class ControllerProbeTest(unittest.TestCase):
                 return types.SimpleNamespace(returncode=0, stdout='codex-cli 0.154.0')
             if args[0] == 'claude':
                 return types.SimpleNamespace(returncode=0, stdout='2.1.222 (Claude Code)')
+            if args[0].endswith('/bwrap'):
+                return types.SimpleNamespace(returncode=0, stdout='')
             return types.SimpleNamespace(returncode=1, stdout=json.dumps(audit))
         output = io.StringIO()
         with patch.object(probe.subprocess, 'check_output', return_value='agent'), patch.object(probe.subprocess, 'run', side_effect=run), patch.object(probe.sys, 'argv', ['probe', '{}']), contextlib.redirect_stdout(output):
@@ -192,6 +196,7 @@ class ControllerProbeTest(unittest.TestCase):
         def run(args, **kwargs):
             if args[0] == 'codex': return types.SimpleNamespace(returncode=0, stdout='codex-cli 0.154.0')
             if args[0] == 'claude': return types.SimpleNamespace(returncode=0, stdout='2.1.222 (Claude Code)')
+            if args[0].endswith('/bwrap'): return types.SimpleNamespace(returncode=0, stdout='')
             return audit
         output = io.StringIO()
         request = {'verificationId': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'phase': phase, 'sentinel': 'PRIVATE-SENTINEL'}

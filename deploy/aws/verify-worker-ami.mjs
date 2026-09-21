@@ -17,8 +17,8 @@ const privateIp = value => isIP(value) === 4 && /^(10\.|192\.168\.|172\.(1[6-9]|
 const tagsOf = resource => Object.fromEntries((resource?.Tags || []).map(({ Key, Value }) => [Key, Value]));
 const quote = value => `'${String(value).replaceAll("'", `'"'"'`)}'`;
 const imageTags = { ManagedBy: "agent-relay", CodexVersion: "0.154.0", ClaudeVersion: "2.1.222" };
-const probeFailureCategories = new Set(["worker-user", "native-version", "image-audit", "heartbeat", "sentinel", "native-process", "application-transport", "invalid-receipt", "ssh-host-key", "ssh-permission-denied", "ssh-connection-refused", "ssh-network-unreachable", "remote-command-missing", "ssh-transport", "remote-command-failed", "ssh-probe-timeout", "ssh-executable-unavailable"]);
-const probeStages = new Set(["request", "identity", "native-version", "image-audit-run", "image-audit-json", "image-audit-validation", "heartbeat", "sentinel", "native-process", "application-transport", "receipt"]);
+const probeFailureCategories = new Set(["worker-user", "native-version", "native-sandbox", "image-audit", "heartbeat", "sentinel", "native-process", "application-transport", "invalid-receipt", "ssh-host-key", "ssh-permission-denied", "ssh-connection-refused", "ssh-network-unreachable", "remote-command-missing", "ssh-transport", "remote-command-failed", "ssh-probe-timeout", "ssh-executable-unavailable"]);
+const probeStages = new Set(["request", "identity", "native-version", "native-sandbox", "image-audit-run", "image-audit-json", "image-audit-validation", "heartbeat", "sentinel", "native-process", "application-transport", "receipt"]);
 const exceptionClasses = new Set(["RuntimeError", "JSONDecodeError", "FileNotFoundError", "PermissionError", "TimeoutExpired", "CalledProcessError", "OSError", "ValueError", "TypeError", "KeyError", "IndexError", "AttributeError", "NameError", "UnboundLocalError", "ImportError", "ModuleNotFoundError", "UnicodeDecodeError", "AssertionError"]);
 
 function safeProbeFailure(output) {
@@ -54,8 +54,9 @@ export function parseVerificationOptions(args) {
   return options;
 }
 
-export function verifyReceipt(receipt, { verificationId, workerId, phase, previous, hibernation = false } = {}) {
+export function verifyReceipt(receipt, { verificationId, workerId, phase, previous, hibernation = false, cycle } = {}) {
   if (receipt?.schema !== 1 || receipt.verificationId !== verificationId || receipt.workerId !== workerId || receipt.phase !== phase || receipt.heartbeatFresh !== true || receipt.sentinelPresent !== true || receipt.versions?.codex !== "codex-cli 0.154.0" || receipt.versions?.claude !== "2.1.222 (Claude Code)") throw new Error("Worker acceptance receipt is incomplete or belongs to another probe");
+  if (hibernation && (!Number.isInteger(cycle) || cycle < 0 || cycle > 2 || receipt.cycle !== cycle)) throw new Error("Worker hibernation receipt belongs to another resume cycle");
   const audit = receipt.audit;
   for (const key of ["valid", "finalized", "cloudInitDisabled", "ssmDisabled", "credentialsAbsent", "transportKeyMatches", "freshIdentity", "heartbeatEnabled", "watchdogActive"]) if (audit?.[key] !== true) throw new Error(`Worker image acceptance failed: ${key}`);
   if (audit.schema !== 1 || audit.metadataReachable !== false || !/^[a-f0-9]{64}$/.test(audit.machine || "") || !audit.hostKeys || !Object.keys(audit.hostKeys).length || Object.entries(audit.hostKeys).some(([key, value]) => !/^ssh_host_(rsa|ecdsa|ed25519)_key\.pub$/.test(key) || !/^[a-f0-9]{64}$/.test(value))) throw new Error("Worker identity or metadata audit is invalid");
@@ -68,8 +69,7 @@ export function verifyReceipt(receipt, { verificationId, workerId, phase, previo
   if (hibernation && (receipt.applicationTransport !== true || !/^[a-f0-9]{64}$/.test(receipt.applicationIdentity || "")
     || previous && receipt.applicationIdentity !== previous.applicationIdentity)) throw new Error("Worker application transport did not survive hibernation");
   if (hibernation && (receipt.browserTransport !== true || !/^[a-f0-9]{64}$/.test(receipt.browserProcessIdentity || "")
-    || !/^[a-f0-9]{64}$/.test(receipt.browserStateIdentity || "") || ![1, 2].includes(receipt.browserCounter)
-    || phase === "fresh" && receipt.browserCounter !== 1 || phase === "resumed" && receipt.browserCounter !== 2
+    || !/^[a-f0-9]{64}$/.test(receipt.browserStateIdentity || "") || receipt.browserCounter !== cycle + 1
     || previous && (receipt.browserProcessIdentity !== previous.browserProcessIdentity || receipt.browserStateIdentity !== previous.browserStateIdentity))) {
     throw new Error("Worker browser process and renderer state did not survive hibernation");
   }
@@ -181,12 +181,13 @@ async function verifyImage(o, { run = defaultRun, sleep = ms => new Promise(reso
         (!absentAllowed && (current.Attachments?.length !== 1 || current.Attachments[0].InstanceId !== workerId))) throw new Error("Acceptance volume ownership/isolation changed; cleanup is unconfirmed");
     return current;
   }
-  async function probe(phase, previous) {
+  async function probe(phase, previous, cycle = 0, finalCycle = true) {
     await controller();
     const current = await worker();
     if (current.State?.Name !== "running" || !privateIp(current.PrivateIpAddress)) throw new Error("Test worker is not privately reachable/running");
     workerHost = current.PrivateIpAddress;
     const payload = { account: o.account, region: o.region, deployment: o.deployment, secretArn: outputs.SecretArn, verificationId, workerId, host: workerHost, publicKey, phase, sentinel, hibernation, supervisorBundle,
+      ...(hibernation ? { cycle, finalCycle } : {}),
       ...(previous ? { knownHosts: previous.knownHosts, processIdentity: previous.processIdentity, applicationIdentity: previous.applicationIdentity,
         browserProcessIdentity: previous.browserProcessIdentity, browserStateIdentity: previous.browserStateIdentity } : {}) };
     // Run Command has a bounded string parameter. Compress the inspected helper
@@ -204,7 +205,7 @@ async function verifyImage(o, { run = defaultRun, sleep = ms => new Promise(reso
       catch (error) { if (error.message === "InvocationDoesNotExist") return false; throw error; }
       if (["Pending", "InProgress", "Delayed"].includes(invocation.Status)) return false;
       if (invocation.Status !== "Success" || invocation.ResponseCode !== 0) throw new Error(`Worker acceptance audit failed (${phase})${safeProbeFailure(invocation.StandardOutputContent)}; inspect scoped SSM command ${commandId}; private output suppressed`);
-      try { return verifyReceipt(JSON.parse(invocation.StandardOutputContent), { verificationId, workerId, phase, previous, hibernation }); }
+      try { return verifyReceipt(JSON.parse(invocation.StandardOutputContent), { verificationId, workerId, phase, previous, hibernation, cycle }); }
       catch { throw new Error(`Worker acceptance receipt failed validation (${phase}); no private output emitted`); }
     });
     return { ...result, commandId };
@@ -229,30 +230,43 @@ async function verifyImage(o, { run = defaultRun, sleep = ms => new Promise(reso
     disposableVolumes = workerDisks.map(mapping => mapping.Ebs.VolumeId);
     if (new Set(disposableVolumes).size !== disposableVolumes.length) throw new Error("Acceptance worker disks are ambiguous");
     for (const volumeId of disposableVolumes) await volume(volumeId);
-    const fresh = await probe("fresh");
-    const stopAttempts = hibernation ? 13 : 1;
-    for (let attempt = 0; attempt < stopAttempts; attempt++) {
-      await worker();
-      try {
-        await aws("ec2", "stop-instances", ...(hibernation ? ["--hibernate"] : []), "--instance-ids", workerId);
-        break;
-      } catch (error) {
-        const warming = hibernation && error.code === "hibernation-warming";
-        if (!warming || attempt === stopAttempts - 1) throw error;
-        if (attempt === 0) log("Worker passed the fresh audit but EC2 hibernation is still warming up; retrying the exact instance.");
-        await sleep(15_000);
+    const fresh = await probe("fresh", undefined, 0, false);
+    const resumeCycles = hibernation ? 2 : 1;
+    const resumedReceipts = [];
+    let previous = fresh;
+    for (let cycle = 1; cycle <= resumeCycles; cycle++) {
+      const stopAttempts = hibernation ? 13 : 1;
+      for (let attempt = 0; attempt < stopAttempts; attempt++) {
+        await worker();
+        try {
+          await aws("ec2", "stop-instances", ...(hibernation ? ["--hibernate"] : []), "--instance-ids", workerId);
+          break;
+        } catch (error) {
+          const warming = hibernation && error.code === "hibernation-warming";
+          if (!warming || attempt === stopAttempts - 1) throw error;
+          if (attempt === 0) log("Worker passed the audit but EC2 hibernation is still warming up; retrying the exact instance.");
+          await sleep(15_000);
+        }
       }
+      await poll(`test worker stopped (cycle ${cycle})`, async () => (await worker()).State?.Name === "stopped");
+      await worker();
+      if (hibernation && cycle === 1) {
+        log("Worker is stopped; holding the exact instance for 125 seconds before the first resume.");
+        await sleep(125_000);
+        await worker();
+      }
+      await aws("ec2", "start-instances", "--instance-ids", workerId);
+      await poll(`test worker resumed (cycle ${cycle})`, async () => (await worker()).State?.Name === "running");
+      const resumed = await probe("resumed", previous, cycle, cycle === resumeCycles);
+      resumedReceipts.push(resumed);
+      previous = resumed;
     }
-    await poll("test worker stopped", async () => (await worker()).State?.Name === "stopped");
-    await worker();
-    await aws("ec2", "start-instances", "--instance-ids", workerId);
-    await poll("test worker resumed", async () => (await worker()).State?.Name === "running");
-    const resumed = await probe("resumed", fresh);
+    const resumed = resumedReceipts.at(-1);
     receipt = { accepted: true, schema: 1, account: o.account, region: o.region, deployment: o.deployment, imageId: o.imageId, verificationId, workerId, controllerId: outputs.ControllerInstanceId,
       checks: { freshBoot: true, disabledMetadata: true, noInstanceRole: true, privateNetwork: true, credentialScrub: true, pinnedNativeVersions: true, freshMachineAndHostIdentity: true,
-        ...(hibernation ? { machineIdentitySurvivedHibernation: true, nativeProcessSurvivedHibernation: true, applicationTransportSurvivedHibernation: true, browserProcessSurvivedHibernation: true, browserRendererStateSurvivedHibernation: true, freshControllerTransportRecreated: true, sentinelSurvivedHibernation: true }
+        ...(hibernation ? { machineIdentitySurvivedHibernation: true, nativeProcessSurvivedHibernation: true, applicationTransportSurvivedHibernation: true, browserProcessSurvivedHibernation: true, browserRendererStateSurvivedHibernation: true, freshControllerTransportRecreated: true, controllerTransportRecreatedEachCycle: true, repeatedHibernationCycles: true, stoppedForMoreThanTwoMinutes: true, sentinelSurvivedHibernation: true }
           : { identitySurvivedStopStart: true, sentinelSurvivedStopStart: true }), heartbeatFreshAfterBoot: true, controllerSecretStayedLocal: true },
-      evidence: { freshCommandId: fresh.commandId, resumedCommandId: resumed.commandId, machineHash: resumed.audit.machine, hostKeyHashes: resumed.audit.hostKeys,
+      evidence: { freshCommandId: fresh.commandId, resumedCommandId: resumed.commandId, resumedCommandIds: resumedReceipts.map(item => item.commandId), machineHash: resumed.audit.machine, hostKeyHashes: resumed.audit.hostKeys,
         ...(hibernation ? { processIdentity: resumed.processIdentity, applicationIdentity: resumed.applicationIdentity,
           browserProcessIdentity: resumed.browserProcessIdentity, browserStateIdentity: resumed.browserStateIdentity, browserCounter: resumed.browserCounter } : {}) }, promptsSent: false, accountImports: false };
   } catch (error) {
