@@ -994,6 +994,10 @@ export async function createAgentWebServer(options = {}) {
     });
     manager.browsers.personalScope = chatId => personalBrowserScope({store,records,resources,agentAccounts},chatId);
     manager.browsers.personal.officialScope = manager.browsers.personalScope;
+    // Core worker/browser ownership is now reconciled. Optional app-preview
+    // and GitHub recovery may continue before start() returns, but must not
+    // make a healthy controller miss the bounded rollout readiness SLA.
+    initializing = false;
     if (config.preview?.enabled) {
       try {
         const { PreviewHosts } = options.previewHosts ? {} : await import("./preview-hosts.mjs");
@@ -1009,7 +1013,6 @@ export async function createAgentWebServer(options = {}) {
     await manager.githubEvents?.initialize();
     manager.pullRequests.start();
     manager.githubEvents?.process();
-    initializing = false;
     return { host: config.host, port, url: `http://${config.host.includes(":") ? `[${config.host}]` : config.host}:${port}` };
   }
 
