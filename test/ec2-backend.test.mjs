@@ -13,7 +13,7 @@ function ec2Config(overrides = {}) {
     AGENT_EC2_AMI_ID: "ami-aaaaaaaaaaaaaaaaa", AGENT_EC2_SUBNET_ID: "subnet-aaaaaaaaaaaaaaaaa", AGENT_EC2_SECURITY_GROUP_ID: "sg-aaaaaaaaaaaaaaaaa", AGENT_EC2_KEY_NAME: "fixture-worker", AGENT_EC2_SSH_PRIVATE_KEY: "/tmp/fixture-key", AGENT_EC2_SSH_KNOWN_HOSTS: "/tmp/relay-known-hosts-fixture", SSH_BIN: "ssh", AWS_REGION: "us-east-1", ...overrides });
 }
 function instance(overrides = {}) {
-  return { InstanceId: "i-aaaaaaaaaaaaaaaaa", ImageId: "ami-aaaaaaaaaaaaaaaaa", State: { Name: "stopped" }, PrivateIpAddress: "10.0.0.42", SubnetId: "subnet-aaaaaaaaaaaaaaaaa", KeyName: "fixture-worker", SecurityGroups: [{ GroupId: "sg-aaaaaaaaaaaaaaaaa" }], MetadataOptions: { HttpEndpoint: "disabled" }, Tags: [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: "relay-fixture" }, { Key: "AgentWebChat", Value: chat.id }], ...overrides };
+  return { InstanceId: "i-aaaaaaaaaaaaaaaaa", ImageId: "ami-aaaaaaaaaaaaaaaaa", InstanceType: "t3.medium", State: { Name: "stopped" }, PrivateIpAddress: "10.0.0.42", SubnetId: "subnet-aaaaaaaaaaaaaaaaa", KeyName: "fixture-worker", SecurityGroups: [{ GroupId: "sg-aaaaaaaaaaaaaaaaa" }], MetadataOptions: { HttpEndpoint: "disabled" }, Tags: [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: "relay-fixture" }, { Key: "AgentWebChat", Value: chat.id }], ...overrides };
 }
 function image(overrides = {}) {
   return { ImageId: "ami-aaaaaaaaaaaaaaaaa", OwnerId: "123456789012", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true } }], State: "available", Architecture: "x86_64", Tags: [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: "relay-fixture" }, { Key: "AgentRelayWorkerKey", Value: "fixture-worker" }, { Key: "CodexVersion", Value: "0.154.0" }, { Key: "ClaudeVersion", Value: "2.1.222" }, { Key: "AgentRelayAcceptance", Value: "verified-v1" }, { Key: "AgentRelayAcceptanceId", Value: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }], ...overrides };
@@ -36,6 +36,7 @@ function fixture({ initial = instance(), config = ec2Config(), ami = image(), lo
     if (args.includes("describe-images")) return JSON.stringify([typeof ami === "function" ? ami(args) : ami]);
     if (args.includes("describe-instances")) return JSON.stringify(args.includes("--instance-ids") ? worker : (lookup || (worker ? [worker] : [])));
     if (args.includes("run-instances")) { worker = afterLaunch || instance({ State: { Name: "pending" } }); return JSON.stringify(worker); }
+    if (args.includes("modify-instance-attribute")) worker.InstanceType = JSON.parse(args[args.indexOf("--instance-type") + 1]).Value;
     if (args.includes("start-instances")) worker.State.Name = "running";
     if (args.includes("stop-instances")) worker.State.Name = "stopped";
     return "";
@@ -64,6 +65,20 @@ test("EC2 starts/stops only a private deployment/chat worker and uses the IAM de
   assert.ok(ssh.includes("IdentitiesOnly=yes"));
   assert.ok(ssh.some(arg => arg.startsWith("UserKnownHostsFile=")));
   assert.ok(ssh.includes("HostKeyAlias=relay-fixture-i-aaaaaaaaaaaaaaaaa"));
+});
+
+test("EC2 resizes only an exact stopped chat worker and starts new workers with the selected size", async () => {
+  const existing = fixture();
+  assert.deepEqual(await existing.backend.resize(chat, "m7i.xlarge"), { instanceId: "i-aaaaaaaaaaaaaaaaa", instanceType: "m7i.xlarge", resized: true });
+  const modify = existing.calls.find(call => call.args.includes("modify-instance-attribute"));
+  assert.deepEqual(JSON.parse(modify.args[modify.args.indexOf("--instance-type") + 1]), { Value: "m7i.xlarge" });
+  const fresh = fixture({ initial: null });
+  await fresh.backend.acquire({ ...chat, workerInstanceType: "t3.xlarge" });
+  const launch = fresh.calls.find(call => call.args.includes("run-instances")).args;
+  assert.equal(launch[launch.indexOf("--instance-type") + 1], "t3.xlarge");
+  const running = fixture({ initial: instance({ State: { Name: "running" } }) });
+  await assert.rejects(running.backend.resize(chat, "t3.large"), /Stop the worker/);
+  await assert.rejects(existing.backend.resize(chat, "r9g.metal"), /supported worker machine size/);
 });
 
 test("an accepted supervisor image verifies the independent user service and records the worker boot identity", async () => {

@@ -85,6 +85,7 @@
               <button type="button" id="pets-button">Pets</button>
               <button type="button" id="vim-button" aria-pressed="false">Enable Vim editing</button>
               <p class="control-group-label">Worker</p>
+              <button type="button" id="resize-worker-button">Machine size</button>
               <button type="button" id="desktop-app-button" hidden>Open in desktop app</button>
               <button type="button" id="stop-button">Stop worker</button>
               <p class="control-group-label danger-label">Danger zone</p>
@@ -389,6 +390,7 @@
             <button type="button" class="environment-summary-card" data-environment-section="setup"><strong>Setup script</strong><span id="environment-setup-summary"></span><small>Configure startup →</small></button>
           </div>
           <details id="environment-advanced"><summary>Access and advanced settings</summary>
+            <label id="environment-instance-type-field"><span>Default machine size</span><select id="environment-instance-type" aria-label="Default machine size"></select><small id="environment-instance-price" class="muted"></small></label>
             <section class="environment-mcps"><h3>Company tools</h3><div id="environment-mcp-options"></div><p class="muted">Tools follow the chat’s company automatically.</p></section>
             <p class="muted">Network access uses the worker infrastructure default. Custom egress restrictions are not enforced here.</p>
             <label class="checkbox-label"><input type="checkbox" id="environment-archived"><span>Archive environment · hide from new chats</span></label>
@@ -411,6 +413,18 @@
           <div class="dialog-actions environment-save-actions"><span class="muted" id="environment-save-status" role="status"></span><button type="button" class="secondary-button" id="delete-environment">Delete environment</button><button id="save-environment" class="primary-button" disabled>Save environment</button></div>
         </form>
       </div>
+    </dialog>
+
+    <dialog id="worker-size-dialog" aria-labelledby="worker-size-title">
+      <form class="dialog-card compact-dialog" id="worker-size-form">
+        <div class="dialog-heading"><h2 id="worker-size-title">Machine size</h2><button type="button" class="icon-button" data-close-dialog aria-label="Close machine size">×</button></div>
+        <p class="muted">Resize this chat’s EC2 worker without losing its workspace or conversation. The worker restarts and queued messages resume afterward.</p>
+        <label><span>EC2 instance</span><select id="worker-instance-type" aria-label="EC2 instance" required></select></label>
+        <p id="worker-instance-description" class="muted"></p>
+        <p class="muted">On-Demand Linux price for the configured AWS region. EBS storage, data transfer and surplus CPU credits are separate.</p>
+        <p class="form-error" id="worker-size-error" role="alert"></p>
+        <div class="dialog-actions"><button type="button" class="secondary-button" data-close-dialog>Cancel</button><button type="submit" class="primary-button">Resize and restart</button></div>
+      </form>
     </dialog>
 
     <dialog id="mcp-dialog" aria-labelledby="mcp-title"><div class="dialog-card mcp-card">

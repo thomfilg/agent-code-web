@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { companyForChat, companyScope, normalizeCompanyScope } from "../public/company-scope.js";
 import { environmentCompany } from "../public/environment-scope.js";
 import { Companies } from "./companies.mjs";
+import { validateWorkerInstanceType } from "./worker-instances.mjs";
 
 export const SOFTWARE_CATALOG = [
   { id: "chrome", name: "Google Chrome", version: "Stable", description: "Shared live browser and agent tools; a separate profile without your saved logins", check: "google-chrome --version" },
@@ -32,27 +33,27 @@ export function validateVariables(input, previous = []) {
   });
 }
 
-function publicEnvironment(environment, registered) {
+function publicEnvironment(environment, registered, defaultInstanceType = "t3.medium") {
   const companyId = environmentCompany(environment);
-  return { ...environment, ...companyScope(environment), scopeNeedsReview: !companyId || !registered.has(companyId), variables: environment.variables.map(({ value, ...v }) => ({ ...v, ...(v.secret ? { hasValue: true } : { value }) })) };
+  return { ...environment, ...(environment.backend === "ec2" ? { instanceType: validateWorkerInstanceType(environment.instanceType, defaultInstanceType) } : {}), ...companyScope(environment), scopeNeedsReview: !companyId || !registered.has(companyId), variables: environment.variables.map(({ value, ...v }) => ({ ...v, ...(v.secret ? { hasValue: true } : { value }) })) };
 }
 
 export class Environments {
-  constructor(records, defaultBackend = "local", mcps = null) { this.records = records; this.defaultBackend = defaultBackend; this.mcps = mcps; this.companies = mcps?.companies || new Companies(records); this.queue = Promise.resolve(); }
+  constructor(records, defaultBackend = "local", mcps = null, { defaultInstanceType = "t3.medium" } = {}) { this.records = records; this.defaultBackend = defaultBackend; this.defaultInstanceType = validateWorkerInstanceType(defaultInstanceType); this.mcps = mcps; this.companies = mcps?.companies || new Companies(records); this.queue = Promise.resolve(); }
   async initialize() {
     if (!(await this.records.list("environment")).length) {
       // An inert template is not a company grant. Never invent a company or move
       // credentials during bootstrap; the owner must explicitly assign it.
       const id = `env_${randomUUID()}`, now = new Date().toISOString();
-      await this.records.put("environment", id, { id, name: "Default", backend: this.defaultBackend, companies: [], allowUnassigned: false, variablesEnabled: true, software: [], variables: [], setupScript: "", revision: 1, createdAt: now, updatedAt: now });
+      await this.records.put("environment", id, { id, name: "Default", backend: this.defaultBackend, ...(this.defaultBackend === "ec2" ? { instanceType: this.defaultInstanceType } : {}), companies: [], allowUnassigned: false, variablesEnabled: true, software: [], variables: [], setupScript: "", revision: 1, createdAt: now, updatedAt: now });
     }
   }
   async registeredCompanies() { return new Set((await this.companies.list()).map(company => company.id)); }
-  async list() { const registered = await this.registeredCompanies(); return (await this.records.list("environment")).map(environment => publicEnvironment(environment, registered)); }
+  async list() { const registered = await this.registeredCompanies(); return (await this.records.list("environment")).map(environment => publicEnvironment(environment, registered, this.defaultInstanceType)); }
   async get(id, { reveal = false } = {}) {
     const env = await this.records.get("environment", id);
     if (!env) throw Object.assign(new Error("Environment not found"), { statusCode: 404 });
-    return reveal ? env : publicEnvironment(env, await this.registeredCompanies());
+    return reveal ? env : publicEnvironment(env, await this.registeredCompanies(), this.defaultInstanceType);
   }
   save(input, id = null) {
     const result = this.queue.then(() => this.saveUnlocked(input, id));
@@ -65,6 +66,7 @@ export class Environments {
     const name = String(input.name || "").trim();
     if (!name || name.length > 80) throw new Error("Environment name must contain 1–80 characters");
     if (!["local", "ec2"].includes(input.backend)) throw new Error("Choose a local or cloud environment");
+    const instanceType = input.backend === "ec2" ? validateWorkerInstanceType(input.instanceType ?? old?.instanceType, this.defaultInstanceType) : null;
     const software = [...new Set(input.software ?? old?.software ?? [])];
     if (software.some(id => !SOFTWARE_CATALOG.some(p => p.id === id))) throw new Error("Unsupported software package");
     if (software.includes("docker") && input.backend !== "ec2") throw new Error("Docker requires a dedicated EC2 worker. Sharing the control-plane Docker socket with agents is not supported.");
@@ -85,7 +87,7 @@ export class Environments {
     else if (mcpIds.length) throw new Error("MCP connections are unavailable");
     if (all.some(env => env.id !== id && environmentCompany(env) === companyId && env.name.toLowerCase() === name.toLowerCase())) throw new Error("An environment with this name already exists in this company");
     const value = {
-      id: id || `env_${randomUUID()}`, name, backend: input.backend, ...scope, companyId,
+      id: id || `env_${randomUUID()}`, name, backend: input.backend, ...(instanceType ? { instanceType } : {}), ...scope, companyId,
       mcpIds,
       description: String(input.description ?? old?.description ?? "").slice(0, 500),
       variablesEnabled: input.variablesEnabled ?? old?.variablesEnabled ?? true,
@@ -95,7 +97,7 @@ export class Environments {
     };
     await this.records.put("environment", value.id, value);
     await this.onSaved?.(value);
-    return publicEnvironment(value, await this.registeredCompanies());
+    return publicEnvironment(value, await this.registeredCompanies(), this.defaultInstanceType);
   }
   async remove(id, chats) {
     await this.get(id);
@@ -111,6 +113,7 @@ export class Environments {
     if (assigned !== company) throw Object.assign(new Error(`Environment “${env.name}” is not available for ${company || "unassigned chats"}. Choose an environment assigned to this chat’s company.`), { statusCode: 403 });
     return {
       id: env.id, name: env.name, revision: env.revision, backend: env.backend, software: env.software,
+      ...(env.backend === "ec2" ? { instanceType: validateWorkerInstanceType(env.instanceType, this.defaultInstanceType) } : {}),
       ...companyScope(env),
       mcpIds: this.mcps?.companies ? await this.mcps.forCompany(company) : env.mcpIds || [],
       setupScript: env.setupScript || "", archived: Boolean(env.archived),

@@ -44,6 +44,7 @@ import { runtimeMcpSecrets } from "./worker-capabilities.mjs";
 import { HIBERNATION_UNAVAILABLE, hibernationAdmission, hibernationUnavailableError } from "./worker-suspension.mjs";
 import { startupStage, failRunningStartup } from "./startup-progress.mjs";
 import { beginWorkerLifecycle, finishWorkerLifecycle, workerIdentityFromMetadata } from "./worker-lifecycle.mjs";
+import { validateWorkerInstanceType } from "./worker-instances.mjs";
 
 const ADAPTERS = {
   codex: CodexAdapter,
@@ -93,6 +94,7 @@ export class RuntimeManager extends EventEmitter {
   #awakeWorkers = new Set();
   #workerIdleTimers = new Map();
   #modeChanges = new Map();
+  #workerResizes = new Map();
 
   #assertNativeAccount(chatId, expectedRuntime = null) {
     const chat = this.store.get(chatId);
@@ -938,7 +940,7 @@ export class RuntimeManager extends EventEmitter {
     this.#startupControllers.set(chatId, controller);
     const check = () => { controller.signal.throwIfAborted(); if (!this.store.get(chatId) || this.store.get(chatId).archived || (this.#lifecycleVersions.get(chatId) || 0) !== version) throw Object.assign(new Error("Worker startup cancelled"), { name: "AbortError" }); };
     const pending = (async () => {
-      if (chat.environmentId) await (await this.servicesFor(chat)).environments.runtime(chat.environmentId, chat);
+      const environment = chat.environmentId ? await (await this.servicesFor(chat)).environments.runtime(chat.environmentId, chat) : null;
       check();
       const acquiring = await this.store.update(chatId, current => {
         check();
@@ -965,7 +967,8 @@ export class RuntimeManager extends EventEmitter {
       const acquisition = protect((async () => {
         if (this.config.workerBackend !== "ec2") { await repositories; check(); }
         check(); acquisitionStarted = true;
-        return this.workerBackend.acquire(this.store.get(chatId), { workspaceReady: repositories, check,
+        const current = this.store.get(chatId);
+        return this.workerBackend.acquire({ ...current, workerInstanceType: current.workerInstanceType || environment?.instanceType || this.config.ec2.instanceType }, { workspaceReady: repositories, check,
           action: workerLifecycleAction, expectedWorker,
           onMutation: receipt => { acquisitionMutation = receipt; },
           onStage: (id, status) => this.#startupStage(chatId, id, status, version) });
@@ -2219,6 +2222,54 @@ export class RuntimeManager extends EventEmitter {
     }
   }
 
+  async resizeWorker(chatId, requestedType) {
+    if (this.config.workerBackend !== "ec2" || typeof this.workerBackend.resize !== "function") throw Object.assign(new Error("Worker resizing is available only for EC2 environments"), { statusCode: 409 });
+    const instanceType = validateWorkerInstanceType(requestedType, this.config.ec2.instanceType);
+    const chat = this.store.get(chatId);
+    if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
+    if (chat.archived || chat.workflowState === "archived") throw Object.assign(new Error("Unarchive this chat before resizing its worker"), { statusCode: 409 });
+    const existing = this.#workerResizes.get(chatId);
+    if (existing) {
+      existing.next = instanceType;
+      const updated = await this.store.update(chatId, { workerInstanceType: instanceType, workerResize: { status: "queued", instanceType, requestedAt: nowIso() } });
+      this.publishChat(updated); return updated;
+    }
+    const wasAwake = this.#runtimes.has(chatId) || this.#executors.has(chatId) || this.#awakeWorkers.has(chatId)
+      || chat.suspension?.nativeRetained === true || chat.suspension?.browserRetained === true
+      || ["running", "starting", "idle", "waiting"].includes(chat.status);
+    const wasQueuePaused = Boolean(chat.queuePaused);
+    const updated = await this.store.update(chatId, { workerInstanceType: instanceType,
+      workerResize: { status: "resizing", instanceType, requestedAt: nowIso() } });
+    this.publishChat(updated);
+    const action = { instanceType, next: null };
+    this.#workerResizes.set(chatId, action);
+    action.promise = (async () => {
+      try {
+        if (wasAwake || !["stopped", "error"].includes(this.store.get(chatId)?.status)) await this.stop(chatId, "resize");
+        const result = await this.workerBackend.resize(this.store.get(chatId), instanceType);
+        const resized = await this.store.update(chatId, current => ({
+          workerInstanceType: instanceType,
+          runtimeMetadata: { ...(current.runtimeMetadata || {}), ...(result.instanceId ? { instanceId: result.instanceId } : {}), instanceType },
+          workerResize: { status: "resized", instanceType, completedAt: nowIso() },
+        }));
+        this.publishChat(resized);
+        if (wasAwake) {
+          const admission = await this.wake(chatId);
+          await admission.completion;
+        }
+        const completed = await this.store.update(chatId, { queuePaused: wasQueuePaused, workerResize: { status: "completed", instanceType, completedAt: nowIso() } });
+        this.publishChat(completed);
+        if (!wasQueuePaused) void this.#drainQueue(chatId);
+      } catch (error) {
+        if (this.store.get(chatId)) this.publishChat(await this.store.update(chatId, { workerResize: { status: "failed", instanceType, error: errorMessage(error), completedAt: nowIso() } }));
+      } finally {
+        this.#workerResizes.delete(chatId);
+        if (action.next && action.next !== instanceType && this.store.get(chatId)) void this.resizeWorker(chatId, action.next);
+      }
+    })();
+    return updated;
+  }
+
   async goalAction(chatId, action) {
     if (!["pause", "clear", "resume"].includes(action)) throw new Error("Choose pause, resume or clear");
     const chat = this.store.get(chatId);
@@ -2338,6 +2389,7 @@ export class RuntimeManager extends EventEmitter {
     this.#workspaceIdleTimers.clear();
     await this.pullRequests.stop();
     await this.githubEvents?.stop();
+    await Promise.allSettled([...this.#workerResizes.values()].map(operation => operation.promise));
     await Promise.allSettled([...new Set([...this.#runtimes.keys(), ...this.#executors.keys(), ...this.#workerWakes.keys()])].map((chatId) => this.stop(chatId, "shutdown")));
     await Promise.allSettled([...this.#workerWakes.values()].map(operation => operation.completion || operation.admission));
     await this.browsers?.shutdown();

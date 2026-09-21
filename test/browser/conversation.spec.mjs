@@ -22,6 +22,31 @@ async function openFixture(page, messages = [], extra = {}) {
   return chat;
 }
 
+test("an EC2 chat offers priced machine sizes and applies a resize immediately in the UI", async ({ page }) => {
+  await page.route("**/api/config", async route => {
+    const response = await route.fetch(), config = await response.json(); config.workerBackend = "ec2";
+    await route.fulfill({ json: config });
+  });
+  await page.route("**/api/environments", route => route.fulfill({ json: {
+    environments: [{ id: "env-fixture", name: "Fixture", backend: "ec2", instanceType: "t3.medium", companies: [], variables: [], software: [] }], software: [],
+    instances: [{ id: "t3.medium", vcpu: 2, memoryGiB: 4, usdPerHour: 0.0416, burstable: true }, { id: "m7i.xlarge", vcpu: 4, memoryGiB: 16, usdPerHour: 0.2016, recommended: true }],
+    defaultInstanceType: "t3.medium", region: "us-east-2",
+  } }));
+  const chat = await openFixture(page, [], { environmentId: "env-fixture", runtimeMetadata: { backend: "ec2", instanceType: "t3.medium" } });
+  const resize = Promise.withResolvers(); let request;
+  await page.route(`**/api/chats/${chat.id}/worker-size`, async route => { request = route.request().postDataJSON(); await resize.promise; await route.fulfill({ status: 202, json: { chat: { ...chat, workerInstanceType: "m7i.xlarge", workerResize: { status: "resizing", instanceType: "m7i.xlarge" } } } }); });
+  await page.getByLabel("Chat settings", { exact: true }).click();
+  await page.getByRole("button", { name: "Machine size · t3.medium", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Machine size" }), size = page.getByRole("combobox", { name: "EC2 instance", exact: true });
+  await expect(size.locator("option")).toHaveText([/2 vCPU.*4 GiB.*\$0\.0416\/hour/, /4 vCPU.*16 GiB.*\$0\.2016\/hour.*Recommended/]);
+  await size.selectOption("m7i.xlarge"); await expect(dialog).toContainText("$0.2016/hour");
+  await page.getByRole("button", { name: "Resize and restart", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.locator("#resize-worker-button")).toHaveText("Machine · resizing to m7i.xlarge");
+  await expect.poll(() => request).toEqual({ instanceType: "m7i.xlarge" });
+  resize.resolve();
+});
+
 test("command controls edit goals, queue native commands and retain drafts on delayed controls", async ({ page }) => {
   const goal = { objective: "Original goal", status: "paused", tokensUsed: 15 };
   const chat = await openFixture(page, [{ id: "reply", role: "assistant", text: "Last completed reply" }], { agent: "codex", status: "running", goal });

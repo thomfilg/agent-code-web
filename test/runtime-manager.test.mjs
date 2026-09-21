@@ -171,6 +171,32 @@ test("a non-mock chat acquires, sleeps, resumes, and destroys its worker backend
   assert.equal(calls.filter(([action]) => action === "destroy").length, 1);
 });
 
+test("an active EC2 chat resizes its existing worker and wakes on the selected machine size", async t => {
+  const root = await temporaryDirectory(t), config = testConfig(root), store = new ChatStore(root); await store.initialize();
+  config.workerBackend = "ec2";
+  const calls = [];
+  const workerBackend = {
+    acquire: async chat => { calls.push(["acquire", chat.workerInstanceType]); return { metadata: { backend: "ec2", instanceId: "i-fixture", instanceType: chat.workerInstanceType } }; },
+    sleep: async chat => { calls.push(["sleep", chat.workerInstanceType]); return { instanceId: "i-fixture", stopped: true }; },
+    resize: async (chat, instanceType) => { calls.push(["resize", instanceType]); return { instanceId: "i-fixture", instanceType, resized: true }; },
+    destroy: async () => {},
+  };
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10_000 }), gatewayOrigin: "http://localhost", workerBackend,
+    adapterFactory: () => ({ start: async () => {}, send: async () => ({ text: "ready" }), stop: async () => {} }) });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "codex" });
+  await manager.send(chat.id, "start");
+  const accepted = await manager.resizeWorker(chat.id, "m7i.xlarge");
+  assert.equal(accepted.workerResize.status, "resizing");
+  assert.equal(accepted.workerInstanceType, "m7i.xlarge");
+  await waitFor(() => store.get(chat.id).workerResize?.status === "completed");
+  assert.deepEqual(calls.filter(([action]) => ["sleep", "resize"].includes(action)), [["sleep", "m7i.xlarge"], ["resize", "m7i.xlarge"]]);
+  assert.deepEqual(calls.filter(([action]) => action === "acquire").map(([, type]) => type), ["t3.medium", "m7i.xlarge"]);
+  assert.equal(store.get(chat.id).runtimeMetadata.instanceType, "m7i.xlarge");
+  assert.equal(store.get(chat.id).queuePaused, false);
+  assert.equal(store.get(chat.id).status, "idle");
+});
+
 test("chat deletion is durable even when worker stop and infrastructure cleanup fail", async t => {
   const root = await temporaryDirectory(t), records = new MemoryRecords(), store = new ChatStore(root, records); await store.initialize();
   const config = testConfig(root); config.idleTimeoutMs = 60_000;

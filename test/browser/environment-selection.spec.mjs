@@ -1,9 +1,10 @@
 import { test, expect } from "@playwright/test";
 
-async function fixture(page, { empty = false, shared = false, secrets = false } = {}) {
+async function fixture(page, { empty = false, shared = false, secrets = false, ec2 = false } = {}) {
   const repository = (fullName, companyId) => ({ fullName, companyId, githubConnectionId: `github-${companyId}`, defaultBranch: "main", branch: "dev" });
   const repositories = [repository("12-apps/future-pay", "personal"), repository("thomfilg/tools", "personal"), repository("g2i-ai/clickdown", "g2i")];
-  const environment = (id, name, companies, extra = {}) => ({ id, name, companies, allowUnassigned: false, archived: false, backend: "local", revision: 1, software: [], variables: [], variablesEnabled: true, ...extra });
+  const environment = (id, name, companies, extra = {}) => ({ id, name, companies, allowUnassigned: false, archived: false, backend: ec2 ? "ec2" : "local", ...(ec2 ? { instanceType: "t3.medium" } : {}), revision: 1, software: [], variables: [], variablesEnabled: true, ...extra });
+  const instances = [{ id: "t3.medium", vcpu: 2, memoryGiB: 4, usdPerHour: 0.0416, burstable: true }, { id: "m7i.xlarge", vcpu: 4, memoryGiB: 16, usdPerHour: 0.2016, burstable: false, recommended: true }];
   const f = {
     repositories,
     environments: [environment("env-personal", "thomfilg + 12-apps", ["personal"]), environment("env-g2i", "g2i", ["g2i"]), environment("env-personal-alt", "Personal staging", ["personal"]), environment("env-archived", "Archived", ["g2i"], { archived: true })],
@@ -21,7 +22,7 @@ async function fixture(page, { empty = false, shared = false, secrets = false } 
       const saved = { ...route.request().postDataJSON(), id: "env-new" }; f.writes.push(saved); f.environments.push(saved);
       return route.fulfill({ json: { environment: saved } });
     }
-    return route.fulfill({ json: { environments: f.environments, software: [{ id: "node", name: "Node.js", version: "22", description: "JavaScript runtime" }] } });
+    return route.fulfill({ json: { environments: f.environments, software: [{ id: "node", name: "Node.js", version: "22", description: "JavaScript runtime" }], instances: ec2 ? instances : [], defaultInstanceType: "t3.medium", region: "us-east-2" } });
   });
   await page.route("**/api/environments/*", route => {
     const saved = route.request().postDataJSON(); f.writes.push(saved);
@@ -41,6 +42,19 @@ async function fixture(page, { empty = false, shared = false, secrets = false } 
   await page.goto("/"); await expect(page.locator("#new-chat-fields")).toHaveJSProperty("disabled", false);
   return f;
 }
+
+test("EC2 environments show CPU, RAM and hourly price and persist the selected default machine", async ({ page }) => {
+  const f = await fixture(page, { ec2: true });
+  await page.locator("#environment-settings").click();
+  await page.locator("#environment-advanced summary").click();
+  const size = page.getByRole("combobox", { name: "Default machine size", exact: true });
+  await expect(size).toHaveValue("t3.medium");
+  await expect(size.locator("option")).toHaveText([/2 vCPU.*4 GiB.*\$0\.0416\/hour.*Burstable/, /4 vCPU.*16 GiB.*\$0\.2016\/hour.*Recommended/]);
+  await size.selectOption("m7i.xlarge");
+  await expect(page.locator("#environment-instance-price")).toContainText("$0.2016/hour");
+  await page.getByRole("button", { name: "Save environment", exact: true }).click();
+  await expect.poll(() => f.writes.at(-1)?.instanceType).toBe("m7i.xlarge");
+});
 
 test("remembered repositories do not hide another company's environment; switching keeps the prompt and scopes the draft", async ({ page }) => {
   const f = await fixture(page);

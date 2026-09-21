@@ -8,6 +8,7 @@ const $ = selector => document.querySelector(selector);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 const option = (value, text) => { const e = el("option", "", text); e.value = value; return e; };
 const button = (text, action, cls = "secondary-button") => { const e = el("button", cls, text); e.type = "button"; e.addEventListener("click", action); return e; };
+const instanceLabel = instance => `${instance.id} · ${instance.vcpu} vCPU · ${instance.memoryGiB} GiB · $${instance.usdPerHour.toFixed(4)}/hour${instance.recommended ? " · Recommended" : instance.burstable ? " · Burstable" : ""}`;
 
 export class WorkspaceSettings {
   constructor({ api, state, toast }) {
@@ -49,6 +50,7 @@ export class WorkspaceSettings {
       if (!this.discardEnvironmentEdits()) { event.target.value = this.draft.id || ""; return; }
       this.editEnvironment(this.companyEnvironments().find(env => env.id === event.target.value));
     });
+    $("#environment-instance-type").addEventListener("change", event => { if (this.draft) this.draft.instanceType = event.target.value; this.renderInstancePrice(); this.updateEnvironmentDirty(); });
     document.querySelectorAll("[data-environment-section]").forEach(node => node.addEventListener("click", () => this.showEnvironmentSection(node.dataset.environmentSection)));
     $("#environment-editor-back").addEventListener("click", () => this.showEnvironmentSection());
     for (const type of ["input", "change"]) $("#environment-form").addEventListener(type, () => this.updateEnvironmentDirty());
@@ -89,6 +91,8 @@ export class WorkspaceSettings {
     this.mcps = mcps.connections;
     if (registry.companies) this.state.companies = registry.companies;
     this.github = github; this.environments = environments.environments; this.software = environments.software;
+    this.instances = environments.instances || []; this.defaultInstanceType = environments.defaultInstanceType || "t3.medium";
+    this.instanceRegion = environments.region || ""; this.instancePricingRegion = environments.pricingRegion || this.instanceRegion;
     this.preferences = saved.preferences;
     this.selectionMemory = saved.selectionMemory === true;
     this.projectAgents = saved.projectAgents || {};
@@ -410,7 +414,7 @@ export class WorkspaceSettings {
     this.preferenceQueue = (this.preferenceQueue || Promise.resolve()).catch(() => {}).then(() => this.api("/api/preferences", { method: "PATCH", body: JSON.stringify(body) }));
     try {
       await this.preferenceQueue; this.preferences = body;
-      if (this.selectionCompany) this.selectionCache.set(this.selectionCompany, structuredClone(body));
+      if (this.selectionCompany) (this.selectionCache ||= new Map()).set(this.selectionCompany, structuredClone(body));
     } catch (error) {
       if (this.projectAgents?.[project] === remembered) { if (previous) this.projectAgents[project] = previous; else delete this.projectAgents[project]; }
       this.toast(`Could not remember your selection: ${error.message}`);
@@ -442,7 +446,8 @@ export class WorkspaceSettings {
   captureEnvironmentFields() {
     if (!this.draft) return;
     Object.assign(this.draft, { name: $("#environment-name").value, variablesEnabled: $("#variables-enabled").checked,
-      setupScript: $("#environment-setup-script").value, archived: $("#environment-archived").checked });
+      setupScript: $("#environment-setup-script").value, archived: $("#environment-archived").checked,
+      ...(this.draft.backend === "ec2" ? { instanceType: $("#environment-instance-type").value || this.defaultInstanceType } : {}) });
   }
   environmentDirty() { this.captureEnvironmentFields(); return Boolean(this.draft && this.environmentBaseline !== JSON.stringify(this.draft)); }
   updateEnvironmentDirty() {
@@ -460,7 +465,7 @@ export class WorkspaceSettings {
     this.updateEnvironmentDirty();
   }
   editEnvironment(environment) {
-    this.draft = structuredClone(environment || { name: "", backend: this.state.config.workerBackend, variablesEnabled: true, variables: [], software: [], ...(this.settingsCompanyId && this.settingsCompanyId !== "__review__" ? { companies: [this.settingsCompanyId], allowUnassigned: false } : {}) });
+    this.draft = structuredClone(environment || { name: "", backend: this.state.config.workerBackend, ...(this.state.config.workerBackend === "ec2" ? { instanceType: this.defaultInstanceType || "t3.medium" } : {}), variablesEnabled: true, variables: [], software: [], ...(this.settingsCompanyId && this.settingsCompanyId !== "__review__" ? { companies: [this.settingsCompanyId], allowUnassigned: false } : {}) });
     $("#environment-error").textContent = "";
     $("#environment-save-status").textContent = "";
     const companies = (this.state.companies || []).map(company => company.id);
@@ -483,6 +488,13 @@ export class WorkspaceSettings {
     $("#environment-setup-script").value = this.draft.setupScript || "";
     $("#environment-archived").checked = Boolean(this.draft.archived);
     $("#environment-backend").textContent = `Worker: ${this.draft.backend} · changes apply on the next worker start`;
+    const instanceField = $("#environment-instance-type-field"), instanceSelect = $("#environment-instance-type");
+    instanceField.hidden = this.draft.backend !== "ec2";
+    const instances = this.instances || [];
+    instanceSelect.replaceChildren(...instances.map(instance => option(instance.id, instanceLabel(instance))));
+    instanceSelect.value = this.draft.instanceType || this.defaultInstanceType || instances[0]?.id || "";
+    if (this.draft.backend === "ec2") this.draft.instanceType = instanceSelect.value;
+    this.renderInstancePrice();
     $("#variables-enabled").checked = this.draft.variablesEnabled;
     $("#delete-environment").hidden = !this.draft.id;
     $("#software-options").replaceChildren();
@@ -494,6 +506,11 @@ export class WorkspaceSettings {
     }
     $("#variable-search").value = ""; this.renderVariables();
     this.captureEnvironmentFields(); this.environmentBaseline = JSON.stringify(this.draft); this.showEnvironmentSection();
+  }
+  renderInstancePrice() {
+    const selected = this.instances?.find(instance => instance.id === $("#environment-instance-type").value);
+    const region = this.instanceRegion === this.instancePricingRegion ? this.instanceRegion || "configured region" : `${this.instancePricingRegion} reference price`;
+    $("#environment-instance-price").textContent = selected ? `$${selected.usdPerHour.toFixed(4)}/hour · ${region}${selected.burstable ? " · CPU credits may add cost under sustained load" : " · sustained performance"}` : "";
   }
   renderEnvironmentMcps() {
     if (this.state.config?.features?.companyMcpConnections) {

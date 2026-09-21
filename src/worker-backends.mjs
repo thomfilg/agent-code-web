@@ -15,6 +15,7 @@ import { ReconnectableBrowserProcess } from "./reconnectable-browser-process.mjs
 import { ReconnectableAgentProcess } from "./reconnectable-agent-process.mjs";
 import { createSshWorkerProcessTransport } from "./ssh-worker-process-transport.mjs";
 import { createHash, randomUUID } from "node:crypto";
+import { validateWorkerInstanceType } from "./worker-instances.mjs";
 
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
@@ -100,7 +101,7 @@ export class Ec2Executor {
     this.heartbeat = `${backend.config.ec2.remoteRoot}/.heartbeat`;
     this.gatewayOrigin = backend.config.ec2.gatewayOrigin;
     this.supervisorAvailable = supervisorAvailable;
-    this.metadata = { backend: "ec2", instanceId: instance.InstanceId, host, imageId: instance.ImageId,
+    this.metadata = { backend: "ec2", instanceId: instance.InstanceId, instanceType: instance.InstanceType, host, imageId: instance.ImageId,
       ...(typeof instance.LaunchTime === "string" && Number.isFinite(Date.parse(instance.LaunchTime)) ? { launchTime: instance.LaunchTime } : {}) };
   }
 
@@ -322,6 +323,7 @@ export class Ec2Backend {
     if (!/^[a-z_][a-z0-9_-]*$/.test(config.ec2.sshUser)) throw new Error("Invalid EC2 SSH user");
     if (!/^\/[A-Za-z0-9_/-]+$/.test(config.ec2.remoteRoot) || config.ec2.remoteRoot.includes("..") || config.ec2.remoteRoot === "/") throw new Error("Invalid EC2 remote root");
     if (config.ec2.usePublicIp) throw new Error("EC2 workers must use private addresses; public worker IPs are not supported");
+    validateWorkerInstanceType(config.ec2.instanceType);
   }
 
   awsArgs(...args) {
@@ -383,7 +385,7 @@ export class Ec2Backend {
         || !["stopped", "stopping"].includes(instance.State?.Name) || instance.HibernationOptions?.Configured !== true) {
         throw new Error("EC2 resume worker identity changed; no replacement instance was started");
       }
-    } else if (!instance) instance = await this.#create(chat.id, check, instanceId => mutated(instanceId, "created"));
+    } else if (!instance) instance = await this.#create(chat.id, check, instanceId => mutated(instanceId, "created"), chat.workerInstanceType);
     // Existing/stopped workers retain their actual AMI, not necessarily the
     // currently configured one. A revoked marker denies new admission only;
     // sleep/destroy deliberately remain available for exact-owned cleanup.
@@ -395,6 +397,7 @@ export class Ec2Backend {
       instance.State.Name = "stopped";
     }
     if (instance.State?.Name === "stopped") {
+      instance = await this.#resizeStopped(instance, chat.id, chat.workerInstanceType || this.config.ec2.instanceType);
       mutated(instance.InstanceId, "started", instance);
       await this.#aws("ec2", "start-instances", "--instance-ids", instance.InstanceId);
       check();
@@ -487,6 +490,30 @@ export class Ec2Backend {
     await this.#aws("ec2", "terminate-instances", "--instance-ids", instance.InstanceId);
   }
 
+  async resize(chat, instanceType) {
+    const desired = validateWorkerInstanceType(instanceType, this.config.ec2.instanceType);
+    let instance = await this.#find(chat.id);
+    if (!instance) return { instanceType: desired, resized: false, absent: true };
+    if (instance.State?.Name === "stopping") {
+      await this.#aws("ec2", "wait", "instance-stopped", "--instance-ids", instance.InstanceId);
+      instance = await this.#describe(instance.InstanceId, chat.id);
+    }
+    if (instance.State?.Name !== "stopped") throw new Error("Stop the worker before changing its machine size");
+    const resized = instance.InstanceType !== desired;
+    if (resized) instance = await this.#resizeStopped(instance, chat.id, desired);
+    return { instanceId: instance.InstanceId, instanceType: instance.InstanceType, resized };
+  }
+
+  async #resizeStopped(instance, chatId, desiredType) {
+    const desired = validateWorkerInstanceType(desiredType, this.config.ec2.instanceType);
+    if (instance.InstanceType === desired) return instance;
+    if (instance.State?.Name !== "stopped") throw new Error("EC2 worker must be stopped before changing its machine size");
+    await this.#aws("ec2", "modify-instance-attribute", "--instance-id", instance.InstanceId, "--instance-type", JSON.stringify({ Value: desired }));
+    const changed = await this.#describe(instance.InstanceId, chatId);
+    if (changed.State?.Name !== "stopped" || changed.InstanceType !== desired) throw new Error("EC2 did not confirm the requested worker machine size");
+    return changed;
+  }
+
   async #find(chatId) {
     if (!/^chat_[a-f0-9]{32}$/.test(chatId)) throw new Error("Invalid EC2 chat identifier");
     const output = await this.#aws(
@@ -537,7 +564,7 @@ export class Ec2Backend {
     return assertWorkerImage(images[0], { imageId, deployment: ec2.deployment, keyName: ec2.keyName });
   }
 
-  async #create(chatId, check = () => {}, onMutation = () => {}) {
+  async #create(chatId, check = () => {}, onMutation = () => {}, requestedInstanceType = null) {
     const ec2 = this.config.ec2;
     const acceptedImage = await this.#acceptedImage(ec2.amiId);
     if (this.config.idlePolicy === "hibernate" && !this.#hibernationEvidence(acceptedImage).available) throw hibernationUnavailableError();
@@ -553,7 +580,7 @@ export class Ec2Backend {
     const output = await this.#aws(
       "ec2", "run-instances",
       "--image-id", this.config.ec2.amiId,
-      "--instance-type", this.config.ec2.instanceType,
+      "--instance-type", validateWorkerInstanceType(requestedInstanceType, this.config.ec2.instanceType),
       "--network-interfaces", JSON.stringify([{ DeviceIndex: 0, SubnetId: ec2.subnetId, Groups: [ec2.securityGroupId], AssociatePublicIpAddress: false, DeleteOnTermination: true }]),
       "--key-name", this.config.ec2.keyName,
       "--block-device-mappings", blockDevice,

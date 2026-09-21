@@ -28,6 +28,7 @@ import { Companies } from "./companies.mjs";
 import { GitHubWorkerGateway } from "./github-worker-gateway.mjs";
 import { handleGitHubWorkerMcp } from "./github-worker-mcp.mjs";
 import { Environments, SOFTWARE_CATALOG } from "./environments.mjs";
+import { WORKER_INSTANCE_CATALOG, WORKER_INSTANCE_PRICING_REGION } from "./worker-instances.mjs";
 import { ModelCatalog } from "./models.mjs";
 import { Attachments } from "./attachments.mjs";
 import { CommandCatalog } from "./command-catalog.mjs";
@@ -149,7 +150,7 @@ export async function createAgentWebServer(options = {}) {
   github.companies = companies;
   const mcps = new McpConnections(records, { ttlMs: config.sessionCapabilityTtlMs, companies });
   const publicOrigin = config.publicOrigin ? safeMcpUrl(config.publicOrigin).origin : null;
-  const environments = new Environments(records, config.workerBackend, mcps);
+  const environments = new Environments(records, config.workerBackend, mcps, { defaultInstanceType: config.ec2.instanceType });
   const companyPlugins = options.companyPlugins || new CompanyPlugins(records, { companies, config, inspect: options.inspectPluginSource });
   const models = options.models || new ModelCatalog(config, agentAccounts);
   const attachments = new Attachments(records, store);
@@ -480,7 +481,9 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/github/device/cancel" && request.method === "POST") return json(response, 200, await github.cancelDevice((await bodyJson(request, config.maxBodyBytes)).id));
       if (url.pathname === "/api/github/repositories" && request.method === "GET") return json(response, 200, { repositories: await github.repositories(url.searchParams.get("q") || "", url.searchParams.get("refresh") === "1") });
       if (url.pathname === "/api/github/branches" && request.method === "GET") return json(response, 200, { branches: await github.branches(url.searchParams.get("repository"), url.searchParams.get("connection") || undefined, url.searchParams.get("company") || undefined) });
-      if (url.pathname === "/api/environments" && request.method === "GET") return json(response, 200, { environments: await environments.list(), software: SOFTWARE_CATALOG });
+      if (url.pathname === "/api/environments" && request.method === "GET") return json(response, 200, { environments: await environments.list(), software: SOFTWARE_CATALOG,
+        instances: config.workerBackend === "ec2" ? WORKER_INSTANCE_CATALOG : [], defaultInstanceType: config.ec2.instanceType,
+        region: config.ec2.region, pricingRegion: WORKER_INSTANCE_PRICING_REGION });
       if (url.pathname === "/api/environments" && request.method === "POST") return json(response, 201, { environment: await environments.save(await bodyJson(request, config.maxBodyBytes)) });
       const environmentRoute = /^\/api\/environments\/(env_[a-f0-9-]{36})(?:\/(reveal))?$/.exec(url.pathname);
       if (environmentRoute) {
@@ -735,6 +738,10 @@ export async function createAgentWebServer(options = {}) {
           const body = await bodyJson(request, config.maxBodyBytes);
           if (body.sendNowId !== undefined) return json(response, 202, { chat: manager.startQueuedNow(chatId, body.sendNowId) });
           return json(response, 200, { chat: await manager.editQueue(chatId, body) });
+        }
+        if (tail === "worker-size" && request.method === "PATCH") {
+          const body = await bodyJson(request, 1000);
+          return json(response, 202, { chat: await manager.resizeWorker(chatId, body.instanceType) });
         }
         if (tail === "repositories" && request.method === "POST") return json(response, 200, { chat: await manager.addRepository(chatId, await bodyJson(request, config.maxBodyBytes)) });
         if (tail === "changes" && request.method === "GET") {

@@ -297,6 +297,13 @@ function renderActive() {
   elements.detail.textContent = chat.statusDetail || "";
   elements.statusDot.className = `status-dot ${chat.status}`;
   $("#stop-button").disabled = false;
+  const resizeButton = $("#resize-worker-button");
+  resizeButton.hidden = state.config.workerBackend !== "ec2";
+  const environment = workspaceSettings.environments?.find(item => item.id === chat.environmentId);
+  const machineType = chat.workerResize?.status === "failed" ? chat.runtimeMetadata?.instanceType || environment?.instanceType || workspaceSettings.defaultInstanceType
+    : chat.workerInstanceType || chat.runtimeMetadata?.instanceType || environment?.instanceType || workspaceSettings.defaultInstanceType;
+  resizeButton.textContent = chat.workerResize?.status === "resizing" || chat.workerResize?.status === "queued" ? `Machine · resizing to ${chat.workerResize.instanceType}`
+    : chat.workerResize?.status === "failed" ? `Machine resize failed · ${machineType || "retry"}` : `Machine size · ${machineType || "choose"}`;
   $("#delete-button").disabled = false;
   $("#delete-button").removeAttribute("aria-busy");
   const busy = ["running", "starting"].includes(chat.status);
@@ -983,6 +990,38 @@ async function interruptAgent() {
   finally { interruptingChats.delete(id); if (state.active?.id === id) renderActive(); }
 }
 $("#interrupt-button").addEventListener("click", () => void interruptAgent());
+const workerSizeDialog = $("#worker-size-dialog"), workerSizeSelect = $("#worker-instance-type");
+const renderWorkerSizeDescription = () => {
+  const instance = workspaceSettings.instances?.find(item => item.id === workerSizeSelect.value);
+  const region = workspaceSettings.instanceRegion === workspaceSettings.instancePricingRegion ? workspaceSettings.instanceRegion || "configured region" : `${workspaceSettings.instancePricingRegion} reference price`;
+  $("#worker-instance-description").textContent = instance ? `${instance.vcpu} vCPU · ${instance.memoryGiB} GiB RAM · $${instance.usdPerHour.toFixed(4)}/hour · ${region}${instance.burstable ? " · burstable CPU" : " · sustained CPU"}` : "";
+};
+$("#resize-worker-button").addEventListener("click", () => {
+  const chat = state.active, instances = workspaceSettings.instances || [];
+  if (!chat || !instances.length) { toast("Machine resizing is unavailable for this environment"); return; }
+  workerSizeSelect.replaceChildren(...instances.map(instance => {
+    const item = node("option", "", `${instance.id} · ${instance.vcpu} vCPU · ${instance.memoryGiB} GiB · $${instance.usdPerHour.toFixed(4)}/hour${instance.recommended ? " · Recommended" : instance.burstable ? " · Burstable" : ""}`);
+    item.value = instance.id; return item;
+  }));
+  const environment = workspaceSettings.environments?.find(item => item.id === chat.environmentId);
+  workerSizeSelect.value = chat.workerInstanceType || chat.runtimeMetadata?.instanceType || environment?.instanceType || workspaceSettings.defaultInstanceType || instances[0].id;
+  $("#worker-size-error").textContent = ""; renderWorkerSizeDescription(); workerSizeDialog.showModal();
+});
+workerSizeSelect.addEventListener("change", renderWorkerSizeDescription);
+$("#worker-size-form").addEventListener("submit", event => {
+  event.preventDefault();
+  const chat = state.active, instanceType = workerSizeSelect.value;
+  if (!chat || !instanceType) return;
+  const previous = chat;
+  state.active = { ...chat, workerInstanceType: instanceType, workerResize: { status: "resizing", instanceType, requestedAt: new Date().toISOString() } };
+  workerSizeDialog.close(); renderActive();
+  void api(`/api/chats/${chat.id}/worker-size`, { method: "PATCH", body: JSON.stringify({ instanceType }) }).then(({ chat: updated }) => {
+    if (state.active?.id === updated.id && (updated.revision || 0) >= (state.active.revision || 0)) { state.active = { ...state.active, ...updated }; renderActive(); }
+  }).catch(error => {
+    if (state.active?.id === previous.id) { state.active = previous; renderActive(); }
+    toast(`Could not resize worker: ${error.message}`);
+  });
+});
 function renderWorkingStatus() {
   const text = workingStatus(state.active, state.liveTools);
   $("#working-status").textContent = text;
