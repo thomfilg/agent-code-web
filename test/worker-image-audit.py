@@ -29,6 +29,15 @@ exec(compile(helpers, '<image-audit-helper>', 'exec'), namespace)
 
 
 class ImageAuditTest(unittest.TestCase):
+    def test_host_key_generator_is_idempotent_and_rejects_unreviewed_algorithms(self):
+        generator = script_at('/usr/local/sbin/agent-web-generate-hostkeys')
+        result = subprocess.run(['/bin/sh', '-n'], input=generator, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('ssh-keygen -A', generator)
+        for text in ('ssh_host_rsa_key -t rsa -b 3072', 'ssh_host_ecdsa_key -t ecdsa -b 256', 'ssh_host_ed25519_key -t ed25519'):
+            self.assertIn(text, generator)
+        self.assertIn('*) exit 1', generator)
+
     def probe(self, response=None, error=None):
         class Response:
             status = response
@@ -134,7 +143,7 @@ class ImageAuditTest(unittest.TestCase):
 
     def test_finalizer_removes_known_nontransport_keys_and_checks_the_only_retained_key(self):
         finalizer = script_at('/usr/local/sbin/agent-web-finalize-image')
-        block = finalizer.split('# Remove nontransport SSH state,', 1)[1].split('# Remove builder host identity', 1)[0]
+        block = finalizer.split('# Remove nontransport SSH state,', 1)[1].split('# Names only, never contents;', 1)[0]
         block = '# Remove nontransport SSH state,' + block
         self.assertLess(finalizer.index('# Remove nontransport SSH state,'), finalizer.index('touch /opt/agent-web/IMAGE_FINALIZED'))
         public = b'ssh-ed25519 AAAAFixturePublicOnly\n'

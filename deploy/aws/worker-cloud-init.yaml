@@ -277,6 +277,38 @@ write_files:
             dhcp4: true
             dhcp6: false
             optional: true
+  - path: /usr/local/sbin/agent-web-generate-hostkeys
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      umask 077
+      ensure_key() {
+        key=$1
+        shift
+        if [ -e "$key" ] || [ -L "$key" ] || [ -e "$key.pub" ] || [ -L "$key.pub" ]; then
+          [ -f "$key" ] && [ ! -L "$key" ] && [ -f "$key.pub" ] && [ ! -L "$key.pub" ]
+        else
+          /usr/bin/ssh-keygen -q "$@" -N '' -f "$key"
+        fi
+        chown root:root "$key" "$key.pub"
+        chmod 0600 "$key"
+        chmod 0644 "$key.pub"
+      }
+      ensure_key /etc/ssh/ssh_host_rsa_key -t rsa -b 3072
+      ensure_key /etc/ssh/ssh_host_ecdsa_key -t ecdsa -b 256
+      ensure_key /etc/ssh/ssh_host_ed25519_key -t ed25519
+      # DSA and any future key family must never silently enter the accepted
+      # worker identity. A recipe update and verifier review are required.
+      for key in /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub; do
+        case "$key" in
+          /etc/ssh/ssh_host_rsa_key|/etc/ssh/ssh_host_rsa_key.pub|\
+          /etc/ssh/ssh_host_ecdsa_key|/etc/ssh/ssh_host_ecdsa_key.pub|\
+          /etc/ssh/ssh_host_ed25519_key|/etc/ssh/ssh_host_ed25519_key.pub) ;;
+          *) exit 1 ;;
+        esac
+      done
   - path: /etc/systemd/system/agent-web-hostkeys.service
     permissions: "0644"
     content: |
@@ -289,7 +321,7 @@ write_files:
       Before=ssh.service ssh.socket
       [Service]
       Type=oneshot
-      ExecStart=/usr/bin/ssh-keygen -A
+      ExecStart=/usr/local/sbin/agent-web-generate-hostkeys
       RemainAfterExit=yes
       [Install]
       WantedBy=multi-user.target
