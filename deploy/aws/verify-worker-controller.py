@@ -35,7 +35,8 @@ EXCEPTION_CLASSES = ('RuntimeError', 'JSONDecodeError', 'FileNotFoundError', 'Pe
                      'ImportError', 'ModuleNotFoundError', 'UnicodeDecodeError', 'AssertionError')
 APPLICATION_STAGES = ('bundle', 'service', 'status', 'configure', 'connect', 'launch', 'attach',
                       'initialize-input', 'initialize-response', 'initialize-error', 'initialize-frame',
-                      'initialize-timeout', 'checkpoint', 'takeover', 'read', 'read-error', 'read-frame',
+                      'initialize-timeout', 'initialize-notify', 'initialize-status', 'initialize-ack',
+                      'checkpoint', 'takeover', 'read', 'read-error', 'read-frame',
                       'read-timeout', 'no-replay', 'terminate', 'release')
 
 
@@ -361,11 +362,14 @@ def application_probe(request):
             client.input(1, {'method': 'initialize', 'id': 1, 'params': {'clientInfo': {'name': 'relay_hibernation_acceptance', 'version': '1'}, 'capabilities': {'experimentalApi': True}}})
             application_at('initialize-response')
             client.app_response(1, 'initialize')
+            application_at('initialize-notify')
             client.input(2, {'method': 'initialized', 'params': {}})
+            application_at('initialize-status')
             transport_status = client.request('status', {'processInstanceId': receipt['processInstanceId']})
             if transport_status.get('inputSeq') != 2 or transport_status.get('pid') != receipt['pid']:
                 application_failure()
             if client.cursor:
+                application_at('initialize-ack')
                 client.request('ackOutput', {'processInstanceId': receipt['processInstanceId'], 'seq': client.cursor})
             application_at('checkpoint')
             state = {'daemonInstanceId': status['daemonInstanceId'], 'receipt': receipt, 'cursor': client.cursor}
@@ -522,7 +526,7 @@ except Exception as error:
         failure['auditChecks'] = audit_checks
         failure['credentialFailureCounts'] = credential_counts
         failure['metadataProbe'] = metadata_probe
-    if failure['reason'] == 'application transport did not survive hibernation' and application_stage in ('bundle', 'service', 'status', 'configure', 'connect', 'launch', 'attach', 'initialize-input', 'initialize-response', 'initialize-error', 'initialize-frame', 'initialize-timeout', 'checkpoint', 'takeover', 'read', 'read-error', 'read-frame', 'read-timeout', 'no-replay', 'terminate', 'release'):
+    if failure['reason'] == 'application transport did not survive hibernation' and application_stage in ('bundle', 'service', 'status', 'configure', 'connect', 'launch', 'attach', 'initialize-input', 'initialize-response', 'initialize-error', 'initialize-frame', 'initialize-timeout', 'initialize-notify', 'initialize-status', 'initialize-ack', 'checkpoint', 'takeover', 'read', 'read-error', 'read-frame', 'read-timeout', 'no-replay', 'terminate', 'release'):
         failure['applicationStage'] = application_stage
     print(json.dumps(failure))
     sys.exit(1)
