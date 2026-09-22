@@ -139,10 +139,11 @@ test("every admitted Claude slash name executes canonically and every unknown na
 
 test("Claude /goal is visible as active before its exact native command finishes", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
-  const gate = Promise.withResolvers(), calls = [];
+  const gate = Promise.withResolvers(), calls = []; let scheduled = true;
   const manager = new RuntimeManager({ store, config: testConfig(root), commands: { list: async () => ({ commands: [{ name: "goal", kind: "CLI command", web: false }] }) },
     broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => ({
-      start: async () => {}, stop: async () => {}, send: async text => { calls.push(text); await gate.promise; return { text: "Goal work completed" }; },
+      start: async () => {}, stop: async () => {}, hasScheduledWork: () => scheduled,
+      send: async text => { calls.push(text); await gate.promise; return { text: "Goal work scheduled" }; },
     }) });
   t.after(() => manager.shutdown());
   const chat = await manager.createChat({ agent: "claude", title: "Claude goal state" });
@@ -154,7 +155,9 @@ test("Claude /goal is visible as active before its exact native command finishes
   assert.equal(store.get(chat.id).messages.filter(message => message.kind === "notice").at(-1).text,
     "Goal set: INC-9670\n\nrun /brief then /spec and finish");
   gate.resolve(); await pending;
-  assert.equal(store.get(chat.id).goal.status, "complete");
+  assert.equal(store.get(chat.id).goal.status, "active", "A scheduled native continuation must not look complete");
+  scheduled = false; await manager.send(chat.id, "/goal clear");
+  assert.equal(store.get(chat.id).goal, null);
 });
 
 test("an admitted Codex skill keeps structured dispatch while unknown names never reach the adapter", async t => {

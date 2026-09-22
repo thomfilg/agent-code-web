@@ -1909,7 +1909,8 @@ export class RuntimeManager extends EventEmitter {
       this.#emit(chatId, { type: "turn_completed", message });
       if (claude && commandAction?.type === "goal" && ["set", "resume"].includes(commandAction.action)) {
         const currentGoal = this.store.get(chatId).goal;
-        if (currentGoal?.managedBy === "relay") this.publishChat(await this.store.update(chatId, { goal: { ...currentGoal, status: output.awaitingUser ? "paused" : "complete" } }));
+        const nativeWorkPending = runtime.adapter.hasScheduledWork?.() || runtime.adapter.isBackgroundBusy?.();
+        if (currentGoal?.managedBy === "relay") this.publishChat(await this.store.update(chatId, { goal: { ...currentGoal, status: output.awaitingUser ? "paused" : nativeWorkPending ? "active" : "complete" } }));
       }
       }
       // Inspect only a worker that is already awake. Later GitHub polling uses
