@@ -144,13 +144,21 @@ export class RuntimeManager extends EventEmitter {
     if (chat.status === "stopped" && !wake) return;
     if (chat.queuedMessages?.some(item => item.githubEventId === event.id)) return;
     await this.githubEvents.validate(chatId, event.id);
-    const item = { id: `github_${event.id}`, githubEventId: event.id, githubWake: wake, text: event.text, attachmentIds: [], createdAt: event.createdAt };
+    const item = { id: `github_${event.id}`, githubEventId: event.id, githubSubscriptionId: event.subscriptionId,
+      githubWake: wake, text: event.text, attachmentIds: [], createdAt: event.createdAt };
     const updated = await this.store.update(chatId, current => {
       if (this.#previewStops.has(chatId) || version !== (this.#lifecycleVersions.get(chatId) || 0) || current.archived
         || ["starting", "stopping", "deleting", "error"].includes(current.status) || stoppedSinceEvent(current)) return {};
       if (current.queuedMessages?.some(entry => entry.githubEventId === event.id)) return {};
-      if ((current.queuedMessages || []).length >= 20) throw new Error("Queue holds at most 20 messages");
-      return { queuedMessages: [...(current.queuedMessages || []), item] };
+      // Each canonical observation supersedes older pending deliveries for the
+      // same PR subscription. Mirror that durable transition in the visible
+      // chat queue so check/review churn cannot fill it with stale snapshots.
+      // Keep an item already claimed by the dispatcher; its final validation
+      // will reject it as superseded without racing an in-flight send.
+      const queuedMessages = (current.queuedMessages || []).filter(entry => entry.githubSubscriptionId !== event.subscriptionId
+        || this.#queueClaims.get(chatId) === entry.id);
+      if (queuedMessages.length >= 20) throw new Error("Queue holds at most 20 messages");
+      return { queuedMessages: [...queuedMessages, item] };
     });
     this.publishChat(updated);
     if (version === (this.#lifecycleVersions.get(chatId) || 0) && !this.#previewStops.has(chatId) && !stoppedSinceEvent(this.store.get(chatId))) void this.#drainQueue(chatId);

@@ -61,6 +61,20 @@ test("busy delivery joins user FIFO without interruption or unpausing independen
   assert.deepEqual(f.calls, ["hold", "queued", "github"]);
 });
 
+test("busy PR status churn keeps only the latest canonical follow-up queued", async t => {
+  const f = await runtimeFixture(t, { automatic: true });
+  const first = await f.manager.submit(f.chat.id, "hold user"); await waitFor(() => f.calls.length === 1);
+  await f.update("failing");
+  await f.update("pending");
+  await f.update("failing");
+  const queued = f.store.get(f.chat.id).queuedMessages.filter(item => item.githubEventId);
+  assert.equal(queued.length, 1);
+  assert.equal(typeof queued[0].githubSubscriptionId, "string");
+  f.release(); await first.completion;
+  await waitFor(async () => (await f.events.state(f.chat.id)).events.at(-1).status === "delivered", { timeoutMs: 5000 });
+  assert.deepEqual(f.calls, ["hold", "github"]);
+});
+
 test("passing-check wake preserves a manually paused ordinary queue", async t => {
   const f = await runtimeFixture(t);
   await f.store.update(f.chat.id, { queuePaused: true }); await f.manager.enqueue(f.chat.id, "queued user");
