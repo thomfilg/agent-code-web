@@ -335,7 +335,7 @@ export class RuntimeManager extends EventEmitter {
       }
       approval = item.nativeApprovalId ? await this.approvals.claim(chatId, item.nativeApprovalId) : null;
       if (version !== (this.#lifecycleVersions.get(chatId) || 0)) throw Object.assign(new Error("Queued message cancelled because the chat stopped"), { name: "AbortError" });
-      const submitted = await this.#submit(chatId, githubClaim ? githubEventText(githubClaim) : item.text, githubClaim ? [] : item.attachmentIds, action, approval, githubClaim);
+      const submitted = await this.#submit(chatId, githubClaim ? githubEventText(githubClaim) : item.text, githubClaim ? [] : item.attachmentIds, action, approval, githubClaim, item.relayGoalWake === true);
       if (githubClaim) submitted.completion = submitted.completion.then(async value => { await this.githubEvents.settle(chatId, item.githubEventId, submitted.githubDelivered?.() ? "delivered" : "uncertain"); return value; }, async error => { await this.githubEvents.settle(chatId, item.githubEventId, "uncertain"); throw error; });
       this.publishChat(await this.store.update(chatId, current => ({ queuedMessages: (current.queuedMessages || []).filter(entry => entry.id !== item.id) })));
       return submitted;
@@ -1635,7 +1635,7 @@ export class RuntimeManager extends EventEmitter {
     this.publishChat(chat); return chat;
   }
 
-  async #submit(chatId, rawText, attachmentIds = [], queueAction = null, approval = null, githubEvent = null) {
+  async #submit(chatId, rawText, attachmentIds = [], queueAction = null, approval = null, githubEvent = null, relayGoalWake = false) {
     if (this.#runtimes.get(chatId)?.cleanupFailed) throw Object.assign(new Error("Worker cleanup is incomplete. Retry stopping the environment before resuming."), { statusCode: 409 });
     if (this.#runtimes.get(chatId)?.failing) throw Object.assign(new Error("The failed worker is being disconnected. Wait before resuming this chat."), { statusCode: 409 });
     if (this.#workerWakes.has(chatId)) throw Object.assign(new Error("The environment is waking up. Wait until it is ready before sending a message."), { statusCode: 409 });
@@ -1680,11 +1680,12 @@ export class RuntimeManager extends EventEmitter {
         this.#assertNativeAccount(chatId);
       });
       await this.store.update(chatId, { awaitingUser: false, pendingRequest: null, ...(!chat.queuedMessages?.length ? { queuePaused: false, queueError: null } : {}) });
-      const userMessage = await this.store.appendMessage(chatId, { role: "user", kind: "message", text,
-        meta: githubEvent ? { githubEventId: githubEvent.id, source: "github" } : { authorship: "user" },
+      const userMessage = await this.store.appendMessage(chatId, { role: relayGoalWake ? "system" : "user", kind: relayGoalWake ? "notice" : "message",
+        text: relayGoalWake ? "Relay resumed the active goal after native scheduling was unavailable." : text,
+        meta: relayGoalWake ? { source: "relay-goal", input: text } : githubEvent ? { githubEventId: githubEvent.id, source: "github" } : { authorship: "user" },
         ...(files.length ? { attachments: files.map(file => this.attachments.public(file)) } : {}) });
       this.#emit(chatId, { type: "message", message: userMessage });
-      if (Object.keys(provisionalTitlePatch(this.store.get(chatId), text, { hasAttachments: files.length > 0 })).length) {
+      if (!relayGoalWake && Object.keys(provisionalTitlePatch(this.store.get(chatId), text, { hasAttachments: files.length > 0 })).length) {
         this.publishChat(await this.store.update(chatId, current => provisionalTitlePatch(current, text, { hasAttachments: files.length > 0 })));
       }
       if (turn.cancelled || version !== (this.#lifecycleVersions.get(chatId) || 0)) { finish(); return { message: userMessage, completion: Promise.resolve() }; }
@@ -1733,6 +1734,7 @@ export class RuntimeManager extends EventEmitter {
     runtime.assistantMessageId = assistantMessageId;
     runtime.assistantText = "";
     runtime.assistantPublishedLength = 0;
+    runtime.scheduleWakeupAttempted = false;
     runtime.toolMessages = new Map();
     let relayGoalBefore;
     await this.store.update(chatId, { taskProgress: null, workingStartedAt: nowIso() });
@@ -1910,7 +1912,13 @@ export class RuntimeManager extends EventEmitter {
       if (claude && commandAction?.type === "goal" && ["set", "resume"].includes(commandAction.action)) {
         const currentGoal = this.store.get(chatId).goal;
         const nativeWorkPending = runtime.adapter.hasScheduledWork?.() || runtime.adapter.isBackgroundBusy?.();
-        if (currentGoal?.managedBy === "relay") this.publishChat(await this.store.update(chatId, { goal: { ...currentGoal, status: output.awaitingUser ? "paused" : nativeWorkPending ? "active" : "complete" } }));
+        const relayWakeNeeded = !output.awaitingUser && !nativeWorkPending && runtime.scheduleWakeupAttempted;
+        if (currentGoal?.managedBy === "relay") this.publishChat(await this.store.update(chatId, { goal: { ...currentGoal, status: output.awaitingUser ? "paused" : nativeWorkPending || relayWakeNeeded ? "active" : "complete" } }));
+        if (relayWakeNeeded) {
+          const queued = await this.store.update(chatId, current => current.queuedMessages?.some(item => item.relayGoalWake)
+            ? {} : { queuedMessages: [...(current.queuedMessages || []), { id: newId("queued"), text: "/goal resume", attachmentIds: [], createdAt: nowIso(), relayGoalWake: true }] });
+          this.publishChat(queued);
+        }
       }
       }
       // Inspect only a worker that is already awake. Later GitHub polling uses
@@ -2183,7 +2191,7 @@ export class RuntimeManager extends EventEmitter {
     this.publishChat(await this.store.update(chatId, current => {
       const workerLifecycle = beginWorkerLifecycle(current.workerLifecycle, "stop", nowIso());
       workerLifecycleGeneration = workerLifecycle.generation;
-      return { queuePaused: true, startupProgress: failRunningStartup(current.startupProgress), workerLifecycle,
+      return { queuePaused: reason === "idle-timeout" ? Boolean(current.queuePaused) : true, startupProgress: failRunningStartup(current.startupProgress), workerLifecycle,
         ...(current.goal?.managedBy === "relay" && current.goal.status === "active" ? { goal: { ...current.goal, status: "paused" } } : {}),
         ...(reason === "manual" ? { forkGoalPending: false, githubEventsStoppedAt: nowIso() } : {}) };
     }));
@@ -2523,6 +2531,7 @@ export class RuntimeManager extends EventEmitter {
       },
       onEvent: (event) => {
         if (runtime?.failing || runtime?.failed) return Promise.resolve();
+        if (event.type === "tool" && event.tool === "ScheduleWakeup" && event.state === "running") runtime.scheduleWakeupAttempted = true;
         if (event.type === "native_approval_denied") {
           if (this.#runtimes.get(chatId) !== runtime) return runtime.eventQueue;
           const observed = { ...chat, agentSessionId: runtime.adapter.threadId }, binding = this.approvals.binding(observed);

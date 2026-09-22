@@ -160,6 +160,30 @@ test("Claude /goal is visible as active before its exact native command finishes
   assert.equal(store.get(chat.id).goal, null);
 });
 
+test("Claude /goal resumes internally when native ScheduleWakeup cannot retain the continuation", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const calls = [];
+  const manager = new RuntimeManager({ store, config: testConfig(root), commands: { list: async () => ({ commands: [{ name: "goal", kind: "CLI command", web: false }] }) },
+    broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: ({ hooks }) => ({
+      start: async () => {}, stop: async () => {}, hasScheduledWork: () => false, isBackgroundBusy: () => false,
+      send: async text => {
+        calls.push(text);
+        if (calls.length === 1) await hooks.onEvent({ type: "tool", tool: "ScheduleWakeup", itemId: "wake-1", title: "ScheduleWakeup", state: "running", output: "" });
+        return { text: calls.length === 1 ? "Waiting for the server" : "Goal finished" };
+      },
+    }) });
+  t.after(() => manager.shutdown());
+  const exact = "/goal INC-9670\n\nrun /brief then /spec and finish";
+  const chat = await manager.createChat({ agent: "claude", title: "Claude goal wake fallback" });
+  await manager.send(chat.id, exact);
+  await waitFor(() => calls.length === 2 && !manager.isBusy(chat.id));
+  assert.deepEqual(calls, [exact, "/goal resume"]);
+  assert.equal(store.get(chat.id).goal.status, "complete");
+  assert.deepEqual(store.get(chat.id).messages.filter(message => message.role === "user").map(message => message.text), [exact], "Relay continuation is not attributed to the user");
+  assert.equal(store.get(chat.id).messages.some(message => message.meta?.source === "relay-goal" && message.meta.input === "/goal resume"), true);
+  assert.deepEqual(store.get(chat.id).queuedMessages, []);
+});
+
 test("an admitted Codex skill keeps structured dispatch while unknown names never reach the adapter", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const calls = [], commands = { list: async () => ({ commands: [{ name: "work", kind: "Skill", path: "/fixture/work/SKILL.md" }] }) };

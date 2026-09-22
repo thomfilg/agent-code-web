@@ -72,6 +72,23 @@ test("a chat rejects a second turn while the first is active", async (t) => {
   await first.completion;
 });
 
+test("a message accepted while idle Stop is finishing wakes and drains instead of becoming a paused queue", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const stopping = Promise.withResolvers(), calls = []; let stopEntered = false;
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }), gatewayOrigin: "http://localhost",
+    adapterFactory: () => ({ start: async () => {}, send: async text => { calls.push(text); return { text: "Done" }; }, stop: () => { stopEntered = true; return stopping.promise; } }),
+  });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "mock" }); await manager.send(chat.id, "first");
+  const idleStop = manager.stop(chat.id, "idle-timeout"); await waitFor(() => stopEntered);
+  await manager.enqueue(chat.id, "arrived during idle stop");
+  assert.equal(store.get(chat.id).queuePaused, false);
+  stopping.resolve(); await idleStop;
+  await waitFor(() => calls.length === 2 && !manager.isBusy(chat.id));
+  assert.deepEqual(calls, ["first", "arrived during idle stop"]);
+  assert.equal(store.get(chat.id).queuePaused, false); assert.deepEqual(store.get(chat.id).queuedMessages, []);
+});
+
 test("native background work queues normal input and Send now interrupts only that turn", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   let hooks, background = false, interrupted = 0, stopped = 0;
