@@ -2261,7 +2261,7 @@ export class RuntimeManager extends EventEmitter {
     let observed;
     try {
       observed = chat.agent !== "mock" && !executor?.workerReleased ? await this.workerBackend.sleep(chat) : null;
-      if (this.config.workerBackend === "ec2") await runtime?.adapter.confirmImportWorkerStopped?.(observed);
+      if (this.config.workerBackend === "ec2" && !skipAdapter) await runtime?.adapter.confirmImportWorkerStopped?.(observed);
     } catch (error) {
       this.broker.revokeChat(chatId);
       await this.store.update(chatId, current => ({ workerLifecycle: finishWorkerLifecycle(current.workerLifecycle, {

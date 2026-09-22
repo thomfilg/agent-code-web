@@ -102,11 +102,13 @@ async function queueFixture(t, options = {}) {
   const config = testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "10000" });
   if (options.interruptTimeoutMs) config.sendNowInterruptTimeoutMs = options.interruptTimeoutMs;
   if (options.forceInterruptTimeoutMs) config.sendNowForceInterruptTimeoutMs = options.forceInterruptTimeoutMs;
+  if (options.confirmImportWorkerStopped) config.workerBackend = "ec2";
   const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10000 }),
     adapterFactory: ({ hooks }) => ({ start: async () => {},
       stop: async () => { stops++; release?.({ text: "stopped" }); },
       interrupt: async () => { interruptions++; await options.interrupt?.(); release?.({ text: "interrupted" }); },
       forceInterrupt: options.forceInterrupt ? async () => { forcedInterruptions++; await options.forceInterrupt(); release?.({ text: "force interrupted" }); } : undefined,
+      confirmImportWorkerStopped: options.confirmImportWorkerStopped,
       setPermissionMode: options.setPermissionMode,
       cancelPermissionModeChange: options.cancelPermissionModeChange,
       send: text => { calls.push(text); if (options.partial) hooks.onEvent({ type: "assistant_delta", delta: options.partial }); return new Promise(resolve => { release = resolve; }); } }), ...options.manager });
@@ -207,7 +209,12 @@ test("Send now force-recycles an unresponsive native turn and sends the priority
 
 test("Send now recycles the worker when both native interruption paths never settle", async t => {
   const never = new Promise(() => {});
-  const f = await queueFixture(t, { interruptTimeoutMs: 10, forceInterruptTimeoutMs: 20, interrupt: () => never, forceInterrupt: () => never });
+  let allowConfirmation = false, confirmations = 0;
+  const f = await queueFixture(t, { interruptTimeoutMs: 10, forceInterruptTimeoutMs: 20, interrupt: () => never, forceInterrupt: () => never,
+    confirmImportWorkerStopped: () => { confirmations++; return allowConfirmation ? Promise.resolve() : never; }, manager: { workerBackend: {
+      acquire: async () => ({ metadata: { backend: "ec2", instanceId: "i-12345678" } }),
+      sleep: async () => ({ instanceId: "i-12345678", stopped: true }), destroy: async () => {},
+    } } });
   const { manager, store, chat, calls } = f;
   const first = await manager.submit(chat.id, "stuck native turn"); await waitFor(() => calls.length === 1);
   await manager.enqueue(chat.id, "send after recycling"); const id = store.get(chat.id).queuedMessages[0].id;
@@ -215,7 +222,9 @@ test("Send now recycles the worker when both native interruption paths never set
   await first.completion; await waitFor(() => calls.length === 2);
   assert.deepEqual(calls, ["stuck native turn", "send after recycling"]);
   assert.equal(store.get(chat.id).queuePaused, false); assert.deepEqual(store.get(chat.id).queuedMessages, []);
+  assert.equal(confirmations, 0, "Hard recycle must not wait on the disconnected adapter's worker confirmation");
   f.complete(); await waitFor(() => !manager.isBusy(chat.id));
+  allowConfirmation = true;
 });
 
 test("Send now cancels a stuck permission-mode control before sending the entire queue", async t => {
