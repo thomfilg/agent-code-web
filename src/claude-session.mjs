@@ -512,12 +512,12 @@ export class ClaudeSession {
         if (turn.listenerCount("error")) turn.emit("error", error);
         // A partial native input may already be running: close the transport
         // rather than replaying it or leaving an orphan turn accepting input.
-        void this.stop();
+        void this.stop().catch(stopError => { if (turn.listenerCount("error")) turn.emit("error", stopError); });
       });
       turn.kill = signal => {
         this.requests?.cancel();
         this.scheduleCalls.clear();
-        if (signal === "SIGKILL") void terminateWorker(this.child, 0);
+        if (signal === "SIGKILL") void terminateWorker(this.child, 0).catch(error => { if (turn.listenerCount("error")) turn.emit("error", error); });
         else if (!turn.interrupting) turn.interrupting = this.control.request("interrupt").catch(() => terminateWorker(this.child));
       };
       this.active = turn;

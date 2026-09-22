@@ -1097,6 +1097,16 @@ test("failed native-mode synchronization reaches the runtime fatal handler witho
   }
 });
 
+test("a failed forced remote termination rejects the logical turn without crashing the controller", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Hold this turn"); await nativeTurnStarted(f);
+  const turn = f.adapter.turnSession.active;
+  f.child.terminateRemote = async () => { throw Error("final output could not be retained"); };
+  turn.kill("SIGKILL");
+  await assert.rejects(running, /final output could not be retained/);
+  delete f.child.terminateRemote; f.close(1, "SIGKILL");
+});
+
 const scheduleCall = (f, name, id = "cron-call", input = {}) => f.emit({ type: "assistant", session_id: f.nativeSession,
   message: { content: [{ type: "tool_use", id, name, input }] } });
 const scheduleResult = (f, data, { id = "cron-call", failed = false, ...extra } = {}) => f.emit({ type: "user", session_id: f.nativeSession,

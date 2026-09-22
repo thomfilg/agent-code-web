@@ -700,7 +700,10 @@ export class ClaudeAdapter {
         // the SDK action. It cannot invoke a model or repeat the mutation.
         // Relay displays the verified outcome, not terminal-only instructions.
         child.stdin.end(`${JSON.stringify({ type: "user", message: { role: "user", content: "/mcp" } })}\n`);
-      }).catch(error => { mcpError = error; void terminateWorker(child); });
+      }).catch(error => {
+        mcpError = error;
+        void terminateWorker(child).catch(stopError => { if (child.listenerCount("error")) child.emit("error", stopError); });
+      });
     });
   }
 
