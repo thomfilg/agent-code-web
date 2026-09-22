@@ -86,7 +86,7 @@ test("busy native aliases retain their exact prefix and refresh only when the qu
   assert.equal(f.store.get(f.chat.id).commandCatalogRevision, 1);
 });
 
-test("Claude goals and native clear aliases keep their literal arguments and FIFO order without Codex goal actions", async t => {
+test("Claude goals use Relay state while other queued commands keep literal arguments and FIFO order", async t => {
   const f = await fixture(t); f.gate = Promise.withResolvers();
   const running = f.manager.send(f.chat.id, "Current task"); await waitFor(() => f.inputs.length === 1);
   const commands = ["/goal Complete both steps\nand preserve ação.", "/goal", "/goal clear", "/goal off"];
@@ -95,7 +95,9 @@ test("Claude goals and native clear aliases keep their literal arguments and FIF
   f.gate.resolve(); await running; await waitFor(() => !f.manager.isBusy(f.chat.id) && !f.store.get(f.chat.id).queuedMessages.length);
   assert.deepEqual(f.inputs.map(input => input.text), ["Current task", ...commands]);
   assert(!f.store.get(f.chat.id).messages.some(message => message.kind === "error"));
-  assert.equal(f.store.get(f.chat.id).goal, undefined, "Do not invent Codex goal state from a Claude command/prose response");
+  assert.equal(f.store.get(f.chat.id).goal, null);
+  assert.deepEqual(f.store.get(f.chat.id).messages.filter(message => message.kind === "notice" && message.text.startsWith("Goal set:")).map(message => message.text),
+    ["Goal set: Complete both steps\nand preserve ação."]);
 });
 
 test("bundled reviews preserve flags and multiline targets in FIFO and pause on failure without consuming later input", async t => {

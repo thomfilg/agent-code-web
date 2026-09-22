@@ -27,7 +27,25 @@ export function messageCommand(agent, text) {
     const key = name === "model" ? "model" : "effort";
     return { type: "settings", settings: { [key]: argument === "default" && !(agent === "claude" && key === "model") ? null : argument } };
   }
-  if (agent !== "codex") return null; // Preserve Claude's installed commands and plugin aliases.
+  // Relay owns persistent goal state for every provider. Codex also mirrors it
+  // into the native thread; Claude has no goal-state API, so forwarding its
+  // reported /goal entry as ordinary prompt text silently loses the command.
+  if (name === "goal") {
+    if (!argument) return { type: "goal", action: "get", ...(agent === "claude" ? { prompt: text, nativeClaude: true } : {}) };
+    const normalizedGoalAction = argument.toLowerCase();
+    if (["pause", "resume", "clear", "stop", "off", "reset", "none", "cancel"].includes(normalizedGoalAction)) {
+      const action = ["pause", "resume"].includes(normalizedGoalAction) ? normalizedGoalAction : "clear";
+      return { type: "goal", action, prompt: agent === "claude" ? text : action === "resume" ? "Continue working toward the current goal." : "", ...(agent === "claude" ? { nativeClaude: true } : {}) };
+    }
+    const objective = argument.replace(/^edit(?:\s+|$)/, "");
+    if (!objective) throw new Error("Use /goal edit followed by the revised objective");
+    if (objective.length > 4000) {
+      if (agent === "claude") return { type: "nativeCommand", prompt: text };
+      throw new Error("Goal objectives must be at most 4,000 characters");
+    }
+    return { type: "goal", action: "set", objective, prompt: agent === "claude" ? text : objective, ...(agent === "claude" ? { nativeClaude: true } : {}) };
+  }
+  if (agent !== "codex") return null; // Preserve Claude's other installed commands and plugin aliases.
   if (name === "app") throw new Error("Open /app without arguments in the web composer to hand off the saved session. This is not agent input.");
   if (name === "approve") throw new Error("Open /approve without arguments and confirm a specific denied action. Plain messages cannot grant approval.");
   if (name === "feedback") throw new Error("Open /feedback without arguments to review and explicitly send a report. Plain messages cannot submit diagnostics.");
@@ -51,11 +69,5 @@ export function messageCommand(agent, text) {
     } else if (argument) target = { type: "custom", instructions: argument };
     return { type: "review", target };
   }
-  if (name !== "goal") return null;
-  if (!argument) return { type: "goal", action: "get" };
-  if (["pause", "resume", "clear"].includes(argument)) return { type: "goal", action: argument, prompt: argument === "resume" ? "Continue working toward the current goal." : "" };
-  const objective = argument.replace(/^edit(?:\s+|$)/, "");
-  if (!objective) throw new Error("Use /goal edit followed by the revised objective");
-  if (objective.length > 4000) throw new Error("Goal objectives must be at most 4,000 characters");
-  return { type: "goal", action: "set", objective, prompt: objective };
+  return null;
 }

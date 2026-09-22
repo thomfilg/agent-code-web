@@ -12,7 +12,7 @@ import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
 test("message commands preserve multiline arguments and Claude plugin goal commands", () => {
   assert.deepEqual(messageCommand("codex", "/plan test\nwith details"), { type: "plan", prompt: "test\nwith details" });
   assert.deepEqual(messageCommand("codex", "/goal build a todo app"), { type: "goal", action: "set", objective: "build a todo app", prompt: "build a todo app" });
-  assert.equal(messageCommand("claude", "/goal build"), null); assert.equal(messageCommand("codex", "/goalkeeper"), null);
+  assert.deepEqual(messageCommand("claude", "/goal build"), { type: "goal", action: "set", objective: "build", prompt: "/goal build", nativeClaude: true }); assert.equal(messageCommand("codex", "/goalkeeper"), null);
   assert.equal(messageCommand("codex", "/goal edit revised objective").objective, "revised objective");
   assert.throws(() => messageCommand("codex", "/goal edit"), /revised objective/);
   assert.throws(() => messageCommand("codex", `/goal ${"x".repeat(4001)}`), /4,000/);
@@ -135,6 +135,26 @@ test("every admitted Claude slash name executes canonically and every unknown na
   assert.equal(calls.length, 4);
   assert.equal(store.get(chat.id).messages.length, before);
   assert.deepEqual(store.get(chat.id).queuedMessages || [], []);
+});
+
+test("Claude /goal is visible as active before its exact native command finishes", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const gate = Promise.withResolvers(), calls = [];
+  const manager = new RuntimeManager({ store, config: testConfig(root), commands: { list: async () => ({ commands: [{ name: "goal", kind: "CLI command", web: false }] }) },
+    broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => ({
+      start: async () => {}, stop: async () => {}, send: async text => { calls.push(text); await gate.promise; return { text: "Goal work completed" }; },
+    }) });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "claude", title: "Claude goal state" });
+  const exact = "/goal INC-9670\n\nrun /brief then /spec and finish";
+  const pending = manager.send(chat.id, exact); await waitFor(() => calls.length === 1);
+  assert.deepEqual(calls, [exact], "Relay must not rewrite Claude's installed /goal command");
+  assert.equal(store.get(chat.id).goal.status, "active");
+  assert.equal(store.get(chat.id).goal.objective, "INC-9670\n\nrun /brief then /spec and finish");
+  assert.equal(store.get(chat.id).messages.filter(message => message.kind === "notice").at(-1).text,
+    "Goal set: INC-9670\n\nrun /brief then /spec and finish");
+  gate.resolve(); await pending;
+  assert.equal(store.get(chat.id).goal.status, "complete");
 });
 
 test("an admitted Codex skill keeps structured dispatch while unknown names never reach the adapter", async t => {

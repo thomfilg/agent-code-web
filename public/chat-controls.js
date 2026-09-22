@@ -115,7 +115,7 @@ export class ChatControls {
     if (signature !== this.signature) { this.signature = signature; this.repositories(chat); this.pullRequests(chat); }
     this.renderAttachments();
     const goalStatus = $("#goal-status"); goalStatus.replaceChildren();
-    if (chat.agent === "codex" && chat.goal) {
+    if (chat.goal) {
       goalStatus.append(button(`Goal · ${chat.goal.status} · ${chat.goal.objective}`, () => this.goal(), "goal-summary"));
       if (chat.mode === "plan" && chat.goal.status === "active") goalStatus.append(el("small", "Plan mode: planning only; automatic goal continuation is disabled.", "muted"));
     }
@@ -132,7 +132,7 @@ export class ChatControls {
         catch (failure) { error.textContent = failure.message; }
         finally { save.disabled = false; }
       }, "primary-button");
-      this.dialog("Edit Codex goal", input, error, save); input.focus(); return;
+      this.dialog("Edit goal", input, error, save); input.focus(); return;
     }
     if (action === "clear" && !confirm("Clear this goal? The conversation and workspace will be kept.")) return;
     try {
@@ -142,14 +142,14 @@ export class ChatControls {
         this.updated(chat);
       }
       const goal = this.state.active.goal;
-      this.dialog("Codex goal", ...(goal ? [
+      this.dialog("Goal", ...(goal ? [
         el("p", goal.objective), el("p", `Status: ${goal.status}`, "muted"),
         el("p", `${count(goal.tokensUsed)} tokens used${goal.tokenBudget ? ` / ${count(goal.tokenBudget)} budget` : " · no token budget set"} · ${Math.round(goal.timeUsedSeconds || 0)} seconds`),
         button(goal.status === "active" ? "Pause goal" : "Resume goal", () => this.goal(goal.status === "active" ? "pause" : "resume"), "secondary-button"),
         button("Clear goal", () => this.goal("clear"), "secondary-button"),
         button("Edit goal", () => this.goal("edit"), "secondary-button"),
       ] : [el("p", "No goal is set. Type /goal followed by the objective to start one.")]),
-      el("p", "Goals use Codex's persisted thread state and respect the selected Plan / Edits mode. No budget is imposed unless you set one in Codex.", "muted"));
+      el("p", goal?.managedBy === "relay" ? "Relay persists this goal for the selected agent. Stop pauses it; Resume continues it in the same chat." : "This goal uses the agent's persisted thread state and respects the selected Plan / Edits mode. No budget is imposed unless the agent sets one.", "muted"));
     } catch (error) { if (throwErrors) throw error; this.toast(error.message); }
   }
   async submitCommand(chatId, text) {

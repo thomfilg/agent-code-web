@@ -10,7 +10,8 @@ test("provisional titles normalize text, preserve language and cap words/charact
   assert.equal(provisionalTitle("  **Corrigir**\n o painel   de configurações  "), "Corrigir o painel de configurações");
   assert.equal(provisionalTitle("one two three four five six seven eight nine"), "one two three four five six seven eight");
   assert.equal(Array.from(provisionalTitle("é".repeat(100))).length, 80);
-  for (const text of ["", "...", "/goal", "/goal finish the private project", "/review --base confidential"]) assert.equal(provisionalTitle(text), null);
+  for (const text of ["", "...", "/goal", "/review --base confidential"]) assert.equal(provisionalTitle(text), null);
+  assert.equal(provisionalTitle("/goal finish the private project"), "finish the private project");
   assert.equal(provisionalTitle("New conversation"), "New task");
 });
 
@@ -32,7 +33,7 @@ test("task-bearing goal/plan use only raw objectives while command controls stay
   for (const input of ["/goal", "/goal pause", "/goal resume", "/goal clear", "/goal edit", "/plan", "/init", "/review --base private", "/model private", "/permissions auto"]) {
     assert.equal(provisionalTitle(input, { agent: "codex" }), null, input);
   }
-  assert.equal(provisionalTitle("/goal Fix checkout", { agent: "claude" }), null);
+  assert.equal(provisionalTitle("/goal Fix checkout", { agent: "claude" }), "Fix checkout");
   assert.equal(provisionalTitlePatch({ agent: "codex", autoTitle: true, title: "New conversation", messages: [{ role: "user", text: "/goal Fix checkout totals" }] }, "continue").title, "Fix checkout totals");
 });
 

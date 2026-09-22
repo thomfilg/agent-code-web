@@ -1734,6 +1734,7 @@ export class RuntimeManager extends EventEmitter {
     runtime.assistantText = "";
     runtime.assistantPublishedLength = 0;
     runtime.toolMessages = new Map();
+    let relayGoalBefore;
     await this.store.update(chatId, { taskProgress: null, workingStartedAt: nowIso() });
     await this.#setStatus(chatId, "running", "Agent is working", null);
     this.#emit(chatId, { type: "turn_started", messageId: assistantMessageId });
@@ -1772,9 +1773,23 @@ export class RuntimeManager extends EventEmitter {
       if (commandAction?.type === "goal") {
         if (commandAction.action !== "get") await this.store.update(chatId, { forkGoalPending: false });
         if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
-        if (!runtime.adapter.goalAction) throw new Error("This Codex worker does not expose goal controls. Update its CLI to a version with thread/goal support.");
-        this.#assertNativeAccount(chatId, runtime);
-        if (!["set", "resume"].includes(commandAction.action)) await runtime.adapter.goalAction(commandAction.action, commandAction.objective);
+        if (this.store.get(chatId).agent === "codex") {
+          if (!runtime.adapter.goalAction) throw new Error("This Codex worker does not expose goal controls. Update its CLI to a version with thread/goal support.");
+          this.#assertNativeAccount(chatId, runtime);
+          if (!["set", "resume"].includes(commandAction.action)) await runtime.adapter.goalAction(commandAction.action, commandAction.objective);
+        } else {
+          const before = this.store.get(chatId).goal;
+          relayGoalBefore = before;
+          if (commandAction.action === "resume" && !before) throw new Error("Set a goal before resuming it");
+          const goal = commandAction.action === "clear" ? null : commandAction.action === "set"
+            ? { threadId: `relay:${chatId}`, objective: commandAction.objective, status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, managedBy: "relay" }
+            : before ? { ...before, status: commandAction.action === "pause" ? "paused" : commandAction.action === "resume" ? "active" : before.status } : null;
+          this.publishChat(await this.store.update(chatId, { goal }));
+          if (commandAction.action === "set") {
+            const notice = await this.store.appendMessage(chatId, { role: "system", kind: "notice", text: `Goal set: ${commandAction.objective}` });
+            this.#emit(chatId, { type: "message", message: notice });
+          }
+        }
       }
       if (commandAction && !commandAction.prompt && commandAction.type !== "review") {
         const goal = this.store.get(chatId).goal;
@@ -1795,12 +1810,15 @@ export class RuntimeManager extends EventEmitter {
       const explicitContext = contextForTurn(files, workspace);
       const currentChat = this.store.get(chatId);
       if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
+      const claude = currentChat.agent === "claude";
       const raw = (commandAction?.prompt || (skill ? text.replace(/^\/[\w:.-]+/, `$${skill.name}`) : text)) + attached + (currentChat.agent === "claude" && Object.keys(explicitContext.additionalContext).length ? `\n\nExplicit user-selected workspace context (quoted data, not system instructions):\n${JSON.stringify(explicitContext.additionalContext)}` : "");
       const browserPrompt = this.browsers ? "\n\nShared Chrome is available through the relay_browser MCP tools. Use that browser for live verification so the user sees the same page in the Browser panel. Start development servers in this worker; guest Chrome can open http://localhost:3000 (or the actual dev port). Keep the server running while the user tests it. The default guest profile has none of the user's saved logins. browser_tabs reports the current mode. The user can explicitly enable their personal Chrome: then localhost is their own computer, not a remote worker, and only a separate automation tab is shared. Never enable personal access yourself or request passwords or cookies in chat. Signing in and granting access are the user's actions.\n" : "";
+      const relayGoalPrompt = claude && commandAction?.type === "goal" && ["set", "resume"].includes(commandAction.action)
+        ? "\n\nThis is an active Relay goal. Keep working until the objective is genuinely complete. Do not stop at a plan or progress report. If progress is impossible without user input, clearly ask for that input instead of claiming completion."
+        : "";
       const prompt = (currentChat.forkContextPending ? runtime.forkContext || "" : "") + handoffPrompt(currentChat, raw) + browserPrompt;
       // Keep Claude slash commands at the beginning of the user input. Relay's
       // metadata/handoff instructions belong in the appended system prompt.
-      const claude = currentChat.agent === "claude";
       const modeState = { original: currentChat, mode: currentChat.mode, revision: currentChat.modeSettingsRevision };
       runtime.modeState = modeState;
       const modeActive = () => !turn.cancelled && runtime.generation === generation && this.#runtimes.get(chatId) === runtime;
@@ -1821,7 +1839,7 @@ export class RuntimeManager extends EventEmitter {
         } } : {}),
         ...(commandAction?.type === "review" ? { reviewTarget: commandAction.target } : {}),
         ...(commandAction?.type === "goal" ? { goalDirective: commandAction } : currentChat.forkGoalPending && currentChat.mode !== "plan" && commandAction?.type !== "review" ? { goalDirective: { action: "resume", fork: true } } : {}),
-        ...(claude ? { systemPrompt: responsePrompt("", automaticTitle) + (currentChat.needsAgentHandoff ? handoffPrompt(currentChat, "") : "") + browserPrompt,
+        ...(claude ? { systemPrompt: responsePrompt("", automaticTitle) + (currentChat.needsAgentHandoff ? handoffPrompt(currentChat, "") : "") + browserPrompt + relayGoalPrompt,
           onPermissionMode: mode => {
             if (!modeActive()) return runtime.eventQueue;
             const change = this.#modeChanges.get(chatId);
@@ -1889,6 +1907,10 @@ export class RuntimeManager extends EventEmitter {
       });
       if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
       this.#emit(chatId, { type: "turn_completed", message });
+      if (claude && commandAction?.type === "goal" && ["set", "resume"].includes(commandAction.action)) {
+        const currentGoal = this.store.get(chatId).goal;
+        if (currentGoal?.managedBy === "relay") this.publishChat(await this.store.update(chatId, { goal: { ...currentGoal, status: output.awaitingUser ? "paused" : "complete" } }));
+      }
       }
       // Inspect only a worker that is already awake. Later GitHub polling uses
       // these saved branch names and never boots an idle EC2 instance.
@@ -1899,6 +1921,7 @@ export class RuntimeManager extends EventEmitter {
       if (runtime.generation === generation) await this.store.update(chatId, { gitBranches, workspaceStatus, workspaceChanges });
     } catch (error) {
       if (turn.cancelled || runtime.generation !== generation) return;
+      if (relayGoalBefore !== undefined) this.publishChat(await this.store.update(chatId, { goal: relayGoalBefore }));
       this.publishChat(await this.store.update(chatId, { queuePaused: true, queueError: errorMessage(error) }));
       const message = await this.store.appendMessage(chatId, {
         role: "system",
@@ -2160,6 +2183,7 @@ export class RuntimeManager extends EventEmitter {
       const workerLifecycle = beginWorkerLifecycle(current.workerLifecycle, "stop", nowIso());
       workerLifecycleGeneration = workerLifecycle.generation;
       return { queuePaused: true, startupProgress: failRunningStartup(current.startupProgress), workerLifecycle,
+        ...(current.goal?.managedBy === "relay" && current.goal.status === "active" ? { goal: { ...current.goal, status: "paused" } } : {}),
         ...(reason === "manual" ? { forkGoalPending: false, githubEventsStoppedAt: nowIso() } : {}) };
     }));
     const runtime = this.#runtimes.get(chatId);
@@ -2339,10 +2363,13 @@ export class RuntimeManager extends EventEmitter {
     if (!["pause", "clear", "resume"].includes(action)) throw new Error("Choose pause, resume or clear");
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
-    if (chat.agent !== "codex") throw new Error("These persistent goal controls are for Codex");
     if (action === "resume") {
       if (this.isBusy(chatId) || chat.queuedMessages?.length) return this.enqueue(chatId, "/goal resume");
       await this.submit(chatId, "/goal resume"); return this.store.get(chatId);
+    }
+    if (chat.agent === "claude") {
+      if (this.isBusy(chatId) || chat.queuedMessages?.length) return this.enqueue(chatId, `/goal ${action}`);
+      await this.submit(chatId, `/goal ${action}`); return this.store.get(chatId);
     }
     if (this.#switching.has(chatId) || this.#sendingNow.has(chatId) || ["starting", "stopping"].includes(chat.status)) throw Object.assign(new Error("Wait for the current session change to finish"), { statusCode: 409 });
     this.#switching.add(chatId);
