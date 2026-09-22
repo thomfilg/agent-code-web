@@ -2,7 +2,7 @@ import { pathToFileURL } from "node:url";
 import { WorkerSupervisorDaemon } from "./worker-supervisor-daemon.mjs";
 
 export async function runWorkerSupervisorDaemon() {
-  const daemon = await new WorkerSupervisorDaemon().listen();
+  const daemon = await new WorkerSupervisorDaemon({ heartbeat: "/opt/agent-web/.heartbeat" }).listen();
   const stop = async () => {
     let code = 0;
     try { await daemon.close(); }

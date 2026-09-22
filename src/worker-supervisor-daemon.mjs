@@ -1,7 +1,7 @@
 import net from "node:net";
 import path from "node:path";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmod, lstat, mkdir, realpath, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, realpath, rm, utimes } from "node:fs/promises";
 import { WorkerProcessSupervisor } from "./worker-process-supervisor.mjs";
 import { identity, readFrames, safeId, writeFrame } from "./worker-transport-wire.mjs";
 import { WORKER_SUPERVISOR_CONTROL_SOCKET, WORKER_SUPERVISOR_ROOT, WORKER_SUPERVISOR_SOCKET } from "./worker-supervisor-paths.mjs";
@@ -28,9 +28,11 @@ async function removeOwnedSocket(filename) {
 // systemd owns the daemon cgroup so a daemon failure cannot leave unowned child
 // processes running outside the worker lifecycle.
 export class WorkerSupervisorDaemon {
-  constructor({ root = WORKER_SUPERVISOR_ROOT, processSocket = WORKER_SUPERVISOR_SOCKET, controlSocket = WORKER_SUPERVISOR_CONTROL_SOCKET } = {}) {
-    if (!path.isAbsolute(root) || path.dirname(processSocket) !== root || path.dirname(controlSocket) !== root || processSocket === controlSocket) throw fail("CONFIG_INVALID");
-    Object.assign(this, { root, processSocket, controlSocket });
+  constructor({ root = WORKER_SUPERVISOR_ROOT, processSocket = WORKER_SUPERVISOR_SOCKET, controlSocket = WORKER_SUPERVISOR_CONTROL_SOCKET,
+    heartbeat = null } = {}) {
+    if (!path.isAbsolute(root) || path.dirname(processSocket) !== root || path.dirname(controlSocket) !== root || processSocket === controlSocket
+      || heartbeat !== null && !path.isAbsolute(heartbeat)) throw fail("CONFIG_INVALID");
+    Object.assign(this, { root, processSocket, controlSocket, heartbeat });
     this.instanceId = randomUUID(); this.connections = new Set(); this.leases = new Map(); this.leaseGenerations = new Map(); this.lastInvalidatedLeases = new Map();
   }
   async listen() {
@@ -94,6 +96,7 @@ export class WorkerSupervisorDaemon {
   }
   status() {
     return { protocol: "relay-worker-supervisor/1", version: workerSupervisorVersion, daemonInstanceId: this.instanceId, configured: Boolean(this.supervisor),
+      leaseHeartbeat: Boolean(this.heartbeat),
       ...(this.selectedIdentity ? { identity: this.selectedIdentity } : {}),
       ...(this.leases.size ? { leases: [...this.leases].map(([processId, lease]) => ({ processId, id: lease.id, generation: lease.generation, expiresAt: lease.expiresAt })) } : {}),
       ...(this.supervisor ? { supervisorInstanceId: this.supervisor.instanceId,
@@ -120,6 +123,16 @@ export class WorkerSupervisorDaemon {
       this.leases.set(processId, { id: lease.id, generation: lease.generation, expiresAt: lease.expiresAt, credentialHash });
       this.leaseGenerations.set(processId, Math.max(generationFloor, lease.generation));
       if (prior && prior.id !== lease.id) this.supervisor.invalidateLease(prior.id);
+    }
+    // Reconnectable native processes no longer have a long-lived SSH launcher
+    // to refresh the machine watchdog. Every authoritative lease issue/renewal
+    // proves that the controller still owns this worker, so keep the watchdog
+    // alive at that exact boundary. If the controller disappears, leases stop
+    // renewing and the existing guest watchdog still powers the orphan down.
+    if (this.heartbeat) {
+      const now = new Date();
+      try { await utimes(this.heartbeat, now, now); }
+      catch { throw fail("HEARTBEAT_FAILED"); }
     }
     return { configured: true, daemonInstanceId: this.instanceId, supervisorInstanceId: this.supervisor.instanceId,
       processId, lease: { id: lease.id, generation: lease.generation, expiresAt: lease.expiresAt } };

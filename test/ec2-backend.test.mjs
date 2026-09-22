@@ -18,17 +18,19 @@ function instance(overrides = {}) {
 function image(overrides = {}) {
   return { ImageId: "ami-aaaaaaaaaaaaaaaaa", OwnerId: "123456789012", Public: false, RootDeviceType: "ebs", RootDeviceName: "/dev/sda1", BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { Encrypted: true } }], State: "available", Architecture: "x86_64", Tags: [{ Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: "relay-fixture" }, { Key: "AgentRelayWorkerKey", Value: "fixture-worker" }, { Key: "CodexVersion", Value: "0.154.0" }, { Key: "ClaudeVersion", Value: "2.1.222" }, { Key: "AgentRelayAcceptance", Value: "verified-v1" }, { Key: "AgentRelayAcceptanceId", Value: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }], ...overrides };
 }
-function fixture({ initial = instance(), config = ec2Config(), ami = image(), lookup, afterLaunch, supervisorActive = true, supervisorStatusFailures = 0 } = {}) {
+function fixture({ initial = instance(), config = ec2Config(), ami = image(), lookup, afterLaunch, supervisorActive = true, supervisorStatusFailures = 0,
+  supervisorLeaseHeartbeat = true } = {}) {
   const calls = [];
-  let worker = initial;
+  let worker = initial, leaseHeartbeat = supervisorLeaseHeartbeat;
   const backend = new Ec2Backend({ store: {}, config, commandRunner: async (command, args, options) => {
     calls.push({ command, args, options });
     if (command === config.ec2.sshBin) {
+      if (args.at(-1).includes("restart agent-relay-worker-supervisor.service")) leaseHeartbeat = true;
       if (args.at(-1).includes(".workspace-seeded")) return "ready";
       if (args.at(-1).includes("systemctl --user is-active")) return supervisorActive ? "active" : "";
       if (args.at(-1).includes("worker-supervisor-control.mjs")) {
         if (supervisorStatusFailures-- > 0) throw Error("synthetic socket startup race");
-        return JSON.stringify({ protocol: "relay-worker-supervisor/1", version: "v3", daemonInstanceId: "daemon-fixture", configured: false });
+        return JSON.stringify({ protocol: "relay-worker-supervisor/1", version: "v3", daemonInstanceId: "daemon-fixture", configured: false, ...(leaseHeartbeat ? { leaseHeartbeat: true } : {}) });
       }
       if (args.at(-1) === "cat /proc/sys/kernel/random/boot_id") return "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
       return "";
@@ -116,6 +118,16 @@ test("tagged supervisor waits for its user-service control socket without reinst
   assert.equal(executor.supervisorReady, true);
   assert.equal(calls.filter(call => call.command === "ssh" && call.args.at(-1).includes("worker-supervisor-control.mjs")).length, 3);
   assert.equal(calls.some(call => call.command === "ssh" && call.args.at(-1).includes("daemon-reload")), false);
+});
+
+test("an idle pre-heartbeat supervisor is upgraded before native admission", async () => {
+  const tagged = image({ Tags: [...image().Tags, { Key: "AgentRelaySupervisor", Value: "v3" }] });
+  const config = ec2Config({ SSH_BIN: process.execPath });
+  const { backend, calls } = fixture({ ami: tagged, config, supervisorLeaseHeartbeat: false });
+  backend.store = { records: {} }; backend.sshArgs = () => ["-e", "process.stdin.resume()"];
+  const executor = await backend.acquire(chat);
+  assert.equal(executor.supervisorReady, true);
+  assert.ok(calls.some(call => call.args.at(-1).includes("restart agent-relay-worker-supervisor.service")));
 });
 
 test("EC2 boots and connects while clone is pending, but workspace preparation waits for clone success", async () => {

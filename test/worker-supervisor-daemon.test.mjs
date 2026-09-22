@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -92,4 +92,18 @@ test("a duplicate daemon never unlinks a live daemon's private sockets", async t
   t.after(async () => { await daemon.close(); await rm(root, { recursive: true, force: true }); });
   await assert.rejects(new WorkerSupervisorDaemon({ root, processSocket, controlSocket }).listen(), { code: "SOCKET_ALREADY_EXISTS" });
   assert.equal((await workerSupervisorControl({ action: "status" }, { socketPath: controlSocket })).configured, false);
+});
+
+test("authoritative supervisor lease renewal refreshes the guest idle watchdog", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "relay-supervisor-heartbeat-"));
+  const processSocket = path.join(root, "process.sock"), controlSocket = path.join(root, "control.sock"), heartbeat = path.join(root, ".heartbeat");
+  await writeFile(heartbeat, "");
+  const before = new Date(Date.now() - 60_000); await import("node:fs/promises").then(({ utimes }) => utimes(heartbeat, before, before));
+  const daemon = await new WorkerSupervisorDaemon({ root, processSocket, controlSocket, heartbeat }).listen();
+  t.after(async () => { await daemon.close(); await rm(root, { recursive: true, force: true }); });
+  const status = await workerSupervisorControl({ action: "status" }, { socketPath: controlSocket });
+  assert.equal(status.leaseHeartbeat, true);
+  const lease = { id: "lease-heartbeat", generation: 1, expiresAt: Date.now() + 30_000, credential: credential(7) };
+  await workerSupervisorControl({ action: "configure", identity: selected, processId: "native-agent", lease }, { socketPath: controlSocket });
+  assert.ok((await stat(heartbeat)).mtimeMs > before.getTime() + 30_000);
 });

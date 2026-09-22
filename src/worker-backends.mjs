@@ -184,22 +184,40 @@ export class Ec2Executor {
   async #prepareSupervisor(check) {
     const active = workerSupervisorShell("systemctl --user is-active --quiet agent-relay-worker-supervisor.service && printf active || true");
     check();
+    let installed = false;
     if (await this.backend.sshCapture(this.host, active, this.instance.InstanceId) !== "active") {
       check(); await this.#uploadSupervisorCode(); check();
       const unit = Buffer.from(workerSupervisorUnit).toString("base64");
       const install = workerSupervisorShell(`test -d \"$XDG_RUNTIME_DIR\" && install -d -m 700 /home/agent/.config/systemd/user && printf %s ${shellQuote(unit)} | base64 -d > /home/agent/.config/systemd/user/agent-relay-worker-supervisor.service && chmod 600 /home/agent/.config/systemd/user/agent-relay-worker-supervisor.service && systemctl --user daemon-reload && systemctl --user enable --now agent-relay-worker-supervisor.service && systemctl --user is-active --quiet agent-relay-worker-supervisor.service`);
       await this.backend.sshCapture(this.host, install, this.instance.InstanceId); check();
+      installed = true;
     }
-    let status, statusFailure;
-    for (let attempt = 0; attempt < 20; attempt++) {
-      check();
-      try { status = await this.#supervisorControl({ action: "status" }); statusFailure = null; break; }
-      catch (error) { statusFailure = error; if (attempt < 19) await new Promise(resolve => setTimeout(resolve, 250)); }
+    const readStatus = async () => {
+      let status, statusFailure;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        check();
+        try { status = await this.#supervisorControl({ action: "status" }); statusFailure = null; break; }
+        catch (error) { statusFailure = error; if (attempt < 19) await new Promise(resolve => setTimeout(resolve, 250)); }
+      }
+      if (statusFailure) throw new Error("EC2 worker supervisor did not open its control socket");
+      return status;
+    };
+    let status = await readStatus();
+    // v3 images predate lease-driven heartbeat refresh. Upgrade an idle daemon
+    // in place before admitting a native process; never restart one that claims
+    // retained work, because that would destroy its exact process identity.
+    if (status?.leaseHeartbeat !== true) {
+      if (status?.configured) throw new Error("EC2 worker supervisor requires an explicit Stop before its watchdog-safe upgrade");
+      if (!installed) await this.#uploadSupervisorCode();
+      const unit = Buffer.from(workerSupervisorUnit).toString("base64");
+      const upgrade = workerSupervisorShell(`test -d \"$XDG_RUNTIME_DIR\" && install -d -m 700 /home/agent/.config/systemd/user && printf %s ${shellQuote(unit)} | base64 -d > /home/agent/.config/systemd/user/agent-relay-worker-supervisor.service && chmod 600 /home/agent/.config/systemd/user/agent-relay-worker-supervisor.service && systemctl --user daemon-reload && systemctl --user restart agent-relay-worker-supervisor.service && systemctl --user is-active --quiet agent-relay-worker-supervisor.service`);
+      await this.backend.sshCapture(this.host, upgrade, this.instance.InstanceId); check();
+      status = await readStatus();
     }
-    if (statusFailure) throw new Error("EC2 worker supervisor did not open its control socket");
     let receipt;
     try { receipt = typeof status === "string" ? JSON.parse(status) : status; } catch { throw new Error("EC2 worker supervisor returned an invalid status receipt"); }
-    if (receipt?.protocol !== "relay-worker-supervisor/1" || receipt.version !== workerSupervisorVersion || typeof receipt.configured !== "boolean" || typeof receipt.daemonInstanceId !== "string") throw new Error("EC2 worker supervisor failed its startup check");
+    if (receipt?.protocol !== "relay-worker-supervisor/1" || receipt.version !== workerSupervisorVersion || receipt.leaseHeartbeat !== true
+      || typeof receipt.configured !== "boolean" || typeof receipt.daemonInstanceId !== "string") throw new Error("EC2 worker supervisor failed its startup check");
     const rawBootId = await this.backend.sshCapture(this.host, "cat /proc/sys/kernel/random/boot_id", this.instance.InstanceId);
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(rawBootId)) throw new Error("EC2 worker returned an invalid boot identity");
     const bootId = createHash("sha256").update(rawBootId).digest("hex");
