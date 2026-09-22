@@ -59,12 +59,12 @@ if (!process.argv.includes("--network-isolated")) {
     await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
     const origin = `http://127.0.0.1:${server.address().port}`;
     const config = loadConfig({ AGENT_DATA_DIR: root, AGENT_DATABASE_MODE: "memory", AGENT_PROCESS_ISOLATION: "none", AGENT_IDLE_TIMEOUT_MS: "60000", CLAUDE_AUTH_MODE: "gateway", ANTHROPIC_API_KEY: "controller-only-goal-fixture" });
-    const store = new ChatStore(root); await store.initialize(); const broker = new CapabilityBroker({ ttlMs: 120000 });
+    const store = new ChatStore(root); await store.initialize(); const broker = new CapabilityBroker({ ttlMs: 120000 }), commands = new CommandCatalog(config);
     const gateway = new ProviderGateway({ config, broker, fetchImpl: (url, options) => fetch(`${origin}${new URL(url).pathname}${new URL(url).search}`, options) });
     gatewayServer = http.createServer((request, response) => { void gateway.handle(request, response, new URL(request.url, "http://fixture")); });
     await new Promise(resolve => gatewayServer.listen(0, "127.0.0.1", resolve));
     const gatewayOrigin = `http://127.0.0.1:${gatewayServer.address().port}`;
-    manager = new RuntimeManager({ store, config, broker, gatewayOrigin, models: new ModelCatalog(config), adapterFactory: params => {
+    manager = new RuntimeManager({ store, config, broker, gatewayOrigin, commands, models: new ModelCatalog(config), adapterFactory: params => {
       const executor = { workspace: params.chat.workspace, runtimeHome: store.runtimeHome(params.chat.id), mkdir: directory => mkdir(directory, { recursive: true, mode: 0o700 }),
         spawn(command, args, options) {
           assert(!JSON.stringify(options.env).includes(config.claude.providerKey));
@@ -76,7 +76,7 @@ if (!process.argv.includes("--network-isolated")) {
     } });
     const chat = await manager.createChat({ agent: "claude", title: "Native goal acceptance" });
     await manager.setModel(chat.id, { model: "sonnet", effort: "high" });
-    assert((await new CommandCatalog(config).claude(store.get(chat.id))).some(command => command.name === "goal"));
+    assert((await commands.claude(store.get(chat.id))).some(command => command.name === "goal"));
     const condition = "Produce GOAL_FIXTURE_COMPLETE after verifying both fixture steps.\nPreserve Unicode: ação.";
     const submit = async command => {
       const before = store.get(chat.id).messages.length;

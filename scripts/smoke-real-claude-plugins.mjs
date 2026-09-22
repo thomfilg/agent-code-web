@@ -31,8 +31,9 @@ if (!process.argv.includes("--network-isolated")) {
   const plan = process.argv.includes("--plan"), trace = process.argv.includes("--trace");
   const application = process.argv.includes("--application");
   const market = "relay-fixture-market", alpha = "relay-fixture-alpha", beta = "relay-fixture-beta";
+  const commandFor = name => `${name}:${name === beta ? "cu" : "stamp"}`;
   const release = Promise.withResolvers();
-  let manager, gatewayServer, chat, failure, active, held = false, titles = 0, catalogPrinted = false, appUrl, appState;
+  let manager, gatewayServer, chat, failure, active, held = false, titles = 0, appUrl, appState, configured = false;
   const respond = async (request, response) => {
     if (request.url.includes("count_tokens")) { response.writeHead(200, { "content-type": "application/json" }); response.end('{"input_tokens":100}'); return; }
     if (request.method !== "POST" || !/\/messages(?:\?|$)/.test(request.url)) { response.writeHead(404); response.end(); return; }
@@ -80,7 +81,9 @@ if (!process.argv.includes("--network-isolated")) {
   try {
     await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
     const config = loadConfig({ AGENT_DATA_DIR: root, AGENT_DATABASE_MODE: "memory", AGENT_PROCESS_ISOLATION: "none", AGENT_IDLE_TIMEOUT_MS: "60000", CLAUDE_AUTH_MODE: "gateway", ANTHROPIC_API_KEY: "controller-only-plugins-fixture" });
-    const store = new ChatStore(root); await store.initialize(); const broker = new CapabilityBroker({ ttlMs: 180000 }), commands = new CommandCatalog(config);
+    const store = new ChatStore(root); await store.initialize(); const broker = new CapabilityBroker({ ttlMs: 180000 }), commands = new CommandCatalog({ ...config, workerBackend: "ec2" }, null, {
+      installed: async () => configured ? [{ name: commandFor(beta), aliases: ["cu"], description: "Configured arbitrary alias fixture" }] : [],
+    });
     const gateway = new ProviderGateway({ config, broker, fetchImpl: (url, options) => fetch(`http://127.0.0.1:${server.address().port}${new URL(url).pathname}${new URL(url).search}`, options) });
     gatewayServer = http.createServer((request, response) => { void gateway.handle(request, response, new URL(request.url, "http://fixture")); });
     await new Promise(resolve => gatewayServer.listen(0, "127.0.0.1", resolve)); const gatewayOrigin = `http://127.0.0.1:${gatewayServer.address().port}`;
@@ -111,7 +114,7 @@ if (!process.argv.includes("--network-isolated")) {
     const local = async text => {
       const before = requests.length; await submit(text); assert.equal(requests.length, before, "Local plugin reload must not call a model");
       assert.match(store.get(chat.id).messages.at(-1).text, /^Reloaded \d+ plugin\(s\),/);
-      if (trace && !catalogPrinted) { catalogPrinted = true; console.log("NATIVE-CATALOG", JSON.stringify(store.get(chat.id).commandCatalog.map(command => command.name))); }
+      if (trace) console.log("NATIVE-CATALOG", JSON.stringify(store.get(chat.id).commandCatalog.map(command => command.name)));
     };
     const visible = async target => (await commands.list(store.get(target.id))).commands.map(command => command.name);
     assert(!(await visible(chat)).some(name => name.startsWith("relay-fixture-")));
@@ -122,8 +125,25 @@ if (!process.argv.includes("--network-isolated")) {
     assert.notEqual(launches[0].exitCode ?? launches[0].signalCode, null);
     await local("/reload-plugins");
     assert.equal(launches.length, 2, "A control-only first session must restart without attempting a missing native journal");
-    const owner = launches[1];
     const checkApp = async () => { if (application) assert.deepEqual(await (await fetch(appUrl, { signal: AbortSignal.timeout(2000) })).json(), appState); };
+    const marketplace = `${root}/marketplace`; await mkdir(`${marketplace}/.claude-plugin`, { recursive: true });
+    await writeFile(`${marketplace}/.claude-plugin/marketplace.json`, JSON.stringify({ name: market, owner: { name: "Disposable fixture" }, plugins: [alpha, beta].map(name => ({ name, source: `./plugins/${name}` })) }));
+    for (const name of [alpha, beta]) {
+      const plugin = `${marketplace}/plugins/${name}`;
+      await mkdir(`${plugin}/.claude-plugin`, { recursive: true }); await writeFile(`${plugin}/.claude-plugin/plugin.json`, JSON.stringify({ name, version: "1.0.0", description: "Disposable namespace acceptance" }));
+      const folder = name === alpha ? "commands" : "skills/cu"; await mkdir(`${plugin}/${folder}`, { recursive: true });
+      await writeFile(`${plugin}/${folder}/${name === alpha ? "stamp.md" : "SKILL.md"}`, `---\nname: ${name === beta ? "cu" : "stamp"}\ndescription: Write this plugin's supplied fixture text\nuser-invocable: true\n---\nRELAY_PLUGIN_CANARY_${name}\nWrite the exact supplied arguments to the requested workspace file, preserving native permission policy.\nArguments:\n$ARGUMENTS\n`);
+    }
+    await cli(["marketplace", "add", marketplace]);
+    for (const name of [alpha, beta]) await cli(["install", `${name}@${market}`, "--scope", "local"]);
+    configured = true;
+    // Skills are loaded at native process startup. Production installs them
+    // before starting the worker, so reproduce that boundary exactly.
+    await manager.stop(chat.id);
+    await local("/reload-plugins");
+    assert.equal(launches.length, 3, "Installed skills must be discovered by the new native owner");
+    const owner = launches[2];
+    assert.equal(owner.exitCode ?? owner.signalCode, null);
     if (application) {
       await writeFile(`${store.runtimeHome(chat.id)}/claude/settings.json`, JSON.stringify({ permissions: { allow: ["Bash(node server.mjs)"] } }));
       await writeFile(`${chat.workspace}/server.mjs`, "import http from 'node:http';import {writeFile} from 'node:fs/promises';const state={pid:process.pid,value:'Keep this app and its state'};const server=http.createServer((req,res)=>res.end(JSON.stringify(state)));server.listen(0,'127.0.0.1',async()=>{await writeFile('.runtime.json',JSON.stringify({port:server.address().port}));console.log('HTTP fixture ready');});");
@@ -136,52 +156,49 @@ if (!process.argv.includes("--network-isolated")) {
       }
       assert(appUrl);
     }
-    const marketplace = `${root}/marketplace`; await mkdir(`${marketplace}/.claude-plugin`, { recursive: true });
-    await writeFile(`${marketplace}/.claude-plugin/marketplace.json`, JSON.stringify({ name: market, owner: { name: "Disposable fixture" }, plugins: [alpha, beta].map(name => ({ name, source: `./plugins/${name}` })) }));
-    for (const name of [alpha, beta]) {
-      const plugin = `${marketplace}/plugins/${name}`;
-      await mkdir(`${plugin}/.claude-plugin`, { recursive: true }); await writeFile(`${plugin}/.claude-plugin/plugin.json`, JSON.stringify({ name, version: "1.0.0", description: "Disposable namespace acceptance" }));
-      const folder = name === alpha ? "commands" : "skills/stamp"; await mkdir(`${plugin}/${folder}`, { recursive: true });
-      await writeFile(`${plugin}/${folder}/${name === alpha ? "stamp.md" : "SKILL.md"}`, `---\ndescription: Write this plugin's supplied fixture text\ndisable-model-invocation: true\n---\nRELAY_PLUGIN_CANARY_${name}\nWrite the exact supplied arguments to the requested workspace file, preserving native permission policy.\nArguments:\n$ARGUMENTS\n`);
-    }
-    await cli(["marketplace", "add", marketplace]);
-    for (const name of [alpha, beta]) await cli(["install", `${name}@${market}`, "--scope", "local"]);
-    await local("/reload-plugins");
-    assert.equal(launches.length, 2, "Installing and reloading plugins must use the same initialized native owner");
-    assert.equal(owner.exitCode ?? owner.signalCode, null);
     await checkApp();
-    for (const name of [alpha, beta]) assert((await visible(chat)).includes(`${name}:stamp`), `Native installation must expose ${name}:stamp`);
+    for (const name of [alpha, beta]) assert((await visible(chat)).includes(commandFor(name)), `Native installation must expose ${commandFor(name)}`);
+    assert((await visible(chat)).includes("cu"), "Configured arbitrary aliases must be restored even when native discovery omits them");
     assert((await visible(chat)).includes("reload-plugins"), "The implemented SDK control must be offered even when native terminal discovery omits it");
     assert.equal(await commands.list(other), otherCatalog, "The other chat's catalog must not be invalidated");
     assert(!(await commands.claude(other)).some(command => command.name.startsWith("relay-fixture-")), "Private plugin installation must not cross chats");
     if (!application) assert.equal(store.get(chat.id).agentSessionId, null, "A control-only reload must not publish an unjournaled resume ID");
     const instruction = (name, file) => ({ canary: `RELAY_PLUGIN_CANARY_${name}`, args: `Target: ${file}\nKeep ${name}; ação, café and the next line.\nDo not change any other file.`, file });
-    const checkFile = async item => { if (plan) await assert.rejects(readFile(`${chat.workspace}/${item.file}`), { code: "ENOENT" }); else assert.equal(await readFile(`${chat.workspace}/${item.file}`, "utf8"), item.args); };
+    const checkFile = async item => {
+      if (plan) return assert.rejects(readFile(`${chat.workspace}/${item.file}`), { code: "ENOENT" });
+      try { assert.equal(await readFile(`${chat.workspace}/${item.file}`, "utf8"), item.args); }
+      catch (error) {
+        if (trace) console.log("FAILED-COMMAND", JSON.stringify({ item, messages: store.get(chat.id).messages.slice(-6) }));
+        throw error;
+      }
+    };
     for (const name of [alpha, beta]) {
-      const item = instruction(name, `${name}.txt`); expected.push(item); await submit(`/${name}:stamp ${item.args}`); await checkFile(item);
+      const item = instruction(name, `${name}.txt`), command = name === beta ? "cu" : commandFor(name);
+      expected.push(item); await submit(`/${command} ${item.args}`); await checkFile(item);
     }
     const session = store.get(chat.id).agentSessionId;
     expected.push({ canary: "Hold this ordinary task", args: "Hold this ordinary task", hold: true });
     const current = submit("Hold this ordinary task while I queue two plugin commands.");
     const deadline = Date.now() + 15000; while (!held && !failure && Date.now() < deadline) await delay(25); if (failure) throw failure; assert(held);
     const queued = [instruction(beta, "queued-beta.txt"), instruction(alpha, "queued-alpha.txt")];
-    for (const [index, name] of [beta, alpha].entries()) { expected.push(queued[index]); await manager.enqueue(chat.id, `/${name}:stamp ${queued[index].args}`); }
+    for (const [index, name] of [beta, alpha].entries()) { expected.push(queued[index]); await manager.enqueue(chat.id, `/${commandFor(name)} ${queued[index].args}`); }
     assert.equal(store.get(chat.id).queuedMessages.length, 2); release.resolve(); await current;
     const drained = Date.now() + 20000; while ((manager.isBusy(chat.id) || store.get(chat.id).queuedMessages.length) && !failure && Date.now() < drained) await delay(25);
     if (failure) throw failure; assert.equal(manager.isBusy(chat.id), false); assert.equal(store.get(chat.id).queuedMessages.length, 0);
     for (const item of queued) await checkFile(item);
-    assert.equal(launches.length, 2, "Native installed commands must run on the owner that reloaded them");
+    assert.equal(launches.length, 3, "Native installed commands must run on the owner that loaded them");
     await checkApp();
     await manager.stop(chat.id);
     if (application) await assert.rejects(fetch(appUrl, { signal: AbortSignal.timeout(2000) }));
-    const resumed = instruction(alpha, "resumed-alpha.txt"); expected.push(resumed); await submit(`/${alpha}:stamp ${resumed.args}`); await checkFile(resumed);
+    const resumed = instruction(alpha, "resumed-alpha.txt"); expected.push(resumed); await submit(`/${commandFor(alpha)} ${resumed.args}`); await checkFile(resumed);
     assert.equal(store.get(chat.id).agentSessionId, session);
     await cli(["disable", `${alpha}@${market}`, "--scope", "local"]); await local("/reload-plugins");
-    const disabled = await visible(chat); assert(!disabled.includes(`${alpha}:stamp`)); assert(disabled.includes(`${beta}:stamp`));
-    const reloadOwner = launches.at(-1), beforeEnable = launches.length;
-    await cli(["enable", `${alpha}@${market}`, "--scope", "local"]); await local("/reload-plugins --force"); assert((await visible(chat)).includes(`${alpha}:stamp`));
-    const enabled = instruction(alpha, "re-enabled-alpha.txt"); expected.push(enabled); await submit(`/${alpha}:stamp ${enabled.args}`); await checkFile(enabled);
-    assert.equal(launches.length, beforeEnable); assert.equal(reloadOwner.exitCode ?? reloadOwner.signalCode, null);
+    const disabled = await visible(chat); assert(!disabled.includes(commandFor(alpha))); assert(disabled.includes(commandFor(beta)));
+    const beforeEnable = launches.length;
+    await cli(["enable", `${alpha}@${market}`, "--scope", "local"]); await manager.stop(chat.id); await local("/reload-plugins --force");
+    const reloadOwner = launches.at(-1); assert((await visible(chat)).includes(commandFor(alpha)));
+    const enabled = instruction(alpha, "re-enabled-alpha.txt"); expected.push(enabled); await submit(`/${commandFor(alpha)} ${enabled.args}`); await checkFile(enabled);
+    assert.equal(launches.length, beforeEnable + 1); assert.equal(reloadOwner.exitCode ?? reloadOwner.signalCode, null);
     assert.equal(expected.length, 0); assert.equal(active, null); assert.equal(store.get(chat.id).mode, plan ? "plan" : "accept_edits");
     assert.equal(store.get(other.id).messages.length, 0);
     console.log(`PASS: installed legacy-command and skill namespaces, actual ${plan ? "native Plan refusals" : "file effects"}, FIFO, Stop/resume, reload/disable/enable and other-chat isolation${application ? "; same HTTP app/state survive reload until explicit Stop" : ""}; ${requests.length} authored main replies, ${titles} titles.`);

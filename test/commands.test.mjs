@@ -86,6 +86,57 @@ test("installed Claude namespaces keep same-name commands and aliases distinct f
   assert.equal(commandCatalog.length, names.length, "Web/SDK controls must not mutate the worker-reported native inventory");
 });
 
+test("configured plugin aliases repair incomplete worker catalogs without hiding web controls", async () => {
+  const catalog = new CommandCatalog({ workerBackend: "ec2" }, null, { installed: async () => [
+    { name: "work-workflow:brief", aliases: ["brief"], description: "Create a brief" },
+    { name: "work-workflow:spec", aliases: ["spec"], description: "Create a spec" },
+    { name: "synapsys:status", aliases: ["status"], description: "Workflow status" },
+  ] });
+  const chat = { id: "configured-plugin-fixture", agent: "claude", commandCatalogRevision: 1, commandCatalog: [
+    { name: "goal", kind: "CLI command" },
+    { name: "work-workflow:brief", kind: "CLI command", aliases: [] },
+    { name: "work-workflow:spec", kind: "CLI command", aliases: ["spec"] },
+    { name: "synapsys:status", kind: "CLI command", aliases: [] },
+  ] };
+  const { commands } = await catalog.list(chat);
+  assert.equal(commands.find(command => command.name === "brief").aliasFor, "work-workflow:brief");
+  assert.equal(commands.find(command => command.name === "spec").aliasFor, "work-workflow:spec");
+  assert.equal(commands.find(command => command.name === "status").web, true);
+  assert.equal(commands.find(command => command.name === "status").nativeCommand, "synapsys:status");
+  assert(commands.some(command => command.name === "goal" && !command.web));
+});
+
+test("every admitted Claude slash name executes canonically and every unknown name stops before the agent", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const calls = [], commands = { list: async () => ({ commands: [
+    { name: "cu", aliasFor: "fixture:cu", kind: "CLI command", web: false },
+    { name: "piroca", kind: "CLI command", web: false },
+    { name: "foda-se", aliasFor: "fixture:foda-se", kind: "CLI command", web: false },
+    { name: "status", kind: "Web control", web: true, nativeCommand: "fixture:status" },
+  ] }) };
+  const manager = new RuntimeManager({ store, config: testConfig(root), commands, broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => ({
+    start: async () => {}, stop: async () => {}, send: async text => { calls.push(text); return { text: "Command completed" }; },
+  }) });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "claude", title: "Generic slash admission" });
+  for (const text of ["/cu ação\nand the next line", "/piroca exact", "/foda-se agora", "/status detailed"]) await manager.send(chat.id, text);
+  assert.deepEqual(calls, [
+    "/cu ação\nand the next line",
+    "/piroca exact",
+    "/foda-se agora",
+    "/status detailed",
+  ], "Claude receives the exact admitted command, alias and arguments");
+  assert.deepEqual(store.get(chat.id).messages.filter(message => message.role === "user").map(message => message.text), [
+    "/cu ação\nand the next line", "/piroca exact", "/foda-se agora", "/status detailed",
+  ], "The transcript preserves exactly what the user typed");
+  const before = store.get(chat.id).messages.length;
+  await assert.rejects(manager.submit(chat.id, "/inferno qualquer coisa"), error => error.statusCode === 400 && /Unknown command \/inferno/.test(error.message));
+  await assert.rejects(manager.enqueue(chat.id, "/nao-existe depois"), error => error.statusCode === 400 && /Unknown command \/nao-existe/.test(error.message));
+  assert.equal(calls.length, 4);
+  assert.equal(store.get(chat.id).messages.length, before);
+  assert.deepEqual(store.get(chat.id).queuedMessages || [], []);
+});
+
 test("an admitted Codex skill keeps structured dispatch while unknown names never reach the adapter", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const calls = [], commands = { list: async () => ({ commands: [{ name: "work", kind: "Skill", path: "/fixture/work/SKILL.md" }] }) };

@@ -1226,10 +1226,11 @@ export class RuntimeManager extends EventEmitter {
     if (!slash.name) throw Object.assign(invalidSlashCommandError(), { statusCode: 400 });
     if (!this.commands) throw Object.assign(new Error(`Unknown command /${slash.name}. Choose a command from the / menu.`), { statusCode: 400 });
 
-    return this.#resolveCatalogCommand(chat, slash.name);
+    return this.#resolveCatalogCommand(chat, slash);
   }
 
-  async #resolveCatalogCommand(chat, name) {
+  async #resolveCatalogCommand(chat, slash) {
+    const { name } = slash;
     const command = (await this.commands.list(chat)).commands.find(item => item.name === name);
     if (chat.agent === "codex" && command?.kind === "Skill" && command.path) {
       return { commandAction: null, skill: { name: command.name, path: command.path } };
@@ -1244,7 +1245,14 @@ export class RuntimeManager extends EventEmitter {
       const entry = typeof item === "string" ? { name: item } : item;
       return [entry?.name, ...(Array.isArray(entry?.aliases) ? entry.aliases : [])].includes(name);
     });
-    if (chat.agent === "claude" && (command && !command.web || reported)) return { commandAction: null, skill: null };
+    if (chat.agent === "claude") {
+      // Claude skills are invoked by their short configured name even when
+      // initialize reports only a namespaced canonical entry. The catalog is
+      // admission authority; preserve the user's command and arguments byte
+      // for byte instead of rewriting it to a name the CLI may not execute.
+      if ((command?.aliasFor && !command.web) || (command?.nativeCommand && slash.argument)) return { commandAction: null, skill: null };
+      if (command && !command.web || reported) return { commandAction: null, skill: null };
+    }
     if (command?.web) throw Object.assign(new Error(`/${name} opens a web control. Run it without arguments, or choose it from the / menu.`), { statusCode: 400 });
     throw Object.assign(new Error(`Unknown command /${name}. Choose a command from the / menu.`), { statusCode: 400 });
   }

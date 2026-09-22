@@ -47,6 +47,7 @@ import { readinessProbe } from "./readiness.mjs";
 import { closeIncompleteRequestAfterResponse } from "./http-request-lifecycle.mjs";
 import { AppPreviews } from "./app-previews.mjs";
 import { CompanyPlugins } from "./company-plugins.mjs";
+import { companyForChat } from "../public/company-scope.js";
 
 const MIME = {
   ".css": "text/css; charset=utf-8",
@@ -155,9 +156,12 @@ export async function createAgentWebServer(options = {}) {
   const companyPlugins = options.companyPlugins || new CompanyPlugins(records, { companies, config, inspect: options.inspectPluginSource });
   const models = options.models || new ModelCatalog(config, agentAccounts);
   const attachments = new Attachments(records, store);
-  const commands = options.commands || new CommandCatalog(config, models);
   const resources = new UserServices({ records, config, identity: googleAuth, store, legacy: { records, github, mcps, environments, organization, companies, plugins: companyPlugins }, changed: sidebarChanged,
     githubChanged: (ownerId, id) => githubWorkers.revokeConnection(ownerId, id) });
+  const commands = options.commands || new CommandCatalog(config, models, { installed: async chat => {
+    const services = await resources.forOwner(chat.ownerId);
+    return services.plugins.commands(companyForChat(chat), chat.agent);
+  } });
   const githubWorkers = new GitHubWorkerGateway({ store, servicesFor: chat => resources.forOwner(chat.ownerId), ttlMs: config.sessionCapabilityTtlMs,
     ...(options.githubWorkerFetch ? { fetchImpl: options.githubWorkerFetch } : {}) });
   await environments.initialize();
@@ -439,10 +443,10 @@ export async function createAgentWebServer(options = {}) {
       if (companyRoute && request.method === "PATCH") return json(response, 200, { company: await companies.save(await bodyJson(request, 4000), companyRoute[1]) });
       if (url.pathname === "/api/company-plugins" && request.method === "GET") return json(response, 200, { marketplaces: await plugins.list(url.searchParams.get("companyId") || null) });
       if (url.pathname === "/api/company-plugins/inspect" && request.method === "POST") return json(response, 200, { marketplace: await plugins.preview((await bodyJson(request, 4000)).source) });
-      if (url.pathname === "/api/company-plugins" && request.method === "POST") return json(response, 201, { marketplace: await plugins.save(await bodyJson(request, config.maxBodyBytes)) });
+      if (url.pathname === "/api/company-plugins" && request.method === "POST") { const marketplace = await plugins.save(await bodyJson(request, config.maxBodyBytes)); commands.invalidate?.(); return json(response, 201, { marketplace }); }
       const companyPluginRoute = /^\/api\/company-plugins\/(plugin_[a-f0-9-]{36})$/.exec(url.pathname);
-      if (companyPluginRoute && request.method === "PATCH") return json(response, 200, { marketplace: await plugins.save(await bodyJson(request, config.maxBodyBytes), companyPluginRoute[1]) });
-      if (companyPluginRoute && request.method === "DELETE") { await plugins.remove(companyPluginRoute[1]); return json(response, 200, { removed: true }); }
+      if (companyPluginRoute && request.method === "PATCH") { const marketplace = await plugins.save(await bodyJson(request, config.maxBodyBytes), companyPluginRoute[1]); commands.invalidate?.(); return json(response, 200, { marketplace }); }
+      if (companyPluginRoute && request.method === "DELETE") { await plugins.remove(companyPluginRoute[1]); commands.invalidate?.(); return json(response, 200, { removed: true }); }
       if (url.pathname === "/api/github" && request.method === "GET") return json(response, 200, await github.status());
       if (url.pathname === "/api/mcps" && request.method === "GET") return json(response, 200, { connections: await mcps.list() });
       if (url.pathname === "/api/mcps/presets" && request.method === "GET") return json(response, 200, { presets: MCP_PRESETS });

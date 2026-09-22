@@ -27,7 +27,9 @@ export function claudeCommandMetadata(value) {
 const reportedCommands = chat => Array.isArray(chat.commandCatalog) && chat.commandCatalog.length ? [...chat.commandCatalog]
   : (Array.isArray(chat.slashCommands) ? chat.slashCommands : []).filter(name => typeof name === "string").map(name => ({ name }));
 export class CommandCatalog {
-  constructor(config, models = null) { this.config = config; this.models = models; this.cache = new Map(); this.pending = new Map(); }
+  constructor(config, models = null, { installed = null } = {}) {
+    this.config = config; this.models = models; this.installed = installed; this.cache = new Map(); this.pending = new Map();
+  }
   async newChat(context, installed = []) {
     // Read existing selected-account metadata only. Never call discover(),
     // models.selected(), or a host CLI for an unsaved draft.
@@ -50,8 +52,11 @@ export class CommandCatalog {
     const promise = this.discover(chat, account).then(value => { if (this.pending.get(key) === promise) this.cache.set(key, { value, expires: Date.now() + 60000 }); return value; }).finally(() => { if (this.pending.get(key) === promise) this.pending.delete(key); });
     this.pending.set(key, promise); return promise;
   }
-  invalidate(chatId) {
-    for (const map of [this.cache, this.pending]) for (const key of map.keys()) if (key.startsWith(`${chatId}:`)) map.delete(key);
+  invalidate(chatId = null) {
+    for (const map of [this.cache, this.pending]) {
+      if (chatId === null) map.clear();
+      else for (const key of map.keys()) if (key.startsWith(`${chatId}:`)) map.delete(key);
+    }
   }
   async discover(chat, account = null) {
     let items = [], note = "";
@@ -68,6 +73,22 @@ export class CommandCatalog {
       try { items = chat.agent === "codex" ? await this.codex(chat) : await this.claude(chat); }
       catch { items = reportedCommands(chat); note = "Command discovery unavailable. Showing web controls and last reported commands."; }
     }
+    // A native worker may report a configured plugin's canonical command but
+    // omit its short alias. Company plugin metadata is the installation
+    // contract, so restore those aliases without inventing command names.
+    let installed = [];
+    if (this.installed) {
+      try { installed = await this.installed(chat); }
+      catch { note = [note, "Configured plugin commands are temporarily unavailable."].filter(Boolean).join(" "); }
+    }
+    const nativeByName = new Map(items.map((item, index) => [item?.name, index]));
+    for (const raw of installed || []) {
+      const item = clean(raw), index = nativeByName.get(item.name);
+      if (index !== undefined) {
+        const native = items[index];
+        items[index] = { ...item, ...native, aliases: [...new Set([...(native.aliases || []), ...item.aliases])] };
+      }
+    }
     // skills/list gives executable Codex skills, not terminal UI settings. Old
     // cached terminal placeholders must not return as broken menu entries.
     if (chat.agent === "codex") items = items.filter(item => item.kind === "Skill" && item.path);
@@ -78,7 +99,17 @@ export class CommandCatalog {
     if (chat.agent === "codex" && this.models) try { model = await this.models.selected(chat); } catch { /* Model-only controls wait for successful catalog discovery. */ }
     items.push(...webCommands(chat.agent, { personality: model?.supportsPersonality, fast: model?.serviceTiers?.some(tier => /^fast$/i.test(tier.name || "") || ["fast", "priority"].includes(tier.id)) }));
     const map = new Map();
-    for (const raw of items) { const item = clean(raw); if (!/^[\w:.-]+$/.test(item.name) || item.name.startsWith("__")) continue; map.set(item.name, { ...item, web: item.kind === "Web control" }); for (const alias of item.aliases) if (/^[\w:.-]+$/.test(alias)) map.set(alias, { ...item, name: alias, aliasFor: item.name, web: item.kind === "Web control" }); }
+    for (const raw of items) {
+      const item = clean(raw); if (!/^[\w:.-]+$/.test(item.name) || item.name.startsWith("__")) continue;
+      const add = (name, value) => {
+        const previous = map.get(name), web = item.kind === "Web control";
+        map.set(name, web && previous && !previous.web
+          ? { ...value, web: true, nativeCommand: previous.aliasFor || previous.name, nativeKind: previous.kind, ...(previous.path ? { nativePath: previous.path } : {}) }
+          : value);
+      };
+      add(item.name, { ...item, web: item.kind === "Web control" });
+      for (const alias of item.aliases) if (/^[\w:.-]+$/.test(alias)) add(alias, { ...item, name: alias, aliasFor: item.name, web: item.kind === "Web control" });
+    }
     return { commands: [...map.values()].sort((a, b) => a.name.localeCompare(b.name)), note };
   }
   async env(agent, chat) {
