@@ -1764,6 +1764,15 @@ export class RuntimeManager extends EventEmitter {
     try {
       this.#assertNativeAccount(chatId, runtime);
       if (turn.cancelled) return;
+      // A normal user reply to a paused Relay goal is the answer/correction
+      // that lets the goal continue. Keep this transition inside the turn so
+      // a failed dispatch can restore the prior paused state.
+      const goalBeforeTurn = this.store.get(chatId).goal;
+      if (this.store.get(chatId).agent === "claude" && commandAction?.type !== "goal"
+        && goalBeforeTurn?.managedBy === "relay" && goalBeforeTurn.status === "paused") {
+        relayGoalBefore = goalBeforeTurn;
+        this.publishChat(await this.store.update(chatId, { goal: { ...goalBeforeTurn, status: "active" } }));
+      }
       if (commandAction?.type === "compact") {
         if (!runtime.adapter.compact) throw new Error("This worker does not expose native compaction. Update its Codex CLI.");
         await this.#setStatus(chatId, "running", "Compacting context", null);
@@ -1933,15 +1942,17 @@ export class RuntimeManager extends EventEmitter {
       });
       if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
       this.#emit(chatId, { type: "turn_completed", message });
-      if (claude && commandAction?.type === "goal" && ["set", "resume"].includes(commandAction.action)) {
+      if (claude) {
         const currentGoal = this.store.get(chatId).goal;
-        const nativeWorkPending = runtime.adapter.hasScheduledWork?.() || runtime.adapter.isBackgroundBusy?.();
-        const relayWakeNeeded = !output.awaitingUser && !output.goalComplete && !nativeWorkPending;
-        if (currentGoal?.managedBy === "relay") this.publishChat(await this.store.update(chatId, { goal: { ...currentGoal, status: output.awaitingUser ? "paused" : output.goalComplete ? "complete" : "active" } }));
-        if (relayWakeNeeded) {
-          const queued = await this.store.update(chatId, current => current.queuedMessages?.some(item => item.relayGoalWake)
-            ? {} : { queuedMessages: [...(current.queuedMessages || []), { id: newId("queued"), text: "/goal resume", attachmentIds: [], createdAt: nowIso(), relayGoalWake: true }] });
-          this.publishChat(queued);
+        if (currentGoal?.managedBy === "relay" && currentGoal.status === "active") {
+          const nativeWorkPending = runtime.adapter.hasScheduledWork?.() || runtime.adapter.isBackgroundBusy?.();
+          const relayWakeNeeded = !output.awaitingUser && !output.goalComplete && !nativeWorkPending;
+          this.publishChat(await this.store.update(chatId, { goal: { ...currentGoal, status: output.awaitingUser ? "paused" : output.goalComplete ? "complete" : "active" } }));
+          if (relayWakeNeeded) {
+            const queued = await this.store.update(chatId, current => current.queuedMessages?.some(item => item.relayGoalWake)
+              ? {} : { queuedMessages: [...(current.queuedMessages || []), { id: newId("queued"), text: "/goal resume", attachmentIds: [], createdAt: nowIso(), relayGoalWake: true }] });
+            this.publishChat(queued);
+          }
         }
       }
       }

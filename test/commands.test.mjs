@@ -193,7 +193,7 @@ test("Claude retains identical system instructions when a paused Relay goal rece
   const manager = new RuntimeManager({ store, config: testConfig(root), commands: { list: async () => ({ commands: [{ name: "goal", kind: "CLI command", web: false }] }) },
     broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => ({
       start: async () => {}, stop: async () => {}, hasScheduledWork: () => false,
-      send: async (_text, turnSettings) => { settings.push(turnSettings); return { text: settings.length === 1 ? "Need input\n<relay-waiting>yes</relay-waiting>" : "Continuing" }; },
+      send: async (_text, turnSettings) => { settings.push(turnSettings); return { text: settings.length === 1 ? "Need input\n<relay-waiting>yes</relay-waiting>" : "Continuing\n<relay-goal>complete</relay-goal>" }; },
     }) });
   t.after(() => manager.shutdown());
   const chat = await manager.createChat({ agent: "claude", title: "Stable goal instructions", autoTitle: false });
@@ -203,6 +203,33 @@ test("Claude retains identical system instructions when a paused Relay goal rece
   assert.equal(settings.length, 2);
   assert.equal(settings[1].systemPrompt, settings[0].systemPrompt);
   assert.match(settings[0].systemPrompt, /Relay may manage a persistent goal/);
+  assert.equal(store.get(chat.id).goal.status, "complete");
+});
+
+test("an ordinary correction resumes a paused Claude goal and rearms Relay continuation", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const calls = [];
+  const manager = new RuntimeManager({ store, config: testConfig(root), commands: { list: async () => ({ commands: [{ name: "goal", kind: "CLI command", web: false }] }) },
+    broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => ({
+      start: async () => {}, stop: async () => {}, hasScheduledWork: () => false, isBackgroundBusy: () => false,
+      send: async text => {
+        calls.push(text);
+        if (calls.length === 1) return { text: "Need the correction\n<relay-waiting>yes</relay-waiting>" };
+        if (calls.length === 2) return { text: "Correction received; more work remains" };
+        return { text: "Everything is finished\n<relay-goal>complete</relay-goal>" };
+      },
+    }) });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "claude", title: "Goal correction continuation" });
+  await manager.send(chat.id, "/goal finish every delivery step");
+  assert.equal(store.get(chat.id).goal.status, "paused");
+  await manager.send(chat.id, "Use the existing implementation and continue now");
+  await waitFor(() => calls.length === 3 && !manager.isBusy(chat.id));
+  assert.deepEqual(calls, ["/goal finish every delivery step", "Use the existing implementation and continue now", "/goal resume"]);
+  assert.equal(store.get(chat.id).goal.status, "complete");
+  assert.deepEqual(store.get(chat.id).messages.filter(message => message.role === "user").map(message => message.text),
+    ["/goal finish every delivery step", "Use the existing implementation and continue now"]);
+  assert.equal(store.get(chat.id).messages.some(message => message.meta?.source === "relay-goal" && message.meta.input === "/goal resume"), true);
 });
 
 test("an admitted Codex skill keeps structured dispatch while unknown names never reach the adapter", async t => {
