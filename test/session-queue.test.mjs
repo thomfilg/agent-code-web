@@ -101,6 +101,7 @@ async function queueFixture(t, options = {}) {
   const calls = []; let release, interruptions = 0, forcedInterruptions = 0, stops = 0;
   const config = testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "10000" });
   if (options.interruptTimeoutMs) config.sendNowInterruptTimeoutMs = options.interruptTimeoutMs;
+  if (options.forceInterruptTimeoutMs) config.sendNowForceInterruptTimeoutMs = options.forceInterruptTimeoutMs;
   const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10000 }),
     adapterFactory: ({ hooks }) => ({ start: async () => {},
       stop: async () => { stops++; release?.({ text: "stopped" }); },
@@ -201,6 +202,19 @@ test("Send now force-recycles an unresponsive native turn and sends the priority
   await first.completion; await waitFor(() => calls.length === 2);
   assert.deepEqual(calls, ["stuck native turn", "send this now"]);
   assert.equal(f.interruptions(), 1); assert.equal(f.forcedInterruptions(), 1); assert.equal(f.stops(), 0);
+  f.complete(); await waitFor(() => !manager.isBusy(chat.id));
+});
+
+test("Send now recycles the worker when both native interruption paths never settle", async t => {
+  const never = new Promise(() => {});
+  const f = await queueFixture(t, { interruptTimeoutMs: 10, forceInterruptTimeoutMs: 20, interrupt: () => never, forceInterrupt: () => never });
+  const { manager, store, chat, calls } = f;
+  const first = await manager.submit(chat.id, "stuck native turn"); await waitFor(() => calls.length === 1);
+  await manager.enqueue(chat.id, "send after recycling"); const id = store.get(chat.id).queuedMessages[0].id;
+  await manager.editQueue(chat.id, { sendNowId: id });
+  await first.completion; await waitFor(() => calls.length === 2);
+  assert.deepEqual(calls, ["stuck native turn", "send after recycling"]);
+  assert.equal(store.get(chat.id).queuePaused, false); assert.deepEqual(store.get(chat.id).queuedMessages, []);
   f.complete(); await waitFor(() => !manager.isBusy(chat.id));
 });
 

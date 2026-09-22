@@ -191,8 +191,12 @@ export class RuntimeManager extends EventEmitter {
     if (this.#queueClaims.get(chatId) === itemId) throw Object.assign(new Error("This queued message is already being sent"), { statusCode: 409 });
     const action = { id: itemId };
     this.#sendingNow.set(chatId, action);
-    action.promise = this.#sendQueuedNow(chatId, item, action).finally(() => {
+    action.promise = this.#sendQueuedNow(chatId, item, action).finally(async () => {
       this.#sendingNow.delete(chatId);
+      // Stop/recycle may already have started a drain while Send now was still
+      // marked busy. Let that no-op drain remove its claim before starting the
+      // real one, otherwise the preserved queue can remain stranded.
+      await this.#draining.get(chatId);
       void this.#drainQueue(chatId);
     });
     return action.promise;
@@ -213,6 +217,7 @@ export class RuntimeManager extends EventEmitter {
     const version = this.#lifecycleVersions.get(chatId) || 0;
     const runtime = this.#runtimes.get(chatId);
     const interruptTimeoutMs = this.config.sendNowInterruptTimeoutMs || 2_000;
+    const forceInterruptTimeoutMs = this.config.sendNowForceInterruptTimeoutMs || Math.max(10_000, interruptTimeoutMs * 5);
     let forced = false;
     const interrupt = async () => {
       const adapter = runtime?.adapter;
@@ -227,7 +232,16 @@ export class RuntimeManager extends EventEmitter {
       } catch (error) {
         if (!adapter.forceInterrupt) throw error;
         forced = true;
-        await adapter.forceInterrupt();
+        const force = Promise.resolve().then(() => adapter.forceInterrupt());
+        let forceTimer;
+        const forceFinished = await Promise.race([force.then(() => true), new Promise(resolve => {
+          forceTimer = setTimeout(() => resolve(false), forceInterruptTimeoutMs);
+        })]);
+        clearTimeout(forceTimer);
+        if (!forceFinished) {
+          void force.catch(() => {});
+          await this.stop(chatId, "send-now-timeout", { skipAdapter: true });
+        } else await force;
         void graceful.catch(() => {});
       } finally { clearTimeout(timer); }
     };
@@ -274,6 +288,7 @@ export class RuntimeManager extends EventEmitter {
           this.#submissions.delete(chatId);
           this.#queued.delete(chatId);
           turn.resolve();
+          turn.completion.resolve();
         }
       }
       this.#emit(chatId, { type: "turn_interrupted" });
@@ -1655,7 +1670,7 @@ export class RuntimeManager extends EventEmitter {
       throw Object.assign(new Error("this chat already has a running turn"), { statusCode: 409 });
     }
     this.#queued.add(chatId);
-    const turn = { cancelled: false, githubEvent, ...Promise.withResolvers() };
+    const turn = { cancelled: false, githubEvent, completion: Promise.withResolvers(), ...Promise.withResolvers() };
     turn.done = turn.promise;
     this.#submissions.set(chatId, turn);
     const finish = () => {
@@ -1689,8 +1704,13 @@ export class RuntimeManager extends EventEmitter {
         this.publishChat(await this.store.update(chatId, current => provisionalTitlePatch(current, text, { hasAttachments: files.length > 0 })));
       }
       if (turn.cancelled || version !== (this.#lifecycleVersions.get(chatId) || 0)) { finish(); return { message: userMessage, completion: Promise.resolve() }; }
-      const completion = this.#runTurn(chatId, text, files, userMessage.id, skill, turn, commandAction).finally(finish);
-      return { message: userMessage, completion, githubDelivered: () => turn.githubDelivered === true };
+      const nativeCompletion = this.#runTurn(chatId, text, files, userMessage.id, skill, turn, commandAction).finally(finish);
+      // A hard worker recycle can settle the logical turn even when the old
+      // provider promise is permanently hung. Continue observing that native
+      // promise, but never make API callers wait on an owner that no longer
+      // exists.
+      void nativeCompletion.then(turn.completion.resolve, turn.completion.reject);
+      return { message: userMessage, completion: turn.completion.promise, githubDelivered: () => turn.githubDelivered === true };
     } catch (error) {
       finish();
       throw error;
@@ -2138,7 +2158,7 @@ export class RuntimeManager extends EventEmitter {
     }
   }
 
-  async stop(chatId, reason = "manual") {
+  async stop(chatId, reason = "manual", { skipAdapter = false } = {}) {
     // A fatal exit owns the old runtime until its queued events and visible
     // response have been checkpointed. Do not race its teardown with Stop.
     const failure = this.#runtimes.get(chatId)?.failure;
@@ -2195,8 +2215,8 @@ export class RuntimeManager extends EventEmitter {
     this.publishChat(await this.store.update(chatId, current => {
       const workerLifecycle = beginWorkerLifecycle(current.workerLifecycle, "stop", nowIso());
       workerLifecycleGeneration = workerLifecycle.generation;
-      return { queuePaused: reason === "idle-timeout" ? Boolean(current.queuePaused) : true, startupProgress: failRunningStartup(current.startupProgress), workerLifecycle,
-        ...(current.goal?.managedBy === "relay" && current.goal.status === "active" ? { goal: { ...current.goal, status: "paused" } } : {}),
+      return { queuePaused: ["idle-timeout", "send-now-timeout"].includes(reason) ? Boolean(current.queuePaused) : true, startupProgress: failRunningStartup(current.startupProgress), workerLifecycle,
+        ...(reason !== "send-now-timeout" && current.goal?.managedBy === "relay" && current.goal.status === "active" ? { goal: { ...current.goal, status: "paused" } } : {}),
         ...(reason === "manual" ? { forkGoalPending: false, githubEventsStoppedAt: nowIso() } : {}) };
     }));
     const runtime = this.#runtimes.get(chatId);
@@ -2208,10 +2228,12 @@ export class RuntimeManager extends EventEmitter {
       if (runtime.idleTimer) clearTimeout(runtime.idleTimer);
       this.#runtimes.delete(chatId);
       await this.sideChats.close(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Side stop warning: ${errorMessage(error)}` }));
-      await runtime.adapter.stop({ checkpointVersion: stopVersion }).catch((error) => this.#emit(chatId, { type: "runtime_log", text: `Adapter stop warning: ${errorMessage(error)}` }));
-      await this.#checkpointStoppedAgentThreads(chatId, runtime, stopVersion).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
-      await runtime.eventQueue; // Flush final context/usage before worker storage disappears.
-      await this.agentThreads.flush(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
+      if (!skipAdapter) {
+        await runtime.adapter.stop({ checkpointVersion: stopVersion }).catch((error) => this.#emit(chatId, { type: "runtime_log", text: `Adapter stop warning: ${errorMessage(error)}` }));
+        await this.#checkpointStoppedAgentThreads(chatId, runtime, stopVersion).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
+        await runtime.eventQueue; // Flush final context/usage before worker storage disappears.
+        await this.agentThreads.flush(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Agent snapshot could not be saved: ${errorMessage(error)}` }));
+      }
     }
     else {
       await this.sideChats.close(chatId).catch(error => this.#emit(chatId, { type: "runtime_log", text: `Side stop warning: ${errorMessage(error)}` }));
@@ -2253,6 +2275,7 @@ export class RuntimeManager extends EventEmitter {
     if (stoppedTurn && this.#submissions.get(chatId) === stoppedTurn) {
       this.#submissions.delete(chatId);
       stoppedTurn.resolve();
+      stoppedTurn.completion.resolve();
     }
     this.#queued.delete(chatId);
     const settled = await this.store.update(chatId, current => ({ messages: current.messages.map(message =>
@@ -2269,6 +2292,7 @@ export class RuntimeManager extends EventEmitter {
       }, nowIso()) };
     });
     const detail = reason === "idle-timeout" ? "Stopped after idle timeout"
+      : reason === "send-now-timeout" ? "Recycled after the agent did not stop for Send now"
       : reason === "reconcile" ? "Machine stop verified after control plane restart" : "Stopped manually";
     await this.#setStatus(chatId, "stopped", detail, null);
     await this.store.update(chatId, current => ({ suspension: current.suspension ? { ...current.suspension,
