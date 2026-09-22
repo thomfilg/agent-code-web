@@ -1840,7 +1840,7 @@ export class RuntimeManager extends EventEmitter {
       // so describe the protocol unconditionally instead of adding/removing it
       // when a goal is set, paused, resumed or cleared.
       const relayGoalPrompt = claude
-        ? "\n\nRelay may manage a persistent goal for this chat. When one is active, keep working until its objective is genuinely complete. Do not stop at a plan or progress report. If progress is impossible without user input, clearly ask for that input instead of claiming completion."
+        ? "\n\nRelay may manage a persistent goal for this chat. When one is active, keep working until its objective is genuinely complete. Do not stop at a plan or progress report. If progress is impossible without user input, clearly ask for that input instead of claiming completion. The hidden relay-goal status must remain continue until every requirement in the objective is actually satisfied."
         : "";
       const prompt = (currentChat.forkContextPending ? runtime.forkContext || "" : "") + handoffPrompt(currentChat, raw) + browserPrompt;
       // Keep Claude slash commands at the beginning of the user input. Relay's
@@ -1936,8 +1936,8 @@ export class RuntimeManager extends EventEmitter {
       if (claude && commandAction?.type === "goal" && ["set", "resume"].includes(commandAction.action)) {
         const currentGoal = this.store.get(chatId).goal;
         const nativeWorkPending = runtime.adapter.hasScheduledWork?.() || runtime.adapter.isBackgroundBusy?.();
-        const relayWakeNeeded = !output.awaitingUser && !nativeWorkPending && runtime.scheduleWakeupAttempted;
-        if (currentGoal?.managedBy === "relay") this.publishChat(await this.store.update(chatId, { goal: { ...currentGoal, status: output.awaitingUser ? "paused" : nativeWorkPending || relayWakeNeeded ? "active" : "complete" } }));
+        const relayWakeNeeded = !output.awaitingUser && !output.goalComplete && !nativeWorkPending;
+        if (currentGoal?.managedBy === "relay") this.publishChat(await this.store.update(chatId, { goal: { ...currentGoal, status: output.awaitingUser ? "paused" : output.goalComplete ? "complete" : "active" } }));
         if (relayWakeNeeded) {
           const queued = await this.store.update(chatId, current => current.queuedMessages?.some(item => item.relayGoalWake)
             ? {} : { queuedMessages: [...(current.queuedMessages || []), { id: newId("queued"), text: "/goal resume", attachmentIds: [], createdAt: nowIso(), relayGoalWake: true }] });

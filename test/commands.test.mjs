@@ -162,22 +162,25 @@ test("Claude /goal is visible as active before its exact native command finishes
 
 test("Claude /goal resumes internally when native ScheduleWakeup cannot retain the continuation", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
-  const calls = [];
+  const calls = [], finalTurn = Promise.withResolvers();
   const manager = new RuntimeManager({ store, config: testConfig(root), commands: { list: async () => ({ commands: [{ name: "goal", kind: "CLI command", web: false }] }) },
     broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: ({ hooks }) => ({
       start: async () => {}, stop: async () => {}, hasScheduledWork: () => false, isBackgroundBusy: () => false,
       send: async text => {
         calls.push(text);
         if (calls.length === 1) await hooks.onEvent({ type: "tool", tool: "ScheduleWakeup", itemId: "wake-1", title: "ScheduleWakeup", state: "running", output: "" });
-        return { text: calls.length === 1 ? "Waiting for the server" : "Goal finished" };
+        if (calls.length === 3) await finalTurn.promise;
+        return { text: calls.length === 1 ? "Waiting for the server" : calls.length === 2 ? "More work remains" : "Goal finished\n<relay-goal>complete</relay-goal>" };
       },
     }) });
   t.after(() => manager.shutdown());
   const exact = "/goal INC-9670\n\nrun /brief then /spec and finish";
   const chat = await manager.createChat({ agent: "claude", title: "Claude goal wake fallback" });
   await manager.send(chat.id, exact);
-  await waitFor(() => calls.length === 2 && !manager.isBusy(chat.id));
-  assert.deepEqual(calls, [exact, "/goal resume"]);
+  await waitFor(() => calls.length === 3);
+  assert.equal(store.get(chat.id).goal.status, "active", "A progress response without explicit completion must continue the goal");
+  finalTurn.resolve(); await waitFor(() => !manager.isBusy(chat.id));
+  assert.deepEqual(calls, [exact, "/goal resume", "/goal resume"]);
   assert.equal(store.get(chat.id).goal.status, "complete");
   assert.deepEqual(store.get(chat.id).messages.filter(message => message.role === "user").map(message => message.text), [exact], "Relay continuation is not attributed to the user");
   assert.equal(store.get(chat.id).messages.some(message => message.meta?.source === "relay-goal" && message.meta.input === "/goal resume"), true);

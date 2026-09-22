@@ -45,6 +45,14 @@ test("hidden waiting metadata never leaks across chunk splits, with or without a
   stream.flush(); assert.equal(events.map(event => event.delta).join("").trim(), "answer");
   assert.equal(extractResponse("Optional: want help?").awaitingUser, false);
   assert.equal(extractResponse("done <relay-waiting>yes</relay-waiting> now done <relay-waiting>no</relay-waiting>").awaitingUser, false);
+  const goalSource = "Still working\n<relay-goal>continue</relay-goal>";
+  for (let split = 0; split <= goalSource.length; split++) {
+    const events = []; const stream = new ResponseStream(event => events.push(event), false);
+    stream.delta(goalSource.slice(0, split)); stream.delta(goalSource.slice(split)); stream.flush();
+    assert.equal(events.map(event => event.delta).join("").trim(), "Still working");
+  }
+  assert.equal(extractResponse(goalSource, false).goalComplete, false);
+  assert.equal(extractResponse("Finished\n<relay-goal>complete</relay-goal>", false).goalComplete, true);
 });
 test("ordinary questions persist across autosleep/restart, then clear on the next turn (Codex and Claude)", async t => {
   for (const agent of ["codex", "claude"]) {
