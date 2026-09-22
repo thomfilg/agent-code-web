@@ -84,6 +84,22 @@ test("a stopped EC2 chat states the physical outcome and explains an interrupted
   await expect(page.locator("#worker-size-error")).toHaveText("The EC2 machine was still running. It will be stopped automatically before retrying.");
 });
 
+test("messages show their local sent date and time without inventing timestamps", async ({ page }) => {
+  const createdAt = "2026-09-22T14:14:00.000Z";
+  await openFixture(page, [
+    { id: "dated-user", role: "user", text: "A dated instruction", createdAt },
+    { id: "dated-assistant", role: "assistant", text: "A dated response", createdAt },
+    { id: "legacy", role: "assistant", text: "A legacy response" },
+  ]);
+  const userTime = page.locator('[data-message-id="dated-user"] .message-time');
+  const assistantTime = page.locator('[data-message-id="dated-assistant"] .message-time');
+  await expect(userTime).toHaveAttribute("datetime", createdAt);
+  await expect(userTime).not.toHaveText("");
+  await expect(assistantTime).toHaveAttribute("datetime", createdAt);
+  await expect(page.locator('[data-message-id="legacy"] .message-time')).toHaveCount(0);
+  await expect(userTime).toHaveCSS("font-size", "9px");
+});
+
 test("command controls edit goals, queue native commands and retain drafts on delayed controls", async ({ page }) => {
   const goal = { objective: "Original goal", status: "paused", tokensUsed: 15 };
   const chat = await openFixture(page, [{ id: "reply", role: "assistant", text: "Last completed reply" }], { agent: "codex", status: "running", goal });

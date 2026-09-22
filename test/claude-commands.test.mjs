@@ -13,7 +13,7 @@ async function fixture(t) {
   commands.discover = async () => { f.discoveries++; return { commands: [...f.nativeNames, ...f.names].map(name => ({ name, ...(f.description && f.names.includes(name) ? { description: f.description } : {}) })) }; };
   const manager = new RuntimeManager({ store, config, commands, broker: new CapabilityBroker({ ttlMs: 120000 }), adapterFactory: ({ chat, hooks }) => {
     f.hooks.set(chat.id, hooks);
-    return { start: async () => {}, send: async text => { f.inputs.push({ chatId: chat.id, text }); await f.gate?.promise; if (f.error) throw Error(f.error); return { text: "Native fixture result" }; }, stop: async () => f.gate?.resolve() };
+    return { start: async () => {}, send: async text => { f.inputs.push({ chatId: chat.id, text }); await f.gate?.promise; if (f.error) throw Error(f.error); return { text: "Native fixture result\n<relay-goal>complete</relay-goal>" }; }, stop: async () => f.gate?.resolve() };
   } });
   manager.on("event", event => f.events.push(event)); t.after(() => manager.shutdown());
   f.chat = await manager.createChat({ agent: "claude", title: "Claude command refresh" });

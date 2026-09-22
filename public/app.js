@@ -129,6 +129,22 @@ function node(tag, className, text) {
   return element;
 }
 
+function messageTime(createdAt) {
+  if (!createdAt) return null;
+  const date = new Date(createdAt);
+  if (!Number.isFinite(date.getTime())) return null;
+  const time = node("time", "message-time", new Intl.DateTimeFormat(undefined, {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(date));
+  time.dateTime = date.toISOString();
+  time.title = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "full",
+    timeStyle: "long",
+  }).format(date);
+  return time;
+}
+
 function renderChats() {
   sidebar.render();
 }
@@ -181,6 +197,8 @@ function renderMessage(message, streaming = false) {
     for (const file of message.attachments) files.append(file.id ? chatControls.attachmentButton(file, { messageId: message.id }) : node("span", "muted", file.name));
     body.append(files);
   }
+  const timestamp = messageTime(message.createdAt);
+  if (timestamp) body.append(timestamp);
   wrapper.append(body);
   return wrapper;
 }

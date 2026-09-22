@@ -132,7 +132,7 @@ export class ChatControls {
         catch (failure) { error.textContent = failure.message; }
         finally { save.disabled = false; }
       }, "primary-button");
-      this.dialog("Edit goal", input, error, save); input.focus(); return;
+      this.dialog("Edit Codex goal", input, error, save); input.focus(); return;
     }
     if (action === "clear" && !confirm("Clear this goal? The conversation and workspace will be kept.")) return;
     try {

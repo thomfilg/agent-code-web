@@ -214,7 +214,9 @@ button { border: 0; cursor: pointer; }
 .message-body { min-width: 0; padding-top: 2px; }
 .message-label { margin-bottom: 7px; color: var(--faint); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .message-text { color: #d9ddd5; font-size: 14px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.message-time { display: block; margin-top: 6px; color: var(--faint); font-size: 9px; font-weight: 500; line-height: 1.2; letter-spacing: .02em; }
 .message.user .message-text { color: #c0c5bb; }
+.message.user .message-time { text-align: right; }
 .message.system { opacity: .82; }
 .message.system.error .message-text { color: var(--red); }
 .message.assistant:has(+ .inline-tool-group) { margin-bottom: 8px; }
