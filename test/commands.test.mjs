@@ -184,6 +184,24 @@ test("Claude /goal resumes internally when native ScheduleWakeup cannot retain t
   assert.deepEqual(store.get(chat.id).queuedMessages, []);
 });
 
+test("Claude retains identical system instructions when a paused Relay goal receives ordinary input", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const settings = [];
+  const manager = new RuntimeManager({ store, config: testConfig(root), commands: { list: async () => ({ commands: [{ name: "goal", kind: "CLI command", web: false }] }) },
+    broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => ({
+      start: async () => {}, stop: async () => {}, hasScheduledWork: () => false,
+      send: async (_text, turnSettings) => { settings.push(turnSettings); return { text: settings.length === 1 ? "Need input\n<relay-waiting>yes</relay-waiting>" : "Continuing" }; },
+    }) });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "claude", title: "Stable goal instructions", autoTitle: false });
+  await manager.send(chat.id, "/goal complete the task");
+  assert.equal(store.get(chat.id).goal.status, "paused");
+  await manager.send(chat.id, "Here is the requested correction");
+  assert.equal(settings.length, 2);
+  assert.equal(settings[1].systemPrompt, settings[0].systemPrompt);
+  assert.match(settings[0].systemPrompt, /Relay may manage a persistent goal/);
+});
+
 test("an admitted Codex skill keeps structured dispatch while unknown names never reach the adapter", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const calls = [], commands = { list: async () => ({ commands: [{ name: "work", kind: "Skill", path: "/fixture/work/SKILL.md" }] }) };
