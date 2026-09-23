@@ -305,7 +305,22 @@ export class CodexAdapter {
   }
 
   checkpointNotice(error) {
-    const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : "UNCLASSIFIED";
+    const safeReasons = new Map([
+      ["Native checkpoint source is unavailable", "SOURCE_UNAVAILABLE"],
+      ["Native fork source is unavailable or temporary", "SOURCE_UNAVAILABLE"],
+      ["Native checkpoint requires a private profile", "PROFILE_SCOPE"],
+      ["Native history is outside the selected private profile", "PROFILE_SCOPE"],
+      ["Native history has no complete records", "NO_COMPLETE_RECORDS"],
+      ["Native session snapshot is incomplete or too large", "INCOMPLETE_SNAPSHOT"],
+      ["Unsupported native session file", "UNSUPPORTED_FILE"],
+      ["Invalid native session header", "INVALID_HEADER"],
+      ["Native session identity does not match its requested thread", "IDENTITY_MISMATCH"],
+      ["Native session contains an invalid record", "INVALID_RECORD"],
+      ["Invalid native fork goal", "INVALID_GOAL_SNAPSHOT"],
+      ["Native session transfer timed out", "TRANSFER_TIMEOUT"],
+    ]);
+    const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code
+      : safeReasons.get(error?.message) || "UNCLASSIFIED";
     const step = ["read", "capture", "save"].includes(error?.checkpointStep) ? error.checkpointStep : "unknown";
     const diagnostic = `${step}:${code}`;
     if (this.lastNativeCheckpointFailure !== diagnostic) {

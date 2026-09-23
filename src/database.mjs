@@ -404,6 +404,14 @@ export async function openDatabase(config) {
     connection = { connectionString: url.toString(), ssl: config.tls ? { rejectUnauthorized: true } : false };
   }
   const pool = new pg.Pool({ ...connection, max: 6, connectionTimeoutMillis: 10000 });
+  // PostgreSQL can close an idle client during maintenance or failover. pg
+  // emits that error on the pool rather than on an in-flight query; without a
+  // listener Node terminates the entire controller. The pool removes the dead
+  // client and opens a new one on the next query.
+  pool.on("error", error => {
+    const code = typeof error?.code === "string" && /^[A-Z0-9]{5}$/.test(error.code) ? error.code : "UNKNOWN";
+    console.error(`PostgreSQL idle connection closed (${code}); waiting for the pool to reconnect.`);
+  });
   const records = new EncryptedRecords({ pool, cipher: new RecordCipher(key) });
   try { await records.initialize(); }
   catch (error) { await pool.end(); await embedded?.stop(); throw error; }

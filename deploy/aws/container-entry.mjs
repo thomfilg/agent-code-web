@@ -1,5 +1,6 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { provisionWorkerKey } from "./worker-key.mjs";
 
 // The deployer supplies this one controller-only secret through an ephemeral
 // environment file. Never place it in the image, worker user-data or logs.
@@ -9,9 +10,7 @@ if (process.env.AGENT_WORKER_BACKEND !== "ec2") throw new Error("The AWS control
 if (!encodedKey || encodedKey.length > 16384) throw new Error("Configure the controller worker transport key");
 const key = Buffer.from(encodedKey, "base64").toString();
 if (!key.startsWith("-----BEGIN OPENSSH PRIVATE KEY-----\n")) throw new Error("Invalid worker transport key format");
-await mkdir("/tmp/relay-transport", { mode: 0o700, recursive: true });
-await writeFile("/tmp/relay-transport/worker-key", key, { mode: 0o600, flag: "wx" });
-process.env.AGENT_EC2_SSH_PRIVATE_KEY = "/tmp/relay-transport/worker-key";
+process.env.AGENT_EC2_SSH_PRIVATE_KEY = await provisionWorkerKey("/tmp/relay-transport", key);
 process.env.HOME = "/var/lib/relay/control/home";
 await mkdir(process.env.HOME, { mode: 0o700, recursive: true });
 const child = spawn(process.execPath, ["src/server.mjs"], { stdio: "inherit", env: process.env });
