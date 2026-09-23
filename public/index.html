@@ -378,6 +378,13 @@
         <p class="muted">Connect your own GitHub account to choose from the repositories it can access.</p>
         <div id="github-account-list" class="agent-account-list" aria-live="polite"></div>
         <button type="button" class="secondary-button" id="github-new">＋ Add GitHub connection</button>
+        <form id="github-permission-form" class="github-permission-form" hidden>
+          <h3 id="github-permission-title">Choose GitHub permissions</h3>
+          <p class="muted">Relay asks GitHub only for the permissions selected here. GitHub CLI also requires its baseline account scopes.</p>
+          <label class="github-permission-option"><input type="checkbox" checked disabled><span><strong>Repositories and pull requests</strong><small>Required · clone, push branches, open pull requests, and read checks.</small></span></label>
+          <label class="github-permission-option"><input type="checkbox" id="github-permission-workflows"><span><strong>Workflows</strong><small>Optional · add or update files in <code>.github/workflows/</code>. Without this, GitHub rejects those commits.</small></span></label>
+          <div class="dialog-actions"><button type="button" class="secondary-button" id="github-permission-cancel">Cancel</button><button type="submit" class="primary-button" id="github-permission-submit">Continue to GitHub</button></div>
+        </form>
         <form id="github-rename-form" hidden>
           <h3 id="github-rename-title">Rename connection</h3>
           <label><span>Company</span><select id="github-connection-company" required></select></label>

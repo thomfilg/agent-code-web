@@ -3,6 +3,18 @@ import { GitHubLogin, GitHubLoginError } from "./github-login.mjs";
 import { companyForChat } from "../public/company-scope.js";
 const fail = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const listingChanged = () => fail("GitHub connection changed while loading repositories. Refresh the list.", 409);
+export const GITHUB_PERMISSIONS = Object.freeze(["repositories", "workflows"]);
+const normalizePermissions = (value, fallback = ["repositories"]) => {
+  if (value === undefined) value = fallback;
+  if (!Array.isArray(value) || value.some(permission => typeof permission !== "string" || !GITHUB_PERMISSIONS.includes(permission))) throw fail("Choose only the GitHub permissions shown by Relay.");
+  return ["repositories", ...new Set(value.filter(permission => permission !== "repositories"))];
+};
+const permissionScopes = permissions => permissions.includes("workflows") ? ["workflow"] : [];
+const oauthScopes = value => {
+  const scopes = typeof value === "string" ? value.split(",") : Array.isArray(value) ? value : [];
+  return [...new Set(scopes.filter(scope => typeof scope === "string").map(scope => scope.trim()).filter(Boolean))].sort();
+};
+const grantedPermissions = scopes => ["repositories", ...(scopes.includes("workflow") ? ["workflows"] : [])];
 const rejectLegacyScope = input => {
   if (["companies", "organization", "allowUnassigned"].some(key => Object.hasOwn(input, key))) throw fail("GitHub repository access follows your GitHub permissions. Reload Relay to use the current account settings.");
 };
@@ -26,7 +38,8 @@ export class GitHubConnection {
   }
   async recover() {
     for (const record of await this.records.list("github_connection")) if (["starting", "pending"].includes(record.loginState)) {
-      await this.put({ ...record, loginState: "disconnected", error: "Relay restarted before sign-in finished. Reconnect to get a new code." });
+      const connected = Boolean(record.token && (!record.expiresAt || Date.parse(record.expiresAt) > Date.now()));
+      await this.put({ ...record, loginState: connected ? "connected" : "disconnected", error: connected ? "The new GitHub sign-in was interrupted; the previous credential is still connected." : "Relay restarted before sign-in finished. Reconnect to get a new code." });
     }
   }
   async connections() {
@@ -37,7 +50,9 @@ export class GitHubConnection {
   public(connection) {
     const { token, companies, organization, allowUnassigned, scopeNeedsReview, ...value } = connection;
     const flow = [...this.pending.values()].find(flow => flow.connectionId === connection.id);
-    return { ...value, name: value.name || value.login || "GitHub", revision: value.revision || 0, repositoryAccess: "github", ...(this.companies ? { companyId: value.companyId || null, scopeNeedsReview: !value.companyId } : {}), connected: Boolean(token && (!value.expiresAt || Date.parse(value.expiresAt) > Date.now())), ...(flow ? { signIn: { id: flow.id, state: flow.code ? "pending" : "starting", ...flow.code } } : {}) };
+    const requestedPermissions = normalizePermissions(value.requestedPermissions);
+    const verifiedScopes = oauthScopes(value.grantedScopes);
+    return { ...value, requestedPermissions, grantedPermissions: verifiedScopes.length ? grantedPermissions(verifiedScopes) : [], permissionsVerified: Boolean(verifiedScopes.length), name: value.name || value.login || "GitHub", revision: value.revision || 0, repositoryAccess: "github", ...(this.companies ? { companyId: value.companyId || null, scopeNeedsReview: !value.companyId } : {}), connected: Boolean(token && (!value.expiresAt || Date.parse(value.expiresAt) > Date.now())), ...(flow ? { signIn: { id: flow.id, state: flow.code ? "pending" : "starting", permissions: flow.permissions, ...flow.code } } : {}) };
   }
   async get(id) {
     await this.ready;
@@ -84,6 +99,7 @@ export class GitHubConnection {
   async connectUnlocked(input, { stillActive = () => true } = {}) {
     let { method, token, expiresAt } = input;
     const old = input.id ? await this.get(input.id) : null;
+    const requestedPermissions = normalizePermissions(input.permissions ?? old?.requestedPermissions);
     if (old && input.revision !== (old.revision || 0)) throw fail("GitHub connection changed. Reload before saving.", 409);
     const companyId = await this.companyForConnection(input, old);
     const name = String(input.name ?? old?.name ?? "GitHub").trim();
@@ -99,11 +115,14 @@ export class GitHubConnection {
     if (!Number.isSafeInteger(account.id) || account.id <= 0 || typeof account.login !== "string" || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(account.login)) throw fail("GitHub returned an invalid account identity. Try signing in again.", 502);
     if (old?.accountId && old.accountId !== account.id) throw fail("You signed in to a different GitHub account. Add it as a new connection instead.", 409);
     const detectedExpiry = response.headers.get("github-authentication-token-expiration");
+    const grantedScopes = oauthScopes(response.headers.get("x-oauth-scopes"));
+    if (requestedPermissions.includes("workflows") && grantedScopes.length && !grantedScopes.includes("workflow")) throw fail("GitHub did not grant workflow access. Sign in again and approve the Workflows permission.", 403);
     const dates = [detectedExpiry, expiresAt].filter(Boolean).map(date => Date.parse(date));
     if (dates.some(date => !Number.isFinite(date) || date <= Date.now())) throw fail("The token expiry must be in the future");
     const connection = {
       id: old?.id || `github_${randomUUID()}`, name, ...(companyId ? { companyId } : {}), revision: (old?.revision || 0) + 1,
       login: account.login, accountId: account.id, token, loginState: "connected", error: null,
+      requestedPermissions, grantedScopes,
       expiresAt: dates.length ? new Date(Math.min(...dates)).toISOString() : null, connectedAt: new Date().toISOString(),
     };
     if (!stillActive()) throw fail("GitHub sign-in was cancelled.", 409);
@@ -231,14 +250,15 @@ export class GitHubConnection {
       if (this.closed) throw fail("Relay is stopping. Retry after it restarts.", 503);
       if (input.token !== undefined || input.method !== undefined) throw fail("Use browser sign-in to connect GitHub.");
       const old = input.id ? await this.get(input.id) : null;
+      const permissions = normalizePermissions(input.permissions, old?.requestedPermissions);
       const existing = [...this.pending.values()].find(flow => flow.connectionId === old?.id);
       if (existing) return { id: existing.id, connection: this.public(old) };
       if (this.pending.size >= 3) throw fail("Finish or cancel an existing GitHub sign-in first.", 429);
       if (old && input.revision !== (old.revision || 0)) throw fail("GitHub connection changed. Reload before signing in.", 409);
       const companyId = await this.companyForConnection(input, old);
-      const connection = { ...old, id: old?.id || `github_${randomUUID()}`, ...(companyId ? { companyId } : {}), name: old?.name || "New GitHub account", token: null, loginState: "starting", error: null, revision: (old?.revision || 0) + 1 };
+      const connection = { ...old, id: old?.id || `github_${randomUUID()}`, ...(companyId ? { companyId } : {}), name: old?.name || "New GitHub account", token: old?.token || null, loginState: "starting", error: null, revision: (old?.revision || 0) + 1 };
       await this.put(connection);
-      const flow = { id: randomUUID(), connectionId: connection.id, client: this.loginFactory(), code: null };
+      const flow = { id: randomUUID(), connectionId: connection.id, client: this.loginFactory(), code: null, permissions };
       this.pending.set(flow.id, flow);
       flow.task = this.completeDevice(flow, connection);
       return { id: flow.id, connection: this.public(connection) };
@@ -252,11 +272,11 @@ export class GitHubConnection {
   }
   async completeDevice(flow, connection) {
     try {
-      const token = await flow.client.start(code => { if (this.pending.get(flow.id) === flow) flow.code = code; });
+      const token = await flow.client.start(code => { if (this.pending.get(flow.id) === flow) flow.code = code; }, { scopes: permissionScopes(flow.permissions) });
       const commit = this.queue.then(async () => {
         if (this.pending.get(flow.id) !== flow || this.closed) return;
         const current = await this.get(connection.id);
-        await this.connectUnlocked({ id: current.id, revision: current.revision, name: current.login ? current.name : undefined, token }, { stillActive: () => this.pending.get(flow.id) === flow && !this.closed });
+        await this.connectUnlocked({ id: current.id, revision: current.revision, name: current.login ? current.name : undefined, token, permissions: flow.permissions }, { stillActive: () => this.pending.get(flow.id) === flow && !this.closed });
         const saved = await this.get(current.id);
         if (!connection.login) await this.put({ ...saved, name: saved.login });
         this.pending.delete(flow.id);
@@ -267,7 +287,8 @@ export class GitHubConnection {
         if (this.pending.get(flow.id) !== flow) return;
         this.pending.delete(flow.id);
         const current = await this.get(connection.id);
-        await this.put({ ...current, token: null, loginState: "disconnected", error: error instanceof GitHubLoginError ? new GitHubLoginError(error.code).message : error.statusCode === 409 ? "You signed in to a different GitHub account. Add it as a new connection instead." : "GitHub sign-in could not finish. Check the connection and try again." });
+        const connected = Boolean(current.token && (!current.expiresAt || Date.parse(current.expiresAt) > Date.now()));
+        await this.put({ ...current, loginState: connected ? "connected" : "disconnected", error: error instanceof GitHubLoginError ? new GitHubLoginError(error.code).message : error.statusCode ? error.message : "GitHub sign-in could not finish. Check the connection and try again." });
       });
       this.queue = finish.catch(() => {}); await finish.catch(() => {});
     } finally { await flow.client.close().catch(() => {}); }
@@ -281,7 +302,8 @@ export class GitHubConnection {
     const result = this.queue.then(async () => {
       await closing;
       const connection = await this.get(flow.connectionId);
-      await this.put({ ...connection, token: null, loginState: "disconnected", error: new GitHubLoginError("cancelled").message });
+      const connected = Boolean(connection.token && (!connection.expiresAt || Date.parse(connection.expiresAt) > Date.now()));
+      await this.put({ ...connection, loginState: connected ? "connected" : "disconnected", error: connected ? null : new GitHubLoginError("cancelled").message });
       return this.status();
     });
     this.queue = result.catch(() => {}); return result;

@@ -638,6 +638,13 @@ dialog { max-height: calc(100dvh - 28px); }
 .company-settings-context { color: var(--muted); font-size: 12px; }
 [data-company-scoped="true"] #mcp-company-filter, [data-company-scoped="true"] #mcp-manage-companies,
 [data-company-scoped="true"] #github-company-filter, [data-company-scoped="true"] #github-manage-companies { display: none; }
+.github-permission-form { display: grid; gap: 10px; margin-top: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.github-permission-form h3, .github-permission-form p { margin: 0; }
+.github-permission-option { display: flex !important; align-items: flex-start; gap: 10px; margin: 0 !important; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+.github-permission-option input { width: 16px !important; height: 16px; margin: 2px 0 0; accent-color: var(--lime); flex: none; }
+.github-permission-option span, .github-permission-option small { display: block; }
+.github-permission-option small { margin-top: 3px; color: var(--muted); line-height: 1.45; }
+.github-permission-summary { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
 @media (max-width: 540px) { .company-settings-grid { grid-template-columns: 1fr; } }
 @media (max-width: 560px) { .company-plugin-columns, .company-plugin-row { grid-template-columns: minmax(0, 1fr) 58px 58px; padding-inline: 8px; } .company-plugin-source-row { grid-template-columns: 1fr; } }
 .browser-options { flex-wrap: wrap; }

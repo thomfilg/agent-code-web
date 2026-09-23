@@ -34,7 +34,8 @@ export class GitHubLogin {
     Object.assign(this, { executable, spawn: spawnImpl, run: runImpl, directory, timeoutMs, startupTimeoutMs });
     this.closed = false;
   }
-  async start(onCode) {
+  async start(onCode, { scopes = [] } = {}) {
+    if (!Array.isArray(scopes) || scopes.some(scope => scope !== "workflow") || new Set(scopes).size !== scopes.length) throw new GitHubLoginError("start");
     this.profile = await mkdtemp(path.join(this.directory, "relay-gh-login-"));
     await chmod(this.profile, 0o700);
     if (this.closed) { await this.cleanup(); throw new GitHubLoginError("cancelled"); }
@@ -46,7 +47,8 @@ export class GitHubLogin {
         await this.cleanup(); error ? reject(error) : resolve(token);
       };
       this.fail = reason => { this.failure = new GitHubLoginError(reason); void this.close(); };
-      try { this.child = this.spawn(this.executable, ["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web", "--insecure-storage"], { env: this.env, cwd: this.profile, stdio: ["ignore", "pipe", "pipe"] }); }
+      const args = ["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web", "--insecure-storage", ...(scopes.length ? ["--scopes", scopes.join(",")] : [])];
+      try { this.child = this.spawn(this.executable, args, { env: this.env, cwd: this.profile, stdio: ["ignore", "pipe", "pipe"] }); }
       catch { void finish(new GitHubLoginError()); return; }
       const consume = chunk => {
         output = (output + chunk.toString()).slice(-16_384);
