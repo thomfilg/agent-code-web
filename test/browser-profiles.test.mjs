@@ -151,3 +151,16 @@ test("an old image Chrome is replaced by the current stable build for newer prof
   assert.ok(calls.some(call => call.includes("browsers install chrome@stable")));
   assert.equal(await prepareChrome(executor, capture), "/usr/bin/google-chrome", "no profile keeps the image Chrome");
 });
+
+test("Chrome's own UI pages are never offered or selected as tabs", async () => {
+  const { ChromeBrowser } = await import("../src/browser-worker.mjs");
+  const browser = new ChromeBrowser();
+  browser.call = async () => ({ targetInfos: [
+    { type: "page", targetId: "popup", title: "", url: "chrome://omnibox-popup.top-chrome/" },
+    { type: "page", targetId: "aim", title: "", url: "chrome://omnibox-popup.top-chrome/omnibox_popup_aim.html" },
+    { type: "background_page", targetId: "extension", title: "", url: "chrome-extension://id/background.html" },
+    { type: "page", targetId: "tab", title: "Blank", url: "about:blank" },
+    { type: "page", targetId: "settings", title: "Settings", url: "chrome://settings/" },
+  ] });
+  assert.deepEqual((await browser.tabs()).map(tab => tab.id), ["tab", "settings"]);
+});

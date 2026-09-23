@@ -248,7 +248,9 @@ export class ChromeBrowser extends EventEmitter {
   }
   async tabs() {
     const { targetInfos } = await this.call("Target.getTargets");
-    return targetInfos.filter(tab => tab.type === "page").map(tab => ({ id: tab.targetId, title: tab.title.slice(0, 300), url: tab.url.slice(0, 4000) }));
+    // Chrome reports some of its own UI (e.g. chrome://omnibox-popup.top-chrome/) as
+    // pages; they are not tabs and reject emulation, so never offer or select them.
+    return targetInfos.filter(tab => tab.type === "page" && !/^chrome:\/\/[^/]+\.top-chrome\//.test(tab.url)).map(tab => ({ id: tab.targetId, title: tab.title.slice(0, 300), url: tab.url.slice(0, 4000) }));
   }
   statusStamp() { return {tabId:this.tabId,viewport:this.viewport,failed:this.failed,targetRevision:this.targetRevision}; }
   statusMatches(stamp) { return stamp.tabId===this.tabId&&stamp.viewport===this.viewport&&stamp.failed===this.failed&&stamp.targetRevision===this.targetRevision; }
