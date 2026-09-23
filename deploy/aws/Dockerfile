@@ -27,7 +27,9 @@ COPY src ./src
 COPY public ./public
 COPY chrome-extension ./chrome-extension
 COPY deploy/aws/container-entry.mjs ./deploy/aws/container-entry.mjs
+COPY deploy/aws/worker-key.mjs ./deploy/aws/worker-key.mjs
 RUN chmod -R a+rX /app \
+    && node --input-type=module -e "await import('./deploy/aws/worker-key.mjs')" \
     && codex --version && claude --version && gh --version && aws --version
 ENV AGENT_WEB_HOST=0.0.0.0 AGENT_WEB_PORT=8787 AGENT_WORKER_BACKEND=ec2 \
     AGENT_CONTROL_DIR=/var/lib/relay/control AGENT_DATA_DIR=/var/lib/relay/state \
