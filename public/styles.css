@@ -120,17 +120,12 @@ button { border: 0; cursor: pointer; }
 .onboarding-hint { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin: 8px 0; }
 .workspace-strip, .repository-strip, .workspace-strip .selected-repositories { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .workspace-strip { position: relative; flex-wrap: nowrap; margin-bottom: 6px; }
-.chat-context-strip { position: relative; display: flex; align-items: center; min-width: 0; height: 34px; margin-bottom: 6px; padding: 0 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
-.chat-context-strip:empty { display: none; }
-.chat-context-strip > .pull-request-bars { flex: 1.15 1 40%; min-width: 0; }
-.chat-context-strip > .workspace-strip { flex: 1 1 38%; min-width: 42px; }
-.chat-context-strip > #goal-status { flex: 0 1 190px; max-width: 24%; min-width: 72px; }
+.chat-context-strip { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; height: 28px; margin-bottom: 4px; }
+.chat-context-strip:not(:has(> :not(:empty))) { display: none; }
+.chat-context-strip > .pull-request-bars { flex: 1 1 auto; min-width: 0; }
+.chat-context-strip > #goal-status { flex: 0 1 120px; max-width: 18%; min-width: 72px; margin-left: auto; }
 .chat-context-strip > :empty { display: none; }
-.chat-context-strip > :not(:first-child):not(:empty) { border-left: 1px solid var(--line); }
-#chat-workspace-strip.workspace-strip { margin-bottom: 0; overflow: visible; }
-.chat-context-strip #chat-workspace-strip { padding-left: 5px; }
-.chat-context-strip #goal-status { padding-left: 3px; }
-.chat-context-strip #chat-workspace-strip :is(.repository-name, .repository-branch, .repository-chip select, .environment-chip) { background: transparent; }
+#chat-workspace-strip.workspace-strip { margin-bottom: 4px; overflow: visible; }
 .workspace-strip .selected-repositories { flex: 1 1 auto; flex-flow: row nowrap; margin: 0; overflow: hidden; }
 .workspace-strip .repository-chip { padding: 0; border: 0; border-radius: 5px; gap: 4px; background: transparent; min-width: 0; max-width: 100%; }
 .workspace-strip .repository-name, .workspace-strip .repository-branch, .workspace-strip .repository-chip select, .environment-chip { background: var(--panel-soft); border: 0; border-radius: 5px; color: var(--muted); font-size: 10.5px; height: 22px; padding: 3px 5px; }
@@ -159,7 +154,14 @@ button { border: 0; cursor: pointer; }
 .repository-overflow-row a { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text); text-decoration: none; white-space: nowrap; }
 .repository-overflow-row span { color: var(--muted); }
 .composer #chat-agent-select.account-select { width: auto; max-width: 210px; min-width: 80px; }
-#chat-agent-account { padding: 0 8px; }
+.chat-agent-compact { position: relative; flex: none; min-width: 0; }
+.chat-agent-compact #chat-agent-select, .chat-agent-compact #chat-agent-select.account-select { width: 82px; min-width: 82px; color: transparent; }
+.chat-agent-compact #chat-agent-select option { color: var(--text); }
+.chat-agent-compact-label { position: absolute; inset: 0 20px 0 8px; display: flex; align-items: center; overflow: hidden; color: var(--muted); font-size: var(--type-control); white-space: nowrap; pointer-events: none; }
+.model-select-compact { position: relative; flex: none; min-width: 0; }
+#composer .model-select-compact .model-select { width: 100px; min-width: 100px; max-width: 100px; color: transparent; field-sizing: fixed; }
+#composer .model-select-compact .model-select option { color: var(--text); }
+.model-compact-label { position: absolute; inset: 0 20px 0 8px; display: flex; align-items: center; overflow: hidden; color: var(--muted); font-size: var(--type-control); white-space: nowrap; pointer-events: none; }
 @media (max-width: 600px) {
   .new-chat-overview, .new-chat-progress { width: calc(100% - 22px); padding-top: 20px; }
   .new-chat-composer .draft-agent-picker { flex: 1 1 calc(100% - 40px); }
@@ -536,7 +538,7 @@ dialog { max-height: calc(100dvh - 28px); }
 .chat-context-strip > .pull-request-bars { margin-bottom: 0; }
 .pull-request-bars.expanded { max-height: min(340px, 45vh); padding: 5px; border: 1px solid var(--line); border-radius: 9px; background: #171916; overflow-y: auto; scrollbar-gutter: stable; }
 .chat-context-strip > .pull-request-bars.expanded { position: absolute; z-index: 12; right: 0; bottom: calc(100% + 6px); left: 0; width: 100%; box-shadow: 0 14px 40px #0009; }
-.chat-context-strip > .pull-request-bars:not(.expanded) .pull-request-bar { height: 32px; min-height: 32px; max-height: 32px; padding-inline: 5px; border: 0; border-radius: 0; background: transparent; }
+.chat-context-strip > .pull-request-bars:not(.expanded) .pull-request-bar { height: 28px; min-height: 28px; max-height: 28px; padding-inline: 6px; }
 .pull-request-bar { display: flex; align-items: center; gap: 8px; height: var(--pr-row-height); min-height: var(--pr-row-height); max-height: var(--pr-row-height); border-radius: 8px; background: #242622; border: 1px solid var(--line); padding: 3px 7px; font-size: var(--type-meta); }
 .pull-request-bars.expanded .pr-tray-anchor { position: sticky; top: 0; z-index: 4; box-shadow: 0 4px 9px #10110fcc; }
 .pr-tray-controls { display: flex; align-items: center; flex: none; gap: 5px; white-space: nowrap; }
@@ -981,7 +983,7 @@ dialog { max-height: calc(100dvh - 28px); }
 .queue-send-now { flex: none; padding: 6px 0; border: 0; background: transparent; color: var(--lime); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .queue-send-now:disabled { opacity: .55; cursor: wait; }
 .queue-send-now:focus-visible { outline: 2px solid var(--lime); outline-offset: 3px; border-radius: 3px; }
-.goal-summary { width: 100%; max-width: 100%; height: 32px; padding: 5px 7px; border: 0; border-radius: 5px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.goal-summary { width: 100%; max-width: 100%; height: 28px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .goal-summary:hover { background: #ffffff08; }
 #goal-status:not(:empty) { display: flex; min-width: 0; font-size: var(--type-control); }
 .message-page-button { display: block; margin: 12px auto; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--muted); font: inherit; cursor: pointer; }
@@ -1079,10 +1081,11 @@ dialog { max-height: calc(100dvh - 28px); }
 #composer #message-input:focus { border-color: #59664b; box-shadow: 0 0 0 3px rgba(201,242,124,.03); }
 #composer .composer-footer { min-height: 30px; margin-top: 3px; padding: 0 3px; gap: 6px; flex-wrap: nowrap; }
 #composer .composer-pickers { gap: 3px; }
+#composer .compact-model-controls { margin-left: auto; }
 #composer .composer-pickers select, #composer .composer-pickers .control-menu > summary { min-height: 28px; height: 28px; padding: 3px 6px; border-color: transparent; border-radius: 6px; background: transparent; }
 #composer .saved-prompts-trigger { flex-basis: 28px; width: 28px; height: 28px; border-color: transparent; }
 #composer .composer-pickers .composer-add > summary { width: 28px; }
-#composer .composer-actions { gap: 4px; }
+#composer .composer-actions { gap: 4px; margin-left: 0; }
 #composer .composer-actions .usage-menu > summary { width: 28px; height: 28px; border-color: transparent; }
 #composer .composer-input-row .send-button { position: absolute; right: 7px; bottom: 6px; width: 28px; height: 28px; border-radius: 8px; }
 .composer-wrap > .composer-help { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
@@ -1094,6 +1097,8 @@ dialog { max-height: calc(100dvh - 28px); }
   .composer-pickers, .composer .compact-model-controls { gap: 3px; }
   .composer-pickers select, .composer-pickers .control-menu > summary { font-size: var(--type-control); padding: 4px; }
   .composer #chat-agent-select { width: 69px; }
+  #composer .chat-agent-compact #chat-agent-select, #composer .chat-agent-compact #chat-agent-select.account-select { width: 64px; min-width: 64px; }
+  #composer .model-select-compact .model-select { width: 76px; min-width: 76px; max-width: 76px; }
   .composer-pickers .composer-add > summary { width: 27px; }
   .composer .compact-model-controls .model-select { min-width: 57px; max-width: 100px; }
   .composer .effort-menu > summary { min-width: 47px; gap: 5px; }

@@ -8,6 +8,12 @@ export function modelOptionLabel(model = {}) {
   if (model.id === "default") return `${label} · ${detail}`;
   return detail;
 }
+export function compactModelLabel(model = {}) {
+  const detail = String(model.description || "").split("·")[0].trim();
+  const claude = /\b(Opus|Fable|Sonnet|Haiku)\s+\d+(?:\.\d+)*/i.exec(detail || String(model.label || ""));
+  if (claude) return claude[0].replace(/^./, character => character.toUpperCase());
+  return String(model.label || model.id || "Model").replace(/^Default\s*(?:\(recommended\))?\s*(?:[·:-]\s*)?/i, "") || "Model";
+}
 export function claudeCatalogMatchesChat(context, chat) {
   // Only named Claude discovery fills the metadata-only command fallback.
   // Do not trigger Codex model probes or shared-host CLI command discovery.
@@ -18,7 +24,7 @@ export class ModelPicker {
   static clearCatalogs() { catalogs.clear(); }
   constructor({ root, api, onChange, onCatalogReady = () => {} }) {
     Object.assign(this, { root, api, onChange, onCatalogReady }); this.version = 0;
-    this.model = root.querySelector(".model-select"); this.effort = root.querySelector(".effort-select"); this.note = root.querySelector(".model-note");
+    this.model = root.querySelector(".model-select"); this.compactLabel = root.querySelector(".model-compact-label"); this.effort = root.querySelector(".effort-select"); this.note = root.querySelector(".model-note");
     this.slider = root.querySelector(".effort-slider"); this.effortLabel = root.querySelector(".effort-label");
     this.model.addEventListener("change", () => { this.renderEfforts(); this.changed(); });
     this.effort.addEventListener("change", () => this.changed());
@@ -36,7 +42,7 @@ export class ModelPicker {
     const context = { chatId: this.chatId, ownerId: this.ownerId, agent, agentAccountId: this.agentAccountId, model: selected.model || null };
     this.root.dataset.status = "loading";
     this.root.hidden = !agent || agent === "mock";
-    this.model.replaceChildren(option("", "Loading models…")); this.model.disabled = true; this.effort.disabled = true;
+    this.model.replaceChildren(option("", "Loading models…")); if (this.compactLabel) this.compactLabel.textContent = "Model"; this.model.disabled = true; this.effort.disabled = true;
     this.effort.replaceChildren(option("", "Default effort")); this.note.textContent = "";
     this.syncEffort();
     if (!agent || agent === "mock") return;
@@ -65,7 +71,7 @@ export class ModelPicker {
       // Selected-account model discovery also supplies native command metadata.
       // Notify only after this exact selection's result has been accepted.
       this.onCatalogReady(context);
-    } catch (error) { if (version === this.version) { this.model.replaceChildren(option("", "Default model")); this.note.textContent = error.message; this.root.dataset.status = "error"; this.key = null; } }
+    } catch (error) { if (version === this.version) { this.model.replaceChildren(option("", "Default model")); if (this.compactLabel) this.compactLabel.textContent = "Model"; this.note.textContent = error.message; this.root.dataset.status = "error"; this.key = null; } }
   }
   renderEfforts(selected = this.effort.value, ultracode = false) {
     const model = this.catalog?.models.find(item => item.id === (this.model.value || this.catalog.configuredDefault)) || (!this.model.value ? this.catalog?.models.find(item => item.isDefault) : null);
@@ -83,6 +89,7 @@ export class ModelPicker {
     }
     this.effort.disabled = !levels.length || model?.disabled === true || this.noEnabledModels;
     this.note.textContent = model?.disabled ? model.disabledReason || model.description || "This model is currently unavailable." : this.noEnabledModels ? "No enabled Claude models were reported for this account. Reload to retry." : this.catalog?.note || "";
+    if (this.compactLabel) this.compactLabel.textContent = compactModelLabel(model || { label: this.model.options[this.model.selectedIndex]?.textContent });
     if (ultracode) this.note.textContent = model?.ultracode?.reason || "Ultracode has not been verified for this account and model. Choose ordinary effort.";
     this.syncEffort();
   }

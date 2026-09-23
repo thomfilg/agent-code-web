@@ -12,8 +12,11 @@ test("compact mobile composer switches agents with Sol/Opus high defaults and pr
   await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("high");
   await expect(page.locator("#composer-model-controls .model-note")).not.toBeVisible();
   await page.getByLabel("Chat agent", { exact: true }).selectOption("claude");
+  await expect(page.locator("#chat-agent-compact-label")).toHaveText("Claude");
+  await expect(page.locator("#chat-agent-account")).toHaveCount(0);
   await expect(page.getByLabel("Chat model", { exact: true })).toHaveValue("opus");
   await expect(page.getByLabel("Chat model", { exact: true }).locator('option[value="opus"]')).toHaveText("Opus 5.5 with 1M context");
+  await expect(page.locator("#composer-model-controls .model-compact-label")).toHaveText("Opus 5.5");
   await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("high");
   expect(page.url()).toBe(url); await expect(page.locator("#chat-title")).toHaveText("Existing alpha");
   await page.getByLabel("Agent mode", { exact: true }).click();
@@ -86,17 +89,20 @@ test("many pull requests collapse to one card row and expand on demand", async (
   const context = page.locator("#chat-context-strip");
   await expect(context.locator("#goal-status")).toBeVisible();
   await expect(context.locator("#pull-request-bars")).toBeVisible();
-  await expect(context.locator("#chat-workspace-strip")).toBeVisible();
+  await expect(page.locator("#chat-workspace-strip")).toBeVisible();
+  await expect(context).toHaveCSS("border-top-width", "0px");
   await expect(context.locator("#goal-status")).toHaveText("Goal · active");
   const compact = await context.evaluate(node => ({
     height: node.getBoundingClientRect().height,
-    childParents: ["goal-status", "pull-request-bars", "chat-workspace-strip"].map(id => document.getElementById(id)?.parentElement?.id),
+    childParents: ["goal-status", "pull-request-bars"].map(id => document.getElementById(id)?.parentElement?.id),
     childOrder: [...node.children].map(child => child.id),
-    centers: ["goal-status", "pull-request-bars", "chat-workspace-strip"].map(id => { const box = document.getElementById(id).getBoundingClientRect(); return box.top + box.height / 2; }),
+    centers: ["goal-status", "pull-request-bars"].map(id => { const box = document.getElementById(id).getBoundingClientRect(); return box.top + box.height / 2; }),
+    workspacePrecedesContext: document.getElementById("chat-workspace-strip")?.nextElementSibling === node,
   }));
-  expect(compact.childParents).toEqual(["chat-context-strip", "chat-context-strip", "chat-context-strip"]);
-  expect(compact.childOrder).toEqual(["chat-workspace-strip", "pull-request-bars", "goal-status"]);
-  expect(compact.height).toBeLessThanOrEqual(34);
+  expect(compact.childParents).toEqual(["chat-context-strip", "chat-context-strip"]);
+  expect(compact.childOrder).toEqual(["pull-request-bars", "goal-status"]);
+  expect(compact.workspacePrecedesContext).toBe(true);
+  expect(compact.height).toBeLessThanOrEqual(28);
   expect(Math.max(...compact.centers) - Math.min(...compact.centers)).toBeLessThanOrEqual(1);
   await page.screenshot({ path: "test-results/compact-context-row.png", fullPage: true });
   await context.getByRole("button", { name: "Goal · active", exact: true }).click();

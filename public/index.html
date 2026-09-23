@@ -197,8 +197,8 @@
             <div id="working-status" class="working-status" hidden></div>
             <div id="system-queue" class="system-queue" aria-live="polite" hidden></div>
             <div id="message-queue" aria-live="polite"></div>
-            <div id="chat-context-strip" class="chat-context-strip" aria-label="Goal, pull request and workspace context">
-              <div id="chat-workspace-strip" class="workspace-strip" aria-label="Chat environment and repositories"></div>
+            <div id="chat-workspace-strip" class="workspace-strip" aria-label="Chat environment and repositories"></div>
+            <div id="chat-context-strip" class="chat-context-strip" aria-label="Goal and pull request context">
               <div id="pull-request-bars" class="pull-request-bars"></div>
               <div id="goal-status"></div>
             </div>
@@ -239,10 +239,15 @@
                     <button type="button" data-agent-mode="dont_ask" data-claude-mode hidden>Deny prompts<small>Deny actions requiring approval; keep existing allowed actions</small></button>
                     <p class="muted" id="mode-provider-note"></p>
                   </div></details>
-                  <select id="chat-agent-select" aria-label="Chat agent" title="Switch agent · conversation and workspace are retained"></select>
-                  <button type="button" class="secondary-button" id="chat-agent-account" hidden title="Choose or manage this chat's agent account">Choose account</button>
+                  <div class="chat-agent-compact">
+                    <select id="chat-agent-select" aria-label="Chat agent" title="Switch agent · conversation and workspace are retained"></select>
+                    <span id="chat-agent-compact-label" aria-hidden="true">Agent</span>
+                  </div>
                   <div class="model-controls compact-model-controls" id="composer-model-controls">
-                    <select class="model-select" aria-label="Chat model" title="Model"></select>
+                    <div class="model-select-compact">
+                      <select class="model-select" aria-label="Chat model" title="Model"></select>
+                      <span class="model-compact-label" aria-hidden="true">Model</span>
+                    </div>
                     <details class="control-menu upward effort-menu"><summary aria-label="Choose effort" class="effort-label">High</summary><div class="control-popover">
                       <p class="menu-caption">Effort · applies next turn</p>
                       <select class="effort-select" aria-label="Chat effort" title="Effort"></select>
