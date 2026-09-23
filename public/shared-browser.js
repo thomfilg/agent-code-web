@@ -34,7 +34,14 @@ export class SharedBrowserPanel {
     $("#browser-connect").onclick = () => this.connect();
     $("#browser-stop").onclick = async () => {
       const chatId = this.chatId, personal = this.mode === "personal"; this.disconnect();
-      try { await this.api(`/api/chats/${chatId}/browser`, { method: "DELETE" }); if (this.chatId === chatId) this.status(personal ? "Chrome stopped. Signed-in access is off; your personal logins stay saved." : "Chrome stopped. Its separate profile has been discarded."); }
+      try { await this.api(`/api/chats/${chatId}/browser`, { method: "DELETE" }); if (this.chatId === chatId) this.status(personal ? "Chrome stopped. Signed-in access is off; your personal logins stay saved." : this.profile ? `Chrome stopped. This chat’s copy of “${this.profile.name}” is kept until the chat is deleted.` : "Chrome stopped. Its separate profile has been discarded."); }
+      catch (error) { if (this.chatId === chatId) this.status(error.message); }
+    };
+    $("#browser-save-profile").onclick = async () => {
+      const chatId = this.chatId, profile = this.profile; if (!profile) return;
+      if (!confirm(`Save this chat’s browser as the next version of “${profile.name}”? Chrome restarts. New chats in this environment will start from it; existing chats keep their own copies.`)) return;
+      this.disconnect(); this.status("Saving this browser to the profile…");
+      try { const result = await this.api(`/api/chats/${chatId}/browser/profile`, { method: "POST", body: JSON.stringify({ confirm: true }) }); if (this.chatId === chatId) this.status(`Saved as version ${result.profile.currentVersion} of “${result.profile.name}”. Signed-in sites: ${result.profile.sites.slice(0, 8).join(", ") || "none"}.`); }
       catch (error) { if (this.chatId === chatId) this.status(error.message); }
     };
     $("#browser-address-form").onsubmit = event => { event.preventDefault(); this.navigate($("#browser-address").value.trim()); };
@@ -141,8 +148,10 @@ export class SharedBrowserPanel {
         this.mode = message.value.mode;
         this.captureVersion = message.value.captureVersion || 1;
         $("#browser-new-tab").disabled = this.mode === "personal"; $("#browser-close-tab").disabled = this.mode === "personal"; $("#browser-tabs").disabled = this.mode === "personal";
-        $("#browser-profile-label").textContent = this.mode === "personal" ? "Your signed-in Chrome" : "Separate profile";
-        $("#browser-footnote").textContent = this.mode === "personal" ? "Signed-in sharing is ON for this chat. Localhost is your computer, not a remote worker. Turn off the top-right switch to revoke access and close the automation tab." : "You and the agent share this page. Localhost reaches the chat’s worker. Your personal Chrome and its saved logins are not connected.";
+        this.profile = this.mode === "personal" ? null : message.value.profile || null;
+        $("#browser-save-profile").hidden = !this.profile;
+        $("#browser-profile-label").textContent = this.mode === "personal" ? "Your signed-in Chrome" : this.profile ? `Profile “${this.profile.name}” v${this.profile.version} · this chat’s copy` : "Separate profile";
+        $("#browser-footnote").textContent = this.profile && this.mode !== "personal" ? `You and the agent share this page. It starts from a private copy of “${this.profile.name}”; changes stay in this chat and are deleted with it unless you choose Save to profile.` : this.mode === "personal" ? "Signed-in sharing is ON for this chat. Localhost is your computer, not a remote worker. Turn off the top-right switch to revoke access and close the automation tab." : "You and the agent share this page. Localhost reaches the chat’s worker. Your personal Chrome and its saved logins are not connected.";
         this.status("Live · click or type in the page. Chrome stays awake while this panel is connected.");
         this.renderTabs(message.value);
       }

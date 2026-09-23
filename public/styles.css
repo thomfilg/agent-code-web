@@ -427,7 +427,9 @@ dialog { max-height: calc(100dvh - 28px); }
 #environment-overview > label { display: block; }
 #environment-backend { padding: 10px 0; }
 .environment-harness-status { margin: -5px 0 12px; overflow-wrap: anywhere; }
-.environment-summary-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 10px 0 18px; }
+.environment-summary-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 10px 0 18px; }
+.browser-profile-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.browser-profile-details { margin: 8px 0 16px; overflow-wrap: anywhere; }
 .environment-summary-card { display: flex; flex-direction: column; align-items: start; gap: 10px; padding: 16px; border: 1px solid var(--line-bright); border-radius: 10px; background: var(--panel); color: var(--text); text-align: left; min-width: 0; }
 .environment-summary-card:hover { border-color: var(--lime); }
 .environment-summary-card span, .environment-summary-card small { color: var(--muted); font-size: 11px; }

@@ -25,7 +25,10 @@ export class ChromeBrowser extends EventEmitter {
     this.directory = this.profile || await mkdtemp(path.join(os.tmpdir(), "relay-chrome-"));
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     this.temporary = !this.profile;
-    this.child = spawn(this.executable, ["--headless=new", "--remote-debugging-pipe", `--user-data-dir=${this.directory}`,
+    // A seeded profile may carry a lock from the machine or run that produced it.
+    if (this.profile) for (const name of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) await rm(path.join(this.directory, name), { force: true });
+    // Basic password store: cookies stay portable (v10) and never depend on a keyring.
+    this.child = spawn(this.executable, ["--headless=new", "--remote-debugging-pipe", `--user-data-dir=${this.directory}`, "--password-store=basic",
       "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-component-update", "--disable-sync", "--disable-dev-shm-usage", "about:blank"],
     { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], env: { PATH: process.env.PATH, HOME: this.directory, LANG: "C.UTF-8" } });
     this.child.stdio[3].on("error", () => {});
@@ -245,7 +248,9 @@ export class ChromeBrowser extends EventEmitter {
   }
   async tabs() {
     const { targetInfos } = await this.call("Target.getTargets");
-    return targetInfos.filter(tab => tab.type === "page").map(tab => ({ id: tab.targetId, title: tab.title.slice(0, 300), url: tab.url.slice(0, 4000) }));
+    // Chrome reports some of its own UI (e.g. chrome://omnibox-popup.top-chrome/) as
+    // pages; they are not tabs and reject emulation, so never offer or select them.
+    return targetInfos.filter(tab => tab.type === "page" && !/^chrome:\/\/[^/]+\.top-chrome\//.test(tab.url)).map(tab => ({ id: tab.targetId, title: tab.title.slice(0, 300), url: tab.url.slice(0, 4000) }));
   }
   statusStamp() { return {tabId:this.tabId,viewport:this.viewport,failed:this.failed,targetRevision:this.targetRevision}; }
   statusMatches(stamp) { return stamp.tabId===this.tabId&&stamp.viewport===this.viewport&&stamp.failed===this.failed&&stamp.targetRevision===this.targetRevision; }
@@ -485,7 +490,8 @@ export class ChromeBrowser extends EventEmitter {
 }
 
 export async function runBrowserWorker({ ProjectionPolicy = null } = {}) {
-  const browser = new ChromeBrowser({ executable: process.env.AGENT_CHROME_BIN || "google-chrome", ProjectionPolicy });
+  // AGENT_CHROME_PROFILE is this chat's private profile copy; it lives until the chat is deleted.
+  const browser = new ChromeBrowser({ executable: process.env.AGENT_CHROME_BIN || "google-chrome", profile: process.env.AGENT_CHROME_PROFILE || null, ProjectionPolicy });
   const watchLeaseMs = Number(process.env.RELAY_BROWSER_WATCH_LEASE_MS || 0);
   if (watchLeaseMs && (!Number.isInteger(watchLeaseMs) || watchLeaseMs < 1000 || watchLeaseMs > 10000)) throw new Error("Invalid browser watch lease");
   browser.transportValidation = watchLeaseMs > 0;

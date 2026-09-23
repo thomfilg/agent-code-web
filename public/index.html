@@ -320,7 +320,7 @@
           <div class="browser-options browser-direct-links"><a id="browser-open-direct" class="secondary-button" target="_blank" rel="noopener noreferrer" aria-disabled="true">Open directly ↗</a><button type="button" class="secondary-button" id="browser-copy-link" disabled>Copy URL</button><button type="button" class="secondary-button" id="browser-open-app" hidden>Set up remote preview</button></div>
           <div class="browser-options"><button type="button" class="secondary-button" id="browser-copy-text" title="Copy selected remote text (Ctrl+C / Cmd+C)">Copy text</button><button type="button" class="secondary-button" id="browser-paste-text" title="Paste plain text into the remote page (Ctrl+V / Cmd+V)">Paste text</button><span class="muted">F5 reloads the focused remote page</span></div>
           <form id="browser-size-form" class="browser-options" hidden><label>Width <input id="browser-width" type="number" min="320" max="2560" value="1280" required aria-label="Browser viewport width"></label><span>×</span><label>Height <input id="browser-height" type="number" min="240" max="1600" value="800" required aria-label="Browser viewport height"></label><button class="secondary-button" type="submit">Apply size</button></form>
-          <div class="browser-options"><button type="button" class="secondary-button" id="browser-stop">Stop Chrome</button></div>
+          <div class="browser-options"><button type="button" class="secondary-button" id="browser-stop">Stop Chrome</button><button type="button" class="secondary-button" id="browser-save-profile" hidden title="Publish this chat’s signed-in browser as the next version of its environment profile">Save to profile</button></div>
           </div></details></div>
           <p id="browser-status" class="muted" role="status">Chrome starts when you connect. Website content runs in the worker, not in this app.</p>
           <div class="browser-surface" id="browser-surface"><canvas id="browser-canvas" width="1280" height="800" tabindex="0" aria-label="Shared Chrome page. Click to interact, then type. Press Escape to leave browser input."></canvas><button type="button" class="primary-button" id="browser-connect">Connect to Chrome</button></div>
@@ -420,6 +420,7 @@
             <button type="button" class="environment-summary-card" data-environment-section="software"><strong>Installed software</strong><span id="environment-software-summary"></span><small>Choose installed tools →</small></button>
             <button type="button" class="environment-summary-card" data-environment-section="variables"><strong>Environment variables</strong><span id="environment-variables-summary"></span><small>Manage values and access →</small></button>
             <button type="button" class="environment-summary-card" data-environment-section="setup"><strong>Setup script</strong><span id="environment-setup-summary"></span><small>Configure startup →</small></button>
+            <button type="button" class="environment-summary-card" data-environment-section="browser"><strong>Browser profile</strong><span id="environment-browser-summary"></span><small>Choose saved sign-ins →</small></button>
           </div>
           <details id="environment-advanced"><summary>Access and advanced settings</summary>
             <label id="environment-instance-type-field"><span>Default machine size</span><select id="environment-instance-type" aria-label="Default machine size"></select><small id="environment-instance-price" class="muted"></small></label>
@@ -437,6 +438,16 @@
           <section id="environment-setup-editor" hidden>
           <label><span>Setup script</span><textarea id="environment-setup-script" rows="5" maxlength="50000" spellcheck="false" placeholder="Runs before the agent starts"></textarea></label>
           <p class="muted">Bash script run on each worker start, before the agent launches. Only agent-readable variables are injected. Do not put secrets directly in the script; its files can be read by the agent.</p>
+          </section>
+          <section id="environment-browser-editor" hidden>
+          <label><span>Profile for new chats</span><select id="environment-browser-profile" aria-label="Browser profile for new chats"></select></label>
+          <p class="muted">Each new chat gets its own private copy of the version that is current when its browser first opens. Nothing a chat changes reaches the saved profile or other chats, and the copy is deleted with the chat. Every account in the profile is available to the agent.</p>
+          <div id="environment-browser-details" class="muted browser-profile-details"></div>
+          <h3>Add a profile or version</h3>
+          <label><span>New profile name</span><input id="browser-profile-name" maxlength="80" placeholder="e.g. ClickUp sandbox"></label>
+          <label><span>Profile archive (.tar.gz)</span><input type="file" id="browser-profile-file" accept=".gz,.tgz,application/gzip"></label>
+          <div class="browser-profile-actions"><button type="button" class="secondary-button" id="browser-profile-create">Create profile</button><button type="button" class="secondary-button" id="browser-profile-upload">Upload new version</button><button type="button" class="secondary-button" id="browser-profile-delete">Delete profile</button></div>
+          <p class="muted">Build an archive from a Chrome user-data-dir with <code>node scripts/import-browser-profile.mjs &lt;dir&gt; --out profile.tar.gz</code>. Only sign-in state is kept: cookies, saved logins and site storage. To sign in without an archive, create an empty profile, open the Browser panel of a chat in this environment, sign in, then choose “Save to profile”.</p>
           </section>
           <section id="environment-variables-editor" hidden>
           <div class="variables-heading"><h3>Variables</h3><label class="checkbox-label"><input type="checkbox" id="variables-enabled"><span>Enable variables</span></label></div>
