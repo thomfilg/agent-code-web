@@ -154,4 +154,16 @@ export class Environments {
       harnessUpdate: publicHarnessUpdate(await this.records.get("environment-harness", env.id)),
     };
   }
+
+  async npmCredential(id, chat = {}) {
+    const env = await this.get(id, { reveal: true });
+    const company = companyForChat(chat), assigned = environmentCompany(env);
+    if (!assigned || !(await this.registeredCompanies()).has(assigned) || assigned !== company) {
+      throw Object.assign(new Error("This environment is not authorized for the chat's company."), { statusCode: 403 });
+    }
+    const variable = env.variablesEnabled && env.variables.find(item => item.enabled && item.secret && item.key === "NODE_AUTH_TOKEN");
+    if (!variable) return null;
+    if (!variable.value || /[\0\r\n]/.test(variable.value)) throw new Error("Protected NODE_AUTH_TOKEN must be a non-empty single-line value");
+    return { token: variable.value, environmentId: env.id, revision: env.revision };
+  }
 }

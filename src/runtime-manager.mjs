@@ -524,7 +524,7 @@ export class RuntimeManager extends EventEmitter {
     }
   }
 
-  constructor({ store, config, broker, gatewayOrigin, workerBackend = null, adapterFactory = null, github = null, githubWorkers = null, environments = null, models = null, harnessUpdates = null, attachments = null, mcps = null, commands = null, resources = null, agentAccounts = null }) {
+  constructor({ store, config, broker, gatewayOrigin, workerBackend = null, adapterFactory = null, github = null, githubWorkers = null, packageRegistry = null, environments = null, models = null, harnessUpdates = null, attachments = null, mcps = null, commands = null, resources = null, agentAccounts = null }) {
     super();
     this.store = store;
     this.config = config;
@@ -562,6 +562,7 @@ export class RuntimeManager extends EventEmitter {
     this.adapterFactory = adapterFactory;
     this.github = github;
     this.githubWorkers = githubWorkers;
+    this.packageRegistry = packageRegistry;
     this.agentAccounts = agentAccounts;
     this.environments = environments;
     this.models = models;
@@ -572,6 +573,7 @@ export class RuntimeManager extends EventEmitter {
     this.nativeSessions = new NativeSessionCheckpoints({ records: store.records, isLegacy: ownerId => resources?.isLegacy(ownerId) ?? !config.google?.enabled });
     if (this.environments) this.environments.onSaved = async environment => {
       for (const chat of this.store.list()) if (chat.environmentId === environment.id) {
+        this.packageRegistry?.revokeChat(chat.id);
         const company = companyForChat(chat);
         this.mcps?.restrictChat(chat.id, scopeAllows(environment, company) ? this.mcps?.companies ? await this.mcps.forCompany(company) : environment.mcpIds || [] : []);
       }
@@ -2252,6 +2254,7 @@ export class RuntimeManager extends EventEmitter {
             environmentRevision: runtime.environmentRevision ?? null, native: native.capabilities || {},
             mcp: services.mcps?.suspendRuntime(chatId) ?? null,
             github: this.githubWorkers?.suspendRuntime(chatId) ?? null,
+            npm: runtime.npmProtected ? this.packageRegistry?.suspendRuntime(chatId) ?? null : null,
             browser: this.browsers?.suspendRuntime(chatId) ?? null };
         } else capabilityRecord = retainedCapabilities(await this.store.records.get(HIBERNATION_CAPABILITIES, chatId), chat);
       }
@@ -2262,6 +2265,7 @@ export class RuntimeManager extends EventEmitter {
       if (native.retained) {
         if (!capabilityRecord?.browser && runtime && this.browsers) throw new Error("Shared Browser capability could not be retained with the native process");
         if (runtime && this.githubWorkers && chat.repositories?.length && !capabilityRecord.github) throw new Error("GitHub capability could not be retained with the native process");
+        if (runtime?.npmProtected && !capabilityRecord.npm) throw new Error("Protected npm capability could not be retained with the native process");
         const services = runtime ? await this.servicesFor(chat) : null;
         if (runtime && services?.mcps?.suspendRuntime && (chat.environmentId || services.mcps.companies) && !capabilityRecord.mcp) {
           throw new Error("MCP capabilities could not be retained with the native process");
@@ -2294,7 +2298,7 @@ export class RuntimeManager extends EventEmitter {
       this.#awakeWorkers.delete(chatId);
       clearTimeout(this.#workerIdleTimers.get(chatId)); this.#workerIdleTimers.delete(chatId);
       this.previewActivity.revokeChat(chatId); this.emit("preview-revoke", { chatId, reason: "hibernate" });
-      this.broker.revokeChat(chatId); this.githubWorkers?.revokeChat(chatId); this.revokeChatMcps(chatId);
+      this.broker.revokeChat(chatId); this.githubWorkers?.revokeChat(chatId); this.packageRegistry?.revokeChat(chatId); this.revokeChatMcps(chatId);
       detached = true;
       const observed = await this.workerBackend.hibernate(this.store.get(chatId), chat.workerLifecycle?.worker);
       this.#executors.delete(chatId);
@@ -2379,6 +2383,7 @@ export class RuntimeManager extends EventEmitter {
     // worker shutdown. Native interruption can still checkpoint its journal.
     this.broker.revokeChat(chatId);
     this.githubWorkers?.revokeChat(chatId);
+    this.packageRegistry?.revokeChat(chatId);
     this.revokeChatMcps(chatId);
     this.#clearBackgroundRecheck(chatId);
     this.publishChat(await this.store.update(chatId, current => {
@@ -2718,6 +2723,7 @@ export class RuntimeManager extends EventEmitter {
     let forkRecord;
     let runtimeEnvironment = null;
     let runtimeHarness = null;
+    let runtimeNpmProtected = false;
     let savedAgentThreads;
     let forkContext = "";
     const hooks = {
@@ -2807,7 +2813,31 @@ export class RuntimeManager extends EventEmitter {
         } else runtimeHarness = environment.harnessUpdate || null;
         checkCancelled();
         executor.environmentVariables = { ...environment.variables, ...executor.capabilityVariables };
-        const mcps = (await this.servicesFor(chat)).mcps;
+        const services = await this.servicesFor(chat);
+        if (this.packageRegistry && environment.protectedKeys?.includes("NODE_AUTH_TOKEN")) {
+          const credential = await services.environments.npmCredential(environment.id, chat); checkCancelled();
+          if (!credential || credential.revision !== environment.revision) throw new Error("Protected npm credential changed during worker startup. Retry after stopping the chat.");
+          const origin = executor.gatewayOrigin || this.gatewayOrigin;
+          const userConfigPath = `${executor.runtimeHome}/npm/relay.npmrc`;
+          const options = { validWhile: () => {
+            const current = this.store.get(chatId);
+            return (this.#lifecycleVersions.get(chatId) || 0) === version && Boolean(current) && !current.archived && current.environmentId === environment.id;
+          } };
+          if (recoveringNative && !retained.npm) throw new Error("The retained npm capability is unavailable; use Stop before continuing");
+          const grant = recoveringNative
+            ? this.packageRegistry.resumeRuntime(chatId, origin, credential, userConfigPath, retained.npm, options)
+            : this.packageRegistry.runtime(chatId, origin, credential, userConfigPath, options);
+          await executor.mkdir(`${executor.runtimeHome}/npm`); checkCancelled();
+          await captureWorker(executor, "node", ["-e", "require('node:fs').writeFileSync(process.argv[1], process.env.RELAY_NPMRC, { mode: 0o600 })", userConfigPath], {
+            cwd: executor.runtimeHome,
+            env: { PATH: executor.environmentPath || process.env.PATH, HOME: executor.runtimeHome, LANG: "C.UTF-8", RELAY_NPMRC: grant.config },
+          });
+          checkCancelled();
+          executor.environmentVariables = { ...executor.environmentVariables, ...grant.environmentVariables };
+          executor.capabilitySecrets = new Set([...(executor.capabilitySecrets || []), grant.token]);
+          runtimeNpmProtected = true;
+        } else if (recoveringNative && retained.npm) throw new Error("The retained npm capability no longer matches this environment; use Stop before continuing");
+        const mcps = services.mcps;
         executor.mcpServers = recoveringNative && mcps?.resumeRuntime
           ? await mcps.resumeRuntime(chatId, environment.mcpIds || [], executor.gatewayOrigin || this.gatewayOrigin, chat, retained.mcp)
           : await mcps?.runtime(chatId, environment.mcpIds || [], executor.gatewayOrigin || this.gatewayOrigin, chat) || {};
@@ -2817,7 +2847,7 @@ export class RuntimeManager extends EventEmitter {
             checkCancelled();
             await captureWorker(executor, "/bin/bash", ["-e", "-c", environment.setupScript], { cwd: executor.workspace,
               env: { ...executor.environmentVariables, PATH: executor.environmentPath || process.env.PATH, HOME: executor.runtimeHome, LANG: "C.UTF-8", CI: "1" } });
-          } catch { checkCancelled(); throw new Error("Environment setup script failed. Review the script and its agent-readable variables. Protected variables are not available to setup scripts."); } });
+          } catch { checkCancelled(); throw new Error("Environment setup script failed. Review the script and its agent-readable variables. Protected values are not available directly; protected NODE_AUTH_TOKEN works only through the Relay npm gateway."); } });
         }
       }
       if (executor && !chat.environmentId) {
@@ -2882,6 +2912,7 @@ export class RuntimeManager extends EventEmitter {
     } catch (error) {
       if ((this.#lifecycleVersions.get(chatId) || 0) !== version) throw error;
       this.githubWorkers?.revokeChat(chatId);
+      this.packageRegistry?.revokeChat(chatId);
       this.revokeChatMcps(chatId);
       await this.browsers?.stop(chatId);
       checkCancelled();
@@ -2907,7 +2938,7 @@ export class RuntimeManager extends EventEmitter {
             if (!Number.isSafeInteger(checkpointVersion) || checkpointVersion !== (this.#lifecycleVersions.get(chatId) || 0)
               || !current || current.archived || runtimeAccountBinding(current) !== runtimeAccountBinding(chat) || active && active !== runtime) throw new Error("Native checkpoint owner changed");
           } });
-      runtime = { adapter, executor, forkContext, environmentRevision: runtimeEnvironment?.revision ?? null, harnessUpdate: runtimeHarness,
+      runtime = { adapter, executor, forkContext, environmentRevision: runtimeEnvironment?.revision ?? null, harnessUpdate: runtimeHarness, npmProtected: runtimeNpmProtected,
         accountBinding: runtimeAccountBinding(chat), agentScopeBinding: agentScopeBinding(chat), busy: false, idleTimer: null, generation: 0, eventQueue: Promise.resolve() };
       this.#runtimes.set(chatId, runtime);
       await this.#startupTask(chatId, "agent", version, () => { checkCancelled(); return adapter.start(); });
@@ -2928,6 +2959,7 @@ export class RuntimeManager extends EventEmitter {
       if ((this.#lifecycleVersions.get(chatId) || 0) !== version) throw error;
       this.#runtimes.delete(chatId);
       this.githubWorkers?.revokeChat(chatId);
+      this.packageRegistry?.revokeChat(chatId);
       this.revokeChatMcps(chatId);
       await this.browsers?.stop(chatId);
       checkCancelled();
@@ -3168,6 +3200,7 @@ export class RuntimeManager extends EventEmitter {
     this.previewActivity.revokeChat(chatId);
     this.emit("preview-revoke", { chatId, reason: "error" });
     this.githubWorkers?.revokeChat(chatId);
+    this.packageRegistry?.revokeChat(chatId);
     this.#forking.get(chatId)?.controller.abort(error);
     this.workspacePresence.remove(chatId);
     clearTimeout(this.#workspaceIdleTimers.get(chatId)); this.#workspaceIdleTimers.delete(chatId);

@@ -241,7 +241,7 @@
                   </div></details>
                   <div class="chat-agent-compact">
                     <select id="chat-agent-select" aria-label="Chat agent" title="Switch agent · conversation and workspace are retained"></select>
-                    <button type="button" id="chat-agent-compact-label" aria-label="Switch agent account">Agent</button>
+                    <button type="button" class="chat-agent-compact-label" id="chat-agent-compact-label" aria-label="Switch agent account">Agent</button>
                   </div>
                   <div class="model-controls compact-model-controls" id="composer-model-controls">
                     <div class="model-select-compact">
@@ -451,7 +451,7 @@
           </section>
           <section id="environment-variables-editor" hidden>
           <div class="variables-heading"><h3>Variables</h3><label class="checkbox-label"><input type="checkbox" id="variables-enabled"><span>Enable variables</span></label></div>
-          <p class="muted">Protected values are encrypted and are never injected into agents. Agent-readable variables are passed to tools and can be read by the AI. Local mode still shares the host filesystem—use isolated cloud workers for a strong secret boundary.</p>
+          <p class="muted">Protected values are encrypted and are never injected into agents. A protected <code>NODE_AUTH_TOKEN</code> is used only by Relay's read-only npm gateway; the agent receives a revocable capability, never the registry token. Agent-readable variables are passed to tools and can be read by the AI. Local mode still shares the host filesystem—use isolated cloud workers for a strong secret boundary.</p>
           <div class="variables-toolbar"><input type="search" id="variable-search" placeholder="Search variable names…" aria-label="Search variables"><button type="button" class="primary-button" id="add-variable">＋ Add variable</button></div>
           <div class="variables-table-wrap"><table class="variables-table"><thead><tr><th>Key</th><th>Visibility</th><th>Value</th><th>Enabled</th></tr></thead><tbody id="variables-table-body"></tbody></table></div>
           </section>

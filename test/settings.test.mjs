@@ -48,6 +48,20 @@ test("protected variables never enter worker env; public values and toggles do; 
   await assert.rejects(environments.save({ ...latest, variables: [{ key: "OPENAI_API_KEY", value: "override" }] }, env.id), /managed by Agent Relay/);
   await assert.rejects(environments.save({ ...latest, variables: [{ key: "SERVICE_TOKEN", secret: false }] }, env.id), /Re-enter/);
 });
+test("protected NODE_AUTH_TOKEN is controller-readable only through the npm credential boundary", async () => {
+  const records = new MemoryRecords(), environments = new Environments(records);
+  await records.put("company", "fixture", { id: "fixture", name: "Fixture", revision: 1, createdAt: new Date().toISOString() });
+  const chat = { repositories: [{ fullName: "fixture/repo" }] };
+  const saved = await environments.save({ name: "Private npm", backend: "local", companyId: "fixture",
+    variables: [{ key: "NODE_AUTH_TOKEN", value: "npm_private_fixture", secret: true }] });
+  assert.equal(saved.variables[0].value, undefined);
+  const runtime = await environments.runtime(saved.id, chat);
+  assert.deepEqual(runtime.variables, {}); assert.deepEqual(runtime.protectedKeys, ["NODE_AUTH_TOKEN"]);
+  assert.deepEqual(await environments.npmCredential(saved.id, chat), { token: "npm_private_fixture", environmentId: saved.id, revision: saved.revision });
+  const latest = await environments.get(saved.id);
+  await environments.save({ ...latest, variables: [{ key: "NODE_AUTH_TOKEN", value: "bad\nvalue", secret: true }] }, saved.id);
+  await assert.rejects(environments.npmCredential(saved.id, chat), /single-line/);
+});
 test("GitHub validates access, redacts credentials, preserves primary order and detects revocation", async () => {
   const records = new MemoryRecords(); let revoked = false;
   const gh = new GitHubConnection({ records, config: { localConnection: true, apiBase: "https://api.github.com" }, localToken: async () => "fixture-github-token",

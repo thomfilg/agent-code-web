@@ -14,6 +14,7 @@ import { SYNTAX_MODES } from "../public/syntax-theme.js";
 import { CapabilityBroker } from "./capabilities.mjs";
 import { loadConfig } from "./config.mjs";
 import { ProviderGateway } from "./provider-gateway.mjs";
+import { NpmRegistryGateway } from "./npm-registry-gateway.mjs";
 import { RuntimeManager } from "./runtime-manager.mjs";
 import { ChatStore } from "./store.mjs";
 import { errorMessage } from "./utils.mjs";
@@ -129,6 +130,7 @@ export async function createAgentWebServer(options = {}) {
   const pets = new PetPreferences(records, { fetchImpl: options.petFetch });
   const savedPrompts = new SavedPrompts(records);
   const gateway = new ProviderGateway({ config, broker });
+  const npmGateway = options.npmGateway || new NpmRegistryGateway({ ttlMs: config.sessionCapabilityTtlMs, upstreamBaseUrl: config.npm.upstreamBaseUrl, ...(options.npmGatewayOptions || {}) });
   const sseClients = new Set();
   const sidebarClients = new Set();
   let stopping;
@@ -161,7 +163,7 @@ export async function createAgentWebServer(options = {}) {
   const harnessUpdates = options.harnessUpdates || new HarnessUpdater({ records, config, refreshModels: agents => models.refresh(agents) });
   const attachments = new Attachments(records, store);
   const resources = new UserServices({ records, config, identity: googleAuth, store, legacy: { records, github, mcps, environments, organization, companies, plugins: companyPlugins, browserProfiles }, changed: sidebarChanged,
-    githubChanged: (ownerId, id) => githubWorkers.revokeConnection(ownerId, id) });
+    githubChanged: (ownerId, id) => githubWorkers.revokeConnection(ownerId, id), environmentChanged: chatId => npmGateway.revokeChat(chatId) });
   const commands = options.commands || new CommandCatalog(config, models, { installed: async chat => {
     const services = await resources.forOwner(chat.ownerId);
     return services.plugins.commands(companyForChat(chat), chat.agent);
@@ -248,6 +250,7 @@ export async function createAgentWebServer(options = {}) {
         return json(response, ok ? 200 : 503, { ok });
       }
       if (await gateway.handle(request, response, url)) return;
+      if (await npmGateway.handle(request, response, url)) return;
       if (url.pathname === "/webhooks/github" && request.method === "POST") {
         if (!manager.githubEvents || !config.github.webhookSecret) return json(response, 404, { error: "Not found" });
         const chunks = []; let size = 0;
@@ -1012,6 +1015,7 @@ export async function createAgentWebServer(options = {}) {
       commands,
       resources,
       agentAccounts,
+      packageRegistry: npmGateway,
       adapterFactory: options.adapterFactory || null,
     });
     await manager.reconcileStoppedWorkers({ background: true });
@@ -1067,6 +1071,7 @@ export async function createAgentWebServer(options = {}) {
   }
   async function shutdown() {
     githubWorkers.shutdown();
+    npmGateway.shutdown();
     // Stop accepting connections before closing SSE. Otherwise a browser may
     // reconnect while workers shut down and keep server.close() waiting forever.
     const closed = new Promise(resolve => server.close(resolve));
@@ -1086,7 +1091,7 @@ export async function createAgentWebServer(options = {}) {
     if (!options.records) await records.close();
   }
 
-  return { server, store, records, organization, broker, config, browserUsers, googleAuth, resources, agentAccounts, start, stop, get manager() { return manager; }, get previews() { return previews; } };
+  return { server, store, records, organization, broker, npmGateway, config, browserUsers, googleAuth, resources, agentAccounts, start, stop, get manager() { return manager; }, get previews() { return previews; } };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
