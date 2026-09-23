@@ -20,7 +20,8 @@ export class CodexLogout {
   constructor(store, config) { this.store = store; this.config = config; this.locks = new Map(); this.active = new Set(); }
   binding(chat) {
     return logoutHash([chat.id, chat.ownerId || null, chat.agent, chat.agentSessionId || null, companyForChat(chat),
-      (chat.repositories || []).map(repo => repo.fullName || `${repo.owner}/${repo.name}`), chat.environmentId || null, chat.workspace, this.config.codex.authMode, this.config.workerBackend]);
+      (chat.repositories || []).map(repo => repo.fullName || `${repo.owner}/${repo.name}`), chat.environmentId || null, chat.workspace, this.config.codex.authMode, this.config.workerBackend,
+      ...(chat.agentAccountId ? ["account", chat.agentAccountId] : [])]);
   }
   #chat(chatId, binding) {
     const chat = this.store.get(chatId);

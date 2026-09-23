@@ -10,7 +10,8 @@ export class SideChats {
   #entries = new Map();
   #revision = 0;
   #epoch = newId("side_epoch");
-  constructor({ fork, prepare, publish, activity }) { Object.assign(this, { fork, prepare, publish, activity }); }
+  constructor({ fork, prepare, publish, activity, authorize = () => {} }) { Object.assign(this, { fork, prepare, publish, activity, authorize }); }
+  has(chatId) { const side = this.#entries.get(chatId); return Boolean(side && !side.closed); }
   busy(chatId) { const side = this.#entries.get(chatId); return Boolean(side && (side.busy || side.status === "starting")); }
   get(chatId) {
     const side = this.#entries.get(chatId);
@@ -36,6 +37,7 @@ export class SideChats {
     while (side.messages.length > 100 || side.messages.reduce((n, m) => n + m.text.length, 0) > 1000000) { side.messages.shift(); side.omittedMessages++; }
   }
   async open(chatId) {
+    this.authorize(chatId);
     let side = this.#entries.get(chatId);
     if (side?.closed) throw conflict("Wait for the previous side chat to close");
     if (!side) {
@@ -68,6 +70,7 @@ export class SideChats {
     } finally { await this.activity(side.chatId); }
   }
   async send(chatId, id, input) {
+    this.authorize(chatId);
     const side = this.#require(chatId, id);
     if (side.busy || side.status === "starting") throw conflict("Wait for the current side reply or stop it first");
     const text = clampText(input.text, 100000, "side message");
@@ -78,6 +81,7 @@ export class SideChats {
       await this.activity(chatId);
       const prepared = await this.prepare(chatId, text, input.attachments || [], side.messages.length === 0);
       this.#require(chatId, id);
+      this.authorize(chatId);
       if (side.interrupted) throw conflict("Side message cancelled before it started");
       this.#append(side, "user", text); side.tools.clear(); side.stream = "";
       side.filter = new ResponseStream(event => { side.stream = (side.stream + event.delta).slice(0, 100000); this.#later(side); }, false);
@@ -109,6 +113,7 @@ export class SideChats {
     return this.get(chatId);
   }
   async respond(chatId, id, requestId, input) {
+    this.authorize(chatId);
     const side = this.#require(chatId, id), request = side.requests.get(requestId);
     if (!request) throw conflict("This side request is no longer active");
     await side.adapter.respond(requestId, responseFor(request, input));

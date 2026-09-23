@@ -1,14 +1,26 @@
 import { openSidePanel, closeSidePanel } from "./side-panels.js";
 import { directBrowserLink } from "./browser-links.js";
+import { BrowserInputQueue } from "./browser-input.js";
 
 const $ = selector => document.querySelector(selector);
 const modifiers = event => (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0);
 
 export class SharedBrowserPanel {
-  constructor({ api, getBackend = () => "local" }) {
+  constructor({ api, getBackend = () => "local", openApp = () => {} }) {
     this.api = api; this.panel = $("#browser-panel"); this.canvas = $("#browser-canvas"); this.context = this.canvas.getContext("2d"); this.sequence = 0; this.frameVersion = 0;
     this.pendingCommands = new Map(); this.resizeQueue = Promise.resolve(); this.resizeVersion = 0;
+    this.input = new BrowserInputQueue((action, params) => this.request(action, params));
     this.getBackend = getBackend;
+    this.tools = $("#browser-tools");
+    this.tools.addEventListener("keydown", event => {
+      if (event.key !== "Escape" || !this.tools.open) return;
+      event.preventDefault(); event.stopPropagation(); this.tools.open = false; this.tools.querySelector("summary").focus();
+    });
+    document.addEventListener("pointerdown", event => { if (this.tools.open && !this.tools.contains(event.target)) this.tools.open = false; });
+    this.tools.addEventListener("focusout", event => { if (event.relatedTarget && !this.tools.contains(event.relatedTarget)) this.tools.open = false; });
+    $("#browser-open-app").onclick = () => openApp({ address: $("#browser-address").value });
+    $("#browser-copy-text").onclick = () => this.copyText();
+    $("#browser-paste-text").onclick = () => this.pasteText();
     $("#browser-address").addEventListener("input", () => this.updateDirectLink());
     $("#browser-copy-link").onclick = async () => {
       const link = this.directLink();
@@ -27,10 +39,10 @@ export class SharedBrowserPanel {
     };
     $("#browser-address-form").onsubmit = event => { event.preventDefault(); this.navigate($("#browser-address").value.trim()); };
     $("#browser-localhost").onclick = () => this.navigate("http://localhost:3000");
-    for (const action of ["back", "forward", "reload"]) $(`#browser-${action}`).onclick = () => this.send(action);
-    $("#browser-new-tab").onclick = () => this.send("newTab");
-    $("#browser-close-tab").onclick = () => this.send("closeTab", { id: $("#browser-tabs").value });
-    $("#browser-tabs").onchange = event => this.send("selectTab", { id: event.target.value });
+    for (const action of ["back", "forward", "reload"]) $(`#browser-${action}`).onclick = () => this.interact(action);
+    $("#browser-new-tab").onclick = () => this.interact("newTab");
+    $("#browser-close-tab").onclick = () => this.interact("closeTab", { id: $("#browser-tabs").value });
+    $("#browser-tabs").onchange = event => this.interact("selectTab", { id: event.target.value });
     $("#browser-viewport").onchange = event => {
       const custom = event.target.value === "custom"; $("#browser-size-form").hidden = !custom;
       if (custom) return $("#browser-width").focus();
@@ -41,33 +53,47 @@ export class SharedBrowserPanel {
     $("#browser-dialog-dismiss").onclick = () => { this.send("dialog", { accept: false }); $("#browser-dialog").hidden = true; };
     for (const [eventName, type] of [["pointerdown", "mousePressed"], ["pointerup", "mouseReleased"], ["pointermove", "mouseMoved"]]) {
       this.canvas.addEventListener(eventName, event => {
-        if (!this.connected || (type === "mouseMoved" && !event.buttons)) return;
-        event.preventDefault(); this.canvas.focus({ preventScroll: true });
+        if (!this.connected) return;
+        event.preventDefault();
+        if (type !== "mouseMoved" || event.buttons) this.canvas.focus({ preventScroll: true });
         if (type === "mousePressed") this.canvas.setPointerCapture(event.pointerId);
         const point = this.point(event);
-        this.send("mouse", { type, ...point, button: ["left", "middle", "right"][event.button] || "none", buttons: event.buttons, clickCount: type === "mouseMoved" ? 0 : event.detail || 1, modifiers: modifiers(event) });
+        this.interact("mouse", { type, ...point, button: ["left", "middle", "right"][event.button] || "none", buttons: event.buttons, clickCount: type === "mouseMoved" ? 0 : event.detail || 1, modifiers: modifiers(event) });
       });
     }
     this.canvas.addEventListener("wheel", event => {
       if (!this.connected) return;
       event.preventDefault(); const scale = event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? this.frameViewport?.height || this.canvas.height : 1;
-      this.send("mouse", { type: "mouseWheel", ...this.point(event), deltaX: event.deltaX * scale, deltaY: event.deltaY * scale, modifiers: modifiers(event) });
+      this.interact("mouse", { type: "mouseWheel", ...this.point(event), deltaX: event.deltaX * scale, deltaY: event.deltaY * scale, modifiers: modifiers(event) });
     }, { passive: false });
     this.canvas.addEventListener("contextmenu", event => event.preventDefault());
     this.canvas.addEventListener("paste", event => {
       if (!this.connected) return;
-      event.preventDefault(); this.send("text", { text: event.clipboardData.getData("text/plain").slice(0, 30000) });
+      event.preventDefault(); event.stopPropagation();
+      if (!event.clipboardData?.types.includes("text/plain")) return this.status("Shared Chrome currently pastes plain text. Use the page directly for files or images.");
+      this.insertText(event.clipboardData.getData("text/plain"));
     });
-    this.canvas.addEventListener("compositionend", event => { if (event.data) this.send("text", { text: event.data }); });
+    this.canvas.addEventListener("compositionend", event => { if (event.data && this.connected) this.insertText(event.data); });
     for (const type of ["keydown", "keyup"]) this.canvas.addEventListener(type, event => {
       if (!this.connected || event.isComposing) return;
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); if (type === "keydown") $("#browser-address").focus(); return; }
-      if ((event.ctrlKey || event.metaKey) && ["v", "c", "x"].includes(event.key.toLowerCase())) return;
+      const key = event.key.toLowerCase(), shortcut = event.ctrlKey || event.metaKey;
+      if (event.key === "F5" || shortcut && key === "r") {
+        event.preventDefault(); event.stopPropagation();
+        if (type === "keydown" && !event.repeat) this.interact("reload", { ignoreCache: event.shiftKey || event.ctrlKey && event.key === "F5" });
+        return;
+      }
+      if (shortcut && key === "c") {
+        event.preventDefault(); event.stopPropagation(); if (type === "keydown" && !event.repeat) this.copyText(); return;
+      }
+      // Native paste grants access only to the explicit paste event, including
+      // browsers that deny the async clipboard-read permission.
+      if (shortcut && ["v", "x"].includes(key)) { event.stopPropagation(); return; }
       event.preventDefault(); event.stopPropagation();
-      this.send("key", { type: type === "keydown" ? "keyDown" : "keyUp", key: event.key, code: event.code, keyCode: event.keyCode,
+      this.interact("key", { type: type === "keydown" ? "keyDown" : "keyUp", key: event.key, code: event.code, keyCode: event.keyCode,
         modifiers: modifiers(event), ...(type === "keydown" && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1 ? { text: event.key } : {}) });
     });
-    document.addEventListener("relay-panel-changed", () => { if (this.panel.hidden) this.disconnect(); });
+    document.addEventListener("relay-panel-changed", () => { if (this.panel.hidden) { this.tools.open = false; this.disconnect(); } });
     window.addEventListener("pagehide", () => this.disconnect());
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") { this.resumeVisible = Boolean(this.socket); this.disconnect(); }
@@ -81,10 +107,11 @@ export class SharedBrowserPanel {
     openSidePanel("browser"); this.panel.classList.remove("expanded"); $("#expand-browser").setAttribute("aria-pressed", "false");
     this.connect();
   }
-  close() { closeSidePanel("browser"); this.disconnect(); }
+  close() { this.tools.open = false; closeSidePanel("browser"); this.disconnect(); }
   accessChanged() { this.disconnect(); if (!this.panel.hidden) this.connect(); }
   disconnect() {
     const socket = this.socket; this.socket = null; socket?.close(); this.connected = false;
+    this.input.reset(); this.clipboard = false;
     for (const pending of this.pendingCommands.values()) { clearTimeout(pending.timer); pending.reject(new Error("Browser connection changed")); }
     this.pendingCommands.clear();
     this.frameVersion = (this.frameVersion || 0) + 1;
@@ -110,6 +137,7 @@ export class SharedBrowserPanel {
       if (message.error) { this.status(message.error); return; }
       if (message.event === "status") {
         this.connected = true; $("#browser-connect").hidden = true;
+        this.clipboard = message.value.clipboard === true;
         this.mode = message.value.mode;
         this.captureVersion = message.value.captureVersion || 1;
         $("#browser-new-tab").disabled = this.mode === "personal"; $("#browser-close-tab").disabled = this.mode === "personal"; $("#browser-tabs").disabled = this.mode === "personal";
@@ -136,16 +164,54 @@ export class SharedBrowserPanel {
   }
   request(action, params = {}) {
     const id = this.send(action, params);
-    if (!id) return Promise.reject(new Error("Connect to Chrome before resizing the page"));
+    if (!id) return Promise.reject(new Error("Connect to Chrome before interacting with the page"));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pendingCommands.delete(id); reject(new Error("Browser resize timed out; try again")); }, 30000);
+      const timer = setTimeout(() => { this.pendingCommands.delete(id); reject(new Error("Browser action timed out; reconnect and try again")); }, 30000);
       this.pendingCommands.set(id, { resolve, reject, timer });
     });
+  }
+  interact(action, params) {
+    const socket = this.socket;
+    if (!this.connected) { this.status("Connect to Chrome before interacting with the page."); return; }
+    void this.input.push(action, params).catch(error => { if (this.socket === socket) this.status(error.message); });
+  }
+  insertText(text) {
+    if (text.length > 30000) return this.status("Paste at most 30,000 characters at a time. Nothing was pasted.");
+    if (text) this.interact("text", { text });
+  }
+  async copyText() {
+    if (!this.connected) return this.status("Connect to Chrome before copying text.");
+    if (!this.clipboard) return this.status("This Relay server needs an update to support copying remote text.");
+    if (this.copying) return;
+    const socket = this.socket; this.copying = true;
+    try {
+      if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") throw Error("Clipboard access is unavailable. Use HTTPS and allow clipboard access, or open the page directly.");
+      const result = this.input.push("copy").then(value => {
+        if (socket !== this.socket || !this.connected) throw Error("Browser connection changed");
+        if (typeof value?.text !== "string" || !value.text || value.text.length > 30000) throw Error("No text selected in the remote page.");
+        return new Blob([value.text], { type: "text/plain" });
+      });
+      // Start the write during the gesture, before waiting for the remote text.
+      // This preserves transient activation; never poll either clipboard.
+      result.catch(() => {});
+      await navigator.clipboard.write([new ClipboardItem({ "text/plain": result })]);
+      if (socket === this.socket) this.status("Selected text copied.");
+    } catch (error) { if (socket === this.socket) this.status(error.name === "NotAllowedError" ? "Clipboard access denied. Allow clipboard access for Relay, then try Copy text again." : error.message); }
+    finally { this.copying = false; }
+  }
+  async pasteText() {
+    if (!this.connected) return this.status("Connect to Chrome before pasting text.");
+    const socket = this.socket;
+    try {
+      const text = await navigator.clipboard.readText();
+      if (socket !== this.socket || !this.connected) return;
+      this.canvas.focus({ preventScroll: true }); this.insertText(text);
+    } catch { if (socket === this.socket) this.status("Clipboard access denied. Click the remote page, then press Ctrl+V (Cmd+V on Mac) to paste text."); }
   }
   navigate(value) {
     if (!value) return;
     const url = /^[a-z]+:\/\//i.test(value) || value === "about:blank" ? value : `http://${value}`;
-    this.send("navigate", { url });
+    this.interact("navigate", { url });
   }
   resize(width, height) {
     if (!Number.isInteger(width) || width < 320 || width > 2560 || !Number.isInteger(height) || height < 240 || height > 1600) { this.status("Use a width of 320–2560 px and a height of 240–1600 px."); return; }
@@ -153,13 +219,13 @@ export class SharedBrowserPanel {
     // Apply changes in order even when connected to a pre-upgrade worker.
     this.resizeQueue = this.resizeQueue.catch(() => {}).then(async () => {
       if (socket !== this.socket || version !== this.resizeVersion) return;
-      await this.request("resize", { width, height });
+      await this.input.push("resize", { width, height });
       if (socket !== this.socket || version !== this.resizeVersion) return;
       if (this.captureVersion < 2 && this.mode !== "personal" && this.tabId) {
         // Older workers kept the original screencast size until tab selection.
         // Reattach to the SAME tab: refresh capture without creating a tab,
         // navigating, reloading, or discarding form/cart state.
-        await this.request("selectTab", { id: this.tabId });
+        await this.input.push("selectTab", { id: this.tabId });
       }
     }).catch(error => { if (socket === this.socket && version === this.resizeVersion) this.status(error.message); });
     return this.resizeQueue;
@@ -186,6 +252,7 @@ export class SharedBrowserPanel {
     link.setAttribute("aria-disabled", String(!result.url));
     if (result.url) link.href = result.url; else link.removeAttribute("href");
     $("#browser-copy-link").disabled = !result.url;
+    $("#browser-open-app").hidden = Boolean(result.url) || this.getBackend() !== "ec2" || this.mode === "personal";
   }
   point(event) {
     const rect = this.canvas.getBoundingClientRect();
@@ -207,12 +274,21 @@ export class SharedBrowserPanel {
     const finish = () => { this.decodingFrame = false; this.decodeFrame(); };
     image.onload = () => {
       if (this.frameVersion !== version || !this.connected) { finish(); return; }
-      if (this.canvas.width !== image.naturalWidth) this.canvas.width = image.naturalWidth;
-      if (this.canvas.height !== image.naturalHeight) this.canvas.height = image.naturalHeight;
+      // CDP can briefly send an old surface after resizing, even when its
+      // metadata already names the new viewport. Don't stretch that image or
+      // map clicks against it. Allow at most one pixel of codec rounding.
+      if (Math.abs(image.naturalWidth * frame.height - image.naturalHeight * frame.width) > Math.max(frame.width, frame.height)) { finish(); return; }
+      // Keep the canvas/layout stable when switching between live 1x JPEG and
+      // idle 2x PNG. Only the PNG supplies native high-DPI detail; upscaling the
+      // live bitmap here does not claim to add detail.
+      const scale = this.captureVersion >= 2 && frame.width * frame.height <= 2097152 ? 2 : 1;
+      if (this.canvas.width !== frame.width * scale) this.canvas.width = frame.width * scale;
+      if (this.canvas.height !== frame.height * scale) this.canvas.height = frame.height * scale;
       this.frameViewport = { width: frame.width, height: frame.height };
       this.canvas.dataset.viewportWidth = frame.width; this.canvas.dataset.viewportHeight = frame.height;
       this.canvas.style.width = `${frame.width}px`;
-      this.canvas.hidden = false; this.context.drawImage(image, 0, 0);
+      this.canvas.dataset.frameFormat = frame.mimeType || "image/jpeg";
+      this.canvas.hidden = false; this.context.drawImage(image, 0, 0, this.canvas.width, this.canvas.height);
       finish();
     };
     image.onerror = finish;

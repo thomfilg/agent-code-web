@@ -1,39 +1,74 @@
+import { ProjectionPolicy } from './projection-policy.js';
 // No content scripts, cookie API, profile export, or access to existing tabs.
 // Only an explicitly authorized, extension-created automation tab is debugged.
 let socket, saved, tabId = null, grantId = null, chatTitle = "", heartbeat, reconnectTimer, watching = false;
 let viewport = { width: 1280, height: 800 };
 let transition = 0, pendingAuthorization = null;
+let projection = null;
 let dialogOpen = false;
-let layoutQueue = Promise.resolve(), captureVersion = 0, captureTimer, capturing = false, frameRequested = false, lastCaptureAt = 0;
+let interactions = 0;
+let lastStreamData = null;
+let pendingFrame = null, deliveryTimer;
+let pendingStream = null, streamTimer;
+let layoutQueue = Promise.resolve(), captureVersion = 0, captureTimer, capturing = false, lastFrameAt = 0, streamStartedAt = 0;
 const pixelRatio = ({ width, height }) => width * height <= 2097152 ? 2 : 1;
 function updateLayout(action) {
   const pending = layoutQueue.then(action); layoutQueue = pending.catch(() => {}); return pending;
 }
-function invalidateFrames() { captureVersion++; clearTimeout(captureTimer); captureTimer = null; frameRequested = false; }
+function invalidateFrames() {
+  captureVersion++; clearTimeout(captureTimer); captureTimer = null; lastStreamData = null;
+  pendingFrame = null; clearTimeout(deliveryTimer); deliveryTimer = null;
+  pendingStream = null; clearTimeout(streamTimer); streamTimer = null;
+}
+function streamFrame(data, expected) {
+  if (data === pendingStream?.data || !pendingStream && data === lastStreamData) return;
+  pendingStream = { data, mimeType: "image/jpeg", ...viewport }; requestFrame();
+  if (streamTimer) return;
+  const startedAt = streamStartedAt;
+  const flush = () => {
+    streamTimer = null; const frame = pendingStream; pendingStream = null;
+    if (!frame || !watching || grantId !== expected || capturing || dialogOpen || streamStartedAt !== startedAt || frame.data === lastStreamData) return;
+    lastFrameAt = Date.now(); lastStreamData = frame.data; deliverFrame(frame, expected);
+  };
+  const delay = Math.max(0, 32 - (Date.now() - lastFrameAt));
+  if (delay) streamTimer = setTimeout(flush, delay); else flush();
+}
+function deliverFrame(value, expected) {
+  if (!watching || grantId !== expected || socket?.readyState !== WebSocket.OPEN) return;
+  pendingFrame = { value, expected };
+  const flush = () => {
+    deliveryTimer = null;
+    if (!pendingFrame || !watching || grantId !== pendingFrame.expected || socket?.readyState !== WebSocket.OPEN) { pendingFrame = null; return; }
+    if (socket.bufferedAmount >= 256 * 1024) { deliveryTimer = setTimeout(flush, 32); return; }
+    const next = pendingFrame; pendingFrame = null;
+    send({ event: "frame", grantId: next.expected, value: next.value });
+  };
+  if (!deliveryTimer) flush();
+}
 function requestFrame() {
   if (!watching || !grantId || dialogOpen) return;
-  frameRequested = true;
-  if (captureTimer || capturing) return;
+  const version = ++captureVersion, expected = grantId;
+  clearTimeout(captureTimer);
   captureTimer = setTimeout(() => {
-    captureTimer = null; frameRequested = false; capturing = true;
-    lastCaptureAt = Date.now();
+    captureTimer = null;
     void updateLayout(async () => {
-      if (!watching || !grantId || dialogOpen) return;
-      const version = captureVersion, expected = grantId, size = { ...viewport };
-      const { data } = await cdp("Page.captureScreenshot", { format: "png", captureBeyondViewport: false }, expected);
-      if (watching && grantId === expected && captureVersion === version && socket?.bufferedAmount < 2 * 1024 * 1024)
-        send({ event: "frame", grantId: expected, value: { data, mimeType: "image/png", ...size } });
-    }).catch(() => {}).finally(() => { capturing = false; if (frameRequested) requestFrame(); });
-  }, Math.max(0, 100 - (Date.now() - lastCaptureAt)));
+      if (!watching || grantId !== expected || dialogOpen || interactions || version !== captureVersion) return;
+      const size = { ...viewport }; capturing = true;
+      try {
+        const { data } = await cdp("Page.captureScreenshot", { format: "png", captureBeyondViewport: false }, expected);
+        if (watching && grantId === expected && captureVersion === version)
+          deliverFrame({ data, mimeType: "image/png", ...size }, expected);
+      } finally { capturing = false; }
+    }).catch(() => {});
+  }, 350);
 }
 async function setWatching(enabled, expected) {
   if (grantId !== expected) throw Error("Agent access changed");
   watching = enabled; invalidateFrames();
   await cdp("Page.stopScreencast", {}, expected).catch(() => {});
   if (watching) {
-    // Screencast frames are always 1x: use their repaint notifications to trigger
-    // lossless high-DPI screenshots, coalesced to at most 10 frames per second.
-    await cdp("Page.startScreencast", { format: "png", maxWidth: viewport.width, maxHeight: viewport.height, everyNthFrame: 1 }, expected);
+    lastFrameAt = 0; lastStreamData = null; streamStartedAt = Date.now() / 1000;
+    await cdp("Page.startScreencast", { format: "jpeg", quality: 75, maxWidth: viewport.width, maxHeight: viewport.height, everyNthFrame: 1 }, expected);
     if (grantId === expected) requestFrame();
   }
   return {};
@@ -61,9 +96,10 @@ async function state(expected = grantId) {
   if (tabId === null) return { running: false, mode: "personal", tabs: [] };
   const info = await evaluate("({title:document.title,url:location.href})", expected);
   if (expected !== grantId) throw Error("Agent access changed");
-  return { running: true, mode: "personal", tabId: String(tabId), tabs: [{ id: String(tabId), title: info.title || "Signed-in Chrome", url: info.url || "about:blank" }], viewport, captureVersion: 2 };
+  return { running: true, mode: "personal", tabId: String(tabId), tabs: [{ id: String(tabId), title: info.title || "Signed-in Chrome", url: info.url || "about:blank" }], viewport, captureVersion: 3 };
 }
 async function revoke(notify = true, invalidate = true) {
+  projection = null;
   const previousGrant = grantId || pendingAuthorization;
   if (invalidate) { transition++; pendingAuthorization = null; }
   const previous = tabId; grantId = null; tabId = null; watching = false; dialogOpen = false; chatTitle = "";
@@ -104,12 +140,18 @@ async function evaluate(expression, expected = grantId) {
 }
 async function command(action, params = {}, expected = grantId) {
   if (!expected || grantId !== expected || tabId === null) throw Error("Agent access is off or changed");
+  const input = ["mouse", "key", "text", "navigate", "reload", "back", "forward"].includes(action);
+  if (input) { interactions++; requestFrame(); }
+  try { return await dispatchCommand(action, params, expected); }
+  finally { if (input) { interactions--; if (grantId === expected) requestFrame(); } }
+}
+async function dispatchCommand(action, params, expected) {
   const call = (method, parameters) => cdp(method, parameters, expected);
   const read = expression => evaluate(expression, expected);
   switch (action) {
     case "status": return state(expected);
     case "navigate": { const result = await updateLayout(() => call("Page.navigate", { url: safeUrl(params.url) })); if (result.errorText) throw Error(result.errorText); return {}; }
-    case "reload": return updateLayout(() => call("Page.reload"));
+    case "reload": return updateLayout(() => call("Page.reload", { ignoreCache: params.ignoreCache === true }));
     case "back": case "forward": { const h = await call("Page.getNavigationHistory"); const entry = h.entries[h.currentIndex + (action === "back" ? -1 : 1)]; if (entry) { safeUrl(entry.url); await updateLayout(() => call("Page.navigateToHistoryEntry", { entryId: entry.id })); } return {}; }
     case "resize": {
       const { width, height } = params;
@@ -153,16 +195,50 @@ async function command(action, params = {}, expected = grantId) {
     default: throw Error("Unsupported browser action");
   }
 }
+async function project(params, expected) {
+  if (!expected || grantId !== expected || tabId === null) throw Error('Browser projection revoked');
+  if (!params || Object.getPrototypeOf(params) !== Object.prototype || Object.keys(params).some(key => !(params.operation === 'command' ? ['operation','id','method','params'] : ['operation','id']).includes(key))) throw Error('Browser projection denied');
+  if (params.operation === 'open') {
+    if (projection || typeof params.id !== 'string' || !/^[a-f0-9-]{36}$/.test(params.id)) throw Error('Browser projection unavailable');
+    const current = { id:params.id, policy:new ProjectionPolicy() }; projection = current;
+    try {
+      const tree = await cdp('Page.getFrameTree', {}, expected); current.policy.result('Page.getFrameTree', tree);
+      await cdp('Runtime.disable', {}, expected);
+      if (projection !== current || grantId !== expected) throw Error('Browser projection revoked');
+      return { frame:tree.frameTree.frame };
+    } catch (error) { if (projection === current) projection = null; throw error; }
+  }
+  if (!projection || params.id !== projection.id) throw Error('Browser projection unavailable');
+  if (params.operation === 'close') { projection = null; return {}; }
+  if (params.operation !== 'command') throw Error('Browser projection denied');
+  const current = projection, method = params.method, input = current.policy.command(method, params.params);
+  if (method === 'Page.navigate') input.url = safeUrl(input.url);
+  if (method === 'Page.navigateToHistoryEntry') {
+    const history = await cdp('Page.getNavigationHistory',{},expected);
+    const entry = history.entries.find(entry => entry.id === input.entryId); if (!entry) throw Error('Unknown history entry'); safeUrl(entry.url);
+  }
+  const result = await cdp(method,input,expected);
+  if (projection !== current || grantId !== expected) throw Error('Browser projection revoked');
+  return current.policy.result(method,result);
+}
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId !== tabId || !grantId) return;
   const expected = grantId;
+  // No auto-attachment to child targets in this first slice. A foreign/debugger
+  // child session cannot be promoted by presenting its ID in a request.
+  if (projection && !source.sessionId) {
+    try { const value = projection.policy.event(method,params); if (value) send({event:'projection',grantId:expected,value:{id:projection.id,method,params:value}}); }
+    catch { projection = null; send({event:'projectionClosed',grantId:expected}); }
+  }
   if (method === "Fetch.requestPaused") {
     let allowed = false; try { safeUrl(params.request.url); allowed = true; } catch {}
     void cdp(allowed ? "Fetch.continueRequest" : "Fetch.failRequest", allowed ? { requestId: params.requestId } : { requestId: params.requestId, errorReason: "BlockedByClient" }).catch(() => {});
   }
   if (method === "Page.screencastFrame") {
     void cdp("Page.screencastFrameAck", { sessionId: params.sessionId }).catch(() => {});
-    if (watching) requestFrame();
+    if (watching && !dialogOpen && !capturing && params.metadata?.timestamp >= streamStartedAt && params.metadata?.deviceWidth === viewport.width && params.metadata?.deviceHeight === viewport.height) {
+      streamFrame(params.data, expected);
+    }
   }
   if (method === "Page.javascriptDialogOpening") { dialogOpen = true; send({ event: "dialog", grantId, value: params }); }
   if (method === "Page.javascriptDialogClosed") { dialogOpen = false; requestFrame(); }
@@ -202,7 +278,7 @@ async function connect(pairing) {
         let value;
         if (message.action === "revoke") { if (grantId === message.grantId || pendingAuthorization === message.grantId) await revoke(false); value = {}; }
         else if (message.action === "authorize") value = await authorize(message.grantId, message.params);
-        else { if (!grantId || grantId !== message.grantId) throw Error("Agent access is off"); value = await command(message.action, message.params, message.grantId); if (grantId !== message.grantId) throw Error("Agent access revoked"); }
+        else { if (!grantId || grantId !== message.grantId) throw Error("Agent access is off"); value = message.action === 'project' ? await project(message.params,message.grantId) : await command(message.action, message.params, message.grantId); if (grantId !== message.grantId) throw Error("Agent access revoked"); }
         send({ id: message.id, grantId: message.grantId, value });
       } catch (error) { send({ id: message.id, grantId: message.grantId, error: error.message }); }
     };

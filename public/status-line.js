@@ -17,7 +17,13 @@ export const STATUS_ITEMS = [
   ["project-root", "Project root", "Primary Git root observed on the worker, not a controller-side mirror."],
   ["codex-version", "Agent CLI version", "Version reported by this chat's Codex or Claude worker."],
 ].map(([id, label, help]) => ({ id, label, help }));
-export const DEFAULT_STATUS_ITEMS = ["model-with-reasoning", "context-remaining", "git-branch"];
+export const DEFAULT_STATUS_ITEMS = [];
+const LEGACY_DEFAULT_STATUS_ITEMS = ["model-with-reasoning", "context-remaining", "git-branch"];
+// Do not rewrite saved preferences. Only the old automatic footer is suppressed;
+// custom selections remain an explicit /statusline option.
+export function visibleStatusItems(items, revision = 0) {
+  return revision === 0 && items.length === LEGACY_DEFAULT_STATUS_ITEMS.length && items.every((id, index) => id === LEGACY_DEFAULT_STATUS_ITEMS[index]) ? [] : [...items];
+}
 export function validateStatusItems(items) {
   if (items === null) return []; // Explicitly disable the footer.
   if (!Array.isArray(items) || items.length > STATUS_ITEMS.length || new Set(items).size !== items.length || items.some(id => !STATUS_ITEMS.some(item => item.id === id))) {

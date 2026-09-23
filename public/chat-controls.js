@@ -1,4 +1,5 @@
 import { openSidePanel, closeSidePanel } from "./side-panels.js";
+import { attachmentPreview, droppedFiles, fileSize, isAttachmentImage } from "./attachment-view.js";
 const $ = selector => document.querySelector(selector);
 const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
 function button(label, action, cls) { const node = el("button", label, cls); node.type = "button"; node.addEventListener("click", action); return node; }
@@ -6,9 +7,25 @@ function link(label, url) { const node = el("a", label); node.href = url; node.t
 const ghUrl = (repo, suffix = "") => /^[\w.-]+\/[\w.-]+$/.test(repo || "") ? `https://github.com/${repo}${suffix}` : null;
 const count = value => Number.isFinite(value) ? new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(value) : "Unavailable";
 
+// Selected checkout defaults are not proof of the worker's current branch.
+// Use observed snapshots only, and do not repeat a branch already shown by a PR.
+export function branchesWithoutPullRequests(chat) {
+  const observed = value => typeof value === "string" && value.trim() ? value.trim().slice(0, 4096) : null;
+  const repositories = chat.repositories?.length ? chat.repositories : [{ fullName: null }];
+  return repositories.flatMap((repository, index) => {
+    const branch = (index === 0 ? observed(chat.workspaceStatus?.branch) : null)
+      || observed(chat.gitBranches?.find(item => item.repository === repository.fullName)?.branch);
+    if (!branch || (chat.pullRequests || []).some(pr => pr.repository?.toLowerCase() === repository.fullName?.toLowerCase() && pr.headRef === branch)) return [];
+    return [{ repository: repository.fullName, branch }];
+  });
+}
+
 export class ChatControls {
   constructor(options) {
-    Object.assign(this, options); this.drafts = new Map(); this.hiddenPRs = new Set(); this.uploads = new Map();
+    Object.assign(this, options); this.drafts = new Map(); this.hiddenPRs = new Set(); this.expandedPRTrays = new Set(); this.uploads = new Map(); this.fileCache = new Map(); this.observedThumbnails = new Set(); this.preparing = new Map();
+    this.thumbnailObserver = new IntersectionObserver(entries => {
+      for (const entry of entries) if (entry.isIntersecting) { this.thumbnailObserver.unobserve(entry.target); this.observedThumbnails.delete(entry.target); void entry.target.loadThumbnail?.(); }
+    });
     $("#copy-chat-link").addEventListener("click", () => this.copy(`${location.origin}/#chat=${this.state.active.id}`, "Private chat link copied"));
     $("#view-changes").addEventListener("click", () => this.showChanges());
     $("#close-diff").addEventListener("click", () => closeSidePanel("diff"));
@@ -21,22 +38,56 @@ export class ChatControls {
     $("#background-tasks").addEventListener("click", () => this.tasks());
     $("#open-workspace").addEventListener("click", () => this.workspace());
     $("#show-connectors").addEventListener("click", () => this.connectors());
+    $(".chat-settings-menu").addEventListener("click", event => {
+      if (event.target.closest("button, a")) event.currentTarget.open = false;
+    });
     document.querySelectorAll("[data-agent-mode]").forEach(node => node.addEventListener("click", async () => {
-      try { const { chat } = await this.api(`/api/chats/${this.state.active.id}/mode`, { method: "PATCH", body: JSON.stringify({ mode: node.dataset.agentMode }) }); this.updated(chat); $("#mode-menu").open = false; }
-      catch (error) { this.toast(error.message); }
+      this.requestedMode = { chatId: this.state.active.id, mode: node.dataset.agentMode };
+      if (this.modeChanging) return;
+      this.modeChanging = true;
+      try {
+        while (this.requestedMode) {
+          const requested = this.requestedMode; this.requestedMode = null;
+          try {
+            const { chat } = await this.api(`/api/chats/${requested.chatId}/mode`, { method: "PATCH", body: JSON.stringify({ mode: requested.mode }) });
+            if (this.state.active?.id === requested.chatId) { this.updated(chat); $("#mode-menu").open = false; }
+          } catch (error) { this.toast(error.message); }
+        }
+      } finally { this.modeChanging = false; }
     }));
     $("#add-attachments").addEventListener("click", () => $("#attachment-input").click());
     $("#attachment-input").addEventListener("change", event => this.attach(event.target.files));
-    $("#message-input").addEventListener("paste", event => {
+    $("#new-add-attachments").addEventListener("click", () => $("#attachment-input").click());
+    for (const selector of ["#message-input", "#initial-prompt"]) $(selector).addEventListener("paste", event => {
       const files = [...(event.clipboardData?.files || [])];
       if (!files.length) for (const item of event.clipboardData?.items || []) if (item.kind === "file") { const file = item.getAsFile(); if (file) files.push(file); }
       if (!files.length) return; // Leave text and unsupported OS file paths alone.
       event.preventDefault(); void this.attach(files);
     });
-    document.addEventListener("click", event => document.querySelectorAll(".control-menu[open]").forEach(menu => { if (!menu.contains(event.target)) menu.open = false; }));
+    window.addEventListener("relay-new-chat-selection-changed", () => this.renderAttachments());
+    $("#environment-select").addEventListener("change", () => queueMicrotask(() => this.renderAttachments()));
+    const dropZone = $(".main");
+    const hasFiles = event => [...(event.dataTransfer?.types || [])].includes("Files");
+    const resetDrop = () => { this.dropDepth = 0; dropZone.classList.remove("attachment-drop-active"); };
+    dropZone.addEventListener("dragenter", event => { if (!hasFiles(event)) return; event.preventDefault(); this.dropDepth = (this.dropDepth || 0) + 1; if (this.draftKey()) dropZone.classList.add("attachment-drop-active"); });
+    dropZone.addEventListener("dragover", event => { if (hasFiles(event)) { event.preventDefault(); event.dataTransfer.dropEffect = this.draftKey() ? "copy" : "none"; } });
+    dropZone.addEventListener("dragleave", event => { if (hasFiles(event) && --this.dropDepth <= 0) resetDrop(); });
+    dropZone.addEventListener("drop", event => {
+      if (!hasFiles(event)) return;
+      event.preventDefault(); resetDrop();
+      try { void this.attach(droppedFiles(event.dataTransfer)); } catch (error) { this.toast(error.message); }
+    });
+    window.addEventListener("dragend", resetDrop); window.addEventListener("blur", resetDrop);
+    // An action may replace its own DOM before the click bubbles here. The
+    // dispatch path still identifies the menu that was actually clicked.
+    document.addEventListener("click", event => document.querySelectorAll(".control-menu[open]").forEach(menu => { if (!event.composedPath().includes(menu)) menu.open = false; }));
     document.addEventListener("keydown", event => { if (event.key === "Escape") document.querySelectorAll(".control-menu[open]").forEach(menu => menu.open = false); });
   }
-  async copy(text, message = "Copied") { try { await navigator.clipboard.writeText(text); this.toast(message); } catch { this.dialog("Copy", el("pre", text)); } }
+  async copy(text, message = "Copied", { validWhile = () => true } = {}) {
+    if (!validWhile()) return;
+    try { await navigator.clipboard.writeText(text); if (validWhile()) this.toast(message); }
+    catch { if (validWhile()) this.dialog("Copy", el("pre", text)); }
+  }
   dialog(title, ...content) {
     this.dialogVersion = (this.dialogVersion || 0) + 1;
     document.querySelectorAll(".control-menu[open]").forEach(menu => menu.open = false);
@@ -53,18 +104,18 @@ export class ChatControls {
       closeSidePanel("diff");
       document.querySelectorAll(".control-menu[open]").forEach(menu => menu.open = false);
     }
-    $("#mode-label").textContent = { auto: "Auto", accept_edits: "Edits", plan: "Plan", default: "Manual", dont_ask: "Deny prompts" }[chat.mode || "accept_edits"];
+    $("#mode-label").textContent = { auto: "Auto", accept_edits: "Edits", plan: "Plan", default: "Manual", dont_ask: "Deny prompts" }[chat.mode || "auto"];
     document.querySelectorAll("[data-claude-mode]").forEach(button => { button.hidden = chat.agent !== "claude"; });
     $("#mode-provider-note").textContent = chat.agent === "codex" ? "Auto routes eligible approvals through Codex's automatic safety reviewer (uses model tokens). Edits asks you. Plan uses a read-only sandbox." : "Claude uses its native permission modes; account restrictions still apply. Private Claude profiles support Approve once and Deny here. Shared host profiles do not support approval replies.";
     const percentage = Number.isFinite(chat.usage?.contextTokens) && chat.usage?.contextWindow ? Math.min(100, chat.usage.contextTokens / chat.usage.contextWindow * 100) : 0;
     $("#usage-ring").style.setProperty("--usage", `${percentage}%`);
     $("#archive-current-chat").textContent = chat.archived ? "Unarchive" : "Archive";
     $("#edit-chat-environment").disabled = !chat.environmentId;
-    const signature = JSON.stringify([chat.id, chat.repositories, chat.gitBranches, chat.pullRequests, chat.githubSyncWarning]);
+    const signature = JSON.stringify([chat.id, chat.repositories, chat.gitBranches, chat.workspaceStatus?.branch, chat.pullRequests, chat.githubSyncWarning, chat.githubEvents]);
     if (signature !== this.signature) { this.signature = signature; this.repositories(chat); this.pullRequests(chat); }
     this.renderAttachments();
     const goalStatus = $("#goal-status"); goalStatus.replaceChildren();
-    if (chat.agent === "codex" && chat.goal) {
+    if (chat.goal) {
       goalStatus.append(button(`Goal · ${chat.goal.status} · ${chat.goal.objective}`, () => this.goal(), "goal-summary"));
       if (chat.mode === "plan" && chat.goal.status === "active") goalStatus.append(el("small", "Plan mode: planning only; automatic goal continuation is disabled.", "muted"));
     }
@@ -91,14 +142,14 @@ export class ChatControls {
         this.updated(chat);
       }
       const goal = this.state.active.goal;
-      this.dialog("Codex goal", ...(goal ? [
+      this.dialog("Goal", ...(goal ? [
         el("p", goal.objective), el("p", `Status: ${goal.status}`, "muted"),
         el("p", `${count(goal.tokensUsed)} tokens used${goal.tokenBudget ? ` / ${count(goal.tokenBudget)} budget` : " · no token budget set"} · ${Math.round(goal.timeUsedSeconds || 0)} seconds`),
         button(goal.status === "active" ? "Pause goal" : "Resume goal", () => this.goal(goal.status === "active" ? "pause" : "resume"), "secondary-button"),
         button("Clear goal", () => this.goal("clear"), "secondary-button"),
         button("Edit goal", () => this.goal("edit"), "secondary-button"),
       ] : [el("p", "No goal is set. Type /goal followed by the objective to start one.")]),
-      el("p", "Goals use Codex's persisted thread state and respect the selected Plan / Edits mode. No budget is imposed unless you set one in Codex.", "muted"));
+      el("p", goal?.managedBy === "relay" ? "Relay persists this goal for the selected agent. Stop pauses it; Resume continues it in the same chat." : "This goal uses the agent's persisted thread state and respects the selected Plan / Edits mode. No budget is imposed unless the agent sets one.", "muted"));
     } catch (error) { if (throwErrors) throw error; this.toast(error.message); }
   }
   async submitCommand(chatId, text) {
@@ -162,29 +213,34 @@ export class ChatControls {
       if (branch) root.append(button(`Copy branch · ${branch}`, () => this.copy(branch, "Branch name copied")));
     }
     if (!chat.repositories?.length) root.append(el("p", "No GitHub repositories selected", "muted"));
-    root.append(button("Add repository…", () => this.addRepository()));
-  }
-  async addRepository() {
-    const chatId = this.state.active.id;
-    this.dialog("Add repository", el("p", "Loading your GitHub repositories…"));
-    try {
-      const { repositories } = await this.api("/api/github/repositories");
-      const select = el("select"); select.setAttribute("aria-label", "Repository to add");
-      for (const repo of repositories.filter(repo => !this.state.active.repositories?.some(existing => existing.fullName === repo.fullName))) { const option = el("option", `${repo.fullName}${repo.connectionName ? ` · ${repo.connectionName}` : ""}`); option.value = repo.fullName; option.dataset.connectionId = repo.githubConnectionId || ""; select.append(option); }
-      const branch = el("input"); branch.placeholder = "Default branch"; branch.setAttribute("aria-label", "Branch to add");
-      const save = button("Add repository", async () => {
-        save.disabled = true;
-        try { const { chat } = await this.api(`/api/chats/${chatId}/repositories`, { method: "POST", body: JSON.stringify({ fullName: select.value, branch: branch.value || undefined, githubConnectionId: select.selectedOptions[0]?.dataset.connectionId || undefined }) }); this.updated(chat); $("#controls-dialog").close(); }
-        catch (error) { this.toast(error.message); }
-        finally { save.disabled = false; }
-      }); save.disabled = !select.options.length;
-      $("#controls-content").replaceChildren(el("p", "Stop active work first. Your original primary repository and company grouping stay unchanged. New repositories clone on the next message.", "muted"), select, branch, save);
-    } catch (error) { $("#controls-content").replaceChildren(el("p", error.message, "form-error")); }
+    root.append(button("Add repository…", () => {
+      $("#repositories-menu").open = false;
+      const picker = $("#chat-workspace-strip details"); picker.open = true; picker.querySelector("summary").focus();
+    }));
   }
   pullRequests(chat) {
-    const root = $("#pull-request-bars"); root.replaceChildren();
-    for (const pr of chat.pullRequests || []) {
-      if (this.hiddenPRs.has(`${chat.id}:${pr.repository}:${pr.number}`)) continue;
+    const root = $("#pull-request-bars"); root.replaceChildren(); root.classList.remove("expanded", "has-overflow"); root.removeAttribute("role"); root.removeAttribute("aria-label");
+    const observedBranches = new Map((chat.gitBranches || []).map(ref => [ref.repository?.toLowerCase(), ref.branch]));
+    if (chat.repositories?.[0]?.fullName && chat.workspaceStatus?.branch) observedBranches.set(chat.repositories[0].fullName.toLowerCase(), chat.workspaceStatus.branch);
+    const pullRequests = (chat.pullRequests || []).map((pr, index) => ({ pr, index })).filter(({ pr }) => {
+      if (this.hiddenPRs.has(`${chat.id}:${pr.repository}:${pr.number}`)) return false;
+      return Boolean(ghUrl(pr.repository, `/pull/${pr.number}`));
+    }).sort((left, right) => {
+      const priority = ({ pr, index }) => [observedBranches.get(pr.repository?.toLowerCase()) === pr.headRef ? 0 : 1,
+        pr.agentFollowUp || chat.githubEvents?.subscriptions?.some(item => item.repository === pr.repository?.toLowerCase() && item.number === pr.number) ? 0 : 1,
+        pr.state === "open" ? 0 : 1, index];
+      const a = priority(left), b = priority(right);
+      return a[0] - b[0] || a[1] - b[1] || a[2] - b[2] || a[3] - b[3];
+    }).map(({ pr }) => pr);
+    const branchRefs = branchesWithoutPullRequests(chat), totalRows = pullRequests.length + branchRefs.length;
+    if (!totalRows) { this.expandedPRTrays.delete(chat.id); return; }
+    const overflow = totalRows > 3;
+    if (!overflow) this.expandedPRTrays.delete(chat.id);
+    const expanded = overflow && this.expandedPRTrays.has(chat.id);
+    root.classList.toggle("expanded", expanded); root.classList.toggle("has-overflow", overflow);
+    const rows = [];
+    const renderedPullRequests = expanded ? pullRequests : pullRequests.slice(0, 3);
+    for (const pr of renderedPullRequests) {
       const url = ghUrl(pr.repository, `/pull/${pr.number}`); if (!url) continue;
       const row = el("div", undefined, "pull-request-bar");
       const status = pr.merged ? "merged" : pr.state === "closed" ? "closed" : pr.conflicts || pr.checks === "failing" ? "failing" : "open";
@@ -194,6 +250,19 @@ export class ChatControls {
       const changes = button("", () => this.showChanges(pr), "pr-change-count"); changes.append(el("span", `+${count(pr.additions)} `), el("span", `−${count(pr.deletions)}`, "pr-deletions")); changes.setAttribute("aria-label", `View changes for PR ${pr.number}`); row.append(changes);
       const ci = el("details", undefined, "control-menu upward ci-menu"); const summary = el("summary", pr.conflicts ? "Conflict" : pr.checks === "pending" ? "◌ CI" : pr.checks === "failing" ? "× CI" : "CI⌄");
       const body = el("div", undefined, "control-popover"); body.append(link("CI monitoring ↗", `${url}/checks`));
+      const topLayer = typeof body.showPopover === "function"; if (topLayer) body.setAttribute("popover", "auto");
+      ci.addEventListener("toggle", () => {
+        if (!ci.open) {
+          if (topLayer && body.matches(":popover-open")) body.hidePopover();
+          body.classList.remove("pr-ci-floating"); body.style.removeProperty("left"); body.style.removeProperty("bottom"); body.style.removeProperty("width"); return;
+        }
+        const rect = summary.getBoundingClientRect(), width = Math.min(270, innerWidth - 24);
+        body.classList.add("pr-ci-floating"); body.style.width = `${width}px`;
+        body.style.left = `${Math.max(12, Math.min(innerWidth - width - 12, rect.right - width))}px`;
+        body.style.bottom = `${Math.max(12, innerHeight - rect.top + 7)}px`;
+        if (topLayer && !body.matches(":popover-open")) body.showPopover();
+      });
+      if (topLayer) body.addEventListener("toggle", event => { if (event.newState === "closed" && ci.open) ci.open = false; });
       if (pr.ci) for (const [key, label] of [["inProgress", "In progress"], ["passed", "Passed"], ["skipped", "Skipped"], ["failed", "Failed"]]) {
         const line = el("div", undefined, `ci-count ${key}`); line.append(el("span", label), el("strong", String(pr.ci[key]))); body.append(line);
       } else body.append(el("p", "Check counts unavailable", "muted"));
@@ -210,10 +279,62 @@ export class ChatControls {
         finally { input.disabled = pr.state !== "open"; }
       });
       auto.append(input, el("span", "Auto-merge when ready")); body.append(auto);
-      const fix = el("label", undefined, "checkbox-label"); const fixing = document.createElement("input"); fixing.type = "checkbox"; fixing.disabled = true;
-      fix.append(fixing, el("span", "Auto-fix CI & comments · not available")); body.append(fix, el("p", "CI checks refresh every minute. Auto-merge follows GitHub repository rules; no admin bypass.", "muted"));
-      ci.append(summary, body); row.append(ci, button("×", () => { this.hiddenPRs.add(`${chat.id}:${pr.repository}:${pr.number}`); this.pullRequests(chat); }, "small-icon")); root.append(row);
+      const subscription = chat.githubEvents?.subscriptions?.find(item => item.repository === pr.repository.toLowerCase() && item.number === pr.number);
+      if (subscription?.automatic) body.append(el("p", "Automatic agent follow-up is on. Check failures, merge conflicts and new PR comments wake this exact chat; it keeps following the PR until checks pass without conflicts.", "muted"));
+      else {
+        const choices = [];
+        for (const [field, label] of [["notifyFailures", "Notify agent when checks fail"], ["wakePassing", "Wake this chat when checks pass"]]) {
+          const row = el("label", undefined, "checkbox-label"), control = document.createElement("input"); control.type = "checkbox";
+          control.checked = Boolean(subscription?.[field]); control.disabled = !chat.ownerId || !control.checked && (!chat.agentAccountId || pr.state !== "open");
+          control.setAttribute("aria-label", `${label} for PR ${pr.number}`); choices.push(control);
+          control.addEventListener("change", async () => {
+            if (field === "wakePassing" && control.checked && !confirm(`Allow verified passing checks for ${pr.repository} #${pr.number} to start this chat's worker and send an agent message? This may use worker time and model tokens. It does not enable merging or resume other paused messages.`)) { control.checked = Boolean(subscription?.[field]); return; }
+            for (const choice of choices) choice.disabled = true;
+            try {
+              const { chat: updated } = await this.api(`/api/chats/${chat.id}/pull-requests/subscription`, { method: "PATCH", body: JSON.stringify({ repository: pr.repository, number: pr.number,
+                notifyFailures: Boolean(subscription?.notifyFailures), wakePassing: Boolean(subscription?.wakePassing), [field]: control.checked, revision: chat.githubEvents?.revision || 0 }) });
+              if (this.state.active?.id === chat.id) this.updated(updated);
+            } catch (error) { control.checked = Boolean(subscription?.[field]); if (this.state.active?.id === chat.id) body.append(el("p", error.message, "form-error")); }
+            finally { for (const choice of choices) choice.disabled = !chat.ownerId || !choice.checked && (!chat.agentAccountId || pr.state !== "open"); }
+          });
+          row.append(control, el("span", label)); body.append(row);
+        }
+      }
+      body.append(el("p", chat.githubEvents?.configured ? "Signed event receiver configured; polling reconciles every minute. GitHub webhook registration is managed separately." : "Polling every minute. Live events require an operator-configured GitHub webhook.", "muted"));
+      for (const event of chat.githubEvents?.deliveries?.filter(item => item.repository === pr.repository.toLowerCase() && item.number === pr.number).slice(-3) || []) {
+        body.append(el("p", `GitHub notification: ${(event.reasons || [event.checks]).join(" + ")} · ${event.status}`, event.status === "uncertain" || event.status === "blocked" ? "form-error" : "muted"));
+        if (["uncertain", "blocked", "pending"].includes(event.status)) {
+          for (const [action, label] of [["retry", "Review and retry notification"], ["discard", "Discard notification"]]) body.append(button(label, async () => {
+            if (action === "retry" && !confirm("Review the conversation first: this notification may already have reached the agent. Retry may repeat work. Send it again only if appropriate?")) return;
+            try { const { chat: updated } = await this.api(`/api/chats/${chat.id}/pull-requests/event`, { method: "PATCH", body: JSON.stringify({ id: event.id, action }) }); if (this.state.active?.id === chat.id) this.updated(updated); }
+            catch (error) { if (this.state.active?.id === chat.id) body.append(el("p", error.message, "form-error")); }
+          }, "secondary-button"));
+        }
+      }
+      body.append(el("p", "GitHub events grant no merge or permission changes. Auto-merge follows existing repository rules; no admin bypass.", "muted"));
+      ci.append(summary, body); row.append(ci, button("×", () => { this.hiddenPRs.add(`${chat.id}:${pr.repository}:${pr.number}`); this.pullRequests(chat); }, "small-icon")); rows.push(row);
     }
+    const remainingRows = expanded ? branchRefs : branchRefs.slice(0, Math.max(0, 3 - renderedPullRequests.length));
+    for (const ref of remainingRows) {
+      const row = el("div", undefined, "pull-request-bar branch-only"); row.setAttribute("role", "group"); row.setAttribute("aria-label", `Git branch for ${ref.repository || "workspace"}`);
+      const icon = el("span", "⑂"); icon.setAttribute("aria-hidden", "true");
+      const branch = el("span", `${ref.repository?.split("/")[1] || "Workspace"} · ${ref.branch}`, "pr-branch");
+      branch.title = `${ref.repository || "Workspace"} · ${ref.branch}`;
+      row.append(icon, branch); rows.push(row);
+    }
+    root.setAttribute("role", "group"); root.setAttribute("aria-label", `${pullRequests.length} pull request${pullRequests.length === 1 ? "" : "s"}`);
+    const controls = el("span", undefined, "pr-tray-controls");
+    controls.append(el("span", `${pullRequests.length} PR${pullRequests.length === 1 ? "" : "s"}`, "pr-tray-count"));
+    if (overflow) {
+      const toggle = button(expanded ? "Show less" : "View more", () => {
+        if (expanded) this.expandedPRTrays.delete(chat.id); else this.expandedPRTrays.add(chat.id);
+        this.pullRequests(chat);
+        queueMicrotask(() => root.querySelector(".pr-tray-toggle")?.focus());
+      }, "pr-tray-toggle");
+      toggle.setAttribute("aria-expanded", String(expanded)); toggle.setAttribute("aria-controls", root.id); controls.append(toggle);
+    }
+    rows[0].classList.add("pr-tray-anchor"); rows[0].children[1]?.after(controls);
+    root.append(...rows);
   }
   async showChanges(pr = this.state.active?.pullRequests?.at(-1)) {
     const chat = this.state.active; if (!chat) return;
@@ -268,7 +389,9 @@ export class ChatControls {
     try { const info = await this.api(`/api/chats/${this.state.active.id}/session-info`); $("#controls-content").replaceChildren(el("p", "Worker-reported MCP status. Save connections in the sidebar’s MCP connections section, then select them in this chat’s environment. Changes apply on the next worker start.", "muted"), ...(info.connectors?.length ? info.connectors.map(server => el("p", `${server.name} · ${server.status}`)) : [el("p", "No connector information reported yet.")])); }
     catch (error) { $("#controls-content").replaceChildren(el("p", error.message, "form-error")); }
   }
-  attachments() { return this.drafts.get(this.state.active?.id) || []; }
+  newDraftKey() { return `new:${this.newDraftScope?.() || "unassigned"}`; }
+  draftKey() { return this.state.active?.id || (this.state.page !== "companies" && !this.state.creatingChat ? this.newDraftKey() : null); }
+  attachments() { return this.drafts.get(this.draftKey()) || []; }
   addDraftAttachment(chatId, file) {
     const draft = this.drafts.get(chatId) || [];
     if (draft.some(item => item.id === file.id)) return;
@@ -276,9 +399,36 @@ export class ChatControls {
     this.drafts.set(chatId, [...draft, file]); this.renderAttachments();
   }
   attachmentButton(file, { chatId = this.state.active?.id, messageId } = {}) {
+    const draftKey = chatId || this.draftKey();
     const label = file.workspaceContext ? `${file.workspaceContext.path || "Workspace"}${file.workspaceContext.range ? `:${file.workspaceContext.range.start.line}–${file.workspaceContext.range.end.line}` : ""}` : file.name;
-    const open = button(label, () => this.openAttachment(file, { chatId, messageId, trigger: open }), "attachment-open");
+    const open = button(undefined, () => this.openAttachment(file, { chatId, draftKey, messageId, trigger: open }), "attachment-open");
+    const icon = el("span", isAttachmentImage(file) ? "Image" : (file.name.split(".").at(-1) || "FILE").slice(0, 6).toUpperCase(), "attachment-icon"); icon.setAttribute("aria-hidden", "true");
+    const info = el("span", undefined, "attachment-info"); info.append(el("strong", label), el("small", `${file.appReference ? "App reference" : fileSize(file.size)}${file.local ? " · Draft" : ""}`));
+    open.append(icon, info);
+    if (isAttachmentImage(file)) {
+      open.classList.add("attachment-image-card");
+      open.loadThumbnail = async () => {
+        try {
+          const full = await this.loadAttachment(file, chatId);
+          if (!open.isConnected || (chatId ? this.state.active?.id !== chatId : this.draftKey() !== draftKey)) return;
+          const img = document.createElement("img"); img.alt = ""; img.decoding = "async"; img.src = attachmentPreview(full).source;
+          img.onerror = () => img.remove(); icon.replaceChildren(img);
+        } catch { /* The clickable card remains usable when a thumbnail fails. */ }
+      };
+      this.thumbnailObserver.observe(open);
+      this.observedThumbnails.add(open);
+    }
     open.setAttribute("aria-label", `Preview ${file.name}`); open.title = `Preview ${file.name}`; return open;
+  }
+  async loadAttachment(file, chatId) {
+    if (file.data !== undefined) return file;
+    const key = `${chatId}:${file.id}`;
+    if (!this.fileCache.has(key)) {
+      if (this.fileCache.size >= 12) this.fileCache.delete(this.fileCache.keys().next().value);
+      const request = this.api(`/api/chats/${chatId}/attachments/${file.id}`).then(result => result.attachment);
+      this.fileCache.set(key, request); request.catch(() => this.fileCache.delete(key));
+    }
+    return this.fileCache.get(key);
   }
   async openAttachment(file, context) {
     if (file.appReference) {
@@ -288,28 +438,28 @@ export class ChatControls {
     }
     const version = this.attachmentPreviewVersion = (this.attachmentPreviewVersion || 0) + 1;
     try {
-      const attachment = file.previewSource ? file : (await this.api(`/api/chats/${context.chatId}/attachments/${file.id}`)).attachment;
-      if (this.state.active?.id !== context.chatId || this.attachmentPreviewVersion !== version) return;
-      const image = /^image\/(png|jpeg|webp|gif|avif)$/.test(attachment.mime || "");
-      let source;
-      if (image) source = attachment.previewSource || `data:${attachment.mime};base64,${attachment.data}`;
-      else if (/^(?:text\/|application\/(?:json|xml))/.test(attachment.mime || "") || /\.(?:txt|md|json|csv|log|html|svg|js|ts|css)$/i.test(attachment.name)) {
-        source = new TextDecoder().decode(Uint8Array.from(atob(attachment.data), char => char.charCodeAt(0)));
-      } else { this.toast("Preview is available for images and text files."); return; }
-      this.preview.open({ ...context, source, format: image ? "image" : "text", title: attachment.name });
+      const attachment = await this.loadAttachment(file, context.chatId);
+      if ((context.chatId ? this.state.active?.id !== context.chatId : this.draftKey() !== context.draftKey) || this.attachmentPreviewVersion !== version) return;
+      this.preview.open({ ...context, ...attachmentPreview(attachment), title: attachment.name });
     } catch (error) { this.toast(error.message); }
   }
   renderAttachments() {
-    const root = $("#attachment-chips"); root.replaceChildren(...this.attachments().map(file => {
-      const chip = el("span", undefined, "attachment-chip"), remove = button("×", () => { this.drafts.set(this.state.active.id, this.attachments().filter(item => item.id !== file.id)); this.renderAttachments(); }, "small-icon");
+    for (const card of this.observedThumbnails) if (!card.isConnected) { this.thumbnailObserver.unobserve(card); this.observedThumbnails.delete(card); }
+    const key = this.draftKey(), root = $(this.state.active ? "#attachment-chips" : "#new-attachment-chips");
+    if (!this.state.active && this.state.page !== "companies") this.preview.setChat(this.newDraftKey());
+    const signature = JSON.stringify([key, this.attachments().map(file => [file.id, file.local]), this.uploads.has(key)]);
+    if (root.dataset.signature === signature) return;
+    root.dataset.signature = signature;
+    root.replaceChildren(...this.attachments().map(file => {
+      const chip = el("span", undefined, "attachment-chip"), remove = button("×", () => { this.drafts.set(key, (this.drafts.get(key) || []).filter(item => item.id !== file.id)); this.renderAttachments(); }, "small-icon");
       remove.setAttribute("aria-label", `Remove ${file.name}`); chip.append(this.attachmentButton(file), remove); return chip;
     }));
-    if (this.uploads.has(this.state.active?.id)) root.append(el("span", "Uploading…", "muted"));
+    if (this.uploads.has(key)) { const loading = el("span", "Adding files…", "muted"); loading.setAttribute("role", "status"); root.append(loading); }
   }
   clearAttachments(chatId, sentIds) { if (sentIds) this.drafts.set(chatId, (this.drafts.get(chatId) || []).filter(file => !sentIds.includes(file.id))); else this.drafts.delete(chatId); this.renderAttachments(); }
   async waitForUploads(chatId) { while (this.uploads.has(chatId)) await this.uploads.get(chatId); }
   attach(files) {
-    const chatId = this.state.active?.id; if (!chatId) return;
+    const chatId = this.draftKey(); if (!chatId || this.state.creatingChat || this.state.openingNewChat || this.state.active?.archived || this.state.deletingChats?.has(chatId)) return;
     const list = [...files];
     return this.queueUpload(chatId, () => this.uploadFiles(chatId, list));
   }
@@ -322,16 +472,34 @@ export class ChatControls {
   }
   async uploadFiles(chatId, files) {
     for (const file of files) {
+      if (!(file instanceof File) || !file.name?.trim() || file.name.length > 200 || file.webkitRelativePath) { this.toast("Choose individual files with names of up to 200 characters, not folders."); continue; }
       const draft = this.drafts.get(chatId) || [];
       if (draft.length >= 10 || draft.reduce((sum, item) => sum + item.size, 0) + file.size > 20 * 1024 * 1024) { this.toast("Attach up to 10 files and 20 MB per message"); break; }
       if (file.size > 5 * 1024 * 1024) { this.toast(`${file.name}: maximum file size is 5 MB`); continue; }
       try {
-        const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1]); reader.onerror = reject; reader.readAsDataURL(file); });
-        const result = await this.api(`/api/chats/${chatId}/attachments`, { method: "POST", body: JSON.stringify({ name: file.name, mime: file.type, data }) });
-        const previewSource = /^image\/(png|jpeg|webp|gif|avif)$/.test(file.type) ? `data:${file.type};base64,${data}` : undefined;
-        this.drafts.set(chatId, [...(this.drafts.get(chatId) || []), { ...result.attachment, ...(previewSource ? { previewSource } : {}) }]); this.renderAttachments();
+        const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1]); reader.onerror = () => reject(new Error(`${file.name}: the file could not be read. Choose it again.`)); reader.readAsDataURL(file); });
+        const local = { id: `local_${crypto.randomUUID()}`, local: true, name: file.name, mime: file.type, size: file.size, data };
+        this.drafts.set(chatId, [...(this.drafts.get(chatId) || []), local]); this.renderAttachments();
+        if (!chatId.startsWith("new:")) await this.prepareAttachments(chatId);
       } catch (error) { this.toast(error.message); }
     }
     $("#attachment-input").value = "";
+  }
+  moveNewAttachments(key, chatId) { this.drafts.set(chatId, this.drafts.get(key) || []); this.drafts.delete(key); this.renderAttachments(); }
+  prepareAttachments(chatId) {
+    if (this.preparing.has(chatId)) return this.preparing.get(chatId);
+    const task = this.uploadLocalAttachments(chatId).finally(() => this.preparing.delete(chatId));
+    this.preparing.set(chatId, task); return task;
+  }
+  async uploadLocalAttachments(chatId) {
+    let file;
+    while ((file = (this.drafts.get(chatId) || []).find(file => file.local))) {
+      const { attachment } = await this.api(`/api/chats/${chatId}/attachments`, { method: "POST", body: JSON.stringify({ name: file.name, mime: file.mime, data: file.data }) });
+      this.drafts.set(chatId, (this.drafts.get(chatId) || []).map(current => current.id === file.id ? attachment : current));
+      if (this.fileCache.size >= 12) this.fileCache.delete(this.fileCache.keys().next().value);
+      this.fileCache.set(`${chatId}:${attachment.id}`, Promise.resolve({ ...attachment, data: file.data }));
+      this.renderAttachments();
+    }
+    return this.drafts.get(chatId) || [];
   }
 }

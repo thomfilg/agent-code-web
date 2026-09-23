@@ -73,9 +73,10 @@ export class GoogleAuth {
     };
     this.api.config.callbacks.session = async input => {
       const session = await callbacks.session(input);
+      if (this.revoked.has(input.token.relaySessionId)) return null;
       const saved = await this.records.get("relay-session", input.token.relaySessionId || "");
       const user = saved && await this.records.get("relay-user", saved.ownerId);
-      if (!user || saved.ownerId !== input.token.id || saved.expiresAt <= this.now() || !this.allowedEmail(user.email)) return null;
+      if (!user || this.revoked.has(input.token.relaySessionId) || saved.ownerId !== input.token.id || saved.expiresAt <= this.now() || !this.allowedEmail(user.email)) return null;
       return { user: publicUser(user), expires: new Date(saved.expiresAt).toISOString(), relaySessionId: saved.id };
     };
     this.api.config.callbacks.redirect = ({ url }) => sameOriginRedirect(url, origin);
@@ -119,7 +120,7 @@ export class GoogleAuth {
   async session(request) {
     if (!this.api) return null;
     const session = await this.api.auth(this.request({ url: request.url, headers: request.headers, method: "GET" }));
-    return session ? { ...session.user, sessionId: session.relaySessionId, expiresAt: Date.parse(session.expires) } : null;
+    return session && !this.revoked.has(session.relaySessionId) ? { ...session.user, sessionId: session.relaySessionId, expiresAt: Date.parse(session.expires) } : null;
   }
   async logout(request) {
     const user = await this.session(request);
@@ -129,7 +130,9 @@ export class GoogleAuth {
   async revoke(user) {
     this.revoked.set(user.sessionId, user.expiresAt);
     for (const [id, expiry] of this.revoked) if (expiry <= this.now()) this.revoked.delete(id);
-    await this.records.delete("relay-session", user.sessionId); await this.onSignOut(user);
+    // In-memory browser/preview capabilities must end before potentially slow
+    // database persistence. Await both operations without an unhandled rejection.
+    await Promise.all([Promise.resolve(this.onSignOut(user)), this.records.delete("relay-session", user.sessionId)]);
   }
   public(user) { return publicUser(user); }
   require(user) { if (!user) throw fail("Sign in with Google first", 401); return user; }

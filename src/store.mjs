@@ -2,12 +2,19 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import path from "node:path";
 import { newId, nowIso } from "./utils.mjs";
 import { runtimeWorkflowPatch } from "../public/chat-organization.js";
+import { initialWorkerLifecycle, restoreWorkerLifecycle } from "./worker-lifecycle.mjs";
 
 function restored(chat) {
   chat = { ...chat, archived: chat.archived ?? chat.workflowState === "archived" };
-  return { pinned: false, customGroupId: null, workflowState: "idle", ...chat,
+  const workerLifecycle = restoreWorkerLifecycle(chat.workerLifecycle, chat.runtimeMetadata, nowIso());
+  // The original source-only schema predates saved repository selections.
+  // An absent field means no GitHub grant, not permission to infer a connection.
+  // Explicit null/malformed selections remain intact so admission rejects them.
+  return { repositories: [], pinned: false, customGroupId: null, workflowState: "idle", ...chat,
     ...runtimeWorkflowPatch(chat, "stopped"), status: "stopped", pendingRequest: null, idleDeadlineAt: null,
-    queuePaused: Boolean(chat.queuedMessages?.length) || Boolean(chat.queuePaused) };
+    messages: (chat.messages || []).map(message => message.kind === "tool" && ["running", "stopping"].includes(message.meta?.state)
+      ? { ...message, meta: { ...message.meta, state: "completed", interrupted: true, resultMissing: true } } : message),
+    queuePaused: Boolean(chat.queuedMessages?.length) || Boolean(chat.queuePaused), workerLifecycle };
 }
 
 function clone(value) {
@@ -33,6 +40,10 @@ export class ChatStore {
         chat.pendingRequest = null;
         chat.idleDeadlineAt = null;
         this.#chats.set(chat.id, restored(chat));
+        // Persist the fenced lifecycle before this controller can admit work.
+        // The saved observation from another controller is never treated as a
+        // live process or a current lease merely because the row survived.
+        await this.#persist(chat.id);
       }
     }
     const entries = await readdir(this.chatsDir, { withFileTypes: true });
@@ -84,7 +95,7 @@ export class ChatStore {
     return chat ? clone(chat) : null;
   }
 
-  async create({ title, agent, source = "", repositories = [], environmentId = null, environmentName = null, autoTitle = true, model = null, effort = null, modelSelectionSet = false, ownerId = null }, prepare = null) {
+  async create({ title, agent, source = "", repositories = [], environmentId = null, environmentName = null, autoTitle = true, model = null, effort = null, ultracode = false, modelSelectionSet = false, mode = "auto", ownerId = null, agentAccountId = null }, prepare = null) {
     const id = newId("chat");
     const timestamp = nowIso();
     const chat = {
@@ -93,10 +104,12 @@ export class ChatStore {
       revision: 1,
       title,
       agent,
+      agentAccountId,
       model,
       effort,
+      ultracode: agent === "claude" && ultracode === true,
       modelSelectionSet,
-      mode: "accept_edits",
+      mode,
       source,
       repositories,
       environmentId,
@@ -120,6 +133,7 @@ export class ChatStore {
       status: "stopped",
       statusDetail: "Not started",
       runtimeMetadata: null,
+      workerLifecycle: initialWorkerLifecycle(timestamp),
       agentSessionId: null,
       pendingRequest: null,
       messages: [],
@@ -177,6 +191,8 @@ export class ChatStore {
     this.#chats.delete(id);
     await this.#writes.get(id);
     if (this.records) await this.records.delete("chat", id);
+    if (this.records) await this.records.delete("native-session", id);
+    if (this.records) await this.records.delete("github-event-state", id);
     if (this.records) await this.records.delete("native-fork", id);
     if (this.records) await this.records.delete("native-agents", id);
     if (this.records) await this.records.delete("native-import", id);

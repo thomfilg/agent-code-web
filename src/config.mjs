@@ -53,6 +53,10 @@ export function loadConfig(env = process.env) {
 
   const isolationDefault = os.platform() === "linux" ? "namespace" : "none";
   const workerBackend = choice(env, "AGENT_WORKER_BACKEND", "local", ["local", "ec2"]);
+  // Requested policy is distinct from runtime support. Hibernation is a
+  // fail-closed opt-in until transport and image acceptance are implemented.
+  const idlePolicy = choice(env, "AGENT_IDLE_POLICY", "stop", ["stop", "hibernate"]);
+  if (idlePolicy === "hibernate" && workerBackend !== "ec2") throw new Error("AGENT_IDLE_POLICY=hibernate requires EC2 workers");
   const codexAuthMode = choice(env, "CODEX_AUTH_MODE", "gateway", ["gateway", "host"]);
   const claudeAuthMode = choice(env, "CLAUDE_AUTH_MODE", "gateway", ["gateway", "host"]);
   const ec2GatewayOrigin = (env.AGENT_EC2_GATEWAY_ORIGIN || "").replace(/\/$/, "");
@@ -62,9 +66,28 @@ export function loadConfig(env = process.env) {
   if (workerBackend === "ec2" && !ec2GatewayOrigin.startsWith("https://") && !boolean(env, "AGENT_EC2_ALLOW_INSECURE_GATEWAY", false)) {
     throw new Error("AGENT_EC2_GATEWAY_ORIGIN must use HTTPS (or explicitly set AGENT_EC2_ALLOW_INSECURE_GATEWAY=1 for a private-network POC)");
   }
+  if (workerBackend === "ec2") {
+    const gateway = new URL(ec2GatewayOrigin);
+    if (!["https:", "http:"].includes(gateway.protocol) || gateway.username || gateway.password || gateway.search || gateway.hash || gateway.pathname !== "/") {
+      throw new Error("AGENT_EC2_GATEWAY_ORIGIN must be an HTTP(S) origin without credentials, path, query, or fragment");
+    }
+  }
   if (workerBackend === "ec2" && (codexAuthMode === "host" || claudeAuthMode === "host")) {
     throw new Error("EC2 workers require gateway auth mode; host CLI credentials must not be baked into worker images");
   }
+  const preview = {
+    enabled: boolean(env, "AGENT_PREVIEW_ENABLED", false),
+    expectedAccount: env.AGENT_PREVIEW_ACCOUNT_ID || "", deployment: env.AGENT_EC2_DEPLOYMENT || "",
+    vpcOriginId: env.AGENT_PREVIEW_VPC_ORIGIN_ID || "", controllerInstanceId: env.AGENT_PREVIEW_CONTROLLER_INSTANCE_ID || "",
+    controllerOriginDns: env.AGENT_PREVIEW_CONTROLLER_ORIGIN_DNS || "", relayDistributionId: env.AGENT_PREVIEW_RELAY_DISTRIBUTION_ID || "",
+    region: env.AWS_REGION || "us-east-1", awsBin: env.AWS_BIN || "aws", profile: env.AWS_PROFILE || "",
+    maxHosts: integer(env, "AGENT_PREVIEW_MAX_HOSTS", 8, { min: 1, max: 40 }),
+    maxPerOwner: integer(env, "AGENT_PREVIEW_MAX_PER_OWNER", 4, { min: 1, max: 40 }),
+    maxPerChat: integer(env, "AGENT_PREVIEW_MAX_PER_CHAT", 2, { min: 1, max: 40 }),
+  };
+  if (preview.enabled && (workerBackend !== "ec2" || !googleEnabled || !googleOrigin.startsWith("https://"))) throw new Error("Remote app previews require EC2 workers and HTTPS Google Relay login");
+  if (preview.enabled && (!/^\d{12}$/.test(preview.expectedAccount) || !preview.deployment || !preview.vpcOriginId || !preview.controllerInstanceId || !preview.controllerOriginDns || !preview.relayDistributionId)) throw new Error("Configure all AGENT_PREVIEW deployment identity fields before enabling app previews");
+  if (preview.maxPerChat > preview.maxPerOwner || preview.maxPerOwner > preview.maxHosts) throw new Error("Preview per-chat and per-owner limits must fit the deployment limit");
   return {
     appRoot: APP_ROOT,
     publicDir: path.join(APP_ROOT, "public"),
@@ -83,14 +106,16 @@ export function loadConfig(env = process.env) {
       port: integer(env, "AGENT_DATABASE_PORT", 55438, { min: 1024, max: 65535 }),
     },
     github: {
-      clientId: env.GITHUB_OAUTH_CLIENT_ID || "",
-      localConnection: boolean(env, "AGENT_GITHUB_LOCAL_CONNECT", isLoopbackHost(host)),
+      cliPath: env.AGENT_GITHUB_CLI || "gh",
       apiBase: "https://api.github.com",
+      webhookSecret: env.AGENT_GITHUB_WEBHOOK_SECRET || "",
     },
-    idleTimeoutMs: integer(env, "AGENT_IDLE_TIMEOUT_MS", 300_000, { min: 100, max: 86_400_000 }),
+    idlePolicy,
+    idleTimeoutMs: integer(env, "AGENT_IDLE_TIMEOUT_MS", idlePolicy === "hibernate" ? 120_000 : 300_000, { min: 100, max: 86_400_000 }),
     dataDir: path.resolve(APP_ROOT, env.AGENT_DATA_DIR || "data"),
     workspaceSource: env.AGENT_WORKSPACE_SOURCE || "",
     workerBackend,
+    preview,
     enableMock: boolean(env, "AGENT_ENABLE_MOCK", false),
     chromeBin: env.AGENT_CHROME_BIN || "google-chrome",
     processIsolation: choice(env, "AGENT_PROCESS_ISOLATION", isolationDefault, ["namespace", "none"]),
@@ -98,6 +123,7 @@ export function loadConfig(env = process.env) {
       min: 10_000,
       max: 86_400_000,
     }),
+    harnessUpdateTimeoutMs: integer(env, "AGENT_HARNESS_UPDATE_TIMEOUT_MS", 300_000, { min: 10_000, max: 900_000 }),
     maxBodyBytes: integer(env, "AGENT_MAX_BODY_BYTES", 1_048_576, { min: 1_024, max: 10_485_760 }),
     codex: {
       bin: env.CODEX_BIN || "codex",
@@ -117,8 +143,10 @@ export function loadConfig(env = process.env) {
     },
     ec2: {
       awsBin: env.AWS_BIN || "aws",
-      profile: env.AWS_PROFILE || "default",
+      // Omit --profile when unset so an EC2 controller uses its IAM role.
+      profile: env.AWS_PROFILE || "",
       region: env.AWS_REGION || "us-east-1",
+      deployment: env.AGENT_EC2_DEPLOYMENT || "",
       amiId: env.AGENT_EC2_AMI_ID || "",
       instanceType: env.AGENT_EC2_INSTANCE_TYPE || "t3.medium",
       subnetId: env.AGENT_EC2_SUBNET_ID || "",
@@ -127,6 +155,7 @@ export function loadConfig(env = process.env) {
       sshBin: env.SSH_BIN || "ssh",
       sshUser: env.AGENT_EC2_SSH_USER || "ubuntu",
       sshPrivateKey: env.AGENT_EC2_SSH_PRIVATE_KEY || "",
+      sshKnownHosts: path.resolve(APP_ROOT, env.AGENT_EC2_SSH_KNOWN_HOSTS || path.join(env.AGENT_DATA_DIR || "data", "worker-known-hosts")),
       usePublicIp: boolean(env, "AGENT_EC2_USE_PUBLIC_IP", false),
       remoteRoot: env.AGENT_EC2_REMOTE_ROOT || "/opt/agent-web",
       remotePath: env.AGENT_EC2_REMOTE_PATH || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",

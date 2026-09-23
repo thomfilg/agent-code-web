@@ -77,8 +77,25 @@ export function spawnWorker(command, args, { isolation = "none", ...options } = 
   });
 }
 
-export async function terminateWorker(child, graceMs = 2_000) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+export async function terminateWorker(child, graceMs = 2_000, killMs = 2_000) {
+  if (typeof child?.terminateRemote === "function") { await child.terminateRemote(); return; }
+  if (!child) return;
+  const groupAlive = () => {
+    if (process.platform === "win32" || !Number.isSafeInteger(child.pid) || child.pid <= 1) return false;
+    try { process.kill(-child.pid, 0); return true; }
+    catch (error) { return error?.code === "EPERM"; }
+  };
+  const childAlive = () => child.exitCode === null && child.signalCode === null;
+  const alive = () => childAlive() || groupAlive();
+  const waitGone = timeoutMs => new Promise(resolve => {
+    const deadline = Date.now() + timeoutMs;
+    const inspect = () => {
+      if (!alive()) { resolve(true); return; }
+      if (Date.now() >= deadline) { resolve(false); return; }
+      setTimeout(inspect, Math.min(20, Math.max(1, deadline - Date.now())));
+    };
+    inspect();
+  });
   const signal = (name) => {
     try {
       if (process.platform === "win32") child.kill(name);
@@ -87,10 +104,9 @@ export async function terminateWorker(child, graceMs = 2_000) {
       try { child.kill(name); } catch {}
     }
   };
+  if (!alive()) return;
   signal("SIGTERM");
-  await Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
-    new Promise((resolve) => setTimeout(resolve, graceMs)),
-  ]);
-  if (child.exitCode === null && child.signalCode === null) signal("SIGKILL");
+  if (await waitGone(graceMs)) return;
+  signal("SIGKILL");
+  if (!await waitGone(killMs)) throw new Error("Worker process group did not exit after SIGKILL");
 }
