@@ -1,4 +1,5 @@
 import { openSidePanel, closeSidePanel } from "./side-panels.js";
+import { renderPullRequestList } from "./pull-request-list.js";
 const $ = selector => document.querySelector(selector);
 const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
 function button(label, action, cls) { const node = el("button", label, cls); node.type = "button"; node.addEventListener("click", action); return node; }
@@ -8,7 +9,7 @@ const count = value => Number.isFinite(value) ? new Intl.NumberFormat(undefined,
 
 export class ChatControls {
   constructor(options) {
-    Object.assign(this, options); this.drafts = new Map(); this.hiddenPRs = new Set(); this.uploads = new Map();
+    Object.assign(this, options); this.drafts = new Map(); this.hiddenPRs = new Set(); this.uploads = new Map(); this.expandedPRs = new Set();
     $("#copy-chat-link").addEventListener("click", () => this.copy(`${location.origin}/#chat=${this.state.active.id}`, "Private chat link copied"));
     $("#view-changes").addEventListener("click", () => this.showChanges());
     $("#close-diff").addEventListener("click", () => closeSidePanel("diff"));
@@ -181,39 +182,45 @@ export class ChatControls {
       $("#controls-content").replaceChildren(el("p", "Stop active work first. Your original primary repository and company grouping stay unchanged. New repositories clone on the next message.", "muted"), select, branch, save);
     } catch (error) { $("#controls-content").replaceChildren(el("p", error.message, "form-error")); }
   }
+  prRow(chat, pr) {
+    const url = ghUrl(pr.repository, `/pull/${pr.number}`);
+    const row = el("div", undefined, "pull-request-bar");
+    const status = pr.merged ? "merged" : pr.state === "closed" ? "closed" : pr.conflicts || pr.checks === "failing" ? "failing" : "open";
+    const prLink = link(`⑂ #${pr.number}`, url); prLink.className = `pr-${status}`; prLink.title = "Open pull request on GitHub";
+    const branch = el("span", `${pr.repository.split("/")[1]}${pr.headRef ? ` · ${pr.headRef}` : ""}`, "pr-branch"); branch.title = `${pr.repository} · ${pr.headRef || "Branch unavailable"}`;
+    row.append(prLink, branch);
+    const changes = button("", () => this.showChanges(pr), "pr-change-count"); changes.append(el("span", `+${count(pr.additions)} `), el("span", `−${count(pr.deletions)}`, "pr-deletions")); changes.setAttribute("aria-label", `View changes for PR ${pr.number}`); row.append(changes);
+    const ci = el("details", undefined, "control-menu upward ci-menu"); const summary = el("summary", pr.conflicts ? "Conflict" : pr.checks === "pending" ? "◌ CI" : pr.checks === "failing" ? "× CI" : "CI⌄");
+    const body = el("div", undefined, "control-popover"); body.append(link("CI monitoring ↗", `${url}/checks`));
+    if (pr.ci) for (const [key, label] of [["inProgress", "In progress"], ["passed", "Passed"], ["skipped", "Skipped"], ["failed", "Failed"]]) {
+      const line = el("div", undefined, `ci-count ${key}`); line.append(el("span", label), el("strong", String(pr.ci[key]))); body.append(line);
+    } else body.append(el("p", "Check counts unavailable", "muted"));
+    if (pr.conflicts) body.append(el("p", "Merge conflicts detected. Resolve them before merging.", "form-error"));
+    else if (pr.conflicts === null && pr.state === "open") body.append(el("p", "GitHub is checking mergeability.", "muted"));
+    if (pr.checksStale || chat.githubSyncWarning) body.append(el("p", chat.githubSyncWarning || "Checks are stale", "form-error"));
+    const auto = el("label", undefined, "checkbox-label"); const input = document.createElement("input"); input.type = "checkbox"; input.checked = pr.autoMerge; input.disabled = pr.state !== "open"; input.setAttribute("aria-label", `Auto-merge PR ${pr.number}`);
+    input.addEventListener("change", async () => {
+      const enabled = input.checked;
+      if (enabled && !confirm(`Enable GitHub auto-merge for ${pr.repository} #${pr.number}? GitHub will merge it when its branch requirements pass.`)) { input.checked = pr.autoMerge; return; }
+      input.disabled = true;
+      try { const { chat: updated } = await this.api(`/api/chats/${chat.id}/pull-requests/auto-merge`, { method: "PATCH", body: JSON.stringify({ repository: pr.repository, number: pr.number, enabled }) }); this.updated(updated); }
+      catch (error) { input.checked = pr.autoMerge; body.append(el("p", error.message, "form-error")); }
+      finally { input.disabled = pr.state !== "open"; }
+    });
+    auto.append(input, el("span", "Auto-merge when ready")); body.append(auto);
+    const fix = el("label", undefined, "checkbox-label"); const fixing = document.createElement("input"); fixing.type = "checkbox"; fixing.disabled = true;
+    fix.append(fixing, el("span", "Auto-fix CI & comments · not available")); body.append(fix, el("p", "CI checks refresh every minute. Auto-merge follows GitHub repository rules; no admin bypass.", "muted"));
+    ci.append(summary, body); row.append(ci, button("×", () => { this.hiddenPRs.add(`${chat.id}:${pr.repository}:${pr.number}`); this.pullRequests(chat); }, "small-icon"));
+    return row;
+  }
   pullRequests(chat) {
-    const root = $("#pull-request-bars"); root.replaceChildren();
-    for (const pr of chat.pullRequests || []) {
-      if (this.hiddenPRs.has(`${chat.id}:${pr.repository}:${pr.number}`)) continue;
-      const url = ghUrl(pr.repository, `/pull/${pr.number}`); if (!url) continue;
-      const row = el("div", undefined, "pull-request-bar");
-      const status = pr.merged ? "merged" : pr.state === "closed" ? "closed" : pr.conflicts || pr.checks === "failing" ? "failing" : "open";
-      const prLink = link(`⑂ #${pr.number}`, url); prLink.className = `pr-${status}`; prLink.title = "Open pull request on GitHub";
-      const branch = el("span", `${pr.repository.split("/")[1]}${pr.headRef ? ` · ${pr.headRef}` : ""}`, "pr-branch"); branch.title = `${pr.repository} · ${pr.headRef || "Branch unavailable"}`;
-      row.append(prLink, branch);
-      const changes = button("", () => this.showChanges(pr), "pr-change-count"); changes.append(el("span", `+${count(pr.additions)} `), el("span", `−${count(pr.deletions)}`, "pr-deletions")); changes.setAttribute("aria-label", `View changes for PR ${pr.number}`); row.append(changes);
-      const ci = el("details", undefined, "control-menu upward ci-menu"); const summary = el("summary", pr.conflicts ? "Conflict" : pr.checks === "pending" ? "◌ CI" : pr.checks === "failing" ? "× CI" : "CI⌄");
-      const body = el("div", undefined, "control-popover"); body.append(link("CI monitoring ↗", `${url}/checks`));
-      if (pr.ci) for (const [key, label] of [["inProgress", "In progress"], ["passed", "Passed"], ["skipped", "Skipped"], ["failed", "Failed"]]) {
-        const line = el("div", undefined, `ci-count ${key}`); line.append(el("span", label), el("strong", String(pr.ci[key]))); body.append(line);
-      } else body.append(el("p", "Check counts unavailable", "muted"));
-      if (pr.conflicts) body.append(el("p", "Merge conflicts detected. Resolve them before merging.", "form-error"));
-      else if (pr.conflicts === null && pr.state === "open") body.append(el("p", "GitHub is checking mergeability.", "muted"));
-      if (pr.checksStale || chat.githubSyncWarning) body.append(el("p", chat.githubSyncWarning || "Checks are stale", "form-error"));
-      const auto = el("label", undefined, "checkbox-label"); const input = document.createElement("input"); input.type = "checkbox"; input.checked = pr.autoMerge; input.disabled = pr.state !== "open"; input.setAttribute("aria-label", `Auto-merge PR ${pr.number}`);
-      input.addEventListener("change", async () => {
-        const enabled = input.checked;
-        if (enabled && !confirm(`Enable GitHub auto-merge for ${pr.repository} #${pr.number}? GitHub will merge it when its branch requirements pass.`)) { input.checked = pr.autoMerge; return; }
-        input.disabled = true;
-        try { const { chat: updated } = await this.api(`/api/chats/${chat.id}/pull-requests/auto-merge`, { method: "PATCH", body: JSON.stringify({ repository: pr.repository, number: pr.number, enabled }) }); this.updated(updated); }
-        catch (error) { input.checked = pr.autoMerge; body.append(el("p", error.message, "form-error")); }
-        finally { input.disabled = pr.state !== "open"; }
-      });
-      auto.append(input, el("span", "Auto-merge when ready")); body.append(auto);
-      const fix = el("label", undefined, "checkbox-label"); const fixing = document.createElement("input"); fixing.type = "checkbox"; fixing.disabled = true;
-      fix.append(fixing, el("span", "Auto-fix CI & comments · not available")); body.append(fix, el("p", "CI checks refresh every minute. Auto-merge follows GitHub repository rules; no admin bypass.", "muted"));
-      ci.append(summary, body); row.append(ci, button("×", () => { this.hiddenPRs.add(`${chat.id}:${pr.repository}:${pr.number}`); this.pullRequests(chat); }, "small-icon")); root.append(row);
-    }
+    const root = $("#pull-request-bars");
+    const items = (chat.pullRequests || []).filter(pr => !this.hiddenPRs.has(`${chat.id}:${pr.repository}:${pr.number}`) && ghUrl(pr.repository, `/pull/${pr.number}`));
+    renderPullRequestList(root, items, pr => this.prRow(chat, pr), {
+      expanded: this.expandedPRs.has(chat.id),
+      onToggle: expanded => { if (expanded) this.expandedPRs.add(chat.id); else this.expandedPRs.delete(chat.id); this.pullRequests(chat); },
+      ariaLabel: "Linked pull requests",
+    });
   }
   async showChanges(pr = this.state.active?.pullRequests?.at(-1)) {
     const chat = this.state.active; if (!chat) return;

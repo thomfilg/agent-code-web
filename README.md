@@ -330,6 +330,10 @@ open failing PR makes an otherwise idle chat red, and all tracked PRs must be
 merged for the merged state. Closed, unmerged PRs return to idle.
 
 The PR bar above the composer links to GitHub and shows additions/deletions.
+Chats with many linked PRs collapse to at most three rows (two PRs plus a
+"View N more" toggle); the same collapsed/expandable list is shared with the
+organize dialog's PR summary — see
+[ADR 0001](docs/adr/0001-collapsible-pull-request-lists.md).
 Click the change count for a side-by-side file viewer (an overlay on mobile),
 with file search and line numbers. Its source picker switches between GitHub's
 PR diff and the last workspace snapshot, including unpushed changes. Snapshots
