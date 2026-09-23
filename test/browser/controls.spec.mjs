@@ -13,6 +13,14 @@ test("compact mobile composer switches agents with Sol/Opus high defaults and pr
   await expect(page.locator("#composer-model-controls .model-note")).not.toBeVisible();
   await page.getByLabel("Chat agent", { exact: true }).selectOption("claude");
   await expect(page.locator("#chat-agent-compact-label")).toHaveText("Claude");
+  const agentPickerBox = await page.getByLabel("Chat agent", { exact: true }).boundingBox();
+  const agentLabelBox = await page.getByRole("button", { name: "Switch agent account", exact: true }).boundingBox();
+  expect(agentPickerBox).not.toBeNull();
+  expect(agentLabelBox).not.toBeNull();
+  expect(agentLabelBox.x).toBeCloseTo(agentPickerBox.x, 0);
+  expect(agentLabelBox.y).toBeCloseTo(agentPickerBox.y, 0);
+  expect(agentLabelBox.width).toBeCloseTo(agentPickerBox.width, 0);
+  expect(agentLabelBox.height).toBeCloseTo(agentPickerBox.height, 0);
   await page.getByLabel("Chat agent", { exact: true }).evaluate(select => { select.showPicker = () => { select.dataset.pickerOpened = "true"; }; });
   await page.getByRole("button", { name: "Switch agent account", exact: true }).click();
   await expect(page.getByLabel("Chat agent", { exact: true })).toHaveAttribute("data-picker-opened", "true");
