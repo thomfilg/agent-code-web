@@ -76,13 +76,27 @@ test("many pull requests collapse to one card row and expand on demand", async (
   const detail = await (await page.request.get(`/api/chats/${fixture.id}`)).json();
   const pullRequests = Array.from({ length: 6 }, (_, index) => ({ ...detail.chat.pullRequests[0], number: 42 + index, headRef: `feature/card-${index}` }));
   await page.route(`**/api/chats/${fixture.id}`, route => route.request().method() === "GET"
-    ? route.fulfill({ json: { chat: { ...detail.chat, revision: 999999, pullRequests } } }) : route.fallback());
+    ? route.fulfill({ json: { chat: { ...detail.chat, revision: 999999, pullRequests, goal: { status: "active", objective: "Keep this goal compact beside the PR and workspace context" } } } }) : route.fallback());
   await page.goto(`/#chat=${fixture.id}`);
   await expect(page.locator(".pull-request-bar")).toHaveCount(1);
   await expect(page.locator("#pull-request-bars")).toContainText("6 PRs");
+  const context = page.locator("#chat-context-strip");
+  await expect(context.locator("#goal-status")).toBeVisible();
+  await expect(context.locator("#pull-request-bars")).toBeVisible();
+  await expect(context.locator("#chat-workspace-strip")).toBeVisible();
+  const compact = await context.evaluate(node => ({
+    height: node.getBoundingClientRect().height,
+    childParents: ["goal-status", "pull-request-bars", "chat-workspace-strip"].map(id => document.getElementById(id)?.parentElement?.id),
+    centers: ["goal-status", "pull-request-bars", "chat-workspace-strip"].map(id => { const box = document.getElementById(id).getBoundingClientRect(); return box.top + box.height / 2; }),
+  }));
+  expect(compact.childParents).toEqual(["chat-context-strip", "chat-context-strip", "chat-context-strip"]);
+  expect(compact.height).toBeLessThanOrEqual(34);
+  expect(Math.max(...compact.centers) - Math.min(...compact.centers)).toBeLessThanOrEqual(1);
+  const composerTop = (await page.locator("#composer").boundingBox()).y;
   await page.getByRole("button", { name: "View more", exact: true }).click();
   await expect(page.locator("#pull-request-bars")).toHaveClass(/expanded/);
   await expect(page.locator(".pull-request-bar")).toHaveCount(6);
+  expect((await page.locator("#composer").boundingBox()).y).toBe(composerTop);
 });
 
 test("repository strip keeps its primary repository and moves overflow into a compact panel", async ({ page }) => {

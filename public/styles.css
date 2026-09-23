@@ -120,6 +120,13 @@ button { border: 0; cursor: pointer; }
 .onboarding-hint { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin: 8px 0; }
 .workspace-strip, .repository-strip, .workspace-strip .selected-repositories { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .workspace-strip { position: relative; flex-wrap: nowrap; margin-bottom: 6px; }
+.chat-context-strip { position: relative; display: flex; align-items: center; gap: 5px; min-width: 0; height: 34px; margin-bottom: 6px; }
+.chat-context-strip:empty { display: none; }
+.chat-context-strip > #goal-status { flex: 1 1 28%; min-width: 0; }
+.chat-context-strip > .pull-request-bars { flex: 1.35 1 38%; min-width: 0; }
+.chat-context-strip > .workspace-strip { flex: 1 1 34%; min-width: 42px; }
+.chat-context-strip > :empty { display: none; }
+#chat-workspace-strip.workspace-strip { margin-bottom: 0; overflow: visible; }
 .workspace-strip .selected-repositories { flex: 1 1 auto; flex-flow: row nowrap; margin: 0; overflow: hidden; }
 .workspace-strip .repository-chip { padding: 0; border: 0; border-radius: 5px; gap: 4px; background: transparent; min-width: 0; max-width: 100%; }
 .workspace-strip .repository-name, .workspace-strip .repository-branch, .workspace-strip .repository-chip select, .environment-chip { background: var(--panel-soft); border: 0; border-radius: 5px; color: var(--muted); font-size: 10.5px; height: 22px; padding: 3px 5px; }
@@ -520,7 +527,9 @@ dialog { max-height: calc(100dvh - 28px); }
 #diff-selection { width: 100%; margin-top: 8px; padding: 6px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--panel); }
 .pull-request-bars { --pr-row-height: 34px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 5px; max-height: var(--pr-row-height); margin-bottom: 6px; overflow: visible; overscroll-behavior: contain; }
 .pull-request-bars:empty { margin-bottom: 0; }
+.chat-context-strip > .pull-request-bars { margin-bottom: 0; }
 .pull-request-bars.expanded { max-height: min(340px, 45vh); padding: 5px; border: 1px solid var(--line); border-radius: 9px; background: #171916; overflow-y: auto; scrollbar-gutter: stable; }
+.chat-context-strip > .pull-request-bars.expanded { position: absolute; z-index: 12; right: 0; bottom: calc(100% + 6px); left: 0; width: 100%; box-shadow: 0 14px 40px #0009; }
 .pull-request-bar { display: flex; align-items: center; gap: 8px; height: var(--pr-row-height); min-height: var(--pr-row-height); max-height: var(--pr-row-height); border-radius: 8px; background: #242622; border: 1px solid var(--line); padding: 3px 7px; font-size: var(--type-meta); }
 .pull-request-bars.expanded .pr-tray-anchor { position: sticky; top: 0; z-index: 4; box-shadow: 0 4px 9px #10110fcc; }
 .pr-tray-controls { display: flex; align-items: center; flex: none; gap: 5px; white-space: nowrap; }
@@ -965,8 +974,8 @@ dialog { max-height: calc(100dvh - 28px); }
 .queue-send-now { flex: none; padding: 6px 0; border: 0; background: transparent; color: var(--lime); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .queue-send-now:disabled { opacity: .55; cursor: wait; }
 .queue-send-now:focus-visible { outline: 2px solid var(--lime); outline-offset: 3px; border-radius: 3px; }
-.goal-summary { max-width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--text); font: inherit; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#goal-status:not(:empty) { display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; font-size: var(--type-control); }
+.goal-summary { width: 100%; max-width: 100%; height: 34px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--text); font: inherit; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#goal-status:not(:empty) { display: flex; min-width: 0; font-size: var(--type-control); }
 .message-page-button { display: block; margin: 12px auto; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--muted); font: inherit; cursor: pointer; }
 .message-latest-button { flex: none; margin: 0 auto 8px; padding: 6px 12px; font-size: var(--type-control); }
 .queue-send { padding: 4px 7px; font-size: var(--type-control); }

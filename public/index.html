@@ -196,10 +196,12 @@
           <div class="composer-wrap">
             <div id="working-status" class="working-status" hidden></div>
             <div id="system-queue" class="system-queue" aria-live="polite" hidden></div>
-            <div id="goal-status"></div>
             <div id="message-queue" aria-live="polite"></div>
-            <div id="pull-request-bars" class="pull-request-bars"></div>
-            <div id="chat-workspace-strip" class="workspace-strip" aria-label="Chat environment and repositories"></div>
+            <div id="chat-context-strip" class="chat-context-strip" aria-label="Goal, pull request and workspace context">
+              <div id="goal-status"></div>
+              <div id="pull-request-bars" class="pull-request-bars"></div>
+              <div id="chat-workspace-strip" class="workspace-strip" aria-label="Chat environment and repositories"></div>
+            </div>
             <form class="composer" id="composer">
               <div id="slash-menu" hidden>
                 <div class="slash-heading"><span class="slash-symbol" aria-hidden="true">/</span><div><strong>Commands &amp; skills</strong><span id="slash-caption"></span></div><span id="slash-count"></span></div>

@@ -116,8 +116,10 @@ export class ChatControls {
     this.renderAttachments();
     const goalStatus = $("#goal-status"); goalStatus.replaceChildren();
     if (chat.goal) {
-      goalStatus.append(button(`Goal · ${chat.goal.status} · ${chat.goal.objective}`, () => this.goal(), "goal-summary"));
-      if (chat.mode === "plan" && chat.goal.status === "active") goalStatus.append(el("small", "Plan mode: planning only; automatic goal continuation is disabled.", "muted"));
+      const planOnly = chat.mode === "plan" && chat.goal.status === "active";
+      const summary = button(`Goal · ${chat.goal.status}${planOnly ? " · plan only" : ""} · ${chat.goal.objective}`, () => this.goal(), "goal-summary");
+      summary.title = planOnly ? `${chat.goal.objective} — Plan mode is active; automatic goal continuation is disabled.` : chat.goal.objective;
+      goalStatus.append(summary);
     }
   }
   async goal(action = null, { throwErrors = false } = {}) {
