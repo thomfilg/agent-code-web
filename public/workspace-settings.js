@@ -506,7 +506,7 @@ export class WorkspaceSettings {
       }
       this.browserProfiles = (await this.api("/api/browser-profiles")).profiles;
       this.renderBrowserProfiles(); this.updateEnvironmentDirty();
-      this.toast(action === "delete" ? "Browser profile deleted" : "Browser profile saved · save the environment to use it");
+      $("#environment-save-status").textContent = action === "delete" ? "Browser profile deleted" : "Browser profile saved · save the environment to use it";
     } catch (failure) { error.textContent = failure.message; this.browserProfiles = (await this.api("/api/browser-profiles").catch(() => ({ profiles: this.browserProfiles }))).profiles; this.renderBrowserProfiles(); }
   }
   showEnvironmentSection(section = null) {
