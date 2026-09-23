@@ -4,6 +4,7 @@ import test from "node:test";
 import { CapabilityBroker } from "../src/capabilities.mjs";
 import { RuntimeManager } from "../src/runtime-manager.mjs";
 import { ChatStore } from "../src/store.mjs";
+import { MemoryRecords } from "../src/database.mjs";
 import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
 
 test("multiple chats stream independently, persist responses, autosleep, and restart", async (t) => {
@@ -168,4 +169,28 @@ test("a non-mock chat acquires, sleeps, resumes, and destroys its worker backend
   await manager.remove(chat.id);
   assert.ok(calls.some(([action]) => action === "sleep"));
   assert.equal(calls.filter(([action]) => action === "destroy").length, 1);
+});
+
+test("failed worker deletion is reported as pending and retried after chat removal", async t => {
+  const root = await temporaryDirectory(t), records = new MemoryRecords(), store = new ChatStore(root, records);
+  await store.initialize();
+  let destroyCalls = 0, releaseRetry;
+  const retryGate = new Promise(resolve => { releaseRetry = resolve; });
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10_000 }),
+    gatewayOrigin: "http://127.0.0.1:1",
+    workerBackend: { acquire: async () => null, sleep: async () => {}, destroy: async () => {
+      destroyCalls++;
+      if (destroyCalls === 1) throw new Error("EC2 termination not confirmed");
+      await retryGate;
+    } },
+  });
+  t.after(() => { releaseRetry(); manager.shutdown(); });
+  const chat = await manager.createChat({ agent: "codex", title: "Cleanup retry" });
+  const result = await manager.remove(chat.id);
+  assert.deepEqual(result, { removed: true, cleanupPending: true });
+  assert.equal(store.get(chat.id), null);
+  assert.ok(await records.get("worker-deletion-cleanup", chat.id));
+  releaseRetry();
+  await waitFor(async () => !(await records.get("worker-deletion-cleanup", chat.id)));
+  assert.ok(destroyCalls >= 2);
 });

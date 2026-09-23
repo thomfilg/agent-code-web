@@ -1,4 +1,5 @@
 import { ChatSidebar } from "./chat-sidebar.js";
+import { confirmDeleteChat } from "./delete-chat-confirmation.js";
 import { GoogleLogin } from "./google-login.js";
 import { AgentAccountSettings } from "./agent-accounts.js";
 import { closeSidePanel } from "./side-panels.js";
@@ -147,7 +148,7 @@ function paintMachineHealth(health) {
   const rows = [
     ["Worker", `${health.worker.backend}${health.worker.ec2?.instanceId ? ` · ${health.worker.ec2.instanceId} · EC2 ${health.worker.ec2.state}` : ""} · worker ${health.worker.state}`],
     ["Control", `${health.worker.control} · lease ${health.worker.lease?.active ? health.worker.lease.reasons.join(", ") : "idle"}`],
-    ["Agent", `${agent.state} · PID ${agent.pid ?? "unavailable"} · PGID ${agent.pgid ?? "unavailable"} · heartbeat ${healthAge(agent.heartbeatAgeMs)}${agent.heartbeatExpected ? "" : " (activity)"}`],
+    ["Agent", `${agent.state} · PID ${agent.pid ?? "unavailable"} · PGID ${agent.pgid ?? "unavailable"} · heartbeat ${healthAge(agent.heartbeatAgeMs)}${agent.heartbeatExpected ? "" : " (activity)"} · control ${agent.control || "unknown"}${agent.control === "detached" ? ` · reconnect attempts ${agent.reconnectAttempts ?? 0}` : ""}`],
     ["Tool", tool ? `${tool.type} · ${tool.summary} · ${healthAge(tool.durationMs)} · PID ${tool.pid ?? "unavailable"} · PGID ${tool.pgid ?? "unavailable"} · deadline ${tool.deadlineAt ? new Date(tool.deadlineAt).toLocaleTimeString() : "none"}` : "none"],
     ["Resources", system.unavailable ? `unavailable · ${system.reason}` : `CPU ${system.cpu?.usedPercent ?? "?"}% (${system.cpuCount ?? "?"} cores) · load ${(system.load || []).join("/")} · RAM ${system.ram?.usedPercent ?? "?"}% (${healthBytes(system.ram?.usedBytes)}) · disk ${system.disk?.usedPercent ?? "?"}% · ${system.processCount ?? "?"} processes`],
     ["Harness", harness ? `${harness.status} · Codex ${harness.installed?.codex || "unknown"}${harness.latest?.codex && harness.latest.codex !== harness.installed?.codex ? ` → ${harness.latest.codex}` : ""} · Claude ${harness.installed?.claude || "unknown"}${harness.latest?.claude && harness.latest.claude !== harness.installed?.claude ? ` → ${harness.latest.claude}` : ""}${harness.error ? ` · ${harness.error}` : ""}` : "not checked"],
@@ -1253,16 +1254,16 @@ $("#stop-button").addEventListener("click", async () => {
 });
 async function deleteChat(chat, { confirmed = false } = {}) {
   if (chat && state.deletingChats.has(chat.id)) return false;
-  if (!chat || !confirmed && !confirm(`Permanently delete “${chat.title}”, its messages, and its workspace files? Any running agent will be stopped. This cannot be undone.`)) return false;
+  if (!chat || !confirmed && !await confirmDeleteChat(chat)) return false;
   const id = chat.id;
   // Deletion is immediate from the user's perspective. Worker shutdown and
   // workspace cleanup continue in the request without trapping the UI in a
   // modal or a synthetic "deleting" chat state.
   state.deletingChats.add(id);
   await forgetChat(id);
-  void api(`/api/chats/${id}`, { method: "DELETE" }).then(() => {
+  void api(`/api/chats/${id}`, { method: "DELETE" }).then(result => {
     state.deletingChats.delete(id);
-    toast("Chat and workspace permanently deleted.");
+    toast(result.cleanupPending ? "Chat removed. Worker cleanup is pending and will retry automatically." : "Chat, worker and workspace permanently deleted.");
   }).catch(async error => {
     state.deletingChats.delete(id);
     toast(`${error.message} The chat was restored; retry deletion.`);

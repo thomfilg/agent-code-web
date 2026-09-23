@@ -1,4 +1,5 @@
 import { SORT_OPTIONS, groupChats, repositoryGroup, stateLabel } from "./chat-organization.js";
+import { confirmDeleteChat } from "./delete-chat-confirmation.js";
 
 const $ = selector => document.querySelector(selector);
 function el(tag, className, text) {
@@ -50,7 +51,7 @@ export class ChatSidebar {
     $("#archive-chat-button").addEventListener("click", () => this.toggleArchive());
     $("#organize-delete-chat").addEventListener("click", async event => {
       const chat = this.editingChat;
-      if (!confirm(`Permanently delete “${chat.title}”, its messages, and its workspace files? Any running agent will be stopped. This cannot be undone.`)) return;
+      if (!chat || !await confirmDeleteChat(chat)) return;
       $("#organize-dialog").close();
       void this.remove(chat, { confirmed: true }).catch(error => this.toast(error.message));
     });

@@ -805,7 +805,10 @@ export class CodexAdapter {
       state: child ? child.exitCode === null && child.signalCode === null ? "running" : "exited" : "stopped",
       heartbeatAt: child?.lastHeartbeatAt || this.rpc?.lastActivityAt || null,
       heartbeatExpected: Boolean(receipt),
-      control: child?.detached === true ? "detached" : this.rpc ? "connected" : "disconnected" };
+      control: child?.detached === true ? "detached" : this.rpc ? "connected" : "disconnected",
+      reconnectAttempts: child?.reconnectFailures || 0,
+      lastDetachedAt: child?.lastDetachedAt || null,
+      lastReconnectedAt: child?.lastReconnectedAt || null };
   }
 
   async inspectCommand(command) {

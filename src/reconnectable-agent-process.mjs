@@ -67,7 +67,12 @@ export class ReconnectableAgentProcess extends EventEmitter {
     client.on("disconnect", () => {
       if (this.client !== client) return;
       this.detached = true; clearInterval(this.renewal);
-      if (!this.stopping && !this.commandExited) this.emit("transportDetached");
+      if (!this.stopping && !this.commandExited && !this.relinquished) {
+        this.lastDetachedAt = new Date().toISOString();
+        console.warn(`[worker-transport] detached for ${this.context.claim.attemptId}; reconnect scheduled`);
+        this.emit("transportDetached");
+        this.#scheduleReconnect();
+      }
     });
     client.on("output", frame => {
       this.outputQueue = this.outputQueue.then(() => this.#output(frame, client)).catch(error => {
@@ -131,6 +136,7 @@ export class ReconnectableAgentProcess extends EventEmitter {
   }
   #startFailed(error) {
     if (this.startError || this.receipt && this.recovered) return;
+    clearTimeout(this.reconnectTimer);
     this.startError = error; this.stdout.end(); this.stderr.end();
     if (!this.stdin.destroyed) this.stdin.destroy();
     queueMicrotask(() => { this.emit("error", error); this.emit("close", null, null); this.resolveClosed(); });
@@ -141,10 +147,33 @@ export class ReconnectableAgentProcess extends EventEmitter {
       if (!this.detached && !this.stopping && !this.renewing) {
         const client = this.client;
         this.renewing = Promise.resolve().then(() => this.context.renewLease(client.authorityLeaseId)).then(() => client.status()).then(result => { this.lastHeartbeatAt = new Date().toISOString(); return result; })
-          .catch(() => client.disconnect()).finally(() => { this.renewing = null; });
+          .catch(error => {
+            console.warn(`[worker-transport] lease or status check failed for ${this.context.claim.attemptId}: ${error?.code || error?.name || "error"}`);
+            client.disconnect();
+          }).finally(() => { this.renewing = null; });
       }
     }, 1000);
     this.renewal.unref();
+  }
+  #scheduleReconnect(delayMs = 250) {
+    if (this.reconnectTimer || !this.detached || this.stopping || this.commandExited || this.relinquished || this.inputUncertain || this.outputFailed) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.detached || this.stopping || this.commandExited || this.relinquished) return;
+      void this.reconnect().then(() => {
+        this.reconnectFailures = 0;
+        this.lastReconnectedAt = new Date().toISOString();
+        this.emit("transportReconnected");
+      }).catch(error => {
+        const attempts = this.reconnectFailures = (this.reconnectFailures || 0) + 1;
+        if (attempts === 1 || attempts % 10 === 0) {
+          console.warn(`[worker-transport] reconnect attempt ${attempts} failed for ${this.context.claim.attemptId}: ${error?.code || error?.name || "error"}`);
+        }
+        this.emit("transportReconnectFailed", { attempts, reason: error?.code || error?.name || "error" });
+        this.#scheduleReconnect(Math.min(1000 * 2 ** Math.min(attempts, 5), 30_000));
+      });
+    }, delayMs);
+    this.reconnectTimer.unref?.();
   }
   async reconnect() {
     await this.ready;
@@ -242,7 +271,7 @@ export class ReconnectableAgentProcess extends EventEmitter {
       if (!this.stopping && this.client === client) client.disconnect();
     }
     if (frame.channel === "exit") {
-      clearInterval(this.renewal); this.stdout.end(); this.stderr.end();
+      clearInterval(this.renewal); clearTimeout(this.reconnectTimer); this.stdout.end(); this.stderr.end();
       this.emit("exit", this.exitCode, this.signalCode); this.emit("close", this.exitCode, this.signalCode); this.resolveClosed();
     }
   }
@@ -272,6 +301,7 @@ export class ReconnectableAgentProcess extends EventEmitter {
       return { ...value, detachedForRecovery: true };
     });
     this.relinquished = true;
+    clearTimeout(this.reconnectTimer);
     this.client.disconnect();
   }
   detach() { this.client?.disconnect(); }
@@ -282,7 +312,7 @@ export class ReconnectableAgentProcess extends EventEmitter {
   }
   async terminateRemote() {
     if (this.termination) return this.termination;
-    this.stopping = true; this.killed = true; clearInterval(this.renewal);
+    this.stopping = true; this.killed = true; clearInterval(this.renewal); clearTimeout(this.reconnectTimer);
     this.termination = (async () => {
       try { await this.ready; }
       catch {

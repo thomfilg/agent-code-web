@@ -839,8 +839,8 @@ export async function createAgentWebServer(options = {}) {
           return chat ? json(response, 200, { chat }) : json(response, 404, { error: "chat not found" });
         }
         if (!tail && request.method === "DELETE") {
-          const removed = await manager.remove(chatId);
-          return removed ? json(response, 200, { removed: true }) : json(response, 404, { error: "chat not found" });
+          const result = await manager.remove(chatId);
+          return result.removed ? json(response, result.cleanupPending ? 202 : 200, result) : json(response, 404, { error: "chat not found" });
         }
         if (tail === "messages" && request.method === "POST") {
           const body = await bodyJson(request, config.maxBodyBytes);

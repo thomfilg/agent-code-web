@@ -513,9 +513,20 @@ export class Ec2Backend {
   }
 
   async destroy(chat) {
-    const instance = await this.#find(chat.id);
-    if (!instance) return;
-    await this.#aws("ec2", "terminate-instances", "--instance-ids", instance.InstanceId);
+    const instance = await this.#find(chat.id, "pending,running,stopping,stopped,shutting-down");
+    if (instance) {
+      if (instance.State?.Name !== "shutting-down") await this.#aws("ec2", "terminate-instances", "--instance-ids", instance.InstanceId);
+      await this.#aws("ec2", "wait", "instance-terminated", "--instance-ids", instance.InstanceId);
+    }
+    // Root volumes are launched with DeleteOnTermination, but the EC2 waiter
+    // only proves the instance is gone. Verify storage too; retry cleanup if
+    // an EBS volume outlives the worker instead of reporting false success.
+    for (const volume of await this.#ownedVolumes(chat.id)) {
+      if (volume.State === "available") await this.#aws("ec2", "delete-volume", "--volume-id", volume.VolumeId);
+      else if (volume.State !== "deleting") throw new Error(`EC2 worker volume ${volume.VolumeId} is still ${volume.State}`);
+      await this.#aws("ec2", "wait", "volume-deleted", "--volume-ids", volume.VolumeId);
+    }
+    if ((await this.#ownedVolumes(chat.id)).length) throw new Error("EC2 worker volumes remain after deletion");
   }
 
   async resize(chat, instanceType) {
@@ -542,7 +553,24 @@ export class Ec2Backend {
     return changed;
   }
 
-  async #find(chatId) {
+  async #ownedVolumes(chatId) {
+    const output = await this.#aws("ec2", "describe-volumes", "--filters",
+      `Name=tag:AgentWebChat,Values=${chatId}`,
+      `Name=tag:AgentRelayDeployment,Values=${this.config.ec2.deployment}`,
+      "Name=tag:ManagedBy,Values=agent-relay", "--query", "Volumes", "--output", "json");
+    const volumes = JSON.parse(output || "[]");
+    if (!Array.isArray(volumes)) throw new Error("EC2 worker volume lookup returned invalid data");
+    for (const volume of volumes) {
+      const tags = Object.fromEntries((volume.Tags || []).map(({ Key, Value }) => [Key, Value]));
+      if (!/^vol-[a-f0-9]{8,17}$/.test(volume.VolumeId || "") ||
+          tags.AgentWebChat !== chatId || tags.AgentRelayDeployment !== this.config.ec2.deployment || tags.ManagedBy !== "agent-relay") {
+        throw new Error("EC2 worker volume ownership does not match this deployment");
+      }
+    }
+    return volumes;
+  }
+
+  async #find(chatId, states = "pending,running,stopping,stopped") {
     if (!/^chat_[a-f0-9]{32}$/.test(chatId)) throw new Error("Invalid EC2 chat identifier");
     const output = await this.#aws(
       "ec2", "describe-instances",
@@ -550,7 +578,7 @@ export class Ec2Backend {
       `Name=tag:AgentWebChat,Values=${chatId}`,
       `Name=tag:AgentRelayDeployment,Values=${this.config.ec2.deployment}`,
       "Name=tag:ManagedBy,Values=agent-relay",
-      "Name=instance-state-name,Values=pending,running,stopping,stopped",
+      `Name=instance-state-name,Values=${states}`,
       "--query", "Reservations[].Instances[]",
       "--output", "json",
     );

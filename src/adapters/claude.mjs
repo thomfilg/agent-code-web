@@ -842,7 +842,10 @@ export class ClaudeAdapter {
       state: child ? child.exitCode === null && child.signalCode === null ? "running" : "exited" : this.stopped ? "stopped" : "idle",
       heartbeatAt: child?.lastHeartbeatAt || null,
       heartbeatExpected: Boolean(receipt),
-      control: child?.detached === true ? "detached" : child ? "connected" : "idle" };
+      control: child?.detached === true ? "detached" : child ? "connected" : "idle",
+      reconnectAttempts: child?.reconnectFailures || 0,
+      lastDetachedAt: child?.lastDetachedAt || null,
+      lastReconnectedAt: child?.lastReconnectedAt || null };
   }
 
   permissionMode(event) {

@@ -2611,10 +2611,10 @@ export class RuntimeManager extends EventEmitter {
 
   async remove(chatId) {
     const chat = this.store.get(chatId);
-    if (!chat) return false;
-    // Deleting the product record is the user action. Stopping/destroying the
-    // worker is best-effort infrastructure cleanup and must never hold the UI
-    // hostage behind a stale lease or an unresponsive native process.
+    if (!chat) return { removed: false, cleanupPending: false };
+    // The UI hides the chat immediately after confirmation. Keep a durable
+    // cleanup record if verified worker destruction fails, then report pending
+    // instead of claiming that all infrastructure is already gone.
     let cleanupError = null;
     try { await this.stop(chatId, "deleted"); }
     catch (error) { cleanupError = error; }
@@ -2638,16 +2638,22 @@ export class RuntimeManager extends EventEmitter {
         cleanupError ||= error;
       }
     }
-    if (cleanupError && this.store.records) await this.store.records.put(DELETION_CLEANUP, chatId, {
-      id: chatId, createdAt: nowIso(), attempts: 0, error: errorMessage(cleanupError).slice(0, 500),
-    }).catch(() => {});
+    if (cleanupError) {
+      if (!this.store.records) throw cleanupError;
+      await this.store.records.put(DELETION_CLEANUP, chatId, {
+        id: chatId, createdAt: nowIso(), attempts: 0, error: errorMessage(cleanupError).slice(0, 500),
+      });
+    }
+    await this.attachments?.removeChat(chatId);
     const removed = await this.store.remove(chatId);
     this.agentThreads.forget(chatId);
-    await this.attachments?.removeChat(chatId);
     this.#emit(chatId, { type: "chat_deleted", chatId });
     this.#events.delete(chatId);
-    if (cleanupError) void this.retryDeletionCleanup().catch(() => {});
-    return removed;
+    if (cleanupError) {
+      console.error(`Worker deletion pending for ${chatId}: ${errorMessage(cleanupError)}`);
+      void this.retryDeletionCleanup().catch(error => console.error(`Worker deletion retry failed for ${chatId}: ${errorMessage(error)}`));
+    }
+    return { removed, cleanupPending: Boolean(cleanupError) };
   }
 
   async retryDeletionCleanup() {
@@ -2661,8 +2667,10 @@ export class RuntimeManager extends EventEmitter {
       try {
         await this.workerBackend.destroy({ id: pending.id });
         await this.store.records.delete(DELETION_CLEANUP, pending.id);
+        console.info(`Worker deletion completed for ${pending.id}`);
       } catch (error) {
         remaining = true;
+        console.error(`Worker deletion retry pending for ${pending.id}: ${errorMessage(error)}`);
         await this.store.records.put(DELETION_CLEANUP, pending.id, {
           ...pending, attempts: (pending.attempts || 0) + 1, lastAttemptAt: nowIso(), error: errorMessage(error).slice(0, 500),
         }).catch(() => {});

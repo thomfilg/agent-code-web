@@ -20,10 +20,14 @@ test("Organize deletes only the confirmed chat, keeps other drafts, and updates 
     await page.goto("/"); await page.getByRole("button", { name: `Open ${active.title}`, exact: true }).click();
     await page.getByLabel("Message", { exact: true }).fill("Keep this draft");
     await page.getByRole("button", { name: `Organize ${other.title}`, exact: true }).click();
-    page.once("dialog", dialog => dialog.dismiss()); await page.locator("#organize-delete-chat").click();
+    await page.locator("#organize-delete-chat").click();
+    const confirmation = page.getByRole("dialog", { name: "Delete chat?" });
+    await expect(confirmation).toContainText(other.title);
+    await confirmation.getByRole("button", { name: "Cancel" }).click();
     await expect(page.locator("#organize-dialog")).toBeVisible(); expect((await request.get(`/api/chats/${other.id}`)).ok()).toBe(true);
-    page.once("dialog", dialog => { expect(dialog.message()).toContain("cannot be undone"); return dialog.accept(); });
-    await page.locator("#organize-delete-chat").click(); await expect(page.locator("#organize-dialog")).not.toBeVisible();
+    await page.locator("#organize-delete-chat").click();
+    await confirmation.getByRole("button", { name: "Delete chat" }).click();
+    await expect(page.locator("#organize-dialog")).not.toBeVisible();
     await expect(page.locator(`[data-chat-id="${other.id}"]`)).toHaveCount(0);
     await expect(page.locator("#chat-title")).toHaveText(active.title); await expect(page.getByLabel("Message", { exact: true })).toHaveValue("Keep this draft");
     expect((await request.get(`/api/chats/${other.id}`)).status()).toBe(404);
@@ -32,11 +36,38 @@ test("Organize deletes only the confirmed chat, keeps other drafts, and updates 
     await page.getByRole("button", { name: `Organize ${active.title}`, exact: true }).click();
     await expect(page.locator("#organize-delete-chat")).toBeInViewport();
     expect(await page.locator("#organize-dialog").evaluate(n => n.scrollWidth <= n.clientWidth)).toBe(true);
-    page.once("dialog", dialog => dialog.accept()); await page.locator("#organize-delete-chat").click();
+    await page.locator("#organize-delete-chat").click();
+    await confirmation.getByRole("button", { name: "Delete chat" }).click();
     await expect(page.locator("#organize-dialog")).not.toBeVisible();
     await expect(tab.locator("#chat-title")).not.toHaveText(active.title);
     expect((await request.get(`/api/chats/${active.id}`)).status()).toBe(404);
   } finally { await request.delete(`/api/chats/${active.id}`); await request.delete(`/api/chats/${other.id}`); }
+});
+
+test("chat settings hide a confirmed chat before worker deletion finishes", async ({ page, request }) => {
+  const chat = (await (await request.post("/api/chats", { data: { title: "Delayed worker deletion", agent: "mock" } })).json()).chat;
+  let release = () => {};
+  const gate = new Promise(resolve => { release = resolve; });
+  try {
+    await page.route(`**/api/chats/${chat.id}`, async route => {
+      if (route.request().method() !== "DELETE") return route.fallback();
+      await gate;
+      return route.continue();
+    });
+    await page.goto(`/#chat=${chat.id}`);
+    await page.locator(".chat-settings-menu > summary").click();
+    await page.getByRole("button", { name: "Delete chat", exact: true }).click();
+    const confirmation = page.getByRole("dialog", { name: "Delete chat?" });
+    await expect(confirmation).toContainText("Delayed worker deletion");
+    await confirmation.getByRole("button", { name: "Delete chat" }).click();
+    await expect(page.locator(`[data-chat-id="${chat.id}"]`)).toHaveCount(0);
+    expect((await request.get(`/api/chats/${chat.id}`)).status()).toBe(200);
+    release();
+    await expect.poll(async () => (await request.get(`/api/chats/${chat.id}`)).status()).toBe(404);
+  } finally {
+    release();
+    await request.delete(`/api/chats/${chat.id}`);
+  }
 });
 
 test("automatic sidebar status symbols use the requested colors and accessible labels", async ({ page }) => {

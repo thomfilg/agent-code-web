@@ -10,6 +10,7 @@ function ec2Config(overrides = {}) {
     AGENT_EC2_GATEWAY_ORIGIN: "http://gateway.internal:8787",
     AGENT_EC2_ALLOW_INSECURE_GATEWAY: "1",
     AGENT_EC2_AMI_ID: "ami-fixture",
+    AGENT_EC2_DEPLOYMENT: "fixture",
     AGENT_EC2_SUBNET_ID: "subnet-fixture",
     AGENT_EC2_SECURITY_GROUP_ID: "sg-fixture",
     AGENT_EC2_KEY_NAME: "key-fixture",
@@ -90,4 +91,38 @@ test("EC2 configuration rejects a plaintext public gateway by default", () => {
     () => ec2Config({ AGENT_EC2_ALLOW_INSECURE_GATEWAY: "0" }),
     /must use HTTPS/,
   );
+});
+
+test("deleting a chat waits for its EC2 worker and tagged storage to be gone", async () => {
+  const chat = { id: "chat_cccccccccccccccccccccccccccccccc" };
+  const config = ec2Config({ AGENT_EC2_DEPLOYMENT: "fixture" });
+  const calls = [];
+  let instanceState = "stopped", volumeState = "available";
+  const tags = [
+    { Key: "AgentWebChat", Value: chat.id },
+    { Key: "AgentRelayDeployment", Value: config.ec2.deployment },
+    { Key: "ManagedBy", Value: "agent-relay" },
+  ];
+  const instance = {
+    InstanceId: "i-0123456789abcdef0", State: { Name: instanceState }, Tags: tags,
+    SubnetId: config.ec2.subnetId, KeyName: config.ec2.keyName,
+    SecurityGroups: [{ GroupId: config.ec2.securityGroupId }],
+    MetadataOptions: { HttpEndpoint: "disabled" },
+  };
+  const runner = async (_command, args) => {
+    calls.push(args);
+    if (args.includes("describe-instances")) return JSON.stringify(instanceState === "terminated" ? [] : [{ ...instance, State: { Name: instanceState } }]);
+    if (args.includes("terminate-instances")) instanceState = "shutting-down";
+    if (args.includes("instance-terminated")) instanceState = "terminated";
+    if (args.includes("describe-volumes")) return JSON.stringify(volumeState === "deleted" ? [] : [{ VolumeId: "vol-0123456789abcdef0", State: volumeState, Tags: tags }]);
+    if (args.includes("delete-volume")) volumeState = "deleting";
+    if (args.includes("volume-deleted")) volumeState = "deleted";
+    return "";
+  };
+  await new Ec2Backend({ store: {}, config, commandRunner: runner }).destroy(chat);
+  assert.equal(instanceState, "terminated");
+  assert.equal(volumeState, "deleted");
+  assert.ok(calls.some(args => args.includes("instance-terminated")));
+  assert.ok(calls.some(args => args.includes("volume-deleted")));
+  assert.ok(calls.some(args => args.includes("delete-volume")));
 });
