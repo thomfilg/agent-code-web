@@ -308,6 +308,10 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/models" && request.method === "GET") {
         const agent = url.searchParams.get("agent");
         if (googleAuth.enabled && agent !== "mock" && !resources.isLegacy(user.id)) return json(response, 403, { error: "No agent account is connected for this user" });
+        // A daily CLI updater (or an operator, after manually installing a new
+        // CLI) calls this with refresh=1 once the new binary is active, so the
+        // picker reflects it immediately instead of waiting out the TTL cache.
+        if (url.searchParams.get("refresh") === "1") models.invalidate(agent);
         return json(response, 200, await models.list(agent));
       }
       if (url.pathname === "/api/github" && request.method === "POST") return json(response, 200, await github.connect(await bodyJson(request, config.maxBodyBytes)));

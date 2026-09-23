@@ -33,6 +33,51 @@ export class ClaudeAdapter {
     this.sendVersion = 0;
     this.fetchImpl = fetchImpl;
     this.now = now;
+    // Durable, adapter-level record of locally-backgrounded Bash tasks (e.g. a
+    // Playwright run started with run_in_background and polled to completion
+    // within the same turn). This survives past the SDK's own per-turn event
+    // bookkeeping (activeTools/liveTools), which is cleared unconditionally
+    // once the turn's "result" event arrives even if the real OS process the
+    // command spawned is still running. The Claude Code CLI protocol used here
+    // does not report a distinct child PID per background task, so pid/pgid
+    // anchor to the owning worker process — the best real handle available.
+    this.backgroundTasks = new Map();
+  }
+
+  hasBackgroundTasks() {
+    this.#reconcileBackgroundTasks();
+    return [...this.backgroundTasks.values()].some(task => task.state === "running");
+  }
+
+  #publicBackgroundTask(toolUseId) {
+    const task = this.backgroundTasks.get(toolUseId);
+    if (!task) return null;
+    return { id: task.id, title: task.title, pid: task.pid, pgid: task.pgid, state: task.state,
+      startedAt: new Date(task.startedAt).toISOString(), deadlineAt: new Date(task.deadlineAt).toISOString(),
+      durationMs: (task.completedAt ?? this.now()) - task.startedAt };
+  }
+
+  #trackBackgroundTask(toolUseId, title, child) {
+    const startedAt = this.now();
+    // 30 minutes: long enough for a real background build/test run, short
+    // enough that a genuinely abandoned process does not stay "running"
+    // forever. Reaching it marks the task "unknown", never "failed" — an
+    // ambiguous timeout must stay non-terminal, not be treated as an error.
+    const deadlineAt = startedAt + 30 * 60 * 1000;
+    this.backgroundTasks.set(toolUseId, { id: toolUseId, title: title || "Background command", pid: child?.pid ?? null, pgid: child?.pid ?? null, state: "running", startedAt, deadlineAt });
+    this.hooks.onEvent?.({ type: "background_task", task: this.#publicBackgroundTask(toolUseId) });
+  }
+
+  #finishBackgroundTask(toolUseId, state) {
+    const task = this.backgroundTasks.get(toolUseId);
+    if (!task || task.state !== "running") return;
+    task.state = state; task.completedAt = this.now();
+    this.hooks.onEvent?.({ type: "background_task", task: this.#publicBackgroundTask(toolUseId) });
+    setTimeout(() => this.backgroundTasks.delete(toolUseId), 60000).unref?.();
+  }
+
+  #reconcileBackgroundTasks() {
+    for (const [toolUseId, task] of this.backgroundTasks) if (task.state === "running" && this.now() >= task.deadlineAt) this.#finishBackgroundTask(toolUseId, "unknown");
   }
 
   async start() {
@@ -428,6 +473,10 @@ export class ClaudeAdapter {
       activeTools.delete(itemId);
       backgroundCandidates.delete(itemId);
       this.hooks.onEvent?.({ ...tool, state: "completed", failed, resultMissing, output });
+      // resultMissing means the turn ended before a matching tool_result ever
+      // arrived — we cannot tell whether the OS process actually finished, so
+      // this stays "unknown" (non-terminal), never "completed" or "failed".
+      this.#finishBackgroundTask(itemId, resultMissing ? "unknown" : failed ? "failed" : "completed");
     };
     const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     lines.on("line", (line) => {
@@ -436,16 +485,24 @@ export class ClaudeAdapter {
       mcpControl?.accept(event);
       reviewControl?.accept(event);
       this.permissionMode(event);
-      // Any private SDK turn can launch an app, including a generated skill
-      // or ordinary prose. Retain its actual owner, not just /run and /verify.
-      // Bind the native task event to this live main-session Bash call; text,
-      // unrelated tasks and late events after interruption are not evidence.
-      if (managed && !this.applicationSession && this.turnSession === managed && this.child === child
-        && !this.stopped && version === this.sendVersion && event.type === "system" && event.subtype === "task_started"
-        && event.session_id === sessionId && !event.parent_tool_use_id && event.task_type === "local_bash"
-        && typeof event.task_id === "string" && event.task_id
-        && typeof event.tool_use_id === "string" && backgroundCandidates.has(event.tool_use_id)) {
-        this.applicationSession = managed;
+      // A background local_bash task is real regardless of whether this turn
+      // ever built a managed ClaudeSession — a plain default turn can launch
+      // and poll a backgrounded Bash command (e.g. a Playwright run) just as
+      // well as an interactive/application one. Track it durably either way;
+      // only the separate "keep this whole session alive" promotion below
+      // still requires an actual managed session to attach to.
+      const backgroundTaskStarted = event.type === "system" && event.subtype === "task_started" && event.session_id === sessionId
+        && !event.parent_tool_use_id && event.task_type === "local_bash" && typeof event.task_id === "string" && event.task_id
+        && typeof event.tool_use_id === "string" && backgroundCandidates.has(event.tool_use_id);
+      if (backgroundTaskStarted) {
+        this.#trackBackgroundTask(event.tool_use_id, activeTools.get(event.tool_use_id)?.title, child);
+        // Any private SDK turn can launch an app, including a generated skill
+        // or ordinary prose. Retain its actual owner, not just /run and /verify.
+        // Bind the native task event to this live main-session Bash call; text,
+        // unrelated tasks and late events after interruption are not evidence.
+        if (managed && !this.applicationSession && this.turnSession === managed && this.child === child && !this.stopped && version === this.sendVersion) {
+          this.applicationSession = managed;
+        }
       }
       if (!mcpControl) output.accept(event);
       if (event.type === "system" && event.subtype === "notification" && ["fast-mode-overage-rejected", "fast-mode-org-changed", "fast-mode-cooldown-started", "fast-mode-cooldown-expired", "stop-hook-error"].includes(event.key) && typeof event.text === "string" && !notifications.has(event.key)) {

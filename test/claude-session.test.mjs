@@ -23,8 +23,9 @@ function transport(f) {
     child.exitCode = code; child.signalCode = signal; child.stdout.end(); child.stderr.end();
     child.emit("exit", code, signal); child.emit("close", code, signal);
   };
+  f.close = close;
   child.kill = signal => { f.signals.push(signal); setImmediate(() => close(null, signal)); };
-  child.stdin.on("finish", () => setImmediate(() => close(0, null)));
+  child.stdin.on("finish", () => setImmediate(() => { if (!f.holdClose) close(0, null); }));
   f.complete = (text = "Application turn completed.", failed = false) => {
     f.total++;
     f.emit({ type: "assistant", message: { id: `message_${f.total}`, model: "fixture", content: [{ type: "text", text }], usage: { input_tokens: 100, output_tokens: 10 } } });
@@ -1064,6 +1065,39 @@ test("a native background Bash task retains an ordinary or generated-skill sessi
     assert.deepEqual(f.inputs.map(input => input.message.content), [text, "Check the same app"]);
     await f.adapter.stop(); assert.notEqual(f.child.exitCode ?? f.child.signalCode, null); assert.equal(f.broker.validate(capability, "anthropic"), null);
   }
+});
+
+test("a durably-tracked background task survives a plain turn that never builds a managed application session", async t => {
+  const f = await fixture(t); f.block = true; f.holdClose = true;
+  const running = f.adapter.send("Start a background job");
+  await waitFor(() => f.child);
+  f.emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "shell-app", name: "Bash", input: { command: "npx playwright test", run_in_background: true } }] } });
+  f.emit({ type: "system", subtype: "task_started", session_id: f.nativeSession, task_type: "local_bash", task_id: "native-app", tool_use_id: "shell-app" });
+  assert.equal(f.adapter.applicationSession, undefined, "a plain turn must not be promoted into a managed application session");
+  assert.equal(f.adapter.hasBackgroundTasks(), true, "the background task must be tracked even without a managed session");
+  const started = f.events.find(event => event.type === "background_task" && event.task.state === "running");
+  assert(started, "starting a background task must emit a durable background_task event");
+  assert.equal(started.task.pid, f.child.pid ?? started.task.pid); // pid anchors to the owning worker process
+  f.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "shell-app", content: "Playwright run finished", is_error: false }] } });
+  assert.equal(f.adapter.hasBackgroundTasks(), false);
+  const completed = f.events.findLast(event => event.type === "background_task" && event.task.id === "shell-app");
+  assert.equal(completed.task.state, "completed");
+  f.complete(); f.close(0, null); await running;
+});
+
+test("a background task force-completed by the turn's own result stays ambiguous, never silently 'failed'", async t => {
+  const f = await fixture(t); f.block = true; f.holdClose = true;
+  const running = f.adapter.send("Start a background job and stop watching it");
+  await waitFor(() => f.child);
+  f.emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "shell-app", name: "Bash", input: { command: "npx playwright test", run_in_background: true } }] } });
+  f.emit({ type: "system", subtype: "task_started", session_id: f.nativeSession, task_type: "local_bash", task_id: "native-app", tool_use_id: "shell-app" });
+  assert.equal(f.adapter.hasBackgroundTasks(), true);
+  // The turn's own result arrives before any tool_result for the background
+  // task — the underlying OS process may well still be running.
+  f.complete(); f.close(0, null); await running;
+  assert.equal(f.adapter.hasBackgroundTasks(), false);
+  const finished = f.events.findLast(event => event.type === "background_task" && event.task.id === "shell-app");
+  assert.equal(finished.task.state, "unknown", "an ambiguous timeout/force-completion must never be reported as failed or completed");
 });
 
 test("only a bound live native Bash task can retain a private ordinary session", async t => {

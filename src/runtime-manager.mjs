@@ -54,6 +54,7 @@ export class RuntimeManager extends EventEmitter {
   #executors = new Map();
   #forking = new Map();
   #workspaceIdleTimers = new Map();
+  #backgroundRecheck = new Map();
 
   async enqueue(chatId, rawText, attachmentIds = []) {
     const text = clampText(rawText, 100_000, "message");
@@ -163,11 +164,34 @@ export class RuntimeManager extends EventEmitter {
     return draining;
   }
 
+  // A foreground turn finishing always re-triggers a drain itself (#submit's
+  // finish()). Background-only busy (an adapter reporting isBackgroundBusy()
+  // with no active foreground turn, e.g. a lingering Claude application
+  // session) has no such guaranteed external re-trigger, so a queued message
+  // could otherwise sit until an unrelated event happens to fire. Poll it
+  // instead, so the queue always finishes FIFO on its own.
+  #scheduleBackgroundRecheck(chatId) {
+    if (this.#backgroundRecheck.has(chatId)) return;
+    const timer = setTimeout(() => { this.#backgroundRecheck.delete(chatId); void this.#drainQueue(chatId); }, 1000);
+    timer.unref?.();
+    this.#backgroundRecheck.set(chatId, timer);
+  }
+  #clearBackgroundRecheck(chatId) {
+    const timer = this.#backgroundRecheck.get(chatId);
+    if (timer) { clearTimeout(timer); this.#backgroundRecheck.delete(chatId); }
+  }
+
   async #runQueue(chatId) {
     try {
       while (true) {
         const chat = this.store.get(chatId);
-        if (!chat || chat.queuePaused || chat.archived || this.isBusy(chatId) || chat.status === "stopping" || !chat.queuedMessages?.length) break;
+        if (!chat || chat.queuePaused || chat.archived || chat.status === "stopping" || !chat.queuedMessages?.length) { this.#clearBackgroundRecheck(chatId); break; }
+        if (this.isBusy(chatId)) {
+          const runtime = this.#runtimes.get(chatId);
+          if (runtime && !runtime.busy && runtime.adapter.isBackgroundBusy?.()) this.#scheduleBackgroundRecheck(chatId);
+          break;
+        }
+        this.#clearBackgroundRecheck(chatId);
         const item = chat.queuedMessages[0];
         const submitted = await this.#submitQueued(chatId, item);
         await submitted.completion;
@@ -1347,6 +1371,7 @@ export class RuntimeManager extends EventEmitter {
     // worker shutdown. Native interruption can still checkpoint its journal.
     this.broker.revokeChat(chatId);
     this.revokeChatMcps(chatId);
+    this.#clearBackgroundRecheck(chatId);
     this.publishChat(await this.store.update(chatId, { queuePaused: true, ...(reason === "manual" ? { forkGoalPending: false } : {}) }));
     const runtime = this.#runtimes.get(chatId);
     if (this.config.workerBackend === "ec2" && chat.agent !== "mock") {
@@ -1387,8 +1412,20 @@ export class RuntimeManager extends EventEmitter {
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     if (chat.agent !== "codex") throw new Error("These persistent goal controls are for Codex");
     if (action === "resume") {
-      if (this.isBusy(chatId) || chat.queuedMessages?.length) return this.enqueue(chatId, "/goal resume");
-      await this.submit(chatId, "/goal resume"); return this.store.get(chatId);
+      // Check-then-act on isBusy/queuedMessages is not atomic with the read
+      // above: two overlapping resume calls (a double-click, a client retry)
+      // can both observe the same pre-enqueue state and both push the literal
+      // "/goal resume" text. Serialize resume through #switching like every
+      // other branch below, and de-duplicate against an already-queued resume
+      // so a caller that raced anyway still only ever queues it once.
+      if (this.#switching.has(chatId)) throw Object.assign(new Error("Wait for the current goal action to finish"), { statusCode: 409 });
+      this.#switching.add(chatId);
+      try {
+        const current = this.store.get(chatId);
+        if (current?.queuedMessages?.some(item => item.text === "/goal resume")) return current;
+        if (this.isBusy(chatId) || current?.queuedMessages?.length) return await this.enqueue(chatId, "/goal resume");
+        await this.submit(chatId, "/goal resume"); return this.store.get(chatId);
+      } finally { this.#switching.delete(chatId); }
     }
     if (this.#switching.has(chatId) || this.#sendingNow.has(chatId) || ["starting", "stopping"].includes(chat.status)) throw Object.assign(new Error("Wait for the current session change to finish"), { statusCode: 409 });
     this.#switching.add(chatId);
@@ -1566,12 +1603,15 @@ export class RuntimeManager extends EventEmitter {
 
   async #scheduleIdleStop(chatId, runtime) {
     clearTimeout(runtime.idleTimer); runtime.idleTimer = null;
-    if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.trustReviewing || runtime.adapter.isBackgroundBusy?.()) return;
-    const reason = this.#importPending(chatId) ? "import" : this.#forking.has(chatId) ? "fork" : runtime.adapter.hasScheduledWork?.() ? "schedule" : runtime.adapter.agents?.busy() ? "agents" : this.sideChats.busy(chatId) ? "side" : this.browsers?.hasViewers(chatId) ? "browser" : this.workspacePresence.has(chatId) ? "workspace" : this.presence.has(chatId) ? "tab" : null;
+    if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.trustReviewing) return;
+    // A worker holding a durably-tracked background process (or the adapter's
+    // broader isBackgroundBusy signal) must not be idle-stopped out from under
+    // it — that is the "worker lease" a running background task holds.
+    const reason = this.#importPending(chatId) ? "import" : this.#forking.has(chatId) ? "fork" : runtime.adapter.hasScheduledWork?.() ? "schedule" : (runtime.adapter.isBackgroundBusy?.() || runtime.adapter.hasBackgroundTasks?.()) ? "background" : runtime.adapter.agents?.busy() ? "agents" : this.sideChats.busy(chatId) ? "side" : this.browsers?.hasViewers(chatId) ? "browser" : this.workspacePresence.has(chatId) ? "workspace" : this.presence.has(chatId) ? "tab" : null;
     const chat = this.store.get(chatId);
     if (reason) {
       if (chat?.idleKeepAwakeReason !== reason || chat?.idleDeadlineAt || chat?.status !== "idle") {
-        const updated = await this.store.update(chatId, current => ({ ...runtimeWorkflowPatch(current, "idle"), status: "idle", statusDetail: reason === "import" ? "Sleep paused until the import is reconciled" : reason === "fork" ? "Creating an independent fork" : reason === "schedule" ? "Sleep paused while native scheduled tasks are active" : reason === "agents" ? "Sleep paused while child agents are working" : reason === "side" ? "Sleep paused while the side chat is working" : reason === "browser" ? "Sleep paused while you're using Chrome" : reason === "workspace" ? "Sleep paused while the workspace viewer is open" : "Sleep paused while this chat tab is visible", idleDeadlineAt: null, idleKeepAwakeReason: reason }));
+        const updated = await this.store.update(chatId, current => ({ ...runtimeWorkflowPatch(current, "idle"), status: "idle", statusDetail: reason === "import" ? "Sleep paused until the import is reconciled" : reason === "fork" ? "Creating an independent fork" : reason === "schedule" ? "Sleep paused while native scheduled tasks are active" : reason === "background" ? "Sleep paused while a tracked background process is still running" : reason === "agents" ? "Sleep paused while child agents are working" : reason === "side" ? "Sleep paused while the side chat is working" : reason === "browser" ? "Sleep paused while you're using Chrome" : reason === "workspace" ? "Sleep paused while the workspace viewer is open" : "Sleep paused while this chat tab is visible", idleDeadlineAt: null, idleKeepAwakeReason: reason }));
         if (updated) this.publishChat(updated);
       }
       return;
@@ -1579,8 +1619,8 @@ export class RuntimeManager extends EventEmitter {
     const deadline = new Date(Date.now() + this.config.idleTimeoutMs).toISOString();
     await this.#setStatus(chatId, "idle", "Waiting for another message", deadline);
     runtime.idleTimer = setTimeout(() => {
-      if (this.#importPending(chatId) || this.#forking.has(chatId) || runtime.adapter.hasScheduledWork?.() || runtime.adapter.agents?.busy() || this.sideChats.busy(chatId) || this.browsers?.hasViewers(chatId) || this.workspacePresence.has(chatId) || this.presence.has(chatId)) { void this.#scheduleIdleStop(chatId, runtime); return; }
-      if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.trustReviewing || runtime.adapter.isBackgroundBusy?.()) return;
+      if (this.#importPending(chatId) || this.#forking.has(chatId) || runtime.adapter.hasScheduledWork?.() || runtime.adapter.isBackgroundBusy?.() || runtime.adapter.hasBackgroundTasks?.() || runtime.adapter.agents?.busy() || this.sideChats.busy(chatId) || this.browsers?.hasViewers(chatId) || this.workspacePresence.has(chatId) || this.presence.has(chatId)) { void this.#scheduleIdleStop(chatId, runtime); return; }
+      if (this.#runtimes.get(chatId) !== runtime || runtime.busy || runtime.trustReviewing) return;
       this.stop(chatId, "idle-timeout").catch((error) => this.#fatal(chatId, error));
     }, this.config.idleTimeoutMs);
     runtime.idleTimer.unref?.();
@@ -1618,6 +1658,19 @@ export class RuntimeManager extends EventEmitter {
       } else {
         await this.#scheduleIdleStop(chatId, runtime);
         void this.#drainQueue(chatId);
+      }
+      return;
+    }
+    if (event.type === "background_task") {
+      if (!event.task) return;
+      this.publishChat(await this.store.update(chatId, current => ({ backgroundTasks: { ...(current.backgroundTasks || {}), [event.task.id]: event.task } })));
+      // A background task finishing (completed, failed, or its ambiguous
+      // deadline reconciled to "unknown") is the "internal continuation":
+      // release the worker-lease keep-awake reason and let anything the
+      // completion unblocked (a queued message, an idle stop) proceed.
+      if (event.task.state !== "running") {
+        const runtime = this.#runtimes.get(chatId);
+        if (runtime && !runtime.busy) { await this.#scheduleIdleStop(chatId, runtime); void this.#drainQueue(chatId); }
       }
       return;
     }
@@ -1695,6 +1748,7 @@ export class RuntimeManager extends EventEmitter {
     this.#forking.get(chatId)?.controller.abort(error);
     this.workspacePresence.remove(chatId);
     clearTimeout(this.#workspaceIdleTimers.get(chatId)); this.#workspaceIdleTimers.delete(chatId);
+    this.#clearBackgroundRecheck(chatId);
     const runtime = this.#runtimes.get(chatId);
     if (!runtime) return;
     runtime.generation += 1;

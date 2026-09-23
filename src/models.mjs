@@ -5,8 +5,15 @@ import os from "node:os";
 import path from "node:path";
 import { JsonRpcProcess } from "./json-rpc-process.mjs";
 import { claudeFastScope } from "./claude-fast.mjs";
+import { compareSemver } from "./utils.mjs";
 const exec = promisify(execFile);
 const fail = message => Object.assign(new Error(message), { statusCode: 400 });
+
+// Aliases whose availability depends on the installed Claude CLI being new
+// enough, not merely on --help mentioning the word. Update as new gated
+// aliases ship; an alias absent from this table is always available once the
+// CLI advertises it.
+const CLAUDE_MODEL_GATES = { fable: "2.1.280" };
 
 export class ModelCatalog {
   constructor(config) { this.config = config; this.cache = new Map(); this.pending = new Map(); }
@@ -19,6 +26,14 @@ export class ModelCatalog {
     const selected = catalog.models.find(item => item.id === model);
     return this.validate(agent, { model, effort: input.effort || (selected?.efforts.includes(defaults.effort) ? defaults.effort : selected?.defaultEffort) || null });
   }
+  // Drop a cached/in-flight catalog so the next list() re-derives it from the
+  // currently installed CLI. Call this once a software update activates a new
+  // CLI version; without it the picker can stay stale for up to five minutes,
+  // or indefinitely if the caller never happens to hit the TTL again.
+  invalidate(agent = null) {
+    if (agent) { this.cache.delete(agent); this.pending.delete(agent); }
+    else { this.cache.clear(); this.pending.clear(); }
+  }
   async list(agent) {
     if (agent === "mock") return { models: [], source: "mock", note: "Mock mode does not use a model or effort level." };
     if (!["codex", "claude"].includes(agent)) throw fail("Invalid agent");
@@ -27,8 +42,12 @@ export class ModelCatalog {
     if (this.pending.has(agent)) return this.pending.get(agent);
     const promise = (agent === "codex" ? this.codex() : this.claude()).then(value => {
       value = { ...value, configuredDefault: this.defaults(agent).model, configuredDefaultEffort: this.defaults(agent).effort, defaults: this.defaults(agent) };
-      this.cache.set(agent, { value, expires: Date.now() + 300000 }); return value;
-    }).finally(() => this.pending.delete(agent));
+      // A stale lookup started before invalidate() must not resurrect the
+      // pre-update catalog after a fresher one was requested: only the
+      // identity-matching in-flight promise is allowed to populate the cache.
+      if (this.pending.get(agent) === promise) this.cache.set(agent, { value, expires: Date.now() + 300000 });
+      return value;
+    }).finally(() => { if (this.pending.get(agent) === promise) this.pending.delete(agent); });
     this.pending.set(agent, promise); return promise;
   }
   async codex() {
@@ -51,13 +70,27 @@ export class ModelCatalog {
     } catch (error) { throw fail(`Could not load Codex models: ${spawnError?.message || error.message}`); }
     finally { await rpc.stop(); await rm(directory, { recursive: true, force: true }); }
   }
+  async claudeVersion() {
+    try {
+      const { stdout } = await exec(this.config.claude.bin, ["--version"], { timeout: 15000, env: { PATH: process.env.PATH, HOME: os.homedir() } });
+      return /(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)/.exec(stdout)?.[1] || null;
+    } catch { return null; }
+  }
   async claude() {
-    const { stdout } = await exec(this.config.claude.bin, ["--help"], { timeout: 15000, env: { PATH: process.env.PATH, HOME: os.homedir() } });
+    const [{ stdout }, installedVersion] = await Promise.all([
+      exec(this.config.claude.bin, ["--help"], { timeout: 15000, env: { PATH: process.env.PATH, HOME: os.homedir() } }),
+      this.claudeVersion(),
+    ]);
     const advertised = /--effort[^\n]*\n?\s*\(([^)]+)\)/.exec(stdout)?.[1]?.split(",").map(value => value.trim()) || [];
     const efforts = ["low", "medium", "high", "xhigh", "max"].filter(value => advertised.includes(value));
     const aliases = ["opus", "sonnet", "haiku", "default", "best", "sonnet[1m]", "opus[1m]", "opusplan"];
-    if (stdout.includes("fable")) aliases.unshift("fable");
-    return { models: aliases.map(id => ({ id, label: id === "default" ? "Claude account default" : id[0].toUpperCase() + id.slice(1), efforts: id === "haiku" ? ["auto"] : ["auto", ...efforts], defaultEffort: null })), source: "claude-cli-aliases", configuredDefault: this.config.claude.model || null, note: "CLI aliases; Claude checks account availability when you send and may use a different planning model in Plan mode. Auto effort uses Claude's native default; Fable may require usage credits." };
+    // An alias needs both: the installed CLI advertises it in --help, and (if
+    // gated) the installed version meets the minimum. An unparsable installed
+    // version does not disable an otherwise-advertised alias (fail open on
+    // "can't tell", not silently stuck disabled after a real update).
+    const gateOk = id => { const min = CLAUDE_MODEL_GATES[id]; if (!min) return true; const cmp = compareSemver(installedVersion, min); return cmp === null || cmp >= 0; };
+    if (stdout.includes("fable") && gateOk("fable")) aliases.unshift("fable");
+    return { models: aliases.map(id => ({ id, label: id === "default" ? "Claude account default" : id[0].toUpperCase() + id.slice(1), efforts: id === "haiku" ? ["auto"] : ["auto", ...efforts], defaultEffort: null })), source: "claude-cli-aliases", configuredDefault: this.config.claude.model || null, installedVersion, note: "CLI aliases; Claude checks account availability when you send and may use a different planning model in Plan mode. Auto effort uses Claude's native default; Fable may require usage credits." };
   }
   async validate(agent, input) {
     const model = input.model || null; const effort = input.effort || null;
