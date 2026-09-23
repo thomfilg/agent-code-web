@@ -9,7 +9,6 @@ export class AgentAccountSettings {
     this.accounts = []; this.logins = new Map(); this.errors = new Map(); this.actions = new Map(); this.accountVersions = new Map(); this.deleted = new Set(); this.generation = 0; this.listRequest = 0;
     $("#agent-accounts-button").onclick = () => this.open();
     $("#connect-codex-button").onclick = () => this.open();
-    $("#chat-agent-account").onclick = () => this.open();
     $("#agent-account-new").onclick = () => {
       if (!$("#agent-account-form").hidden) this.showForm(false);
       else this.edit();

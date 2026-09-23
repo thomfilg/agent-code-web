@@ -437,6 +437,7 @@ function renderActive() {
   elements.send.querySelector("path").setAttribute("d", busy ? "M7 7h10v10H7z" : "m5 12 7-7 7 7M12 5v14");
   renderKeyboardHints();
   elements.input.placeholder = chat.workflowState === "archived" ? "Send to unarchive and continue…" : "Ask your agent to build, inspect, or fix something…";
+  $("#chat-agent-compact-label").textContent = chat.agent === "claude" ? "Claude" : chat.agent === "codex" ? "Codex" : agentLabel(chat.agent);
   const namedAccounts = state.config.features?.agentAccounts && chat.agent !== "mock";
   if (namedAccounts) {
     const accounts = workspaceSettings.accounts?.filter(item => item.status === "connected") || [];
@@ -458,10 +459,6 @@ function renderActive() {
   const noAgent = [...elements.agentPicker.options].every(option => option.disabled);
   elements.agentPicker.disabled = noAgent;
   elements.agentPicker.title = noAgent ? "Connect an agent in Agent accounts" : "Switch agent · conversation and workspace are retained";
-  const accountButton = $("#chat-agent-account");
-  accountButton.hidden = !state.config.features?.agentAccounts || chat.agent === "mock";
-  accountButton.textContent = "⚙"; accountButton.setAttribute("aria-label", "Manage chat agent accounts");
-  accountButton.disabled = false;
   activeModelPicker.setAgent(state.config.features?.agentAccounts && ["codex", "claude"].includes(chat.agent) && (!account || account.status !== "connected") ? null : chat.agent, chat);
   renderMessages();
   renderApproval();
