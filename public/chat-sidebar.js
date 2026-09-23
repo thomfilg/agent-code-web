@@ -1,4 +1,5 @@
 import { SORT_OPTIONS, groupChats, repositoryGroup, stateLabel } from "./chat-organization.js";
+import { renderPullRequestList } from "./pull-request-list.js";
 
 const $ = selector => document.querySelector(selector);
 function el(tag, className, text) {
@@ -39,7 +40,7 @@ function statusIcon(chat) {
 export class ChatSidebar {
   constructor({ state, api, select, updated, remove, toast, agentLabel }) {
     Object.assign(this, { state, api, select, updated, remove, toast, agentLabel });
-    this.groups = []; this.preferences = { sort: "updated_desc", collapsed: [] };
+    this.groups = []; this.preferences = { sort: "updated_desc", collapsed: [] }; this.expandedPRs = new Set();
     this.dragging = false; this.pendingPreferences = 0; this.preferenceVersion = 0; this.refreshVersion = 0;
     for (const [value, label] of SORT_OPTIONS) { const option = el("option", "", label); option.value = value; $("#chat-sort").append(option); }
     $("#chat-sort").addEventListener("change", () => { this.preferences.sort = $("#chat-sort").value; this.render(); this.savePreferences(); });
@@ -229,18 +230,28 @@ export class ChatSidebar {
     $("#organize-status").replaceChildren(statusIcon(chat), el("span", "", stateLabel(chat.workflowState)));
     $("#organize-status-detail").textContent = chat.stateDetail || "Detected automatically from the agent and GitHub.";
     $("#organize-sync-warning").textContent = chat.githubSyncWarning || "";
-    const links = $("#organize-pull-requests"); links.replaceChildren();
-    for (const pr of chat.pullRequests || []) {
-      if (!/^[\w.-]+\/[\w.-]+$/.test(pr.repository) || !Number.isSafeInteger(pr.number)) continue;
-      const link = el("a", "", `${pr.repository} #${pr.number}${pr.checks === "pending" ? " · checks pending" : ""}`);
-      link.href = `https://github.com/${pr.repository}/pull/${pr.number}`; link.target = "_blank"; link.rel = "noopener noreferrer";
-      links.append(link);
-    }
+    const items = (chat.pullRequests || []).filter(pr => /^[\w.-]+\/[\w.-]+$/.test(pr.repository) && Number.isSafeInteger(pr.number));
+    renderPullRequestList($("#organize-pull-requests"), items, pr => this.prSummaryRow(chat, pr), {
+      expanded: this.expandedPRs.has(chat.id),
+      onToggle: expanded => { if (expanded) this.expandedPRs.add(chat.id); else this.expandedPRs.delete(chat.id); this.renderChatStatus(chat); },
+      ariaLabel: "Linked pull requests",
+    });
     const archive = $("#archive-chat-button");
     archive.textContent = chat.archived ? "Unarchive chat" : "Archive chat";
     archive.dataset.archived = String(Boolean(chat.archived));
     archive.disabled = ["starting", "running", "stopping"].includes(chat.status);
     archive.title = archive.disabled ? "Stop the working agent before archiving" : "";
+  }
+  prSummaryRow(chat, pr) {
+    const row = el("div", "pr-summary-row");
+    const status = pr.merged ? "Merged" : pr.state === "closed" ? "Closed" : pr.conflicts || pr.checks === "failing" ? "Failing" : pr.checks === "pending" ? "Checks pending" : "Open";
+    const link = el("a", `pr-summary-status pr-${pr.merged ? "merged" : pr.state === "closed" ? "closed" : pr.conflicts || pr.checks === "failing" ? "failing" : "open"}`, `#${pr.number} · ${status}`);
+    link.href = `https://github.com/${pr.repository}/pull/${pr.number}`; link.target = "_blank"; link.rel = "noopener noreferrer";
+    const branch = el("span", "pr-summary-branch", `${pr.repository.split("/")[1]}${pr.headRef ? ` · ${pr.headRef}` : ""}`);
+    branch.title = `${pr.repository} · ${pr.headRef || "Branch unavailable"}`;
+    const diff = el("span", "pr-summary-diff", `+${Number.isFinite(pr.additions) ? pr.additions : "?"} −${Number.isFinite(pr.deletions) ? pr.deletions : "?"}`);
+    row.append(link, branch, diff);
+    return row;
   }
   async toggleArchive() {
     const archive = $("#archive-chat-button"); const archived = archive.dataset.archived !== "true";
