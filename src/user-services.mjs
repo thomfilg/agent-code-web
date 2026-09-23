@@ -19,8 +19,8 @@ export function userRecords(records, ownerId) {
 }
 
 export class UserServices {
-  constructor({ records, config, identity, store, legacy, changed, githubChanged = () => {} }) {
-    Object.assign(this, { records, config, identity, store, legacy, changed, githubChanged });
+  constructor({ records, config, identity, store, legacy, changed, githubChanged = () => {}, environmentChanged = () => {} }) {
+    Object.assign(this, { records, config, identity, store, legacy, changed, githubChanged, environmentChanged });
     this.entries = new Map();
     this.ready = new Map();
     legacy.github.onChange = id => {
@@ -47,7 +47,9 @@ export class UserServices {
     const organization = new ChatOrganization({ records, store: this.store, changed: this.changed });
     const plugins = new CompanyPlugins(records, { companies, config: this.config });
     environments.onSaved = environment => {
-      for (const chat of this.store.list()) if (chat.ownerId === ownerId && chat.environmentId === environment.id) mcps.restrictChat(chat.id, []);
+      for (const chat of this.store.list()) if (chat.ownerId === ownerId && chat.environmentId === environment.id) {
+        mcps.restrictChat(chat.id, []); this.environmentChanged(chat.id);
+      }
     };
     await environments.initialize();
     const services = { records, github, mcps, environments, organization, companies, plugins };

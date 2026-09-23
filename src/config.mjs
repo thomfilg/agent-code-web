@@ -141,6 +141,9 @@ export function loadConfig(env = process.env) {
       providerKey: env.ANTHROPIC_API_KEY || "",
       upstreamBaseUrl: (env.ANTHROPIC_BASE_URL_UPSTREAM || "https://api.anthropic.com").replace(/\/$/, ""),
     },
+    npm: {
+      upstreamBaseUrl: env.NPM_REGISTRY_UPSTREAM || "https://registry.npmjs.org/",
+    },
     ec2: {
       awsBin: env.AWS_BIN || "aws",
       // Omit --profile when unset so an EC2 controller uses its IAM role.
