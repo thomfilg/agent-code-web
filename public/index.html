@@ -198,9 +198,9 @@
             <div id="system-queue" class="system-queue" aria-live="polite" hidden></div>
             <div id="message-queue" aria-live="polite"></div>
             <div id="chat-context-strip" class="chat-context-strip" aria-label="Goal, pull request and workspace context">
-              <div id="goal-status"></div>
-              <div id="pull-request-bars" class="pull-request-bars"></div>
               <div id="chat-workspace-strip" class="workspace-strip" aria-label="Chat environment and repositories"></div>
+              <div id="pull-request-bars" class="pull-request-bars"></div>
+              <div id="goal-status"></div>
             </div>
             <form class="composer" id="composer">
               <div id="slash-menu" hidden>
@@ -215,11 +215,15 @@
                 <p id="file-status" role="status"></p>
               </div>
               <div id="attachment-chips" class="attachment-chips" aria-label="Message attachments"></div>
-              <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message" aria-describedby="composer-keyboard-hint"></textarea>
+              <div class="composer-input-row">
+                <textarea id="message-input" rows="1" maxlength="100000" placeholder="Ask your agent to build, inspect, or fix something…" aria-label="Message" aria-describedby="composer-keyboard-hint"></textarea>
+                <button class="send-button" id="send-button" type="submit" aria-label="Send message">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
+                </button>
+              </div>
               <div id="vim-status" class="vim-status" hidden><span id="vim-mode" role="status"></span><span class="muted">i to edit · Esc for Normal</span><button type="button" id="vim-help">Keys</button><button type="button" id="vim-disable">Vim off</button></div>
               <div class="composer-footer">
                 <div class="composer-pickers">
-                  <button type="button" class="saved-prompts-trigger" data-saved-prompts aria-label="Saved prompts" aria-controls="saved-prompts-picker" aria-expanded="false" title="Saved prompts">▤</button>
                   <details class="control-menu upward composer-add"><summary aria-label="Add to message" title="Add files, commands or connectors">+</summary><div class="control-popover">
                     <button type="button" id="add-attachments">Add files or photos</button>
                     <button type="button" id="add-workspace-context">Workspace files &amp; selections</button>
@@ -251,14 +255,8 @@
                   </div>
                 </div>
                 <div class="composer-actions">
+                <button type="button" class="saved-prompts-trigger" data-saved-prompts aria-label="Saved prompts" aria-controls="saved-prompts-picker" aria-expanded="false" title="Saved prompts">▤</button>
                 <details class="control-menu upward usage-menu" id="usage-menu"><summary aria-label="Context and usage" title="Context and usage"><span id="usage-ring" aria-hidden="true"></span></summary><div class="control-popover" id="session-usage"><p>Loading usage…</p></div></details>
-                <button class="send-button interrupt-button" id="interrupt-button" type="button" aria-label="Interrupt agent" title="Interrupt the current turn" hidden>
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v10H7z"/></svg>
-                </button>
-                <button class="send-button" id="send-button" type="submit" aria-label="Send message">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
-                </button>
-                <button type="submit" class="secondary-button queue-send" id="queue-message" hidden>Queue</button>
                 </div>
               </div>
             </form>

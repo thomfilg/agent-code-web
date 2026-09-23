@@ -404,7 +404,7 @@ test("busy composer accepts queued messages and its main button stops the agent"
   const chat = await openFixture(page, [], { status: "running" });
   let queued = "", stopped = false;
   await page.route(`**/api/chats/${chat.id}/queue`, route => { queued = route.request().postDataJSON().text; return route.fulfill({ json: { chat } }); });
-  await page.route(`**/api/chats/${chat.id}/stop`, route => { stopped = true; return route.fulfill({ json: { stopped: true } }); });
+  await page.route(`**/api/chats/${chat.id}/interrupt`, route => { stopped = true; return route.fulfill({ json: { chat: { ...chat, status: "idle" } } }); });
   const input = page.getByLabel("Message", { exact: true }); await expect(input).toBeEnabled();
   await expect(page.getByRole("button", { name: "Stop agent", exact: true })).toBeEnabled();
   await input.fill("Do this next"); await input.press("Enter"); await expect.poll(() => queued).toBe("Do this next");

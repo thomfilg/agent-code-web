@@ -25,6 +25,8 @@ test("compact mobile composer switches agents with Sol/Opus high defaults and pr
   await page.getByLabel("Choose effort", { exact: true }).click();
   const dimensions = await page.locator("#composer").evaluate(node => ({ width: node.clientWidth, scroll: node.scrollWidth, height: node.clientHeight }));
   expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.width + 1); expect(dimensions.height).toBeLessThan(140);
+  await expect(page.locator("#message-input")).toHaveCSS("min-height", "40px");
+  await expect(page.locator("#composer .composer-actions > .saved-prompts-trigger")).toHaveCount(1);
   await page.screenshot({ path: "test-results/compact-mobile-composer.png", fullPage: true });
   await page.getByLabel("Chat agent", { exact: true }).selectOption("mock");
 });
@@ -41,6 +43,7 @@ test("PR bar opens colored diffs, shows CI counts/conflicts, and requires explic
   await expect(bar.locator(".ci-count.skipped strong")).toHaveText("1");
   await expect(bar).toContainText("Merge conflicts detected");
   await expect(bar.getByRole("link", { name: "CI monitoring ↗" })).toHaveAttribute("href", "https://github.com/Acme/api/pull/42/checks");
+  await expect(page.locator("#pull-request-bars")).not.toContainText("1 PR");
   page.once("dialog", dialog => dialog.dismiss());
   await bar.getByLabel("Auto-merge PR 42").click(); await expect(bar.getByLabel("Auto-merge PR 42")).not.toBeChecked();
   page.once("dialog", dialog => dialog.accept());
@@ -84,14 +87,21 @@ test("many pull requests collapse to one card row and expand on demand", async (
   await expect(context.locator("#goal-status")).toBeVisible();
   await expect(context.locator("#pull-request-bars")).toBeVisible();
   await expect(context.locator("#chat-workspace-strip")).toBeVisible();
+  await expect(context.locator("#goal-status")).toHaveText("Goal · active");
   const compact = await context.evaluate(node => ({
     height: node.getBoundingClientRect().height,
     childParents: ["goal-status", "pull-request-bars", "chat-workspace-strip"].map(id => document.getElementById(id)?.parentElement?.id),
+    childOrder: [...node.children].map(child => child.id),
     centers: ["goal-status", "pull-request-bars", "chat-workspace-strip"].map(id => { const box = document.getElementById(id).getBoundingClientRect(); return box.top + box.height / 2; }),
   }));
   expect(compact.childParents).toEqual(["chat-context-strip", "chat-context-strip", "chat-context-strip"]);
+  expect(compact.childOrder).toEqual(["chat-workspace-strip", "pull-request-bars", "goal-status"]);
   expect(compact.height).toBeLessThanOrEqual(34);
   expect(Math.max(...compact.centers) - Math.min(...compact.centers)).toBeLessThanOrEqual(1);
+  await page.screenshot({ path: "test-results/compact-context-row.png", fullPage: true });
+  await context.getByRole("button", { name: "Goal · active", exact: true }).click();
+  await expect(page.locator("#controls-dialog")).toContainText("Keep this goal compact beside the PR and workspace context");
+  await page.locator("#controls-dialog").getByRole("button", { name: "Close controls dialog", exact: true }).click();
   const composerTop = (await page.locator("#composer").boundingBox()).y;
   await page.getByRole("button", { name: "View more", exact: true }).click();
   await expect(page.locator("#pull-request-bars")).toHaveClass(/expanded/);

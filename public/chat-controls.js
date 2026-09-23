@@ -117,7 +117,7 @@ export class ChatControls {
     const goalStatus = $("#goal-status"); goalStatus.replaceChildren();
     if (chat.goal) {
       const planOnly = chat.mode === "plan" && chat.goal.status === "active";
-      const summary = button(`Goal · ${chat.goal.status}${planOnly ? " · plan only" : ""} · ${chat.goal.objective}`, () => this.goal(), "goal-summary");
+      const summary = button(`Goal · ${chat.goal.status}${planOnly ? " · plan only" : ""}`, () => this.goal(), "goal-summary");
       summary.title = planOnly ? `${chat.goal.objective} — Plan mode is active; automatic goal continuation is disabled.` : chat.goal.objective;
       goalStatus.append(summary);
     }
@@ -332,16 +332,17 @@ export class ChatControls {
     }
     root.setAttribute("role", "group"); root.setAttribute("aria-label", `${pullRequests.length} pull request${pullRequests.length === 1 ? "" : "s"}`);
     const controls = el("span", undefined, "pr-tray-controls");
-    controls.append(el("span", `${pullRequests.length} PR${pullRequests.length === 1 ? "" : "s"}`, "pr-tray-count"));
     if (overflow) {
+      controls.append(el("span", `${pullRequests.length} PR${pullRequests.length === 1 ? "" : "s"}`, "pr-tray-count"));
       const toggle = button(expanded ? "Show less" : "View more", () => {
         if (expanded) this.expandedPRTrays.delete(chat.id); else this.expandedPRTrays.add(chat.id);
         this.pullRequests(chat);
         queueMicrotask(() => root.querySelector(".pr-tray-toggle")?.focus());
       }, "pr-tray-toggle");
       toggle.setAttribute("aria-expanded", String(expanded)); toggle.setAttribute("aria-controls", root.id); controls.append(toggle);
+      rows[0].children[1]?.after(controls);
     }
-    rows[0].classList.add("pr-tray-anchor"); rows[0].children[1]?.after(controls);
+    rows[0].classList.add("pr-tray-anchor");
     root.append(...rows);
   }
   async showChanges(pr = this.state.active?.pullRequests?.at(-1)) {

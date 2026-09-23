@@ -140,7 +140,7 @@ for (const width of [1280, 320]) test(`native research at ${width}px stays runni
   f.snapshot = { ...f.snapshot, status: "running", statusDetail: "Native background task is working", idleDeadlineAt: null,
     messages: [{ id: "research-start", role: "assistant", kind: "message", text: "Research is running in the native workflow." }],
     queuedMessages: [{ id: "later", text: "Retain this queued input" }, { id: "now", text: "Send this selected input now" }] }; await f.emit();
-  await expect(page.locator("#runtime-status")).toHaveText("running"); await expect(page.locator("#queue-message")).toBeVisible();
+  await expect(page.locator("#runtime-status")).toHaveText("running"); await expect(page.getByRole("button", { name: "Stop agent", exact: true })).toBeVisible();
   await expect(page.locator("#countdown")).not.toContainText("SLEEPS IN");
   await input.fill("Keep this unsent draft");
   await page.locator("#attachment-input").setInputFiles({ name: "research-context.txt", mimeType: "text/plain", buffer: Buffer.from("Keep this attachment") });
@@ -174,7 +174,7 @@ for (const width of [1280, 320]) test(`native loops at ${width}px expose awake/r
   await expect(page.locator("#runtime-status")).toHaveText("Ready"); await expect(page.locator("#countdown")).toHaveText("KEPT AWAKE");
   await expect(page.locator("#runtime-detail")).toContainText("scheduled tasks");
   f.snapshot = { ...f.snapshot, status: "running", idleKeepAwakeReason: null, statusDetail: "Native background task is working", queuedMessages: [{ id: "later", text: "Keep queued" }, { id: "now", text: "Cancel this loop" }] }; await f.emit();
-  await expect(page.locator("#runtime-status")).toHaveText("running"); await expect(page.locator("#queue-message")).toBeVisible();
+  await expect(page.locator("#runtime-status")).toHaveText("running"); await expect(page.getByRole("button", { name: "Stop agent", exact: true })).toBeVisible();
   await page.route(`**/api/chats/${f.snapshot.id}/queue`, async route => {
     actions.push(route.request().postDataJSON());
     f.snapshot = { ...f.snapshot, revision: f.snapshot.revision + 1, queuedMessages: f.snapshot.queuedMessages.filter(item => item.id !== "now") };
