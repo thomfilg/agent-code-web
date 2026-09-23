@@ -1,6 +1,13 @@
 const catalogs = new Map();
 const option = (value, text) => { const el = document.createElement("option"); el.value = value; el.textContent = text; return el; };
 const selectionKey = (agent, selected, useDefaults) => JSON.stringify([selected.id || null, selected.ownerId || null, agent, selected.agentAccountId || null, selected.model || null, selected.effort || null, selected.ultracode === true, useDefaults]);
+export function modelOptionLabel(model = {}) {
+  const label = String(model.label || model.id || "Model");
+  const detail = String(model.description || "").split("·")[0].trim();
+  if (!detail || !/\b\d+(?:\.\d+)*\b/.test(detail)) return label;
+  if (model.id === "default") return `${label} · ${detail}`;
+  return detail;
+}
 export function claudeCatalogMatchesChat(context, chat) {
   // Only named Claude discovery fills the metadata-only command fallback.
   // Do not trigger Codex model probes or shared-host CLI command discovery.
@@ -40,13 +47,12 @@ export class ModelPicker {
       this.catalog = catalog;
       if (useDefaults) selected = { ...selected, model: selected.model || catalog.defaults?.model, effort: selected.effort || catalog.defaults?.effort };
       const defaultModel = catalog.configuredDefault || catalog.models.find(model => model.isDefault)?.id;
-      const label = value => this.root.classList.contains("compact-model-controls") ? value.replace(/^GPT-\d+(?:\.\d+)?-/i, "") : value;
       const nativeDefault = agent === "claude" && catalog.models.some(model => model.id === "default");
       const useNativeDefault = nativeDefault && (!defaultModel || defaultModel === "default");
       this.noEnabledModels = catalog.source === "claude-account" && !catalog.models.some(model => model.disabled !== true);
-      const configuredLabel = catalog.models.find(model => model.id === defaultModel)?.label || defaultModel;
-      this.model.replaceChildren(...(useNativeDefault || this.noEnabledModels ? [] : [option("", configuredLabel ? `${nativeDefault ? "Configured default" : "Default"} · ${label(configuredLabel)}` : "Account default")]), ...catalog.models.map(model => {
-        const el = option(model.id, label(model.label) + (model.disabled ? ` — ${model.disabledReason || model.description || "Unavailable"}` : ""));
+      const configured = catalog.models.find(model => model.id === defaultModel), configuredLabel = configured ? modelOptionLabel(configured) : defaultModel;
+      this.model.replaceChildren(...(useNativeDefault || this.noEnabledModels ? [] : [option("", configuredLabel ? `${nativeDefault ? "Configured default" : "Default"} · ${configuredLabel}` : "Account default")]), ...catalog.models.map(model => {
+        const el = option(model.id, modelOptionLabel(model) + (model.disabled ? ` — ${model.disabledReason || model.description || "Unavailable"}` : ""));
         el.disabled = model.disabled === true; el.title = model.disabledReason || model.description || ""; return el;
       }));
       if (!catalog.models.length && this.noEnabledModels) { const el = option("", "No available Claude models"); el.disabled = true; this.model.append(el); }

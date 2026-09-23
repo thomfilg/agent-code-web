@@ -7,6 +7,7 @@ const digest = value => createHash("sha256").update(typeof value === "string" ||
 const repoName = value => typeof value === "string" && /^[\w.-]+\/[\w.-]+$/.test(value) && !value.split("/").some(part => [".", ".."].includes(part));
 const sha = value => /^[a-f0-9]{40,64}$/i.test(value || "");
 const key = (repository, number) => `${repository.toLowerCase()}#${number}`;
+const SUBSCRIPTION_LIMIT = 100;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const publicBinding = chat => JSON.stringify([chat?.ownerId, chat?.agent, chat?.agentAccountId, chat?.environmentId, chat?.repositories, chat?.archived]);
 const observedPullRequest = pr => ({ headSha: pr.headSha, headRef: pr.headRef, checks: pr.checks, state: pr.state, merged: pr.merged, conflicts: pr.conflicts,
@@ -58,8 +59,8 @@ export function verifiedWebhook(raw, headers, secret) {
 }
 
 export class GitHubEvents {
-  constructor({ records, store, github, monitor, secret = "", isLegacy = () => false, notify = async () => {}, publish = () => {} }) {
-    Object.assign(this, { records, store, github, monitor, secret, isLegacy, notify, publish });
+  constructor({ records, store, github, monitor, secret = "", isLegacy = () => false, environmentForChat = async () => null, notify = async () => {}, publish = () => {} }) {
+    Object.assign(this, { records, store, github, monitor, secret, isLegacy, environmentForChat, notify, publish });
     this.processing = null; this.inflight = new Map(); this.stopped = false;
     this.controllerId = randomUUID();
   }
@@ -96,13 +97,21 @@ export class GitHubEvents {
     }
   }
   async state(chatId) { return (await this.records.githubEventTransaction({ chatId }, () => {})).value; }
+  async defaults(chat) {
+    if (!chat?.environmentId) return { notifyFailures: true, wakePassing: true };
+    const environment = await this.environmentForChat(chat);
+    if (!environment?.ciMonitoring || typeof environment.ciMonitoring.notifyFailures !== "boolean" || typeof environment.ciMonitoring.wakePassing !== "boolean") throw fail("ENVIRONMENT_CHANGED");
+    return { notifyFailures: environment.ciMonitoring.notifyFailures, wakePassing: environment.ciMonitoring.wakePassing };
+  }
   async snapshot(chatId) {
     const state = await this.state(chatId);
     const chat = this.store.get(chatId);
+    let defaults = { notifyFailures: false, wakePassing: false };
+    try { defaults = await this.defaults(chat); } catch { /* Missing scope grants no automatic wake. */ }
     const subscriptions = (state?.subscriptions || []).filter(sub => sub.scope.ownerId === chat?.ownerId && sub.scope.accountId === chat.agentAccountId
       && sub.scope.provider === chat.agent && sub.scope.companyId === companyForChat(chat) && sub.scope.environmentId === (chat.environmentId || null)
       && chat.repositories?.some(repo => repo.id === sub.repositoryId && repo.fullName?.toLowerCase() === sub.repository && repo.githubConnectionId === sub.scope.connectionId));
-    return { configured: Boolean(this.secret), revision: state?.revision || 0, subscriptions: subscriptions.map(sub => ({ repository: sub.repository, number: sub.number,
+    return { configured: Boolean(this.secret), defaults, revision: state?.revision || 0, subscriptions: subscriptions.map(sub => ({ repository: sub.repository, number: sub.number,
       notifyFailures: sub.notifyFailures, wakePassing: sub.wakePassing, automatic: Boolean(sub.automatic), id: sub.id })),
       deliveries: (state?.events || []).filter(event => subscriptions.some(sub => sub.id === event.subscriptionId)).slice(-20)
         .map(({ id, repository, number, headSha, headRef, checks, conflicts, reasons, reviewActivity, automatic, status, createdAt, error }) => ({ id, repository, number, headSha, headRef, checks, conflicts, reasons, reviewActivity, automatic, status, createdAt, error })) };
@@ -129,7 +138,7 @@ export class GitHubEvents {
         const old = value?.subscriptions.find(sub => sub.id === existing.id);
         if (!old || !ownerId || records[0]?.ownerId !== ownerId || old.scope.ownerId !== ownerId
           || input.notifyFailures && !old.notifyFailures || input.wakePassing && !old.wakePassing) throw fail();
-        return { ...value, subscriptions: value.subscriptions.map(sub => sub.id === old.id ? { ...sub, notifyFailures: input.notifyFailures, wakePassing: input.wakePassing, generation: sub.generation + 1, observed: null } : sub),
+        return { ...value, subscriptions: value.subscriptions.map(sub => sub.id === old.id ? { ...sub, notifyFailures: input.notifyFailures, wakePassing: input.wakePassing, inherited: false, generation: sub.generation + 1, observed: null } : sub),
           events: value.events.map(event => event.subscriptionId === old.id && ["pending", "queued", "blocked"].includes(event.status) ? { ...event, status: "cancelled" } : event) };
       });
       await check(); guard(); await this.publishState(chatId); await check(); guard(); return this.store.get(chatId);
@@ -153,7 +162,7 @@ export class GitHubEvents {
       this.currentSubscription(sub, records, connection.revision || 0);
       const state = value || { chatId, subscriptions: [], events: [], sequence: 0 };
       const old = state.subscriptions.find(entry => entry.id === id);
-      if (!old && state.subscriptions.length >= 30) throw fail("SUBSCRIPTION_LIMIT");
+      if (!old && state.subscriptions.length >= SUBSCRIPTION_LIMIT) throw fail("SUBSCRIPTION_LIMIT");
       // Explicit changes cancel pending deliveries. No retroactive wake merely
       // because a PR was already green at subscription time.
       sub.observed = null; sub.generation = (old?.generation || 0) + 1;
@@ -163,13 +172,17 @@ export class GitHubEvents {
     await this.monitor.refresh(chatId, { force: true }); await check(); guard(); return this.store.get(chatId);
   }
   async reconcileAutomatic(chatId, prs) {
-    for (const pr of prs.filter(entry => entry.agentFollowUp && entry.state === "open" && entry.verifiedAt && sha(entry.headSha))) {
+    for (const pr of prs.filter(entry => entry.state === "open" && entry.verifiedAt && sha(entry.headSha))) {
       try {
         const existing = (await this.state(chatId))?.subscriptions.find(sub => sub.id === key(pr.repository, pr.number));
-        if (existing?.automatic && existing.notifyFailures && existing.wakePassing) continue;
         const chat = this.store.get(chatId), selected = chat?.repositories?.find(repo => repo.id === pr.repositoryId
           && repo.fullName?.toLowerCase() === pr.repository.toLowerCase());
         if (!selected?.githubConnectionId || !Number.isSafeInteger(selected.id)) continue;
+        const defaults = await this.defaults(chat), automatic = Boolean(pr.agentFollowUp || existing?.automatic), inherited = Boolean(automatic || existing?.inherited || !existing);
+        if (existing && !inherited) continue;
+        if (!existing && !automatic && !defaults.notifyFailures && !defaults.wakePassing) continue;
+        if (existing && existing.notifyFailures === defaults.notifyFailures && existing.wakePassing === defaults.wakePassing
+          && Boolean(existing.automatic) === automatic && existing.inherited === true) continue;
         const options = { ownerId: chat.ownerId, connectionId: selected.githubConnectionId, chatCompany: companyForChat(chat), repository: selected.fullName };
         const connection = await this.github.requireConnection(options);
         if ((connection.revision || 0) !== (pr.connectionRevision || 0)) continue;
@@ -177,9 +190,9 @@ export class GitHubEvents {
         await this.mutate(chatId, scope, ({ value, records }) => {
           const state = value || { chatId, subscriptions: [], events: [], sequence: 0 }, old = state.subscriptions.find(entry => entry.id === id);
           const sub = { id, scope, repository: selected.fullName.toLowerCase(), repositoryId: selected.id, number: pr.number,
-            notifyFailures: true, wakePassing: true, automatic: true, observed: null, generation: (old?.generation || 0) + 1 };
+            notifyFailures: defaults.notifyFailures, wakePassing: defaults.wakePassing, automatic, inherited: true, observed: null, generation: (old?.generation || 0) + 1 };
           this.currentSubscription(sub, records, connection.revision || 0);
-          if (!old && state.subscriptions.length >= 30) throw fail("SUBSCRIPTION_LIMIT");
+          if (!old && state.subscriptions.length >= SUBSCRIPTION_LIMIT) throw fail("SUBSCRIPTION_LIMIT");
           return { ...state, subscriptions: [...state.subscriptions.filter(entry => entry.id !== id), sub],
             events: state.events.map(event => event.subscriptionId === id && ["pending", "queued", "blocked"].includes(event.status) ? { ...event, status: "cancelled" } : event) };
         });

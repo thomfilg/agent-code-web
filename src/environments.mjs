@@ -15,6 +15,12 @@ export const SOFTWARE_CATALOG = [
   { id: "typescript", name: "TypeScript", version: "5", description: "TypeScript compiler", check: "tsc --version" },
   { id: "jq", name: "jq", version: "1.7.1", description: "Command-line JSON processor", check: "jq --version" },
 ];
+export const DEFAULT_CI_MONITORING = Object.freeze({ notifyFailures: true, wakePassing: true });
+export function normalizeCiMonitoring(value = DEFAULT_CI_MONITORING) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || typeof value.notifyFailures !== "boolean" || typeof value.wakePassing !== "boolean") throw new Error("CI monitoring defaults must be enabled or disabled explicitly");
+  return { notifyFailures: value.notifyFailures, wakePassing: value.wakePassing };
+}
 const RESERVED = /^(?:HOME|USER|LOGNAME|PATH|SHELL|TMPDIR|CI|NODE_OPTIONS|LD_.*|DYLD_.*|BASH_ENV|ENV|DOCKER_.*|COMPOSE_.*|GIT_.*|GH_.*|GITHUB_.*|AWS_.*|AGENT_.*|CODEX_.*|CLAUDE_.*|ANTHROPIC_.*|OPENAI_.*|DATABASE_URL|PG.*)$/;
 export function validateVariables(input, previous = []) {
   if (!Array.isArray(input) || input.length > 1000) throw new Error("Variables must be a list of at most 1,000 entries");
@@ -36,7 +42,7 @@ export function validateVariables(input, previous = []) {
 
 function publicEnvironment(environment, registered, defaultInstanceType = "t3.medium", harnessUpdate = null) {
   const companyId = environmentCompany(environment);
-  return { ...environment, ...(environment.backend === "ec2" ? { instanceType: validateWorkerInstanceType(environment.instanceType, defaultInstanceType) } : {}), ...companyScope(environment), scopeNeedsReview: !companyId || !registered.has(companyId), variables: environment.variables.map(({ value, ...v }) => ({ ...v, ...(v.secret ? { hasValue: true } : { value }) })), harnessUpdate: publicHarnessUpdate(harnessUpdate) };
+  return { ...environment, ciMonitoring: normalizeCiMonitoring(environment.ciMonitoring), ...(environment.backend === "ec2" ? { instanceType: validateWorkerInstanceType(environment.instanceType, defaultInstanceType) } : {}), ...companyScope(environment), scopeNeedsReview: !companyId || !registered.has(companyId), variables: environment.variables.map(({ value, ...v }) => ({ ...v, ...(v.secret ? { hasValue: true } : { value }) })), harnessUpdate: publicHarnessUpdate(harnessUpdate) };
 }
 
 export class Environments {
@@ -46,7 +52,7 @@ export class Environments {
       // An inert template is not a company grant. Never invent a company or move
       // credentials during bootstrap; the owner must explicitly assign it.
       const id = `env_${randomUUID()}`, now = new Date().toISOString();
-      await this.records.put("environment", id, { id, name: "Default", backend: this.defaultBackend, ...(this.defaultBackend === "ec2" ? { instanceType: this.defaultInstanceType } : {}), companies: [], allowUnassigned: false, variablesEnabled: true, software: [], variables: [], setupScript: "", revision: 1, createdAt: now, updatedAt: now });
+      await this.records.put("environment", id, { id, name: "Default", backend: this.defaultBackend, ...(this.defaultBackend === "ec2" ? { instanceType: this.defaultInstanceType } : {}), companies: [], allowUnassigned: false, variablesEnabled: true, software: [], variables: [], setupScript: "", ciMonitoring: { ...DEFAULT_CI_MONITORING }, revision: 1, createdAt: now, updatedAt: now });
     }
   }
   async registeredCompanies() { return new Set((await this.companies.list()).map(company => company.id)); }
@@ -110,7 +116,7 @@ export class Environments {
       description: String(input.description ?? old?.description ?? "").slice(0, 500),
       variablesEnabled: input.variablesEnabled ?? old?.variablesEnabled ?? true,
       variables: validateVariables(input.variables ?? old?.variables ?? [], old?.variables), software,
-      setupScript, networkAccess: "worker_default", archived: input.archived ?? old?.archived ?? false,
+      setupScript, ciMonitoring: normalizeCiMonitoring(input.ciMonitoring ?? old?.ciMonitoring), networkAccess: "worker_default", archived: input.archived ?? old?.archived ?? false,
       revision: (old?.revision || 0) + 1, createdAt: old?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
     await this.records.put("environment", value.id, value);
@@ -135,7 +141,7 @@ export class Environments {
       ...(env.backend === "ec2" ? { instanceType: validateWorkerInstanceType(env.instanceType, this.defaultInstanceType) } : {}),
       ...companyScope(env),
       mcpIds: this.mcps?.companies ? await this.mcps.forCompany(company) : env.mcpIds || [],
-      setupScript: env.setupScript || "", archived: Boolean(env.archived),
+      setupScript: env.setupScript || "", ciMonitoring: normalizeCiMonitoring(env.ciMonitoring), archived: Boolean(env.archived),
       variables: Object.fromEntries(env.variables.filter(v => env.variablesEnabled && v.enabled && !v.secret).map(v => [v.key, v.value])),
       protectedKeys: env.variables.filter(v => env.variablesEnabled && v.enabled && v.secret).map(v => v.key),
       harnessUpdate: publicHarnessUpdate(await this.records.get("environment-harness", env.id)),

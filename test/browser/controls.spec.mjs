@@ -8,10 +8,12 @@ test("compact mobile composer switches agents with Sol/Opus high defaults and pr
   const url = page.url();
   await page.getByLabel("Chat agent", { exact: true }).selectOption("codex");
   await expect(page.getByLabel("Chat model", { exact: true })).toHaveValue("gpt-5.6-sol");
+  await expect(page.getByLabel("Chat model", { exact: true }).locator('option[value="gpt-5.6-sol"]')).toHaveText("GPT-5.6-Sol");
   await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("high");
   await expect(page.locator("#composer-model-controls .model-note")).not.toBeVisible();
   await page.getByLabel("Chat agent", { exact: true }).selectOption("claude");
   await expect(page.getByLabel("Chat model", { exact: true })).toHaveValue("opus");
+  await expect(page.getByLabel("Chat model", { exact: true }).locator('option[value="opus"]')).toHaveText("Opus 5.5 with 1M context");
   await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("high");
   expect(page.url()).toBe(url); await expect(page.locator("#chat-title")).toHaveText("Existing alpha");
   await page.getByLabel("Agent mode", { exact: true }).click();
@@ -21,7 +23,7 @@ test("compact mobile composer switches agents with Sol/Opus high defaults and pr
   await expect(page.getByLabel("Chat effort", { exact: true })).toHaveValue("low");
   await page.getByLabel("Chat effort", { exact: true }).selectOption("high");
   await page.getByLabel("Choose effort", { exact: true }).click();
-  const dimensions = await page.locator(".composer").evaluate(node => ({ width: node.clientWidth, scroll: node.scrollWidth, height: node.clientHeight }));
+  const dimensions = await page.locator("#composer").evaluate(node => ({ width: node.clientWidth, scroll: node.scrollWidth, height: node.clientHeight }));
   expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.width + 1); expect(dimensions.height).toBeLessThan(140);
   await page.screenshot({ path: "test-results/compact-mobile-composer.png", fullPage: true });
   await page.getByLabel("Chat agent", { exact: true }).selectOption("mock");
@@ -53,6 +55,19 @@ test("PR bar opens colored diffs, shows CI counts/conflicts, and requires explic
   await expect(page.getByRole("button", { name: "Close changes", exact: true })).toBeInViewport();
   await page.getByRole("button", { name: "Close changes", exact: true }).click();
   await page.request.delete("/api/github");
+});
+
+test("PR CI menu uses the selected environment monitoring defaults", async ({ page }) => {
+  const payload = await (await page.request.get("/api/chats")).json();
+  const fixture = payload.chats.find(chat => chat.title === "PR controls fixture");
+  const detail = await (await page.request.get(`/api/chats/${fixture.id}`)).json();
+  await page.route(`**/api/chats/${fixture.id}`, route => route.request().method() === "GET"
+    ? route.fulfill({ json: { chat: { ...detail.chat, ownerId: `user_${"a".repeat(32)}`, agentAccountId: "account_fixture", githubEvents: { revision: 0, defaults: { notifyFailures: true, wakePassing: true }, subscriptions: [], deliveries: [] } } } })
+    : route.fallback());
+  await page.goto(`/#chat=${fixture.id}`);
+  const bar = page.locator(".pull-request-bar"); await bar.locator(".ci-menu > summary").click();
+  await expect(bar.getByLabel("Notify agent when checks fail for PR 42")).toBeChecked();
+  await expect(bar.getByLabel("Wake this chat when checks pass for PR 42")).toBeChecked();
 });
 
 test("many pull requests collapse to one card row and expand on demand", async ({ page }) => {

@@ -281,22 +281,27 @@ export class ChatControls {
       });
       auto.append(input, el("span", "Auto-merge when ready")); body.append(auto);
       const subscription = chat.githubEvents?.subscriptions?.find(item => item.repository === pr.repository.toLowerCase() && item.number === pr.number);
-      if (subscription?.automatic) body.append(el("p", "Automatic agent follow-up is on. Check failures, merge conflicts and new PR comments wake this exact chat; it keeps following the PR until checks pass without conflicts.", "muted"));
+      const monitoringDefaults = chat.githubEvents?.defaults || { notifyFailures: false, wakePassing: false };
+      if (subscription?.automatic) {
+        const enabled = [subscription.notifyFailures ? "failed checks and merge conflicts" : null, subscription.wakePassing ? "passing checks" : null, "new PR comments"].filter(Boolean).join(", ");
+        body.append(el("p", `Automatic agent follow-up is on. ${enabled} wake this exact chat.`, "muted"));
+      }
       else {
         const choices = [];
         for (const [field, label] of [["notifyFailures", "Notify agent when checks fail"], ["wakePassing", "Wake this chat when checks pass"]]) {
           const row = el("label", undefined, "checkbox-label"), control = document.createElement("input"); control.type = "checkbox";
-          control.checked = Boolean(subscription?.[field]); control.disabled = !chat.ownerId || !control.checked && (!chat.agentAccountId || pr.state !== "open");
+          const selected = Boolean(subscription ? subscription[field] : monitoringDefaults[field]);
+          control.checked = selected; control.disabled = !chat.ownerId || !subscription && (!chat.agentAccountId || pr.state !== "open");
           control.setAttribute("aria-label", `${label} for PR ${pr.number}`); choices.push(control);
           control.addEventListener("change", async () => {
-            if (field === "wakePassing" && control.checked && !confirm(`Allow verified passing checks for ${pr.repository} #${pr.number} to start this chat's worker and send an agent message? This may use worker time and model tokens. It does not enable merging or resume other paused messages.`)) { control.checked = Boolean(subscription?.[field]); return; }
+            if (field === "wakePassing" && control.checked && !confirm(`Allow verified passing checks for ${pr.repository} #${pr.number} to start this chat's worker and send an agent message? This may use worker time and model tokens. It does not enable merging or resume other paused messages.`)) { control.checked = selected; return; }
             for (const choice of choices) choice.disabled = true;
             try {
               const { chat: updated } = await this.api(`/api/chats/${chat.id}/pull-requests/subscription`, { method: "PATCH", body: JSON.stringify({ repository: pr.repository, number: pr.number,
-                notifyFailures: Boolean(subscription?.notifyFailures), wakePassing: Boolean(subscription?.wakePassing), [field]: control.checked, revision: chat.githubEvents?.revision || 0 }) });
+                notifyFailures: Boolean(subscription ? subscription.notifyFailures : monitoringDefaults.notifyFailures), wakePassing: Boolean(subscription ? subscription.wakePassing : monitoringDefaults.wakePassing), [field]: control.checked, revision: chat.githubEvents?.revision || 0 }) });
               if (this.state.active?.id === chat.id) this.updated(updated);
-            } catch (error) { control.checked = Boolean(subscription?.[field]); if (this.state.active?.id === chat.id) body.append(el("p", error.message, "form-error")); }
-            finally { for (const choice of choices) choice.disabled = !chat.ownerId || !choice.checked && (!chat.agentAccountId || pr.state !== "open"); }
+            } catch (error) { control.checked = selected; if (this.state.active?.id === chat.id) body.append(el("p", error.message, "form-error")); }
+            finally { for (const choice of choices) choice.disabled = !chat.ownerId || !subscription && (!chat.agentAccountId || pr.state !== "open"); }
           });
           row.append(control, el("span", label)); body.append(row);
         }

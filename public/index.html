@@ -419,6 +419,10 @@
           <details id="environment-advanced"><summary>Access and advanced settings</summary>
             <label id="environment-instance-type-field"><span>Default machine size</span><select id="environment-instance-type" aria-label="Default machine size"></select><small id="environment-instance-price" class="muted"></small></label>
             <section class="environment-mcps"><h3>Company tools</h3><div id="environment-mcp-options"></div><p class="muted">Tools follow the chat’s company automatically.</p></section>
+            <section class="environment-ci-monitoring"><h3>CI monitoring defaults</h3><p class="muted">Applied when this environment starts following a new pull request. Each PR can still be changed from its CI menu.</p>
+              <label class="checkbox-label"><input type="checkbox" id="environment-ci-notify-failures"><span>Notify agent when checks fail</span></label>
+              <label class="checkbox-label"><input type="checkbox" id="environment-ci-wake-passing"><span>Wake chat when checks pass</span></label>
+            </section>
             <p class="muted">Network access uses the worker infrastructure default. Custom egress restrictions are not enforced here.</p>
             <label class="checkbox-label"><input type="checkbox" id="environment-archived"><span>Archive environment · hide from new chats</span></label>
           </details>

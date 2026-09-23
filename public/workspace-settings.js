@@ -447,6 +447,7 @@ export class WorkspaceSettings {
     if (!this.draft) return;
     Object.assign(this.draft, { name: $("#environment-name").value, variablesEnabled: $("#variables-enabled").checked,
       setupScript: $("#environment-setup-script").value, archived: $("#environment-archived").checked,
+      ciMonitoring: { notifyFailures: $("#environment-ci-notify-failures").checked, wakePassing: $("#environment-ci-wake-passing").checked },
       ...(this.draft.backend === "ec2" ? { instanceType: $("#environment-instance-type").value || this.defaultInstanceType } : {}) });
   }
   environmentDirty() { this.captureEnvironmentFields(); return Boolean(this.draft && this.environmentBaseline !== JSON.stringify(this.draft)); }
@@ -465,7 +466,8 @@ export class WorkspaceSettings {
     this.updateEnvironmentDirty();
   }
   editEnvironment(environment) {
-    this.draft = structuredClone(environment || { name: "", backend: this.state.config.workerBackend, ...(this.state.config.workerBackend === "ec2" ? { instanceType: this.defaultInstanceType || "t3.medium" } : {}), variablesEnabled: true, variables: [], software: [], ...(this.settingsCompanyId && this.settingsCompanyId !== "__review__" ? { companies: [this.settingsCompanyId], allowUnassigned: false } : {}) });
+    this.draft = structuredClone(environment || { name: "", backend: this.state.config.workerBackend, ...(this.state.config.workerBackend === "ec2" ? { instanceType: this.defaultInstanceType || "t3.medium" } : {}), variablesEnabled: true, variables: [], software: [], ciMonitoring: { notifyFailures: true, wakePassing: true }, ...(this.settingsCompanyId && this.settingsCompanyId !== "__review__" ? { companies: [this.settingsCompanyId], allowUnassigned: false } : {}) });
+    this.draft.ciMonitoring ||= { notifyFailures: true, wakePassing: true };
     $("#environment-error").textContent = "";
     $("#environment-save-status").textContent = "";
     const companies = (this.state.companies || []).map(company => company.id);
@@ -486,6 +488,8 @@ export class WorkspaceSettings {
     $("#environment-company-review").hidden = !this.draft.scopeNeedsReview;
     this.renderEnvironmentMcps();
     $("#environment-setup-script").value = this.draft.setupScript || "";
+    $("#environment-ci-notify-failures").checked = this.draft.ciMonitoring.notifyFailures;
+    $("#environment-ci-wake-passing").checked = this.draft.ciMonitoring.wakePassing;
     $("#environment-archived").checked = Boolean(this.draft.archived);
     $("#environment-backend").textContent = `Worker: ${this.draft.backend} · changes apply on the next worker start`;
     const harness = this.draft.harnessUpdate;

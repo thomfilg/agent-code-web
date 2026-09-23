@@ -570,6 +570,7 @@ export class RuntimeManager extends EventEmitter {
     if (store.records?.githubEventTransaction && this.pullRequests.github?.requireConnection) {
       this.githubEvents = new GitHubEvents({ records: store.records, store, github: this.pullRequests.github, monitor: this.pullRequests,
         secret: config.github.webhookSecret || "", isLegacy: ownerId => resources?.isLegacy(ownerId) ?? !config.google?.enabled,
+        environmentForChat: async chat => chat?.environmentId ? (await this.servicesFor(chat)).environments.get(chat.environmentId) : null,
         notify: (id, event) => this.#enqueueGitHubEvent(id, event), publish: chat => this.publishChat(chat) });
       this.pullRequests.onObserved = (id, prs) => this.githubEvents.observe(id, prs);
       this.pullRequests.onTick = () => this.githubEvents.process();

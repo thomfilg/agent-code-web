@@ -44,7 +44,8 @@ export class ModelCatalog {
       const configured = this.defaults(agent);
       const chosen = models.find(model => model.model === configured.model) || models.find(model => model.isDefault) || models[0];
       const defaults = { model: chosen?.model || null, effort: chosen?.supportedReasoningEfforts?.some(e => e.reasoningEffort === configured.effort) ? configured.effort : chosen?.defaultReasoningEffort || null };
-      return { models: models.map(model => ({ id: model.model, label: model.displayName || model.model, description: model.description || "", isDefault: model.isDefault,
+      const seen = new Set(), unique = models.filter(model => model && typeof model.model === "string" && !seen.has(model.model) && seen.add(model.model));
+      return { models: unique.map(model => ({ id: model.model, label: model.displayName || model.model, description: model.description || "", isDefault: model.isDefault,
         defaultEffort: model.defaultReasoningEffort, efforts: (model.supportedReasoningEfforts || []).map(e => e.reasoningEffort), supportsPersonality: model.supportsPersonality === true,
         serviceTiers: (model.serviceTiers || []).map(tier => ({ id: tier.id, name: tier.name, description: tier.description })) })),
         source: "codex-account", note: "Models reported for the selected Codex account.", configuredDefault: defaults.model, configuredDefaultEffort: defaults.effort, defaults };
