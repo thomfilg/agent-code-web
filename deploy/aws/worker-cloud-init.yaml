@@ -117,6 +117,20 @@ write_files:
       ExecStart=/usr/bin/touch /opt/agent-web/.heartbeat
       [Install]
       WantedBy=multi-user.target
+  - path: /etc/systemd/system/agent-web-chrome-update.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Keep Google Chrome on the current stable release at every boot
+      Wants=network-online.target
+      After=network-online.target
+      [Service]
+      Type=oneshot
+      TimeoutStartSec=180
+      # Only the Google repository is refreshed; a failed update keeps the baked Chrome.
+      ExecStart=/bin/sh -c 'apt-get update -o Dir::Etc::sourcelist=sources.list.d/google-chrome.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 && DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade google-chrome-stable'
+      [Install]
+      WantedBy=multi-user.target
   - path: /etc/systemd/system/agent-web-idle-watchdog.service
     permissions: "0644"
     content: |
@@ -164,7 +178,7 @@ runcmd:
   - sh -c 'google-chrome --version >> /opt/agent-web/versions.txt'
   - chown agent:agent /opt/agent-web/versions.txt
   - systemctl daemon-reload
-  - systemctl enable agent-web-heartbeat.service agent-web-idle-watchdog.timer
+  - systemctl enable agent-web-heartbeat.service agent-web-chrome-update.service agent-web-idle-watchdog.timer
   - systemctl restart ssh
   - rm -f /tmp/nodesource-setup.sh
   - sh -c 'codex --version && claude --version && docker --version && docker compose version && docker buildx version && touch /opt/agent-web/READY'

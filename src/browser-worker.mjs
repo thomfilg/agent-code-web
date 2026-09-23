@@ -25,7 +25,10 @@ export class ChromeBrowser extends EventEmitter {
     this.directory = this.profile || await mkdtemp(path.join(os.tmpdir(), "relay-chrome-"));
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     this.temporary = !this.profile;
-    this.child = spawn(this.executable, ["--headless=new", "--remote-debugging-pipe", `--user-data-dir=${this.directory}`,
+    // A seeded profile may carry a lock from the machine or run that produced it.
+    if (this.profile) for (const name of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) await rm(path.join(this.directory, name), { force: true });
+    // Basic password store: cookies stay portable (v10) and never depend on a keyring.
+    this.child = spawn(this.executable, ["--headless=new", "--remote-debugging-pipe", `--user-data-dir=${this.directory}`, "--password-store=basic",
       "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-component-update", "--disable-sync", "--disable-dev-shm-usage", "about:blank"],
     { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], env: { PATH: process.env.PATH, HOME: this.directory, LANG: "C.UTF-8" } });
     this.child.stdio[3].on("error", () => {});
@@ -485,7 +488,8 @@ export class ChromeBrowser extends EventEmitter {
 }
 
 export async function runBrowserWorker({ ProjectionPolicy = null } = {}) {
-  const browser = new ChromeBrowser({ executable: process.env.AGENT_CHROME_BIN || "google-chrome", ProjectionPolicy });
+  // AGENT_CHROME_PROFILE is this chat's private profile copy; it lives until the chat is deleted.
+  const browser = new ChromeBrowser({ executable: process.env.AGENT_CHROME_BIN || "google-chrome", profile: process.env.AGENT_CHROME_PROFILE || null, ProjectionPolicy });
   const watchLeaseMs = Number(process.env.RELAY_BROWSER_WATCH_LEASE_MS || 0);
   if (watchLeaseMs && (!Number.isInteger(watchLeaseMs) || watchLeaseMs < 1000 || watchLeaseMs > 10000)) throw new Error("Invalid browser watch lease");
   browser.transportValidation = watchLeaseMs > 0;

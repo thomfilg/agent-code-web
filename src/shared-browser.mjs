@@ -14,6 +14,34 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { OfficialBrowserMcp } from './official-browser-mcp.mjs';
 import { personalProjectionProvider } from './personal-browser-projection.mjs';
 import { acquireGuestProjection } from './guest-browser-projection.mjs';
+import { PROFILE_ALLOWLIST, PROFILE_ARCHIVE_LIMIT, chromeMajor } from "./browser-profiles.mjs";
+import path from "node:path";
+
+// Each chat owns one private copy of its environment profile inside its runtime
+// home. It survives browser restarts and is deleted with the chat, never merged back.
+const PROFILE_DIRECTORY = ".relay-browser-profile", PROFILE_MARKER = ".relay-profile.json";
+export const chatProfileDirectory = executor => path.posix.join(executor.runtimeHome, PROFILE_DIRECTORY);
+const workerOptions = executor => ({ cwd: executor.runtimeHome, env: { PATH: executor.environmentPath || executor.backend?.config.ec2.remotePath || process.env.PATH, HOME: executor.runtimeHome, LANG: "C.UTF-8" } });
+
+// Run one command on the chat worker, optionally streaming input, and collect stdout.
+export function pipeWorker(executor, command, args, options, input = null, { maxOutput = 64 * 1024, timeoutMs = 120000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = executor.spawn(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] });
+    const chunks = []; let size = 0, stderr = "", settled = false;
+    const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); error ? reject(error) : resolve(value); };
+    const timer = setTimeout(() => { terminateWorker(child).catch(() => {}); finish(new Error(`${command} timed out on the worker`)); }, timeoutMs);
+    child.stdout.on("data", chunk => { size += chunk.length; if (size > maxOutput) { terminateWorker(child).catch(() => {}); finish(new Error("Worker output exceeded limit")); } else chunks.push(chunk); });
+    child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-2000); });
+    child.stdin.on("error", () => {});
+    child.once("error", error => finish(error));
+    child.once("close", code => code === 0 ? finish(null, Buffer.concat(chunks)) : finish(new Error(`${command} failed on the worker: ${stderr.trim() || code}`)));
+    child.stdin.end(input || undefined);
+  });
+}
+async function readProfileMarker(executor, directory) {
+  const output = await pipeWorker(executor, "/bin/sh", ["-c", 'cat "$1/' + PROFILE_MARKER + '" 2>/dev/null || true', "profile-marker", directory], workerOptions(executor));
+  try { const marker = JSON.parse(output.toString("utf8")); return typeof marker?.id === "string" ? marker : null; } catch { return null; }
+}
 
 const stopped = () => ({ running: false, mode: "guest", tabs: [], tabId: null });
 const uiActions = new Set(["status", "navigate", "reload", "back", "forward", "newTab", "selectTab", "closeTab", "mouse", "key", "text", "resize", "dialog", "copy"]);
@@ -135,8 +163,8 @@ export class BrowserProcess extends EventEmitter {
 }
 
 export class SharedBrowsers {
-  constructor({ store, config, acquire, onIdle = async () => {}, isActive = () => false, onViewers = async () => {}, processFactory = child => new BrowserProcess(child) }) {
-    this.store = store; this.config = config; this.acquire = acquire; this.processFactory = processFactory;
+  constructor({ store, config, acquire, onIdle = async () => {}, isActive = () => false, onViewers = async () => {}, processFactory = child => new BrowserProcess(child), profiles = null }) {
+    this.store = store; this.config = config; this.acquire = acquire; this.processFactory = processFactory; this.profiles = profiles;
     this.isActive = isActive; this.onViewers = onViewers;
     this.browserAttempts = new Map();
     this.entries = new Map(); this.versions = new Map(); this.grants = new CapabilityBroker({ ttlMs: config.sessionCapabilityTtlMs }); this.onIdle = onIdle;
@@ -152,7 +180,7 @@ export class SharedBrowsers {
     const personal = this.personal?.currentGrant(chatId);
     if (personal?.active) return { ...personal.state, mode: "personal", viewers: personal.viewers.size };
     const entry = this.entries.get(chatId);
-    return { ...(entry?.browser?.state || stopped()), starting: Boolean(entry && !entry.browser), viewers: entry?.viewers.size || 0 };
+    return { ...(entry?.browser?.state || stopped()), starting: Boolean(entry && !entry.browser), viewers: entry?.viewers.size || 0, profile: entry?.profile || null };
   }
   hasViewers(chatId) { return Boolean(this.entries.get(chatId)?.viewers.size || this.personal?.grants.get(chatId)?.viewers.size); }
   hasSession(chatId) { return this.entries.has(chatId) || this.personal?.currentGrant(chatId)?.active === true; }
@@ -184,18 +212,21 @@ export class SharedBrowsers {
     entry.ready = (async () => {
       const executor = await this.acquire(chatId);
       if ((this.versions.get(chatId) || 0) !== version) throw new Error("Browser start cancelled");
-      const executable = await prepareChrome(executor, captureWorker, () => {}, this.config.chromeBin);
+      const profile = await this.prepareProfile(chatId, executor);
       if ((this.versions.get(chatId) || 0) !== version) throw new Error("Browser start cancelled");
+      const executable = await prepareChrome(executor, captureWorker, () => {}, this.config.chromeBin, { minimumMajor: chromeMajor(profile?.chromeVersion) });
+      if ((this.versions.get(chatId) || 0) !== version) throw new Error("Browser start cancelled");
+      entry.profile = profile && { id: profile.id, name: profile.name, version: profile.version };
       const source = await readFile(new URL("./browser-worker.mjs", import.meta.url), "utf8");
       const policy = await readFile(new URL('../chrome-extension/projection-policy.js',import.meta.url),'utf8');
-      const env = { PATH: executor.environmentPath || process.env.PATH, HOME: executor.runtimeHome, LANG: "C.UTF-8", AGENT_CHROME_BIN: executable };
+      const env = { PATH: executor.environmentPath || process.env.PATH, HOME: executor.runtimeHome, LANG: "C.UTF-8", AGENT_CHROME_BIN: executable, ...(profile ? { AGENT_CHROME_PROFILE: profile.directory } : {}) };
       const child = await (executor.spawnBrowser || executor.spawn).call(executor, "node", ["--input-type=module", "-e", source + `\nconst {ProjectionPolicy}=await import(${JSON.stringify('data:text/javascript;base64,'+Buffer.from(policy).toString('base64'))}); await runBrowserWorker({ProjectionPolicy});`], { cwd: executor.workspace, env, stdio: ["pipe", "pipe", "pipe"] });
       const browser = this.processFactory(child); entry.browser = browser;
       browser.on("frame", value => {
         entry.frame = value;
         for (const viewer of entry.viewers) sendBrowserFrame(viewer, value);
       });
-      for (const event of ["status", "dialog"]) browser.on(event, value => { for (const viewer of entry.viewers) this.send(viewer, { event, value: event === "status" ? { ...value, clipboard: true } : value }); });
+      for (const event of ["status", "dialog"]) browser.on(event, value => { for (const viewer of entry.viewers) this.send(viewer, { event, value: event === "status" ? { ...value, clipboard: true, profile: entry.profile || null } : value }); });
       browser.on("closed", value => {
         clearTimeout(entry.idleTimer);
         if (this.entries.get(chatId) === entry) {
@@ -226,6 +257,34 @@ export class SharedBrowsers {
     });
     return entry.ready;
   }
+  // Seed this chat's copy once, from the version its environment selects at
+  // that moment. Later profile versions or environment edits never reach an
+  // existing copy; the copy is the chat's alone until the chat is deleted.
+  async prepareProfile(chatId, executor) {
+    if (!this.profiles) return null;
+    const directory = chatProfileDirectory(executor);
+    const marker = await readProfileMarker(executor, directory);
+    if (marker) return { ...marker, directory };
+    const selected = await this.profiles.resolve(chatId);
+    if (!selected) return null;
+    const archive = selected.version ? await this.profiles.archive(chatId, selected.id, selected.version) : null;
+    const pinned = { id: selected.id, name: selected.name, version: selected.version || 0, chromeVersion: selected.chromeVersion || null };
+    const script = 'set -e; rm -rf "$1"; install -d -m 700 "$1"; if [ "$3" = 1 ]; then tar -xzf - -C "$1" --no-same-owner; fi; printf "%s" "$2" > "$1/' + PROFILE_MARKER + '"';
+    await pipeWorker(executor, "/bin/sh", ["-c", script, "profile-seed", directory, JSON.stringify(pinned), archive ? "1" : "0"], workerOptions(executor), archive);
+    return { ...pinned, directory };
+  }
+  // Explicit owner action: snapshot this chat's copy so it can become a new
+  // profile version. Chrome is stopped first so its databases are flushed.
+  async captureProfile(chatId) {
+    if (this.personal?.grants.has(chatId)) throw Object.assign(new Error("Stop sharing your personal Chrome before saving the guest browser profile"), { statusCode: 409 });
+    const executor = await this.acquire(chatId);
+    const directory = chatProfileDirectory(executor);
+    const marker = await readProfileMarker(executor, directory);
+    if (!marker) throw Object.assign(new Error("This chat's browser does not use a saved profile. Select one in its environment and open the browser first."), { statusCode: 409 });
+    if (this.entries.has(chatId)) await this.stop(chatId, false);
+    const archive = await pipeWorker(executor, "tar", ["-czf", "-", "--ignore-failed-read", "-C", directory, "--", ...PROFILE_ALLOWLIST], workerOptions(executor), null, { maxOutput: PROFILE_ARCHIVE_LIMIT });
+    return { profileId: marker.id, archive };
+  }
   touch(chatId) {
     const entry = this.entries.get(chatId); if (!entry) return;
     clearTimeout(entry.idleTimer);
@@ -242,7 +301,7 @@ export class SharedBrowsers {
     if (this.personal?.grants.has(chatId)) return this.personal.attachViewer(chatId, socket);
     entry.viewers.add(socket); this.touch(chatId);
     void this.onViewers(chatId).catch(() => {});
-    this.send(socket, { event: "status", value: { ...entry.browser.state, clipboard: true } });
+    this.send(socket, { event: "status", value: { ...entry.browser.state, clipboard: true, profile: entry.profile || null } });
     if (entry.frame) sendBrowserFrame(socket, entry.frame);
     let pending = 0;
     socket.on("message", data => {

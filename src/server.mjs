@@ -37,6 +37,7 @@ import { McpConnections } from "./mcp-connections.mjs";
 import { MCP_PRESETS } from "./mcp-presets.mjs";
 import { safeMcpUrl, oauthCookieName } from "./mcp-oauth.mjs";
 import { SharedBrowsers } from "./shared-browser.mjs";
+import { BrowserProfiles, PROFILE_ARCHIVE_LIMIT } from "./browser-profiles.mjs";
 import { WebSocketServer } from "ws";
 import { BrowserUsers } from "./browser-users.mjs";
 import { GoogleAuth } from "./google-auth.mjs";
@@ -154,11 +155,12 @@ export async function createAgentWebServer(options = {}) {
   const mcps = new McpConnections(records, { ttlMs: config.sessionCapabilityTtlMs, companies });
   const publicOrigin = config.publicOrigin ? safeMcpUrl(config.publicOrigin).origin : null;
   const environments = new Environments(records, config.workerBackend, mcps, { defaultInstanceType: config.ec2.instanceType });
+  const browserProfiles = new BrowserProfiles(records, { companies });
   const companyPlugins = options.companyPlugins || new CompanyPlugins(records, { companies, config, inspect: options.inspectPluginSource });
   const models = options.models || new ModelCatalog(config, agentAccounts);
   const harnessUpdates = options.harnessUpdates || new HarnessUpdater({ records, config, refreshModels: agents => models.refresh(agents) });
   const attachments = new Attachments(records, store);
-  const resources = new UserServices({ records, config, identity: googleAuth, store, legacy: { records, github, mcps, environments, organization, companies, plugins: companyPlugins }, changed: sidebarChanged,
+  const resources = new UserServices({ records, config, identity: googleAuth, store, legacy: { records, github, mcps, environments, organization, companies, plugins: companyPlugins, browserProfiles }, changed: sidebarChanged,
     githubChanged: (ownerId, id) => githubWorkers.revokeConnection(ownerId, id) });
   const commands = options.commands || new CommandCatalog(config, models, { installed: async chat => {
     const services = await resources.forOwner(chat.ownerId);
@@ -316,7 +318,7 @@ export async function createAgentWebServer(options = {}) {
       const user = url.pathname.startsWith("/api/") ? await browserUsers.session(request) : null;
       if (googleAuth.enabled && url.pathname.startsWith("/api/") && !user) return json(response, 401, { error: "Sign in with Google to use Relay" });
       if (url.pathname.startsWith("/api/")) {
-      const { github, mcps, environments, organization, records, companies, plugins } = await resources.forOwner(user?.id);
+      const { github, mcps, environments, organization, records, companies, plugins, browserProfiles } = await resources.forOwner(user?.id);
       // Authentication/resource lookup can outlive shutdown's stream cleanup.
       // Do not let an already accepted request open a new SSE stream afterward.
       if (stopping || draining) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
@@ -489,6 +491,17 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/github/device/cancel" && request.method === "POST") return json(response, 200, await github.cancelDevice((await bodyJson(request, config.maxBodyBytes)).id));
       if (url.pathname === "/api/github/repositories" && request.method === "GET") return json(response, 200, { repositories: await github.repositories(url.searchParams.get("q") || "", url.searchParams.get("refresh") === "1") });
       if (url.pathname === "/api/github/branches" && request.method === "GET") return json(response, 200, { branches: await github.branches(url.searchParams.get("repository"), url.searchParams.get("connection") || undefined, url.searchParams.get("company") || undefined) });
+      if (url.pathname === "/api/browser-profiles" && request.method === "GET") return json(response, 200, { profiles: await browserProfiles.list(url.searchParams.get("companyId") || undefined) });
+      if (url.pathname === "/api/browser-profiles" && request.method === "POST") return json(response, 201, { profile: await browserProfiles.create(await bodyJson(request, 4000)) });
+      const browserProfileRoute = /^\/api\/browser-profiles\/(bprof_[a-f0-9-]{36})(?:\/(versions))?$/.exec(url.pathname);
+      if (browserProfileRoute && !browserProfileRoute[2] && request.method === "GET") return json(response, 200, { profile: await browserProfiles.get(browserProfileRoute[1]) });
+      if (browserProfileRoute && !browserProfileRoute[2] && request.method === "DELETE") { await browserProfiles.remove(browserProfileRoute[1], await environments.list()); return json(response, 200, { removed: true }); }
+      if (browserProfileRoute?.[2] === "versions" && request.method === "POST") {
+        // Base64 JSON keeps the upload path identical for the UI and the import script.
+        const input = await bodyJson(request, Math.ceil(PROFILE_ARCHIVE_LIMIT / 3) * 4 + 4096);
+        if (typeof input.archive !== "string" || !/^[A-Za-z0-9+/]+=*$/.test(input.archive)) throw Object.assign(new Error("archive must be a base64 .tar.gz"), { statusCode: 400 });
+        return json(response, 201, { profile: await browserProfiles.addVersion(browserProfileRoute[1], Buffer.from(input.archive, "base64"), { source: "upload" }) });
+      }
       if (url.pathname === "/api/environments" && request.method === "GET") return json(response, 200, { environments: await environments.list(), software: SOFTWARE_CATALOG,
         instances: config.workerBackend === "ec2" ? WORKER_INSTANCE_CATALOG : [], defaultInstanceType: config.ec2.instanceType,
         region: config.ec2.region, pricingRegion: WORKER_INSTANCE_PRICING_REGION });
@@ -632,6 +645,14 @@ export async function createAgentWebServer(options = {}) {
         if (tail === "browser" && request.method === "GET") return json(response, 200, manager.browsers.info(chatId));
         if (tail === "browser" && request.method === "POST") { await manager.browsers.ensure(chatId); return json(response, 200, manager.browsers.info(chatId)); }
         if (tail === "browser" && request.method === "DELETE") { await manager.browsers.stop(chatId, false); await manager.browserIdle(chatId); return json(response, 200, { stopped: true }); }
+        if (tail === "browser/profile" && request.method === "POST") {
+          // The only write-back path: the owner explicitly publishes this chat's copy.
+          if ((await bodyJson(request, 1000)).confirm !== true) throw new Error("Confirm saving this chat's browser as a new profile version");
+          const owner = await resources.forOwner(store.get(chatId)?.ownerId);
+          const { profileId, archive } = await manager.browsers.captureProfile(chatId);
+          await manager.browserIdle(chatId);
+          return json(response, 201, { profile: await owner.browserProfiles.addVersion(profileId, archive, { source: "chat" }) });
+        }
         if (tail === "copy" && request.method === "POST") return json(response, 201, { chat: await manager.copyTranscript(chatId, await bodyJson(request, config.maxBodyBytes), user?.id) });
         if (tail === "fork" && request.method === "POST") return json(response, 201, { chat: await manager.forkChat(chatId, await bodyJson(request, 2000), user?.id || null) });
         if (tail === "rendering-sample" && request.method === "POST") return json(response, 200, { chat: await manager.appendRenderingSample(chatId, (await bodyJson(request, 1000)).confirm) });
@@ -997,7 +1018,19 @@ export async function createAgentWebServer(options = {}) {
     void manager.retryDeletionCleanup().catch(error => console.error("worker deletion cleanup:", errorMessage(error)));
     manager.browsers = new SharedBrowsers({ store, config, acquire: chatId => manager.browserExecutor(chatId), onIdle: chatId => manager.browserIdle(chatId),
       // Chat presence is presentation state, never browser/process authority.
-      isActive: () => false, onViewers: chatId => manager.refreshActivity(chatId), ...options.browserOptions });
+      isActive: () => false, onViewers: chatId => manager.refreshActivity(chatId),
+      profiles: {
+        resolve: async chatId => {
+          const chat = store.get(chatId); if (!chat?.environmentId) return null;
+          const services = await resources.forOwner(chat.ownerId);
+          const environment = await services.environments.runtime(chat.environmentId, chat);
+          if (!environment.browserProfileId) return null;
+          const profile = await services.browserProfiles.get(environment.browserProfileId);
+          return { id: profile.id, name: profile.name, version: profile.currentVersion, chromeVersion: profile.chromeVersion };
+        },
+        archive: async (chatId, id, version) => (await resources.forOwner(store.get(chatId)?.ownerId)).browserProfiles.archive(id, version),
+      },
+      ...options.browserOptions });
     manager.browsers.personal = new BrowserConnections({ records, store, ttlMs: config.sessionCapabilityTtlMs, validateCompany: async (user, companyId) => (await resources.forOwner(user.id)).companies.get(companyId) });
     manager.browsers.personal.on("viewers", chatId => { void manager.refreshActivity(chatId).catch(() => {}); });
     manager.browsers.personal.on("changed", chatId => {

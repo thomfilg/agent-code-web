@@ -6,7 +6,7 @@ import { validateWorkerInstanceType } from "./worker-instances.mjs";
 import { publicHarnessUpdate } from "./harness-state.mjs";
 
 export const SOFTWARE_CATALOG = [
-  { id: "chrome", name: "Google Chrome", version: "Stable", description: "Shared live browser and agent tools; a separate profile without your saved logins", check: "google-chrome --version" },
+  { id: "chrome", name: "Google Chrome", version: "Stable", description: "Shared live browser and agent tools; starts from the environment browser profile when one is selected, otherwise an empty profile", check: "google-chrome --version" },
   { id: "docker", name: "Docker", version: "Engine + Compose", description: "Containers and builds on a dedicated EC2 worker only; never the control-plane socket", check: "docker info --format '{{.ServerVersion}}' && docker compose version && docker buildx version", backends: ["ec2"] },
   { id: "node", name: "Node.js", version: "22", description: "JavaScript runtime and npm", check: "node --version" },
   { id: "python", name: "Python", version: "3", description: "Private virtualenv using the base Python 3 runtime", check: "python3 --version" },
@@ -106,13 +106,20 @@ export class Environments {
     const companyId = environmentCompany({ ...scope, ...(input.companyId !== undefined ? { companyId: input.companyId } : {}) });
     if (!companyId) throw Object.assign(new Error("Each environment must belong to exactly one registered company. Choose its company before saving."), { statusCode: 400 });
     await this.companies.get(companyId);
+    // A saved browser profile must belong to the same company as the environment.
+    const browserProfileId = input.browserProfileId !== undefined ? input.browserProfileId || null : old?.browserProfileId || null;
+    if (browserProfileId) {
+      const profile = /^bprof_[a-f0-9-]{36}$/.test(browserProfileId) && await this.records.get("browser-profile", browserProfileId);
+      if (!profile) throw Object.assign(new Error("Browser profile not found"), { statusCode: 400 });
+      if (profile.companyId !== companyId) throw Object.assign(new Error("Choose a browser profile that belongs to this environment's company"), { statusCode: 400 });
+    }
     const mcpIds = this.mcps?.companies ? [] : input.mcpIds ?? old?.mcpIds ?? [];
     if (this.mcps) await this.mcps.validateSelection(mcpIds);
     else if (mcpIds.length) throw new Error("MCP connections are unavailable");
     if (all.some(env => env.id !== id && environmentCompany(env) === companyId && env.name.toLowerCase() === name.toLowerCase())) throw new Error("An environment with this name already exists in this company");
     const value = {
       id: id || `env_${randomUUID()}`, name, backend: input.backend, ...(instanceType ? { instanceType } : {}), ...scope, companyId,
-      mcpIds,
+      mcpIds, browserProfileId,
       description: String(input.description ?? old?.description ?? "").slice(0, 500),
       variablesEnabled: input.variablesEnabled ?? old?.variablesEnabled ?? true,
       variables: validateVariables(input.variables ?? old?.variables ?? [], old?.variables), software,
@@ -141,7 +148,7 @@ export class Environments {
       ...(env.backend === "ec2" ? { instanceType: validateWorkerInstanceType(env.instanceType, this.defaultInstanceType) } : {}),
       ...companyScope(env),
       mcpIds: this.mcps?.companies ? await this.mcps.forCompany(company) : env.mcpIds || [],
-      setupScript: env.setupScript || "", ciMonitoring: normalizeCiMonitoring(env.ciMonitoring), archived: Boolean(env.archived),
+      setupScript: env.setupScript || "", ciMonitoring: normalizeCiMonitoring(env.ciMonitoring), archived: Boolean(env.archived), browserProfileId: env.browserProfileId || null,
       variables: Object.fromEntries(env.variables.filter(v => env.variablesEnabled && v.enabled && !v.secret).map(v => [v.key, v.value])),
       protectedKeys: env.variables.filter(v => env.variablesEnabled && v.enabled && v.secret).map(v => v.key),
       harnessUpdate: publicHarnessUpdate(await this.records.get("environment-harness", env.id)),

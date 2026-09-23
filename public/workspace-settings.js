@@ -18,7 +18,8 @@ export class WorkspaceSettings {
       const companyId = event.target.value;
       if (this.environmentScopedCompanyId && companyId !== this.environmentScopedCompanyId) { event.target.value = this.environmentScopedCompanyId; return; }
       Object.assign(this.draft, { companyId, companies: companyId ? [companyId] : [], allowUnassigned: false, scopeNeedsReview: !companyId, confirmCompanyAssignment: true });
-      this.renderEnvironmentMcps(); this.updateEnvironmentDirty();
+      if (this.browserProfiles?.find(profile => profile.id === this.draft.browserProfileId)?.companyId !== companyId) this.draft.browserProfileId = null;
+      this.renderEnvironmentMcps(); this.renderBrowserProfiles(); this.updateEnvironmentDirty();
     });
     this.githubAccounts = new GitHubAccounts(this);
     this.modelPicker = new ModelPicker({ root: $("#new-model-controls"), api, onChange: () => this.remember() });
@@ -53,6 +54,10 @@ export class WorkspaceSettings {
     $("#environment-instance-type").addEventListener("change", event => { if (this.draft) this.draft.instanceType = event.target.value; this.renderInstancePrice(); this.updateEnvironmentDirty(); });
     document.querySelectorAll("[data-environment-section]").forEach(node => node.addEventListener("click", () => this.showEnvironmentSection(node.dataset.environmentSection)));
     $("#environment-editor-back").addEventListener("click", () => this.showEnvironmentSection());
+    $("#environment-browser-profile").addEventListener("change", event => { if (this.draft) this.draft.browserProfileId = event.target.value || null; this.renderBrowserProfiles(); this.updateEnvironmentDirty(); });
+    $("#browser-profile-create").addEventListener("click", () => this.browserProfileAction("create"));
+    $("#browser-profile-upload").addEventListener("click", () => this.browserProfileAction("upload"));
+    $("#browser-profile-delete").addEventListener("click", () => this.browserProfileAction("delete"));
     for (const type of ["input", "change"]) $("#environment-form").addEventListener(type, () => this.updateEnvironmentDirty());
     $("#environment-form").addEventListener("submit", event => this.saveEnvironment(event));
     $("#delete-environment").addEventListener("click", () => this.deleteEnvironment());
@@ -81,7 +86,7 @@ export class WorkspaceSettings {
   async loadSnapshot({ validWhile = () => true } = {}) {
     if (!this.state.config) throw new Error("Relay is still loading. Try again in a moment.");
     const request = this.loadRequest = (this.loadRequest || 0) + 1;
-    const [github, environments, saved, mcps, accounts, registry] = await Promise.all([this.api("/api/github"), this.api("/api/environments"), this.api("/api/preferences"), this.api("/api/mcps"), this.state.config.features?.agentAccounts ? this.api("/api/agent-accounts") : { accounts: [] }, this.state.config.features?.companyRegistry ? this.api("/api/companies") : {}]);
+    const [github, environments, saved, mcps, accounts, registry, profiles] = await Promise.all([this.api("/api/github"), this.api("/api/environments"), this.api("/api/preferences"), this.api("/api/mcps"), this.state.config.features?.agentAccounts ? this.api("/api/agent-accounts") : { accounts: [] }, this.state.config.features?.companyRegistry ? this.api("/api/companies") : {}, this.api("/api/browser-profiles").catch(() => ({ profiles: [] }))]);
     if (request !== this.loadRequest || !validWhile()) return false;
     const repositoryScope = JSON.stringify(github.connections || []);
     if (this.repositoryScope !== repositoryScope) {
@@ -90,7 +95,7 @@ export class WorkspaceSettings {
     }
     this.mcps = mcps.connections;
     if (registry.companies) this.state.companies = registry.companies;
-    this.github = github; this.environments = environments.environments; this.software = environments.software;
+    this.github = github; this.environments = environments.environments; this.software = environments.software; this.browserProfiles = profiles.profiles || [];
     this.instances = environments.instances || []; this.defaultInstanceType = environments.defaultInstanceType || "t3.medium";
     this.instanceRegion = environments.region || ""; this.instancePricingRegion = environments.pricingRegion || this.instanceRegion;
     this.preferences = saved.preferences;
@@ -457,10 +462,56 @@ export class WorkspaceSettings {
     $("#environment-software-summary").textContent = `${this.draft.software.length} selected`;
     $("#environment-variables-summary").textContent = this.draft.variablesEnabled ? `${this.draft.variables.length} ${this.draft.variables.length === 1 ? "variable" : "variables"}` : "Disabled";
     $("#environment-setup-summary").textContent = this.draft.setupScript.trim() ? "Startup script configured" : "No startup script";
+    const profile = this.browserProfiles?.find(item => item.id === this.draft.browserProfileId);
+    $("#environment-browser-summary").textContent = profile ? `${profile.name} · v${profile.currentVersion}` : "Empty profile";
+  }
+  renderBrowserProfiles() {
+    if (!this.draft) return;
+    const companyId = environmentCompany(this.draft), select = $("#environment-browser-profile");
+    const profiles = (this.browserProfiles || []).filter(profile => profile.companyId === companyId);
+    select.replaceChildren(option("", "None · empty profile"), ...profiles.map(profile => option(profile.id, `${profile.name} · v${profile.currentVersion}`)));
+    select.value = profiles.some(profile => profile.id === this.draft.browserProfileId) ? this.draft.browserProfileId : "";
+    const selected = profiles.find(profile => profile.id === select.value);
+    $("#environment-browser-details").textContent = !selected ? "Chats start with an empty browser profile."
+      : !selected.currentVersion ? "No version yet. Upload an archive, or sign in from a chat’s Browser panel and choose “Save to profile”."
+      : `Version ${selected.currentVersion} · ${selected.versions.at(-1).source === "chat" ? "saved from a chat" : "uploaded"} ${new Date(selected.versions.at(-1).createdAt).toLocaleString()} · Chrome ${selected.chromeVersion || "unknown"} · signed-in sites: ${selected.sites.slice(0, 12).join(", ") || "none"}`;
+    $("#browser-profile-upload").disabled = $("#browser-profile-delete").disabled = !selected;
+    $("#browser-profile-create").disabled = !companyId;
+  }
+  async browserProfileAction(action) {
+    const error = $("#environment-error"); error.textContent = "";
+    const selected = $("#environment-browser-profile").value, file = $("#browser-profile-file").files[0];
+    const archive = async () => {
+      if (!file) return null;
+      const data = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(reader.error); reader.readAsDataURL(file); });
+      return String(data).replace(/^data:[^,]*,/, "");
+    };
+    try {
+      if (action === "delete") {
+        if (!confirm("Delete this browser profile and all of its versions? Chats that already copied it keep their copies.")) return;
+        await this.api(`/api/browser-profiles/${selected}`, { method: "DELETE" });
+        if (this.draft.browserProfileId === selected) this.draft.browserProfileId = null;
+      } else {
+        let id = selected;
+        if (action === "create") {
+          const name = $("#browser-profile-name").value.trim();
+          if (!name) { $("#browser-profile-name").focus(); throw new Error("Name the new browser profile"); }
+          id = (await this.api("/api/browser-profiles", { method: "POST", body: JSON.stringify({ name, companyId: environmentCompany(this.draft) }) })).profile.id;
+          this.draft.browserProfileId = id; $("#browser-profile-name").value = "";
+        }
+        const data = await archive();
+        if (action === "upload" && !data) throw new Error("Choose a profile archive to upload");
+        if (data) await this.api(`/api/browser-profiles/${id}/versions`, { method: "POST", body: JSON.stringify({ archive: data }) });
+        $("#browser-profile-file").value = "";
+      }
+      this.browserProfiles = (await this.api("/api/browser-profiles")).profiles;
+      this.renderBrowserProfiles(); this.updateEnvironmentDirty();
+      this.toast(action === "delete" ? "Browser profile deleted" : "Browser profile saved · save the environment to use it");
+    } catch (failure) { error.textContent = failure.message; this.browserProfiles = (await this.api("/api/browser-profiles").catch(() => ({ profiles: this.browserProfiles }))).profiles; this.renderBrowserProfiles(); }
   }
   showEnvironmentSection(section = null) {
     $("#environment-overview").hidden = Boolean(section); $("#environment-editor-heading").hidden = !section;
-    const titles = { software: "Installed software", variables: "Environment variables", setup: "Setup script" };
+    const titles = { software: "Installed software", variables: "Environment variables", setup: "Setup script", browser: "Browser profile" };
     for (const id of Object.keys(titles)) $("#environment-" + id + "-editor").hidden = id !== section;
     $("#environment-editor-title").textContent = titles[section] || "";
     this.updateEnvironmentDirty();
@@ -513,6 +564,7 @@ export class WorkspaceSettings {
       label.append(input, el("span", "", `${pkg.name} ${pkg.version}`), el("small", "", pkg.description)); $("#software-options").append(label);
     }
     $("#variable-search").value = ""; this.renderVariables();
+    this.draft.browserProfileId ??= null; this.renderBrowserProfiles();
     this.captureEnvironmentFields(); this.environmentBaseline = JSON.stringify(this.draft); this.showEnvironmentSection();
   }
   renderInstancePrice() {
