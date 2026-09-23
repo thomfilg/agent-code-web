@@ -154,10 +154,13 @@ button { border: 0; cursor: pointer; }
 .repository-overflow-row a { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text); text-decoration: none; white-space: nowrap; }
 .repository-overflow-row span { color: var(--muted); }
 .composer #chat-agent-select.account-select { width: auto; max-width: 210px; min-width: 80px; }
-.chat-agent-compact { position: relative; flex: none; min-width: 0; }
+.chat-agent-compact { position: relative; flex: none; min-width: 0; border-radius: 6px; }
 .chat-agent-compact #chat-agent-select, .chat-agent-compact #chat-agent-select.account-select { width: 82px; min-width: 82px; color: transparent; }
 .chat-agent-compact #chat-agent-select option { color: var(--text); }
 .chat-agent-compact-label { position: absolute; inset: 0 20px 0 8px; display: flex; align-items: center; overflow: hidden; color: var(--muted); font-size: var(--type-control); white-space: nowrap; pointer-events: none; }
+.chat-agent-compact::after { content: "▾"; position: absolute; top: 50%; right: 6px; color: var(--text); font-size: 10px; line-height: 1; pointer-events: none; transform: translateY(-50%); }
+.chat-agent-compact:hover { background: #ffffff08; }
+.chat-agent-compact:focus-within { outline: 1px solid var(--line-bright); outline-offset: 1px; }
 .model-select-compact { position: relative; flex: none; min-width: 0; }
 #composer .model-select-compact .model-select { width: 100px; min-width: 100px; max-width: 100px; color: transparent; field-sizing: fixed; }
 #composer .model-select-compact .model-select option { color: var(--text); }

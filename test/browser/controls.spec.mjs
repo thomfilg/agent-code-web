@@ -13,6 +13,12 @@ test("compact mobile composer switches agents with Sol/Opus high defaults and pr
   await expect(page.locator("#composer-model-controls .model-note")).not.toBeVisible();
   await page.getByLabel("Chat agent", { exact: true }).selectOption("claude");
   await expect(page.locator("#chat-agent-compact-label")).toHaveText("Claude");
+  const agentHitTarget = await page.locator(".chat-agent-compact").evaluate(wrapper => {
+    const box = wrapper.getBoundingClientRect();
+    return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.id;
+  });
+  expect(agentHitTarget).toBe("chat-agent-select");
+  expect(await page.locator(".chat-agent-compact").evaluate(node => getComputedStyle(node, "::after").content)).not.toBe("none");
   await expect(page.locator("#chat-agent-account")).toHaveCount(0);
   await expect(page.getByLabel("Chat model", { exact: true })).toHaveValue("opus");
   await expect(page.getByLabel("Chat model", { exact: true }).locator('option[value="opus"]')).toHaveText("Opus 5.5 with 1M context");
