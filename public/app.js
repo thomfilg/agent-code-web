@@ -1122,6 +1122,11 @@ elements.send.addEventListener("click", event => {
   if (elements.send.type !== "button") return;
   event.preventDefault(); void interruptAgent();
 });
+$("#chat-agent-compact-label").addEventListener("click", () => {
+  if (elements.agentPicker.disabled) return;
+  try { elements.agentPicker.showPicker(); }
+  catch { elements.agentPicker.focus(); elements.agentPicker.click(); }
+});
 const workerSizeDialog = $("#worker-size-dialog"), workerSizeSelect = $("#worker-instance-type");
 const workerSizeDefault = $("#worker-size-save-default"), workerSizeSubmit = $("#worker-size-submit");
 const workerSizeEnvironment = () => workspaceSettings.environments?.find(item => item.id === state.active?.environmentId);
