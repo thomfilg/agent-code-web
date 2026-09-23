@@ -26,6 +26,7 @@ test("compact mobile composer switches agents with Sol/Opus high defaults and pr
   const dimensions = await page.locator("#composer").evaluate(node => ({ width: node.clientWidth, scroll: node.scrollWidth, height: node.clientHeight }));
   expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.width + 1); expect(dimensions.height).toBeLessThan(140);
   await expect(page.locator("#message-input")).toHaveCSS("min-height", "40px");
+  await expect(page.locator("#composer .composer-actions > .saved-prompts-trigger")).toHaveCount(1);
   await page.screenshot({ path: "test-results/compact-mobile-composer.png", fullPage: true });
   await page.getByLabel("Chat agent", { exact: true }).selectOption("mock");
 });
