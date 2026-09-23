@@ -16,7 +16,7 @@ export function workerActivity({ chat, runtime, controls = false, importing = fa
   if (runtime?.busy || (!runtime && chat?.status === "running")) reasons.push("foreground");
   if (chat?.goal?.status === "active" || runtime?.adapter?.goal?.status === "active") reasons.push("goal");
   if (runtime?.adapter?.agents?.busy?.()) reasons.push("agents");
-  if (runtime?.adapter?.isBackgroundBusy?.() || runtime?.adapter?.hasAwaitedBackgroundWork?.()) reasons.push("background");
+  if (runtime?.adapter?.isBackgroundBusy?.() || runtime?.adapter?.hasAwaitedBackgroundWork?.() || runtime?.adapter?.hasBackgroundTasks?.()) reasons.push("background");
   if (runtime?.adapter?.hasScheduledWork?.()) reasons.push("schedule");
   if (hasActiveTool(chat)) reasons.push("tool");
   if (hasQueuedSystemWork(chat)) reasons.push("queue");

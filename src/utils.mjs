@@ -28,3 +28,17 @@ export function redact(value) {
     .replace(/cap_[A-Za-z0-9_-]{20,}/g, "cap_***")
     .replace(/(?:api[_-]?key|authorization|token|secret)(\s*[:=]\s*)[^\s,;]+/gi, "$1***");
 }
+
+// Numeric semver compare (ignores pre-release/build metadata): -1/0/1, or null
+// when either side is not a plain x.y.z version. Never treat an unparsable
+// version as "too old" or "new enough" by falling back to string comparison.
+export function compareSemver(a, b) {
+  const parse = value => /^(\d+)\.(\d+)\.(\d+)/.exec(String(value || ""));
+  const left = parse(a), right = parse(b);
+  if (!left || !right) return null;
+  for (let index = 1; index <= 3; index++) {
+    const diff = Number(left[index]) - Number(right[index]);
+    if (diff !== 0) return diff > 0 ? 1 : -1;
+  }
+  return 0;
+}

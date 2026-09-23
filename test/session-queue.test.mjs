@@ -75,6 +75,25 @@ test("messages drain FIFO, stop pauses queue, removal and explicit resume work",
   await manager.editQueue(chat.id, { resume: true }); await waitFor(() => calls.length === 3); release({ text: "done" });
   await waitFor(() => !manager.isBusy(chat.id)); assert.deepEqual(calls, ["first", "second", "third"]); assert.equal(store.get(chat.id).queuedMessages.length, 0);
 });
+test("a queued message eventually drains when only background work, not a foreground turn, keeps the adapter busy", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const calls = []; let backgroundBusy = false;
+  const manager = new RuntimeManager({ store, config: testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "10000" }), broker: new CapabilityBroker({ ttlMs: 10000 }),
+    adapterFactory: () => ({ start: async () => {}, stop: async () => {}, isBackgroundBusy: () => backgroundBusy,
+      send: async text => { calls.push(text); return { text: "done" }; } }) });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "mock" });
+  await manager.send(chat.id, "first");
+  backgroundBusy = true;
+  await manager.enqueue(chat.id, "second");
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(calls.length, 1, "the queue must not drain while the adapter reports background work, even with no active foreground turn");
+  backgroundBusy = false;
+  await waitFor(() => calls.length === 2, { timeoutMs: 3000 });
+  assert.deepEqual(calls, ["first", "second"]);
+  await manager.stop(chat.id);
+});
+
 test("stop during asynchronous turn preparation cannot start a late agent turn", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   let release, sends = 0;

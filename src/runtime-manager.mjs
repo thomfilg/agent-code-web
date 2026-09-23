@@ -98,6 +98,7 @@ export class RuntimeManager extends EventEmitter {
   #modeChanges = new Map();
   #workerResizes = new Map();
   #workerReconciliations = new Map();
+  #backgroundRecheck = new Map();
 
   #activity(chatId, runtime = this.#runtimes.get(chatId), { ignoreSuspension = false } = {}) {
     return workerActivity({
@@ -128,7 +129,6 @@ export class RuntimeManager extends EventEmitter {
     this.#assertNativeAccount(chatId, runtime);
     return runtime;
   }
-
   async enqueue(chatId, rawText, attachmentIds = []) {
     const text = clampText(rawText, 100_000, "message");
     const current = this.store.get(chatId);
@@ -472,15 +472,38 @@ export class RuntimeManager extends EventEmitter {
     return draining;
   }
 
+  // A foreground turn finishing always re-triggers a drain itself (#submit's
+  // finish()). Background-only busy (an adapter reporting isBackgroundBusy()
+  // with no active foreground turn, e.g. a lingering Claude application
+  // session) has no such guaranteed external re-trigger, so a queued message
+  // could otherwise sit until an unrelated event happens to fire. Poll it
+  // instead, so the queue always finishes FIFO on its own.
+  #scheduleBackgroundRecheck(chatId) {
+    if (this.#backgroundRecheck.has(chatId)) return;
+    const timer = setTimeout(() => { this.#backgroundRecheck.delete(chatId); void this.#drainQueue(chatId); }, 1000);
+    timer.unref?.();
+    this.#backgroundRecheck.set(chatId, timer);
+  }
+  #clearBackgroundRecheck(chatId) {
+    const timer = this.#backgroundRecheck.get(chatId);
+    if (timer) { clearTimeout(timer); this.#backgroundRecheck.delete(chatId); }
+  }
+
   async #runQueue(chatId) {
     try {
       while (true) {
         const chat = this.store.get(chatId);
-        if (!chat || chat.archived || this.isBusy(chatId) || chat.status === "stopping" || this.#previewStops.has(chatId) || !chat.queuedMessages?.length) break;
+        if (!chat || chat.archived || chat.status === "stopping" || this.#previewStops.has(chatId) || !chat.queuedMessages?.length) { this.#clearBackgroundRecheck(chatId); break; }
         // An authorized PR follow-up event may wake a stopped chat, but must
         // not resume the user's independently paused ordinary queue.
         const item = chat.queuePaused ? chat.status === "stopped" ? chat.queuedMessages.find(entry => entry.githubEventId && entry.githubWake) : null : chat.queuedMessages[0];
-        if (!item) break;
+        if (!item) { this.#clearBackgroundRecheck(chatId); break; }
+        if (this.isBusy(chatId)) {
+          const runtime = this.#runtimes.get(chatId);
+          if (runtime && !runtime.busy && (runtime.adapter.isBackgroundBusy?.() || runtime.adapter.hasBackgroundTasks?.())) this.#scheduleBackgroundRecheck(chatId);
+          break;
+        }
+        this.#clearBackgroundRecheck(chatId);
         const submitted = await this.#submitQueued(chatId, item);
         await submitted.completion;
       }
@@ -942,7 +965,7 @@ export class RuntimeManager extends EventEmitter {
     ];
   }
 
-  isBusy(chatId) { const runtime = this.#runtimes.get(chatId), chat = this.store.get(chatId); return this.#modeChanges.has(chatId) || this.#workerWakes.has(chatId) || this.#suspensions.has(chatId) || this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.failing || runtime?.busy || runtime?.adapter.isBackgroundBusy?.() || runtime?.adapter.hasAwaitedBackgroundWork?.() || runtime?.adapter.agents?.busy?.() || chat?.goal?.status === "active" || runtime?.adapter.goal?.status === "active" || chat?.messages?.some(message => message.kind === "tool" && ["running", "stopping"].includes(message.meta?.state))) || this.#importPending(chatId); }
+  isBusy(chatId) { const runtime = this.#runtimes.get(chatId), chat = this.store.get(chatId); return this.#modeChanges.has(chatId) || this.#workerWakes.has(chatId) || this.#suspensions.has(chatId) || this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.failing || runtime?.busy || runtime?.adapter.isBackgroundBusy?.() || runtime?.adapter.hasAwaitedBackgroundWork?.() || runtime?.adapter.hasBackgroundTasks?.() || runtime?.adapter.agents?.busy?.() || chat?.goal?.status === "active" || runtime?.adapter.goal?.status === "active" || chat?.messages?.some(message => message.kind === "tool" && ["running", "stopping"].includes(message.meta?.state))) || this.#importPending(chatId); }
   async machineHealth(chatId) {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
@@ -2342,6 +2365,7 @@ export class RuntimeManager extends EventEmitter {
     this.broker.revokeChat(chatId);
     this.githubWorkers?.revokeChat(chatId);
     this.revokeChatMcps(chatId);
+    this.#clearBackgroundRecheck(chatId);
     this.publishChat(await this.store.update(chatId, current => {
       const workerLifecycle = beginWorkerLifecycle(current.workerLifecycle, "stop", nowIso());
       workerLifecycleGeneration = workerLifecycle.generation;
@@ -2528,8 +2552,20 @@ export class RuntimeManager extends EventEmitter {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     if (action === "resume") {
-      if (this.isBusy(chatId) || chat.queuedMessages?.length) return this.enqueue(chatId, "/goal resume");
-      await this.submit(chatId, "/goal resume"); return this.store.get(chatId);
+      // Check-then-act on isBusy/queuedMessages is not atomic with the read
+      // above: two overlapping resume calls (a double-click, a client retry)
+      // can both observe the same pre-enqueue state and both push the literal
+      // "/goal resume" text. Serialize resume through #switching like every
+      // other branch below, and de-duplicate against an already-queued resume
+      // so a caller that raced anyway still only ever queues it once.
+      if (this.#switching.has(chatId)) throw Object.assign(new Error("Wait for the current goal action to finish"), { statusCode: 409 });
+      this.#switching.add(chatId);
+      try {
+        const current = this.store.get(chatId);
+        if (current?.queuedMessages?.some(item => item.text === "/goal resume")) return current;
+        if (this.isBusy(chatId) || current?.queuedMessages?.length) return await this.enqueue(chatId, "/goal resume");
+        await this.submit(chatId, "/goal resume"); return this.store.get(chatId);
+      } finally { this.#switching.delete(chatId); }
     }
     if (chat.agent === "claude") {
       if (this.isBusy(chatId) || chat.queuedMessages?.length) return this.enqueue(chatId, `/goal ${action}`);
@@ -2974,6 +3010,19 @@ export class RuntimeManager extends EventEmitter {
       }
       return;
     }
+    if (event.type === "background_task") {
+      if (!event.task) return;
+      this.publishChat(await this.store.update(chatId, current => ({ backgroundTasks: { ...(current.backgroundTasks || {}), [event.task.id]: event.task } })));
+      // A background task finishing (completed, failed, or its ambiguous
+      // deadline reconciled to "unknown") is the "internal continuation":
+      // release the worker-lease keep-awake reason and let anything the
+      // completion unblocked (a queued message, an idle stop) proceed.
+      if (event.task.state !== "running") {
+        const runtime = this.#runtimes.get(chatId);
+        if (runtime && !runtime.busy) { await this.#scheduleIdleStop(chatId, runtime); void this.#drainQueue(chatId); }
+      }
+      return;
+    }
     if (event.type === "background_response") {
       const chat = this.store.get(chatId); if (!chat) return;
       const output = extractResponse(event.text || "", chat.autoTitle);
@@ -3109,6 +3158,7 @@ export class RuntimeManager extends EventEmitter {
     this.#forking.get(chatId)?.controller.abort(error);
     this.workspacePresence.remove(chatId);
     clearTimeout(this.#workspaceIdleTimers.get(chatId)); this.#workspaceIdleTimers.delete(chatId);
+    this.#clearBackgroundRecheck(chatId);
     const failureVersion = (this.#lifecycleVersions.get(chatId) || 0) + 1;
     this.#lifecycleVersions.set(chatId, failureVersion);
     runtime.generation += 1;

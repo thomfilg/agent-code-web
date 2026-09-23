@@ -62,6 +62,10 @@ export class ClaudeAdapter {
       this.currentAccountCredentialHash = accountCredentialHash(credentials);
       return credentials;
     } } : {}) };
+    // Keep locally-backgrounded Bash work visible after the foreground turn
+    // has finished. Claude does not expose the spawned child PID here, so the
+    // owning CLI process is the strongest durable handle available.
+    this.backgroundTasks = new Map();
   }
 
   get privateProfile() { return this.config.claude.authMode !== "host"; }
@@ -74,6 +78,42 @@ export class ClaudeAdapter {
       return item;
     });
     return JSON.parse(raw.replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, "[redacted]"));
+  }
+
+  hasBackgroundTasks() {
+    this.#reconcileBackgroundTasks();
+    return [...this.backgroundTasks.values()].some(task => task.state === "running");
+  }
+
+  #publicBackgroundTask(toolUseId) {
+    const task = this.backgroundTasks.get(toolUseId);
+    if (!task) return null;
+    return { id: task.id, title: task.title, pid: task.pid, pgid: task.pgid, state: task.state,
+      startedAt: new Date(task.startedAt).toISOString(), deadlineAt: new Date(task.deadlineAt).toISOString(),
+      durationMs: (task.completedAt ?? this.now()) - task.startedAt };
+  }
+
+  #trackBackgroundTask(toolUseId, title, child) {
+    const startedAt = this.now();
+    // 30 minutes: long enough for a real background build/test run, short
+    // enough that a genuinely abandoned process does not stay "running"
+    // forever. Reaching it marks the task "unknown", never "failed" — an
+    // ambiguous timeout must stay non-terminal, not be treated as an error.
+    const deadlineAt = startedAt + 30 * 60 * 1000;
+    this.backgroundTasks.set(toolUseId, { id: toolUseId, title: title || "Background command", pid: child?.pid ?? null, pgid: child?.pid ?? null, state: "running", startedAt, deadlineAt });
+    this.hooks.onEvent?.({ type: "background_task", task: this.#publicBackgroundTask(toolUseId) });
+  }
+
+  #finishBackgroundTask(toolUseId, state) {
+    const task = this.backgroundTasks.get(toolUseId);
+    if (!task || task.state !== "running") return;
+    task.state = state; task.completedAt = this.now();
+    this.hooks.onEvent?.({ type: "background_task", task: this.#publicBackgroundTask(toolUseId) });
+    setTimeout(() => this.backgroundTasks.delete(toolUseId), 60000).unref?.();
+  }
+
+  #reconcileBackgroundTasks() {
+    for (const [toolUseId, task] of this.backgroundTasks) if (task.state === "running" && this.now() >= task.deadlineAt) this.#finishBackgroundTask(toolUseId, "unknown");
   }
 
   async start() {
@@ -526,6 +566,10 @@ export class ClaudeAdapter {
       activeTools.delete(itemId);
       backgroundCandidates.delete(itemId);
       this.hooks.onEvent?.({ ...tool, state: "completed", failed, resultMissing, output });
+      // resultMissing means the turn ended before a matching tool_result ever
+      // arrived — we cannot tell whether the OS process actually finished, so
+      // this stays "unknown" (non-terminal), never "completed" or "failed".
+      this.#finishBackgroundTask(itemId, resultMissing ? "unknown" : failed ? "failed" : "completed");
     };
     const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     lines.on("line", (line) => {
@@ -534,16 +578,24 @@ export class ClaudeAdapter {
       mcpControl?.accept(event);
       reviewControl?.accept(event);
       this.permissionMode(event);
-      // Any private SDK turn can launch an app, including a generated skill
-      // or ordinary prose. Retain its actual owner, not just /run and /verify.
-      // Bind the native task event to this live main-session Bash call; text,
-      // unrelated tasks and late events after interruption are not evidence.
-      if (managed && !this.applicationSession && this.turnSession === managed && this.child === child
-        && !this.stopped && version === this.sendVersion && event.type === "system" && event.subtype === "task_started"
-        && event.session_id === sessionId && !event.parent_tool_use_id && event.task_type === "local_bash"
-        && typeof event.task_id === "string" && event.task_id
-        && typeof event.tool_use_id === "string" && backgroundCandidates.has(event.tool_use_id)) {
-        this.applicationSession = managed;
+      // A background local_bash task is real regardless of whether this turn
+      // ever built a managed ClaudeSession — a plain default turn can launch
+      // and poll a backgrounded Bash command (e.g. a Playwright run) just as
+      // well as an interactive/application one. Track it durably either way;
+      // only the separate "keep this whole session alive" promotion below
+      // still requires an actual managed session to attach to.
+      const backgroundTaskStarted = event.type === "system" && event.subtype === "task_started" && event.session_id === sessionId
+        && !event.parent_tool_use_id && event.task_type === "local_bash" && typeof event.task_id === "string" && event.task_id
+        && typeof event.tool_use_id === "string" && backgroundCandidates.has(event.tool_use_id);
+      if (backgroundTaskStarted) {
+        this.#trackBackgroundTask(event.tool_use_id, activeTools.get(event.tool_use_id)?.title, child);
+        // Any private SDK turn can launch an app, including a generated skill
+        // or ordinary prose. Retain its actual owner, not just /run and /verify.
+        // Bind the native task event to this live main-session Bash call; text,
+        // unrelated tasks and late events after interruption are not evidence.
+        if (managed && !this.applicationSession && this.turnSession === managed && this.child === child && !this.stopped && version === this.sendVersion) {
+          this.applicationSession = managed;
+        }
       }
       // Keep native text unchanged for stream deduplication. The text sink
       // masks credentials across events before either SSE or saved output.

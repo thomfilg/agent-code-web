@@ -476,6 +476,7 @@ export async function createAgentWebServer(options = {}) {
         const agentAccountId = url.searchParams.get("account") || null;
         if (googleAuth.enabled && ["codex", "claude"].includes(agent) && !agentAccountId) return json(response, 409, { error: "Connect and select an agent account first" });
         if (googleAuth.enabled && !["mock", "codex", "claude"].includes(agent)) return json(response, 403, { error: "No agent account is connected for this user" });
+        if (url.searchParams.get("refresh") === "1") models.invalidate(agent);
         return json(response, 200, await models.list(agent, { ownerId: user?.id, agentAccountId }));
       }
       if (url.pathname === "/api/github" && request.method === "POST") return json(response, 200, await github.update(await bodyJson(request, config.maxBodyBytes)));

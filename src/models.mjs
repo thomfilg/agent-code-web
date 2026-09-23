@@ -6,8 +6,15 @@ import path from "node:path";
 import { JsonRpcProcess } from "./json-rpc-process.mjs";
 import { claudeFastScope } from "./claude-fast.mjs";
 import { ultracodeForModel, ULTRACODE_UNAVAILABLE } from "./claude-ultracode.mjs";
+import { compareSemver } from "./utils.mjs";
 const exec = promisify(execFile);
 const fail = message => Object.assign(new Error(message), { statusCode: 400 });
+
+// Aliases whose availability depends on the installed Claude CLI being new
+// enough, not merely on --help mentioning the word. Update as new gated
+// aliases ship; an alias absent from this table is always available once the
+// CLI advertises it.
+const CLAUDE_MODEL_GATES = { fable: "2.1.280" };
 
 export class ModelCatalog {
   constructor(config, accounts = null) { this.config = config; this.accounts = accounts; this.cache = new Map(); this.pending = new Map(); this.generation = 0; }
@@ -15,6 +22,7 @@ export class ModelCatalog {
     this.generation += 1;
     for (const agent of agents) { this.cache.delete(agent); this.pending.delete(agent); }
   }
+  invalidate(agent = null) { this.refresh(agent ? [agent] : undefined); }
   defaults(agent) { return { model: this.config[agent]?.model || null, effort: this.config[agent]?.effort || null }; }
   async creationSettings(agent, input = {}) {
     if (agent === "mock") return this.validate(agent, input);
@@ -87,13 +95,27 @@ export class ModelCatalog {
     } catch (error) { throw fail(`Could not load Codex models: ${spawnError?.message || error.message}`); }
     finally { await rpc.stop(); await rm(directory, { recursive: true, force: true }); }
   }
+  async claudeVersion() {
+    try {
+      const { stdout } = await exec(this.config.claude.bin, ["--version"], { timeout: 15000, env: { PATH: process.env.PATH, HOME: os.homedir() } });
+      return /(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)/.exec(stdout)?.[1] || null;
+    } catch { return null; }
+  }
   async claude() {
-    const { stdout } = await exec(this.config.claude.bin, ["--help"], { timeout: 15000, env: { PATH: process.env.PATH, HOME: os.homedir() } });
+    const [{ stdout }, installedVersion] = await Promise.all([
+      exec(this.config.claude.bin, ["--help"], { timeout: 15000, env: { PATH: process.env.PATH, HOME: os.homedir() } }),
+      this.claudeVersion(),
+    ]);
     const advertised = /--effort[^\n]*\n?\s*\(([^)]+)\)/.exec(stdout)?.[1]?.split(",").map(value => value.trim()) || [];
     const efforts = ["low", "medium", "high", "xhigh", "max"].filter(value => advertised.includes(value));
     const aliases = ["opus", "sonnet", "haiku", "default", "best", "sonnet[1m]", "opus[1m]", "opusplan"];
-    if (stdout.includes("fable")) aliases.unshift("fable");
-    return { models: aliases.map(id => ({ id, label: id === "default" ? "Claude account default" : id[0].toUpperCase() + id.slice(1), efforts: id === "haiku" ? ["auto"] : ["auto", ...efforts], defaultEffort: null })), source: "claude-cli-aliases", configuredDefault: this.config.claude.model || null, note: "CLI aliases; Claude checks account availability when you send and may use a different planning model in Plan mode. Auto effort uses Claude's native default; Fable may require usage credits." };
+    // An alias needs both: the installed CLI advertises it in --help, and (if
+    // gated) the installed version meets the minimum. An unparsable installed
+    // version does not disable an otherwise-advertised alias (fail open on
+    // "can't tell", not silently stuck disabled after a real update).
+    const gateOk = id => { const min = CLAUDE_MODEL_GATES[id]; if (!min) return true; const cmp = compareSemver(installedVersion, min); return cmp === null || cmp >= 0; };
+    if (stdout.includes("fable") && gateOk("fable")) aliases.unshift("fable");
+    return { models: aliases.map(id => ({ id, label: id === "default" ? "Claude account default" : id[0].toUpperCase() + id.slice(1), efforts: id === "haiku" ? ["auto"] : ["auto", ...efforts], defaultEffort: null })), source: "claude-cli-aliases", configuredDefault: this.config.claude.model || null, installedVersion, note: "CLI aliases; Claude checks account availability when you send and may use a different planning model in Plan mode. Auto effort uses Claude's native default; Fable may require usage credits." };
   }
   async validate(agent, input, context = input) {
     const model = input.model || null; let effort = input.effort || null;

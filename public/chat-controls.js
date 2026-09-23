@@ -377,7 +377,16 @@ export class ChatControls {
   }
   tasks() {
     const live = [...this.state.liveTools.values()];
-    this.dialog("Background tasks", el("p", "Tools reported by this chat. Detached processes outside the CLI are not tracked here.", "muted"), ...live.map(tool => el("p", `${tool.title} · ${tool.state}`)), ...(!live.length ? [el("p", "No active tool calls")] : []));
+    // Persisted, durable background tasks (e.g. a Playwright run started with
+    // run_in_background) survive this chat's own SSE reconnects/reloads and a
+    // finished turn, unlike the ephemeral live tool list above.
+    const background = Object.values(this.state.active.backgroundTasks || {});
+    const minutes = ms => `${Math.max(0, Math.round(ms / 60000))} min`;
+    this.dialog("Background tasks",
+      el("p", "Tools reported by this chat. Detached processes outside the CLI are not tracked here.", "muted"),
+      ...live.map(tool => el("p", `${tool.title} · ${tool.state}`)),
+      ...background.map(task => el("p", `${task.title} · ${task.state} · ${minutes(task.durationMs)}${task.state === "running" ? ` (worker held awake, pid ${task.pid ?? "unknown"})` : ""}`)),
+      ...(!live.length && !background.length ? [el("p", "No active tool calls")] : []));
   }
   workspace() {
     const chat = this.state.active;
