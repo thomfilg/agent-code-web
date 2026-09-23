@@ -398,7 +398,8 @@ export class RuntimeManager extends EventEmitter {
     }
     await this.#draining.get(chatId);
     if (version !== (this.#lifecycleVersions.get(chatId) || 0)) {
-      this.publishChat(await this.store.update(chatId, { queuePaused: false, queueError: null }));
+      // A simultaneous explicit Stop owns the final paused state. Send now
+      // becomes a no-op and leaves every queued item available after Wake.
       return this.store.get(chatId);
     }
     // Send now is a queue-wide action. The clicked item gets priority, then
@@ -410,7 +411,7 @@ export class RuntimeManager extends EventEmitter {
     const priority = queued.find(entry => entry.id === item.id) || queued[0];
     if (!priority) return this.store.get(chatId);
     const ordinary = [priority, ...queued.filter(entry => entry.id !== priority.id)]
-      .filter(entry => !entry.githubEventId && !entry.nativeApprovalId);
+      .filter(entry => !entry.githubEventId && !entry.nativeApprovalId && !entry.relayGoalWake && !entry.systemWork);
     const combinedText = ordinary.map(entry => entry.text).join("\n\n---\n\n");
     if (!priority.githubEventId && !priority.nativeApprovalId && ordinary.length > 1 && combinedText.length <= 100_000) {
       await this.#submitQueuedBatch(chatId, ordinary, combinedText, action);
@@ -965,7 +966,9 @@ export class RuntimeManager extends EventEmitter {
     ];
   }
 
-  isBusy(chatId) { const runtime = this.#runtimes.get(chatId), chat = this.store.get(chatId); return this.#modeChanges.has(chatId) || this.#workerWakes.has(chatId) || this.#suspensions.has(chatId) || this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.failing || runtime?.busy || runtime?.adapter.isBackgroundBusy?.() || runtime?.adapter.hasAwaitedBackgroundWork?.() || runtime?.adapter.hasBackgroundTasks?.() || runtime?.adapter.agents?.busy?.() || chat?.goal?.status === "active" || runtime?.adapter.goal?.status === "active" || chat?.messages?.some(message => message.kind === "tool" && ["running", "stopping"].includes(message.meta?.state))) || this.#importPending(chatId); }
+  // A persistent goal is a worker-lifetime lease, not an in-flight turn. It
+  // must not block the system continuation queued to perform the next turn.
+  isBusy(chatId) { const runtime = this.#runtimes.get(chatId), chat = this.store.get(chatId); return this.#modeChanges.has(chatId) || this.#workerWakes.has(chatId) || this.#suspensions.has(chatId) || this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.failing || runtime?.busy || runtime?.adapter.isBackgroundBusy?.() || runtime?.adapter.hasAwaitedBackgroundWork?.() || runtime?.adapter.hasBackgroundTasks?.() || runtime?.adapter.agents?.busy?.() || chat?.messages?.some(message => message.kind === "tool" && ["running", "stopping"].includes(message.meta?.state))) || this.#importPending(chatId); }
   async machineHealth(chatId) {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
@@ -2092,7 +2095,7 @@ export class RuntimeManager extends EventEmitter {
           this.publishChat(await this.store.update(chatId, { goal: { ...currentGoal, status: output.awaitingUser ? "paused" : output.goalComplete ? "complete" : "active" } }));
           if (relayWakeNeeded) {
             const queued = await this.store.update(chatId, current => current.queuedMessages?.some(item => item.relayGoalWake)
-              ? {} : { queuedMessages: [...(current.queuedMessages || []), { id: newId("queued"), text: "/goal resume", attachmentIds: [], createdAt: nowIso(), relayGoalWake: true }] });
+              ? {} : { queuedMessages: [...(current.queuedMessages || []), { id: newId("queued"), text: "/goal resume", attachmentIds: [], createdAt: nowIso(), relayGoalWake: true, systemWork: true }] });
             this.publishChat(queued);
           }
         }
@@ -2551,25 +2554,23 @@ export class RuntimeManager extends EventEmitter {
     if (!["pause", "clear", "resume"].includes(action)) throw new Error("Choose pause, resume or clear");
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
-    if (action === "resume") {
-      // Check-then-act on isBusy/queuedMessages is not atomic with the read
-      // above: two overlapping resume calls (a double-click, a client retry)
-      // can both observe the same pre-enqueue state and both push the literal
-      // "/goal resume" text. Serialize resume through #switching like every
-      // other branch below, and de-duplicate against an already-queued resume
-      // so a caller that raced anyway still only ever queues it once.
+    if (chat.agent === "claude") {
       if (this.#switching.has(chatId)) throw Object.assign(new Error("Wait for the current goal action to finish"), { statusCode: 409 });
       this.#switching.add(chatId);
       try {
-        const current = this.store.get(chatId);
-        if (current?.queuedMessages?.some(item => item.text === "/goal resume")) return current;
-        if (this.isBusy(chatId) || current?.queuedMessages?.length) return await this.enqueue(chatId, "/goal resume");
-        await this.submit(chatId, "/goal resume"); return this.store.get(chatId);
-      } finally { this.#switching.delete(chatId); }
-    }
-    if (chat.agent === "claude") {
-      if (this.isBusy(chatId) || chat.queuedMessages?.length) return this.enqueue(chatId, `/goal ${action}`);
-      await this.submit(chatId, `/goal ${action}`); return this.store.get(chatId);
+        const current = this.store.get(chatId), goal = current?.goal;
+        if (!goal?.managedBy || goal.managedBy !== "relay") throw new Error("Set a goal before changing it");
+        if (action !== "resume") {
+          const updated = await this.store.update(chatId, { goal: action === "clear" ? null : { ...goal, status: "paused" }, ...(action === "clear" ? { forkGoalPending: false } : {}) });
+          this.publishChat(updated); return updated;
+        }
+        const queued = current.queuedMessages || [];
+        const queuedMessages = queued.some(item => item.relayGoalWake) ? queued : [...queued, {
+          id: newId("queued"), text: "/goal resume", attachmentIds: [], createdAt: nowIso(), relayGoalWake: true, systemWork: true,
+        }];
+        const updated = await this.store.update(chatId, { goal: { ...goal, status: "active" }, queuePaused: false, queuedMessages });
+        this.publishChat(updated); return updated;
+      } finally { this.#switching.delete(chatId); void this.#drainQueue(chatId); }
     }
     if (this.#switching.has(chatId) || this.#sendingNow.has(chatId) || ["starting", "stopping"].includes(chat.status)) throw Object.assign(new Error("Wait for the current session change to finish"), { statusCode: 409 });
     this.#switching.add(chatId);

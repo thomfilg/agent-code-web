@@ -9,22 +9,27 @@ export class ChatRepositoryPicker {
   constructor(options) {
     Object.assign(this, options); this.version = 0;
     this.chips = el("div", "selected-repositories");
+    this.moreMenu = el("details", "control-menu upward repository-overflow-menu");
+    this.moreSummary = el("summary", "", "and more"); this.moreSummary.setAttribute("role", "button"); this.moreSummary.setAttribute("aria-label", "Show all repositories");
+    this.morePanel = el("div", "control-popover repository-overflow-panel"); this.moreMenu.append(this.moreSummary, this.morePanel); this.moreMenu.hidden = true;
     this.menu = el("details", "control-menu upward repository-picker-dropdown");
     const summary = el("summary", "", "+"); summary.setAttribute("role", "button"); summary.setAttribute("aria-label", "Add repository to chat"); summary.setAttribute("aria-expanded", "false"); summary.setAttribute("aria-controls", "chat-repository-popover"); summary.title = "Add repository";
     this.panel = el("div", "control-popover repository-popover"); this.panel.id = "chat-repository-popover"; this.menu.append(summary, this.panel);
-    this.root.append(this.chips, this.menu);
+    this.root.append(this.chips, this.moreMenu, this.menu);
     this.menu.addEventListener("toggle", () => { summary.setAttribute("aria-expanded", String(this.menu.open)); if (this.menu.open) void this.load(); else this.version++; });
+    this.moreMenu.addEventListener("toggle", () => this.moreSummary.setAttribute("aria-expanded", String(this.moreMenu.open)));
+    this.resizeObserver = new ResizeObserver(() => this.fitRepositories()); this.resizeObserver.observe(this.root);
   }
   render(chat) {
-    if (this.chatId !== chat.id) { this.chatId = chat.id; this.menu.open = false; this.version++; }
+    if (this.chatId !== chat.id) { this.chatId = chat.id; this.menu.open = false; this.moreMenu.open = false; this.version++; }
     const signature = JSON.stringify([chat.id, chat.environmentId, chat.repositories, chat.gitBranches, chat.workspaceStatus?.branch, this.getEnvironments()]);
     if (signature !== this.signature) {
-      this.signature = signature; this.chips.replaceChildren();
+      this.signature = signature; this.chips.replaceChildren(); this.morePanel.replaceChildren(); this.repositoryChips = []; this.environmentChip = null;
       const environment = this.getEnvironments()?.find(item => item.id === chat.environmentId);
       if (environment) {
         const chip = el("button", "environment-chip", `☁ ${environment.name}`); chip.type = "button";
         chip.title = "Environment settings"; chip.setAttribute("aria-label", `Environment: ${environment.name}`);
-        chip.onclick = () => this.manageEnvironment(environment.id); this.chips.append(chip);
+        chip.onclick = () => this.manageEnvironment(environment.id); this.environmentChip = chip; this.chips.append(chip);
       }
       for (const [index, repo] of (chat.repositories || []).entries()) {
         const chip = el("div", "repository-chip"); chip.title = repo.fullName;
@@ -33,12 +38,40 @@ export class ChatRepositoryPicker {
         const observed = (index === 0 && chat.workspaceStatus?.branch) || chat.gitBranches?.find(ref => ref.repository === repo.fullName)?.branch;
         const branch = el("span", "repository-branch", `⑂ ${observed || repo.branch || "default"}`);
         branch.title = observed ? "Current reported branch" : "Selected branch · checkout not yet reported";
-        chip.append(link, branch); this.chips.append(chip);
+        chip.append(link, branch); this.repositoryChips.push(chip); this.chips.append(chip);
+        const full = el("div", "repository-overflow-row");
+        const fullLink = el("a", "", repo.fullName); fullLink.href = link.href; fullLink.target = "_blank"; fullLink.rel = "noopener noreferrer";
+        full.append(fullLink, el("span", "", observed || repo.branch || "default")); this.morePanel.append(full);
       }
+      queueMicrotask(() => this.fitRepositories());
     }
     this.menu.hidden = Boolean(chat.source);
     if (this.save) this.save.disabled = Boolean(this.pending) || busy(chat) || !this.branch?.value;
     if (this.status && !this.pending) this.status.textContent = busy(chat) ? "Wait for the agent to finish before adding a repository." : "";
+  }
+  fitRepositories() {
+    const repositories = this.repositoryChips || [];
+    this.moreMenu.hidden = true;
+    for (const chip of repositories) chip.hidden = false;
+    if (!repositories.length || !this.root.clientWidth) return;
+    const fit = () => {
+      const gap = 5, available = this.chips.clientWidth;
+      let used = this.environmentChip && !this.environmentChip.hidden ? this.environmentChip.offsetWidth : 0;
+      let shown = 0;
+      for (const chip of repositories) {
+        chip.hidden = false;
+        const width = chip.offsetWidth, next = used + (used ? gap : 0) + width;
+        if (shown === 0 || next <= available) { used = next; shown += 1; }
+        else chip.hidden = true;
+      }
+      return repositories.length - shown;
+    };
+    let hidden = fit();
+    if (hidden) {
+      this.moreMenu.hidden = false; void this.root.offsetWidth;
+      hidden = fit(); this.moreSummary.textContent = `and ${hidden} more`;
+      this.moreSummary.setAttribute("aria-label", `Show all repositories, ${hidden} hidden`);
+    } else this.moreMenu.open = false;
   }
   async load(refresh = false) {
     const chat = this.getChat(); if (!chat) return;

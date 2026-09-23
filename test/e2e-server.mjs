@@ -35,7 +35,8 @@ models.claude = async () => ({ models: [{ id: "opus", label: "Opus", efforts: ["
 const commands = { list: async chat => ({ commands: [{ name: "usage", kind: "Web control" }, { name: "goal", kind: "CLI command" }, { name: "work", description: "Installed work skill", kind: "Skill" }, { name: "workflow", description: "Workflow plugin", kind: "Skill" }, ...(chat.agent === "claude" ? [{ name: "claude-only", kind: "Skill" }] : [])] }) };
 const app = await createAgentWebServer({ config, records, github, models, commands }); await app.start();
 const defaultEnvironment = (await app.manager.environments.list())[0];
-await app.manager.environments.save({ ...defaultEnvironment, companies: ["acme", "other", "12-apps", "g2i"], allowUnassigned: true }, defaultEnvironment.id);
+await app.manager.environments.companies.save({ id: "acme", name: "Acme" });
+await app.manager.environments.save({ ...defaultEnvironment, companyId: "acme", companies: ["acme"], allowUnassigned: false, confirmCompanyAssignment: true }, defaultEnvironment.id);
 for (const title of ["Existing alpha", "Existing beta"]) await app.manager.createChat({ agent: "mock", title });
 const prChat = await app.store.create({ agent: "mock", title: "PR controls fixture", repositories: [{ fullName: "Acme/api", defaultBranch: "main", branch: "feature/controls" }] });
 await app.store.update(prChat.id, { workflowState: "pr_failing", pullRequests: [{ repository: "Acme/api", number: 42, url: "https://github.com/Acme/api/pull/42", state: "open", headRef: "feature/controls", baseRef: "main", additions: 12, deletions: 3, conflicts: true, checks: "pending", ci: { passed: 2, skipped: 1, inProgress: 1, failed: 0, total: 4 }, autoMerge: false, verifiedAt: new Date().toISOString() }] });

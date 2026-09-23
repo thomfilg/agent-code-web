@@ -182,6 +182,14 @@ test("Markdown renders tables and bubbles; HTML preview cannot leak styles, exec
   await expect(page.locator('.markdown a[href^="javascript:"]')).toHaveCount(0); expect(errors).toEqual([]);
   await page.screenshot({ path: "test-results/conversation-markdown.png", fullPage: true });
 });
+test("Relay protocol metadata never renders or creates document previews", async ({ page }) => {
+  await openFixture(page, [{ id: "protocol-leak", role: "assistant", text: "Visible result\n<relay-title>Hidden title</relay-title>\n<relay-waiting>yes</relay-waiting>\n<relay-goal>continue</relay-goal>" }]);
+  const message = page.locator('[data-message-id="protocol-leak"]');
+  await expect(message).toContainText("Visible result");
+  await expect(message).not.toContainText("relay-title");
+  await expect(message).not.toContainText("Hidden title");
+  await expect(message.getByRole("button", { name: /Open HTML preview/ })).toHaveCount(0);
+});
 test("raw and fenced HTML stay isolated across messages and cannot load remote resources", async ({ page }) => {
   const escapedRequests = [];
   await page.route("https://preview-escape.invalid/**", route => { escapedRequests.push(route.request().url()); return route.abort(); });

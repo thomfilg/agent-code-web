@@ -33,9 +33,18 @@ export function startupProgressView(chat, now = Date.now()) {
   return { key: `${chat.id}:${progress.startedAt}`, active, rows, summary: `${label} · ${elapsedLabel(progress.startedAt, end)}` };
 }
 
+export function startupProgressPlacement(chat, view) {
+  if (!view) {
+    const health = !["starting", "stopped"].includes(chat?.status);
+    return { banner: false, settings: false, health, detail: !health };
+  }
+  const banner = view.active || ["starting", "stopped"].includes(chat?.status);
+  return { banner, settings: !banner, health: !banner, detail: false };
+}
+
 export class StartupProgress {
-  constructor({ container, detail }) {
-    this.detail = detail;
+  constructor({ container, settingsContainer, settingsMenu }) {
+    this.container = container; this.settingsContainer = settingsContainer; this.settingsMenu = settingsMenu;
     this.root = document.createElement("details");
     this.root.id = "startup-progress"; this.root.className = "startup-progress"; this.root.hidden = true;
     this.summary = document.createElement("summary");
@@ -46,12 +55,15 @@ export class StartupProgress {
   }
   update(chat, now = Date.now()) {
     const view = startupProgressView(chat, now);
+    const placement = startupProgressPlacement(chat, view);
     if (view?.key !== this.key) {
       this.root.open = false; this.list.replaceChildren(); this.rows.clear(); this.key = view?.key;
     }
+    const target = placement.settings ? this.settingsContainer : this.container;
+    if (target && this.root.parentElement !== target) target.append(this.root);
     this.root.hidden = !view;
-    this.detail.hidden = Boolean(view?.active);
-    if (!view) return;
+    if (this.settingsMenu) this.settingsMenu.hidden = !placement.settings;
+    if (!view) return placement;
     if (this.summary.textContent !== view.summary) this.summary.textContent = view.summary;
     const retained = new Set();
     for (const stage of view.rows) {
@@ -69,5 +81,6 @@ export class StartupProgress {
       if (row.lastChild.textContent !== text) row.lastChild.textContent = text;
     }
     for (const [id, row] of this.rows) if (!retained.has(id)) { row.remove(); this.rows.delete(id); }
+    return placement;
   }
 }

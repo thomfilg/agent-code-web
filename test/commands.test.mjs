@@ -9,31 +9,30 @@ import { messageCommand } from "../src/message-command.mjs";
 import { webCommands } from "../public/web-commands.js";
 import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
 
-test("concurrent goalAction resume calls queue the literal command at most once", async t => {
+test("concurrent Relay goal resumes create at most one hidden system continuation", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
-  const config = testConfig(root, { CODEX_BIN: fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url)), AGENT_IDLE_TIMEOUT_MS: "10000" });
-  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10000 }), commands: new CommandCatalog({ workerBackend: "ec2" }) });
+  let release;
+  const config = testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "10000" });
+  const manager = new RuntimeManager({ store, config, broker: new CapabilityBroker({ ttlMs: 10000 }), commands: new CommandCatalog({ workerBackend: "ec2" }),
+    adapterFactory: () => ({ start: async () => {}, stop: async () => release?.({ text: "stopped" }), send: () => new Promise(resolve => { release = resolve; }) }) });
   t.after(() => manager.shutdown());
-  const chat = await manager.createChat({ agent: "codex", title: "Goal resume race" });
+  const chat = await manager.createChat({ agent: "claude", title: "Goal resume race" });
+  await store.update(chat.id, { goal: { threadId: `relay:${chat.id}`, objective: "Finish the task", status: "paused", managedBy: "relay" } });
   await manager.submit(chat.id, "hold this turn open");
-  await waitFor(() => manager.isBusy(chat.id) && store.get(chat.id).pendingRequest);
+  await waitFor(() => manager.isBusy(chat.id) && release);
   const results = await Promise.allSettled([manager.goalAction(chat.id, "resume"), manager.goalAction(chat.id, "resume")]);
-  const queued = store.get(chat.id).queuedMessages.filter(item => item.text === "/goal resume");
-  assert.equal(queued.length, 1, "two overlapping resume calls must not double-queue the literal command");
-  assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
-  assert.equal(results.filter(result => result.status === "rejected").length, 1);
-  assert.match(results.find(result => result.status === "rejected").reason.message, /current goal action/);
-  // A third, non-overlapping resume call while the item is already queued
-  // must also not add a second copy.
+  assert(results.some(result => result.status === "fulfilled"));
+  const queued = store.get(chat.id).queuedMessages.filter(item => item.relayGoalWake);
+  assert.equal(queued.length, 1); assert.equal(queued[0].systemWork, true);
   await manager.goalAction(chat.id, "resume");
-  assert.equal(store.get(chat.id).queuedMessages.filter(item => item.text === "/goal resume").length, 1);
+  assert.equal(store.get(chat.id).queuedMessages.filter(item => item.relayGoalWake).length, 1);
   await manager.stop(chat.id);
 });
 
 test("message commands preserve multiline arguments and Claude plugin goal commands", () => {
   assert.deepEqual(messageCommand("codex", "/plan test\nwith details"), { type: "plan", prompt: "test\nwith details" });
   assert.deepEqual(messageCommand("codex", "/goal build a todo app"), { type: "goal", action: "set", objective: "build a todo app", prompt: "build a todo app" });
-  assert.equal(messageCommand("claude", "/goal build"), null); assert.equal(messageCommand("codex", "/goalkeeper"), null);
+  assert.deepEqual(messageCommand("claude", "/goal build"), { type: "goal", action: "set", objective: "build", prompt: "/goal build", nativeClaude: true }); assert.equal(messageCommand("codex", "/goalkeeper"), null);
   assert.equal(messageCommand("codex", "/goal edit revised objective").objective, "revised objective");
   assert.throws(() => messageCommand("codex", "/goal edit"), /revised objective/);
   assert.throws(() => messageCommand("codex", `/goal ${"x".repeat(4001)}`), /4,000/);

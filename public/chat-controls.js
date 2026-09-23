@@ -226,20 +226,21 @@ export class ChatControls {
       if (this.hiddenPRs.has(`${chat.id}:${pr.repository}:${pr.number}`)) return false;
       return Boolean(ghUrl(pr.repository, `/pull/${pr.number}`));
     }).sort((left, right) => {
-      const priority = ({ pr, index }) => [observedBranches.get(pr.repository?.toLowerCase()) === pr.headRef ? 0 : 1,
+      const priority = ({ pr, index }) => [pr.state === "open" ? 0 : 1,
+        observedBranches.get(pr.repository?.toLowerCase()) === pr.headRef ? 0 : 1,
         pr.agentFollowUp || chat.githubEvents?.subscriptions?.some(item => item.repository === pr.repository?.toLowerCase() && item.number === pr.number) ? 0 : 1,
-        pr.state === "open" ? 0 : 1, index];
+        index];
       const a = priority(left), b = priority(right);
       return a[0] - b[0] || a[1] - b[1] || a[2] - b[2] || a[3] - b[3];
     }).map(({ pr }) => pr);
     const branchRefs = branchesWithoutPullRequests(chat), totalRows = pullRequests.length + branchRefs.length;
     if (!totalRows) { this.expandedPRTrays.delete(chat.id); return; }
-    const overflow = totalRows > 3;
+    const overflow = totalRows > 1;
     if (!overflow) this.expandedPRTrays.delete(chat.id);
     const expanded = overflow && this.expandedPRTrays.has(chat.id);
     root.classList.toggle("expanded", expanded); root.classList.toggle("has-overflow", overflow);
     const rows = [];
-    const renderedPullRequests = expanded ? pullRequests : pullRequests.slice(0, 3);
+    const renderedPullRequests = expanded ? pullRequests : pullRequests.slice(0, 1);
     for (const pr of renderedPullRequests) {
       const url = ghUrl(pr.repository, `/pull/${pr.number}`); if (!url) continue;
       const row = el("div", undefined, "pull-request-bar");
@@ -314,7 +315,7 @@ export class ChatControls {
       body.append(el("p", "GitHub events grant no merge or permission changes. Auto-merge follows existing repository rules; no admin bypass.", "muted"));
       ci.append(summary, body); row.append(ci, button("×", () => { this.hiddenPRs.add(`${chat.id}:${pr.repository}:${pr.number}`); this.pullRequests(chat); }, "small-icon")); rows.push(row);
     }
-    const remainingRows = expanded ? branchRefs : branchRefs.slice(0, Math.max(0, 3 - renderedPullRequests.length));
+    const remainingRows = expanded ? branchRefs : pullRequests.length ? [] : branchRefs.slice(0, 1);
     for (const ref of remainingRows) {
       const row = el("div", undefined, "pull-request-bar branch-only"); row.setAttribute("role", "group"); row.setAttribute("aria-label", `Git branch for ${ref.repository || "workspace"}`);
       const icon = el("span", "⑂"); icon.setAttribute("aria-hidden", "true");

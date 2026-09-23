@@ -67,6 +67,7 @@
             <details class="control-menu chat-settings-menu"><summary aria-label="Chat settings" title="Chat settings">Chat settings</summary><div class="control-popover">
               <p class="control-group-label">Workspace</p>
               <details class="chat-settings-disclosure" id="repositories-menu"><summary aria-label="Repositories">Repositories</summary><div class="chat-settings-submenu" id="chat-repositories"></div></details>
+              <details class="chat-settings-disclosure" id="startup-history-menu" hidden><summary aria-label="Startup history">Startup history</summary><div class="chat-settings-submenu" id="startup-history-host"></div></details>
               <button type="button" id="view-changes">View changes</button>
               <button type="button" id="open-workspace">Open in…</button>
               <button type="button" id="edit-chat-environment">Edit environment</button>
@@ -170,11 +171,13 @@
               <span class="status-dot" id="status-dot"></span>
               <div>
                 <strong id="runtime-status">Stopped</strong>
-                <span id="runtime-detail">Wake the environment without sending an agent message.</span>
-                <details class="machine-health" id="machine-health">
-                  <summary id="machine-health-summary">Machine health · checking…</summary>
-                  <div id="machine-health-detail" aria-live="polite"></div>
-                </details>
+                <div class="runtime-subline" id="runtime-subline">
+                  <span id="runtime-detail">Wake the environment without sending an agent message.</span>
+                  <details class="machine-health" id="machine-health">
+                    <summary id="machine-health-summary">Machine health · checking…</summary>
+                    <div id="machine-health-detail" aria-live="polite"></div>
+                  </details>
+                </div>
               </div>
             </div>
             <div class="runtime-actions">
@@ -192,6 +195,7 @@
           <div class="approval-card" id="approval-card" hidden></div>
           <div class="composer-wrap">
             <div id="working-status" class="working-status" hidden></div>
+            <div id="system-queue" class="system-queue" aria-live="polite" hidden></div>
             <div id="goal-status"></div>
             <div id="message-queue" aria-live="polite"></div>
             <div id="pull-request-bars" class="pull-request-bars"></div>

@@ -94,7 +94,7 @@ const elements = {
   dialogSecurity: $("#dialog-security"),
   loginDialog: $("#login-dialog"),
 };
-const startupProgress = new StartupProgress({ container: elements.detail.parentElement, detail: elements.detail });
+const startupProgress = new StartupProgress({ container: $("#runtime-subline"), settingsContainer: $("#startup-history-host"), settingsMenu: $("#startup-history-menu") });
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -476,9 +476,20 @@ function renderActive() {
 }
 
 function renderQueue() {
-  const root = $("#message-queue"), chat = state.active; root.replaceChildren();
+  const root = $("#message-queue"), systemRoot = $("#system-queue"), chat = state.active; root.replaceChildren(); systemRoot.replaceChildren(); systemRoot.hidden = true;
   const optimistic = chat && state.optimisticQueueSends.get(chat.id);
-  const queuedMessages = (chat?.queuedMessages || []).filter(item => !optimistic?.ids.has(item.id));
+  const queued = (chat?.queuedMessages || []).filter(item => !optimistic?.ids.has(item.id));
+  const systemMessages = queued.filter(item => item.systemWork || item.relayGoalWake || item.githubEventId || item.nativeApprovalId);
+  const queuedMessages = queued.filter(item => !systemMessages.includes(item));
+  if (systemMessages.length) {
+    const labels = systemMessages.map(item => item.relayGoalWake ? "Continue active goal" : item.githubEventId ? "Review GitHub update" : item.nativeApprovalId ? "Resolve native approval" : "System work");
+    const card = node("details", "system-queue-card"), summary = node("summary");
+    summary.append(node("strong", "", `System queue · ${systemMessages.length}`), node("span", "", labels.at(-1)));
+    if (systemMessages.length > 1) summary.append(node("small", "", "View more"));
+    const list = node("div", "system-queue-list");
+    for (const label of labels) list.append(node("div", "", label));
+    card.append(summary, list); systemRoot.append(card); systemRoot.hidden = false;
+  }
   if (!queuedMessages.length) return;
   root.append(node("strong", "", `${chat.queuePaused ? "Paused queue" : "Queued messages"} · ${queuedMessages.length}`));
   const pending = state.queueActions.get(chat.id);
@@ -491,11 +502,11 @@ function renderQueue() {
       // message with the durable one; an admission error restores the queue.
       const priority = chat.queuedMessages.find(item => item.id === body.sendNowId);
       const ordered = priority ? [priority, ...chat.queuedMessages.filter(item => item.id !== priority.id)] : [...chat.queuedMessages];
-      const ordinary = ordered.filter(item => !item.githubEventId && !item.nativeApprovalId);
+      const ordinary = ordered.filter(item => !item.githubEventId && !item.nativeApprovalId && !item.relayGoalWake && !item.systemWork);
       const text = ordinary.map(item => item.text).join("\n\n---\n\n");
       const previousWorkingStartedAt = chat.workingStartedAt;
       const action = {
-        ids: new Set(chat.queuedMessages.map(item => item.id)),
+        ids: new Set(ordinary.map(item => item.id)),
         message: text ? { id: `send-now-${Date.now()}`, role: "user", kind: "message", text, createdAt: new Date().toISOString(), meta: { authorship: "user", optimisticSendNow: true } } : null,
       };
       state.optimisticQueueSends.set(chat.id, action);
@@ -1186,7 +1197,10 @@ function renderWorkingStatus() {
 }
 function renderStartupProgress() {
   const resizing = ["resizing", "queued", "resized"].includes(state.active?.workerResize?.status);
-  startupProgress.update(state.deletingChats.has(state.active?.id) || resizing ? null : state.active);
+  const chat = state.deletingChats.has(state.active?.id) || resizing ? null : state.active;
+  const placement = startupProgress.update(chat);
+  elements.health.hidden = !chat || !placement.health;
+  elements.detail.hidden = !chat || !placement.detail;
 }
 setInterval(() => { if (!document.hidden) { renderWorkingStatus(); renderStartupProgress(); } }, 1000);
 document.addEventListener("keydown", event => {

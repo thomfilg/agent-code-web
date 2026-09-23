@@ -55,6 +55,52 @@ test("PR bar opens colored diffs, shows CI counts/conflicts, and requires explic
   await page.request.delete("/api/github");
 });
 
+test("many pull requests collapse to one card row and expand on demand", async ({ page }) => {
+  const payload = await (await page.request.get("/api/chats")).json();
+  const fixture = payload.chats.find(chat => chat.title === "PR controls fixture");
+  const detail = await (await page.request.get(`/api/chats/${fixture.id}`)).json();
+  const pullRequests = Array.from({ length: 6 }, (_, index) => ({ ...detail.chat.pullRequests[0], number: 42 + index, headRef: `feature/card-${index}` }));
+  await page.route(`**/api/chats/${fixture.id}`, route => route.request().method() === "GET"
+    ? route.fulfill({ json: { chat: { ...detail.chat, revision: 999999, pullRequests } } }) : route.fallback());
+  await page.goto(`/#chat=${fixture.id}`);
+  await expect(page.locator(".pull-request-bar")).toHaveCount(1);
+  await expect(page.locator("#pull-request-bars")).toContainText("6 PRs");
+  await page.getByRole("button", { name: "View more", exact: true }).click();
+  await expect(page.locator("#pull-request-bars")).toHaveClass(/expanded/);
+  await expect(page.locator(".pull-request-bar")).toHaveCount(6);
+});
+
+test("repository strip keeps its primary repository and moves overflow into a compact panel", async ({ page }) => {
+  const payload = await (await page.request.get("/api/chats")).json();
+  const fixture = payload.chats.find(chat => chat.title === "PR controls fixture");
+  const detail = await (await page.request.get(`/api/chats/${fixture.id}`)).json();
+  const repositories = Array.from({ length: 5 }, (_, index) => ({ fullName: `Acme/a-very-long-repository-${index}`, branch: `feature/long-branch-${index}` }));
+  await page.route(`**/api/chats/${fixture.id}`, route => route.request().method() === "GET"
+    ? route.fulfill({ json: { chat: { ...detail.chat, revision: 999999, repositories } } }) : route.fallback());
+  await page.setViewportSize({ width: 600, height: 800 }); await page.goto(`/#chat=${fixture.id}`);
+  await expect(page.locator(".repository-chip").first()).toBeVisible();
+  const more = page.locator(".repository-overflow-menu > summary"); await expect(more).toBeVisible();
+  await expect(more).toContainText(/and \d+ more/); await more.click();
+  await expect(page.locator(".repository-overflow-row")).toHaveCount(5);
+});
+
+test("internal goal continuations use the one-line system queue and never appear as user queue text", async ({ page }) => {
+  const payload = await (await page.request.get("/api/chats")).json();
+  const fixture = payload.chats.find(chat => chat.title === "PR controls fixture");
+  const detail = await (await page.request.get(`/api/chats/${fixture.id}`)).json();
+  const queuedMessages = [
+    { id: "system-goal", text: "/goal resume", relayGoalWake: true, systemWork: true, attachmentIds: [] },
+    { id: "user-message", text: "Real user follow-up", attachmentIds: [] },
+  ];
+  await page.route(`**/api/chats/${fixture.id}`, route => route.request().method() === "GET"
+    ? route.fulfill({ json: { chat: { ...detail.chat, revision: 999999, queuedMessages } } }) : route.fallback());
+  await page.goto(`/#chat=${fixture.id}`);
+  await expect(page.locator("#system-queue")).toContainText("Continue active goal");
+  await expect(page.locator("#system-queue")).not.toContainText("/goal resume");
+  await expect(page.locator("#message-queue")).toContainText("Real user follow-up");
+  await expect(page.locator("#message-queue")).not.toContainText("/goal resume");
+});
+
 test("upload chips, usage availability, transcript and repository menus are functional", async ({ page }) => {
   await page.goto("/"); await page.getByRole("button", { name: "Open Existing beta", exact: true }).click();
   await page.locator("#attachment-input").setInputFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("Fixture notes") });
