@@ -431,13 +431,10 @@ function renderActive() {
   // busy is an ordinary queue operation; the controller owns serialization.
   elements.send.disabled = false;
   elements.input.disabled = false;
-  elements.send.type = "submit";
-  elements.send.setAttribute("aria-label", busy ? "Queue message" : "Send message");
-  elements.send.title = busy ? "Queue message" : "Send message";
-  elements.send.querySelector("path").setAttribute("d", "m5 12 7-7 7 7M12 5v14");
-  $("#interrupt-button").hidden = !busy;
-  $("#interrupt-button").disabled = false;
-  $("#queue-message").hidden = !busy; $("#queue-message").disabled = false;
+  elements.send.type = busy ? "button" : "submit";
+  elements.send.setAttribute("aria-label", busy ? "Stop agent" : "Send message");
+  elements.send.title = busy ? "Stop the current agent turn" : "Send message";
+  elements.send.querySelector("path").setAttribute("d", busy ? "M7 7h10v10H7z" : "m5 12 7-7 7 7M12 5v14");
   renderKeyboardHints();
   elements.input.placeholder = chat.workflowState === "archived" ? "Send to unarchive and continue…" : "Ask your agent to build, inspect, or fix something…";
   const namedAccounts = state.config.features?.agentAccounts && chat.agent !== "mock";
@@ -1124,7 +1121,10 @@ async function interruptAgent() {
   } catch (error) { toast(`Could not interrupt the agent: ${error.message}`); }
   finally { interruptingChats.delete(id); if (state.active?.id === id) renderActive(); }
 }
-$("#interrupt-button").addEventListener("click", () => void interruptAgent());
+elements.send.addEventListener("click", event => {
+  if (elements.send.type !== "button") return;
+  event.preventDefault(); void interruptAgent();
+});
 const workerSizeDialog = $("#worker-size-dialog"), workerSizeSelect = $("#worker-instance-type");
 const workerSizeDefault = $("#worker-size-save-default"), workerSizeSubmit = $("#worker-size-submit");
 const workerSizeEnvironment = () => workspaceSettings.environments?.find(item => item.id === state.active?.environmentId);

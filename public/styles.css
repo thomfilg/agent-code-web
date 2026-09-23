@@ -120,13 +120,17 @@ button { border: 0; cursor: pointer; }
 .onboarding-hint { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin: 8px 0; }
 .workspace-strip, .repository-strip, .workspace-strip .selected-repositories { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .workspace-strip { position: relative; flex-wrap: nowrap; margin-bottom: 6px; }
-.chat-context-strip { position: relative; display: flex; align-items: center; gap: 5px; min-width: 0; height: 34px; margin-bottom: 6px; }
+.chat-context-strip { position: relative; display: flex; align-items: center; min-width: 0; height: 34px; margin-bottom: 6px; padding: 0 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
 .chat-context-strip:empty { display: none; }
-.chat-context-strip > #goal-status { flex: 1 1 28%; min-width: 0; }
-.chat-context-strip > .pull-request-bars { flex: 1.35 1 38%; min-width: 0; }
-.chat-context-strip > .workspace-strip { flex: 1 1 34%; min-width: 42px; }
+.chat-context-strip > .pull-request-bars { flex: 1.15 1 40%; min-width: 0; }
+.chat-context-strip > .workspace-strip { flex: 1 1 38%; min-width: 42px; }
+.chat-context-strip > #goal-status { flex: 0 1 190px; max-width: 24%; min-width: 72px; }
 .chat-context-strip > :empty { display: none; }
+.chat-context-strip > :not(:first-child):not(:empty) { border-left: 1px solid var(--line); }
 #chat-workspace-strip.workspace-strip { margin-bottom: 0; overflow: visible; }
+.chat-context-strip #chat-workspace-strip { padding-left: 5px; }
+.chat-context-strip #goal-status { padding-left: 3px; }
+.chat-context-strip #chat-workspace-strip :is(.repository-name, .repository-branch, .repository-chip select, .environment-chip) { background: transparent; }
 .workspace-strip .selected-repositories { flex: 1 1 auto; flex-flow: row nowrap; margin: 0; overflow: hidden; }
 .workspace-strip .repository-chip { padding: 0; border: 0; border-radius: 5px; gap: 4px; background: transparent; min-width: 0; max-width: 100%; }
 .workspace-strip .repository-name, .workspace-strip .repository-branch, .workspace-strip .repository-chip select, .environment-chip { background: var(--panel-soft); border: 0; border-radius: 5px; color: var(--muted); font-size: 10.5px; height: 22px; padding: 3px 5px; }
@@ -530,6 +534,7 @@ dialog { max-height: calc(100dvh - 28px); }
 .chat-context-strip > .pull-request-bars { margin-bottom: 0; }
 .pull-request-bars.expanded { max-height: min(340px, 45vh); padding: 5px; border: 1px solid var(--line); border-radius: 9px; background: #171916; overflow-y: auto; scrollbar-gutter: stable; }
 .chat-context-strip > .pull-request-bars.expanded { position: absolute; z-index: 12; right: 0; bottom: calc(100% + 6px); left: 0; width: 100%; box-shadow: 0 14px 40px #0009; }
+.chat-context-strip > .pull-request-bars:not(.expanded) .pull-request-bar { height: 32px; min-height: 32px; max-height: 32px; padding-inline: 5px; border: 0; border-radius: 0; background: transparent; }
 .pull-request-bar { display: flex; align-items: center; gap: 8px; height: var(--pr-row-height); min-height: var(--pr-row-height); max-height: var(--pr-row-height); border-radius: 8px; background: #242622; border: 1px solid var(--line); padding: 3px 7px; font-size: var(--type-meta); }
 .pull-request-bars.expanded .pr-tray-anchor { position: sticky; top: 0; z-index: 4; box-shadow: 0 4px 9px #10110fcc; }
 .pr-tray-controls { display: flex; align-items: center; flex: none; gap: 5px; white-space: nowrap; }
@@ -974,11 +979,11 @@ dialog { max-height: calc(100dvh - 28px); }
 .queue-send-now { flex: none; padding: 6px 0; border: 0; background: transparent; color: var(--lime); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .queue-send-now:disabled { opacity: .55; cursor: wait; }
 .queue-send-now:focus-visible { outline: 2px solid var(--lime); outline-offset: 3px; border-radius: 3px; }
-.goal-summary { width: 100%; max-width: 100%; height: 34px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--text); font: inherit; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.goal-summary { width: 100%; max-width: 100%; height: 32px; padding: 5px 7px; border: 0; border-radius: 5px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.goal-summary:hover { background: #ffffff08; }
 #goal-status:not(:empty) { display: flex; min-width: 0; font-size: var(--type-control); }
 .message-page-button { display: block; margin: 12px auto; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--muted); font: inherit; cursor: pointer; }
 .message-latest-button { flex: none; margin: 0 auto 8px; padding: 6px 12px; font-size: var(--type-control); }
-.queue-send { padding: 4px 7px; font-size: var(--type-control); }
 .composer { position: relative; }
 :is(#slash-menu, #new-slash-menu) { position: absolute; bottom: calc(100% + 10px); left: 0; width: min(560px, 100%); max-height: min(440px, 55dvh); display: flex; flex-direction: column; border: 1px solid #454d3e; border-radius: 14px; background: #22261f; box-shadow: 0 16px 48px #0007; z-index: 40; overflow: hidden; }
 .slash-heading { display: flex; align-items: center; gap: 10px; padding: 13px 14px; border-bottom: 1px solid #ffffff0c; flex-shrink: 0; }
@@ -1063,13 +1068,26 @@ dialog { max-height: calc(100dvh - 28px); }
 .composer-actions .usage-menu > summary { width: 32px; height: 34px; border: 1px solid #ffffff0c; border-radius: 8px; }
 .composer #usage-ring { width: 16px; height: 16px; }
 .composer .send-button { width: 36px; height: 36px; border-radius: 10px; }
-.composer .interrupt-button { background: #322c22; color: #efc36b; border: 1px solid #efc36b60; }
-.composer .interrupt-button path { fill: currentColor; stroke-width: 0; }
 .composer .send-button[aria-label="Stop agent"] { background: #322c22; color: #efc36b; border: 1px solid #efc36b60; }
 .composer .send-button[aria-label="Stop agent"] path { fill: currentColor; stroke-width: 0; }
+#composer { padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+#composer:focus-within { border-color: transparent; box-shadow: none; }
+.composer-input-row { position: relative; }
+#composer #message-input { min-height: 42px; max-height: 160px; padding: 10px 42px 10px 12px; border: 1px solid #41483b; border-radius: 12px; background: #1b1e19; font-size: var(--type-content); line-height: 1.45; transition: border-color .15s, box-shadow .15s; }
+#composer #message-input:focus { border-color: #59664b; box-shadow: 0 0 0 3px rgba(201,242,124,.03); }
+#composer .composer-footer { min-height: 30px; margin-top: 3px; padding: 0 3px; gap: 6px; flex-wrap: nowrap; }
+#composer .composer-pickers { gap: 3px; }
+#composer .composer-pickers select, #composer .composer-pickers .control-menu > summary { min-height: 28px; height: 28px; padding: 3px 6px; border-color: transparent; border-radius: 6px; background: transparent; }
+#composer .saved-prompts-trigger { flex-basis: 28px; width: 28px; height: 28px; border-color: transparent; }
+#composer .composer-pickers .composer-add > summary { width: 28px; }
+#composer .composer-actions { gap: 4px; }
+#composer .composer-actions .usage-menu > summary { width: 28px; height: 28px; border-color: transparent; }
+#composer .composer-input-row .send-button { position: absolute; right: 7px; bottom: 6px; width: 28px; height: 28px; border-radius: 8px; }
+.composer-wrap > .composer-help { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @container (max-width: 540px) {
   .composer { padding: 12px 10px 10px; }
   .composer:has(.saved-prompts-trigger) textarea { min-height: 32px; }
+  #composer #message-input { min-height: 40px; }
   .composer-footer { gap: 6px; }
   .composer-pickers, .composer .compact-model-controls { gap: 3px; }
   .composer-pickers select, .composer-pickers .control-menu > summary { font-size: var(--type-control); padding: 4px; }
