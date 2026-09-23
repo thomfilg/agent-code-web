@@ -295,7 +295,7 @@ export class CodexAdapter {
       if (this.goal?.objective !== saved.objective || this.goal?.tokenBudget !== saved.tokenBudget
         || this.goal?.status !== (saved.status === "active" ? "paused" : saved.status)) throw new Error("Restored native goal could not be verified; no new task was started");
     }
-    await this.checkpointNativeSession().catch(() => this.checkpointNotice());
+    await this.checkpointNativeSession().catch(error => this.checkpointNotice(error));
     try { await this.refreshSkills(); } catch { /* Older workers can still run without skill discovery. */ }
   }
 
@@ -304,10 +304,17 @@ export class CodexAdapter {
     await this.hooks.onEvent?.({ type: "command_catalog", commands: (result.data || []).flatMap(entry => (entry.skills || []).filter(skill => skill.enabled !== false).map(skill => ({ name: skill.name, description: skill.description, path: skill.path, kind: "Skill" }))) });
   }
 
-  checkpointNotice() {
+  checkpointNotice(error) {
+    const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code) ? error.code : "UNCLASSIFIED";
+    const step = ["read", "capture", "save"].includes(error?.checkpointStep) ? error.checkpointStep : "unknown";
+    const diagnostic = `${step}:${code}`;
+    if (this.lastNativeCheckpointFailure !== diagnostic) {
+      this.lastNativeCheckpointFailure = diagnostic;
+      this.hooks.onLog?.(`Native history checkpoint failed (${diagnostic}).`);
+    }
     if (this.nativeCheckpointWarning) return;
     this.nativeCheckpointWarning = true;
-    this.hooks.onEvent?.({ type: "notice", text: "The latest native history checkpoint could not be saved. The current session is retained; worker-loss recovery may use only an earlier verified checkpoint." });
+    this.hooks.onEvent?.({ type: "notice", text: `The latest native history checkpoint could not be saved (${diagnostic}). The current session is retained; worker-loss recovery may use only an earlier verified checkpoint.` });
   }
 
   checkpointNativeSession({ boundary = "complete-records", turnId = null, stopping = false, checkpointVersion } = {}) {
@@ -317,9 +324,11 @@ export class CodexAdapter {
       this.checkpointGuard({ stopping, checkpointVersion });
       if (this.threadId !== threadId || this.rpc !== rpc || this.intentionalStop && !stopping) throw new Error("Native checkpoint cancelled");
     };
+    let checkpointStep = "read";
     const operation = this.nativeCapture.catch(() => {}).then(async () => {
       check(); const chat = this.store.get(this.chat.id);
       const previous = await this.nativeSessions.read(chat, check); check();
+      checkpointStep = "capture";
       const bundle = await captureSessionBundle({ threadId, goal: this.goal ? structuredClone(this.goal) : null,
         readThread: async id => {
           check();
@@ -336,9 +345,14 @@ export class CodexAdapter {
           check(); const result = await workerSessionIO(this.executor, { action: "readScoped", home: this.nativeHome, path: filename, boundary: byteBoundary }); check();
           return Buffer.from(result.data, "base64");
         } });
-      check(); const saved = await this.nativeSessions.save(chat, bundle, previous.revision, { boundary, turnId }, check);
+      check(); checkpointStep = "save";
+      const saved = await this.nativeSessions.save(chat, bundle, previous.revision, { boundary, turnId }, check);
       this.nativeCheckpointWarning = false;
+      this.lastNativeCheckpointFailure = null;
       return { savedAt: saved.value.savedAt, bytes: saved.value.bytes, threadId, boundary, turnId };
+    }).catch(error => {
+      if (error && typeof error === "object") error.checkpointStep = checkpointStep;
+      throw error;
     });
     this.nativeCapture = operation.catch(() => {}); return operation;
   }
@@ -348,7 +362,7 @@ export class CodexAdapter {
     this.nativeCheckpointTimer = setTimeout(() => {
       this.nativeCheckpointTimer = null;
       this.nativeCaptureScheduled = true;
-      void this.checkpointNativeSession().catch(() => this.checkpointNotice()).finally(() => { this.nativeCaptureScheduled = false; });
+      void this.checkpointNativeSession().catch(error => this.checkpointNotice(error)).finally(() => { this.nativeCaptureScheduled = false; });
     }, 1000);
     this.nativeCheckpointTimer.unref?.();
   }
@@ -695,7 +709,7 @@ export class CodexAdapter {
         if (current.awaitingContinuation && this.goal?.status !== "active") this.#finishGoalRun();
       }
       const result = await completion;
-      await this.checkpointNativeSession({ boundary: "turn-completed", turnId: current.turnId || null }).catch(() => this.checkpointNotice());
+      await this.checkpointNativeSession({ boundary: "turn-completed", turnId: current.turnId || null }).catch(error => this.checkpointNotice(error));
       return result;
     } catch (error) {
       startReady.resolve(null);

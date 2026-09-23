@@ -38,6 +38,27 @@ test("Claude queued compaction is sent as the exact native /compact input, witho
   assert.deepEqual(calls, ["hold", "/compact"]);
 });
 
+test("queueing during an active Codex goal neither pauses it nor dispatches input before completion", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const sends = [], goalActions = []; let release;
+  const adapter = { goal: { status: "active" }, start: async () => {}, stop: async () => {},
+    goalAction: async action => { goalActions.push(action); adapter.goal = { status: action === "pause" ? "paused" : "active" }; },
+    send: async text => { sends.push(text); if (text.includes("long goal turn")) await new Promise(resolve => { release = resolve; }); return { text: "Done" }; } };
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => adapter });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "codex" });
+  const first = await manager.submit(chat.id, "long goal turn"); await waitFor(() => release);
+  const probe = await manager.enqueue(chat.id, "remove before delivery");
+  assert.equal(adapter.goal.status, "active"); assert.deepEqual(goalActions, []);
+  await manager.editQueue(chat.id, { removeId: probe.queuedMessages[0].id });
+  await manager.enqueue(chat.id, "deliver after goal");
+  assert.equal(sends.length, 1); assert.match(sends[0], /long goal turn/); assert.equal(adapter.goal.status, "active");
+  adapter.goal = { status: "complete" }; release(); await first.completion;
+  await waitFor(() => sends.length === 2 && !manager.isBusy(chat.id) && !store.get(chat.id).queuedMessages.length);
+  assert.match(sends[1], /deliver after goal/);
+  await manager.stop(chat.id);
+});
+
 test("Claude context includes cache writes and reads once, while result totals accumulate across calls", () => {
   const request = { model: "opus", usage: { input_tokens: 2, output_tokens: 4, cache_read_input_tokens: 15477, cache_creation_input_tokens: 31155 } };
   assert.equal(claudeContext(request).contextTokens, 46634);

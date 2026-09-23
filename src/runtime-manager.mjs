@@ -143,8 +143,9 @@ export class RuntimeManager extends EventEmitter {
       return { queuedMessages: [...(current.queuedMessages || []), item] };
     });
     this.publishChat(chat);
-    const adapter = this.#runtimes.get(chatId)?.adapter;
-    if (adapter?.goal?.status === "active") await adapter.goalAction("pause");
+    // FIFO input waits for the current native goal run. Pausing the goal here
+    // ends its continuation before it can finish, even if the queued item is
+    // subsequently removed without ever reaching the agent.
     void this.#drainQueue(chatId);
     return chat;
   }
@@ -499,6 +500,10 @@ export class RuntimeManager extends EventEmitter {
         // not resume the user's independently paused ordinary queue.
         const item = chat.queuePaused ? chat.status === "stopped" ? chat.queuedMessages.find(entry => entry.githubEventId && entry.githubWake) : null : chat.queuedMessages[0];
         if (!item) { this.#clearBackgroundRecheck(chatId); break; }
+        // A native Codex goal owns its continuation between foreground turns.
+        // Ordinary queued input must wait until the goal finishes; it must not
+        // steal an otherwise idle gap or force the goal into paused state.
+        if (!item.systemWork && this.#runtimes.get(chatId)?.adapter?.goal?.status === "active") break;
         if (this.isBusy(chatId)) {
           const runtime = this.#runtimes.get(chatId);
           if (runtime && !runtime.busy && (runtime.adapter.isBackgroundBusy?.() || runtime.adapter.hasBackgroundTasks?.())) this.#scheduleBackgroundRecheck(chatId);
