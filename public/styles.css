@@ -432,6 +432,9 @@ dialog { max-height: calc(100dvh - 28px); }
 .environment-summary-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 10px 0 18px; }
 .browser-profile-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .browser-profile-details { margin: 8px 0 16px; overflow-wrap: anywhere; }
+.browser-profile-sessions { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 4px; }
+.browser-profile-session.expiring span { color: var(--amber, #e0a100); }
+.browser-profile-session.expired span { color: var(--red, #e5484d); }
 .environment-summary-card { display: flex; flex-direction: column; align-items: start; gap: 10px; padding: 16px; border: 1px solid var(--line-bright); border-radius: 10px; background: var(--panel); color: var(--text); text-align: left; min-width: 0; }
 .environment-summary-card:hover { border-color: var(--lime); }
 .environment-summary-card span, .environment-summary-card small { color: var(--muted); font-size: 11px; }

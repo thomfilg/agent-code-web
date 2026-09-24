@@ -58,8 +58,37 @@ async function cookieSummary(file) {
       .map(row => ({ scheme: Buffer.from(row.scheme).toString("latin1"), count: Number(row.n) }));
     const sites = db.prepare("SELECT host_key AS host, count(*) AS n FROM cookies GROUP BY host_key ORDER BY n DESC LIMIT 200").all()
       .map(row => String(row.host).replace(/^\./, ""));
-    return { schemes, sites: [...new Set(sites)].slice(0, 50) };
+    return { schemes, sites: [...new Set(sites)].slice(0, 50), sessions: loginSessions(db) };
   } finally { db.close(); }
+}
+
+// Login lifetime per site: the longest-lived cookie that looks like a login
+// (a refresh token usually outlives its short access token). Analytics cookies
+// are ignored. A site whose login cookies are all session-only loses them when
+// Chrome restarts, so its snapshot starts signed out.
+const LOGIN_COOKIE = /refresh|session|sess|sid|auth|token|jwt|login|remember|logged|^__(secure|host)-/i;
+const TRACKING_COOKIE = /^(_ga|_gid|_gcl|_fbp|_uet|_ttp|_rdt|__ps|ajs_|analytics|ttcsid|singular|_mkto|_tt_|_clck|_clsk|_hj|mp_|amplitude|intercom-|_dd_s|__cf|cf_)/i;
+const TWO_LEVEL = /\.(com|co|net|org|gov|edu)\.[a-z]{2}$/;
+export const siteOf = host => {
+  const labels = String(host).replace(/^\./, "").toLowerCase().split(".");
+  return labels.slice(TWO_LEVEL.test(labels.join(".")) ? -3 : -2).join(".");
+};
+function loginSessions(db) {
+  // Chrome stores expiry as microseconds since 1601; convert in SQL, it exceeds 2^53.
+  const rows = db.prepare(`SELECT host_key AS host, name, is_persistent AS persistent,
+    CASE WHEN has_expires = 1 THEN expires_utc / 1000000 - 11644473600 ELSE NULL END AS expires FROM cookies`).all();
+  const sites = new Map();
+  for (const row of rows) {
+    const name = String(row.name);
+    if (!LOGIN_COOKIE.test(name) || TRACKING_COOKIE.test(name) || /^\.?(localhost|\d+\.\d+\.\d+\.\d+)$/.test(row.host)) continue;
+    const site = siteOf(row.host), entry = sites.get(site) || { site, expiresAt: null, cookie: null, sessionOnly: true };
+    const expires = row.expires === null ? null : Number(row.expires);
+    if (Number(row.persistent) && expires && (!entry.expiresAt || expires * 1000 > Date.parse(entry.expiresAt))) {
+      Object.assign(entry, { expiresAt: new Date(expires * 1000).toISOString(), cookie: name, sessionOnly: false });
+    } else if (entry.sessionOnly && !entry.cookie) entry.cookie = name;
+    sites.set(site, entry);
+  }
+  return [...sites.values()].sort((a, b) => (a.expiresAt ? Date.parse(a.expiresAt) : 0) - (b.expiresAt ? Date.parse(b.expiresAt) : 0)).slice(0, 50);
 }
 
 export async function inspectProfileArchive(archive) {
@@ -78,10 +107,10 @@ export async function inspectProfileArchive(archive) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "relay-profile-check-"));
   try {
     await run("tar", ["-xzf", "-", "-C", directory, "--no-same-owner", "--no-same-permissions"], { input: archive });
-    const { schemes, sites } = await cookieSummary(path.join(directory, "Default", "Cookies"));
+    const { schemes, sites, sessions } = await cookieSummary(path.join(directory, "Default", "Cookies"));
     if (schemes.some(item => item.scheme === "v11")) throw failure("These cookies are locked to the original computer's keyring (v11). Sign in again from a chat's Browser panel and choose Save to profile, or export a profile that Chrome ran with --password-store=basic.");
     const chromeVersion = (await readFile(path.join(directory, "Last Version"), "utf8").catch(() => "")).trim();
-    return { sites, chromeVersion: /^\d+(\.\d+){3}$/.test(chromeVersion) ? chromeVersion : null, files: entries.length };
+    return { sites, sessions, chromeVersion: /^\d+(\.\d+){3}$/.test(chromeVersion) ? chromeVersion : null, files: entries.length };
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
@@ -98,7 +127,7 @@ export const chromeMajor = version => Number(/^(\d+)\./.exec(version || "")?.[1]
 function publicProfile(profile) {
   const current = profile.versions.at(-1) || null;
   return { id: profile.id, name: profile.name, companyId: profile.companyId, createdAt: profile.createdAt, updatedAt: profile.updatedAt,
-    currentVersion: current?.version || 0, sites: current?.sites || [], chromeVersion: current?.chromeVersion || null,
+    currentVersion: current?.version || 0, sites: current?.sites || [], sessions: current?.sessions || [], chromeVersion: current?.chromeVersion || null,
     versions: profile.versions.map(({ version, bytes, sha256, chromeVersion, sites, source, createdAt }) => ({ version, bytes, sha256, chromeVersion, sites, source, createdAt })) };
 }
 
@@ -106,8 +135,21 @@ export class BrowserProfiles {
   constructor(records, { companies = null } = {}) { this.records = records; this.companies = companies; this.queue = Promise.resolve(); }
   serial(operation) { const result = this.queue.then(operation); this.queue = result.catch(() => {}); return result; }
   async list(companyId) {
-    return (await this.records.list("browser-profile")).filter(profile => companyId === undefined || profile.companyId === companyId)
-      .sort((a, b) => a.name.localeCompare(b.name)).map(publicProfile);
+    const profiles = (await this.records.list("browser-profile")).filter(profile => companyId === undefined || profile.companyId === companyId);
+    return (await Promise.all(profiles.map(profile => this.withSessions(profile)))).sort((a, b) => a.name.localeCompare(b.name)).map(publicProfile);
+  }
+  // Versions saved before login lifetimes were tracked are inspected once.
+  async withSessions(profile) {
+    const current = profile.versions.at(-1);
+    if (!current || current.sessions) return profile;
+    return this.serial(async () => {
+      const latest = await this.owned(profile.id), entry = latest.versions.at(-1);
+      if (!entry || entry.sessions || entry.version !== current.version) return latest;
+      const { sessions } = await inspectProfileArchive(await this.archive(profile.id, entry.version)).catch(() => ({ sessions: [] }));
+      const value = { ...latest, versions: latest.versions.map(item => item.version === entry.version ? { ...item, sessions } : item) };
+      await this.records.put("browser-profile", profile.id, value);
+      return value;
+    });
   }
   async owned(id) {
     if (!/^bprof_[a-f0-9-]{36}$/.test(id || "")) throw failure("Browser profile not found", 404);
@@ -115,7 +157,7 @@ export class BrowserProfiles {
     if (!profile) throw failure("Browser profile not found", 404);
     return profile;
   }
-  async get(id) { return publicProfile(await this.owned(id)); }
+  async get(id) { return publicProfile(await this.withSessions(await this.owned(id))); }
   create(input) {
     return this.serial(async () => {
       const name = String(input.name || "").trim();
