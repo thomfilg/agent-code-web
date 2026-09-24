@@ -57,26 +57,17 @@ export class BrowserProcess extends EventEmitter {
     // transport does not preempt the more precise worker diagnostic.
     this.timer = setTimeout(() => this.fail(new Error("Shared Chrome startup timed out")), 75000);
     const lines = createInterface({ input: child.stdout });
+    // A reconnectable worker settles each reply in its durable ledger first.
+    // Every later line waits behind that reply, so CDP events are never
+    // delivered before the reply that caused them (Playwright relies on it).
+    this.delivery = Promise.resolve();
     lines.on("line", line => {
       let message; try { message = JSON.parse(line); } catch { return; }
-      if (message.id) {
-        const item = this.pending.get(message.id); if (!item) return;
-        this.pending.delete(message.id); clearTimeout(item.timer);
-        const deliver = () => {
-          try {item.onResponse?.(message);} catch(error) {item.reject(error);return;}
-          message.error ? item.reject(new Error(message.error)) : item.resolve(message.value);
-        };
-        if (this.child.commandSettled) void this.child.commandSettled(message.id).then(deliver, error => item.reject(error));
-        else deliver();
-        return;
-      }
-      if (["status", "ready"].includes(message.event)) this.state = message.value;
-      if(message.event==='chromeStopped'&&message.value?.stopped===true){this.chromeStopped=true;this.resolveChromeStopped();}
-      if (message.event === "ready") { clearTimeout(this.timer); this.resolveReady(this.state); }
-      if (["fatal", "closed"].includes(message.event)) this.fail(new Error(message.value.message));
-      else this.emit(message.event, message.value);
+      if (this.child.commandSettled) { this.delivery = this.delivery.then(() => this.receiveLine(message)).catch(() => {}); return; }
+      this.receiveLine(message);
     });
     child.stdin.on("error", () => {});
+
     child.stderr.on("data", chunk => { this.diagnostics = ((this.diagnostics || "") + chunk).slice(-2000); });
     child.once("error", error => this.fail(error));
     child.once("exit", () => this.fail(new Error(this.diagnostics || "Shared Chrome disconnected")));
@@ -93,6 +84,23 @@ export class BrowserProcess extends EventEmitter {
         this.state = value; this.resolveReady(value); this.startHeartbeat();
       }, error => this.fail(error));
     } else this.startHeartbeat();
+  }
+  receiveLine(message) {
+    if (message.id) {
+      const item = this.pending.get(message.id); if (!item) return;
+      this.pending.delete(message.id); clearTimeout(item.timer);
+      const deliver = () => {
+        try {item.onResponse?.(message);} catch(error) {item.reject(error);return;}
+        message.error ? item.reject(new Error(message.error)) : item.resolve(message.value);
+      };
+      if (this.child.commandSettled) return this.child.commandSettled(message.id).then(deliver, error => item.reject(error));
+      return deliver();
+    }
+    if (["status", "ready"].includes(message.event)) this.state = message.value;
+    if(message.event==='chromeStopped'&&message.value?.stopped===true){this.chromeStopped=true;this.resolveChromeStopped();}
+    if (message.event === "ready") { clearTimeout(this.timer); this.resolveReady(this.state); }
+    if (["fatal", "closed"].includes(message.event)) this.fail(new Error(message.value.message));
+    else this.emit(message.event, message.value);
   }
   startHeartbeat() {
     clearInterval(this.heartbeat);

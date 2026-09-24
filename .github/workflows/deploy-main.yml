@@ -1,0 +1,106 @@
+name: Deploy production
+
+# Every push to main builds the controller image and rolls it out.
+# AWS access is short-lived OIDC for one role scoped to this build project,
+# artifact prefix, image repository and controller instance.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# One rollout at a time; a newer push waits instead of racing the controller.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ACCOUNT: "456808212788"
+  ARTIFACT_BUCKET: agent-relay-mvp-artifactbucket-7klwjzxqhntm
+  BUILD_PROJECT: ImageBuild-t8BSbSkDsHYX
+  IMAGE_REPOSITORY: agent-relay-mvp-applicationrepository-sujdgarjwejp
+  CONTROLLER_INSTANCE: i-08c991c22089589a5
+  PUBLIC_URL: https://d20atclccf8cku.cloudfront.net
+
+jobs:
+  check:
+    if: github.repository == 'thomfilg/agent-code-web'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Syntax check
+        run: find src public scripts test chrome-extension deploy -type f \( -name '*.mjs' -o -name '*.js' \) -print0 | xargs -0 -n1 node --check
+      - name: Deployment and browser tests
+        run: node --test test/aws-rollout.test.mjs test/browser-profiles.test.mjs test/reconnectable-browser-ledger.test.mjs
+
+  deploy:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: deploy-${{ github.run_id }}
+      - name: Build image
+        id: build
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_SHA::12}"
+          digest=$(aws ecr describe-images --repository-name "$IMAGE_REPOSITORY" --image-ids imageTag="$tag" --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)
+          if [ -z "$digest" ] || [ "$digest" = "None" ]; then
+            git archive --format=zip -o source.zip HEAD
+            aws s3 cp source.zip "s3://$ARTIFACT_BUCKET/source/agent-relay-$tag.zip" --only-show-errors
+            build=$(aws codebuild start-build --project-name "$BUILD_PROJECT" \
+              --source-location-override "$ARTIFACT_BUCKET/source/agent-relay-$tag.zip" \
+              --environment-variables-override name=IMAGE_TAG,value="$tag",type=PLAINTEXT \
+              --query build.id --output text)
+            echo "CodeBuild $build"
+            while status=$(aws codebuild batch-get-builds --ids "$build" --query 'builds[0].buildStatus' --output text) && [ "$status" = IN_PROGRESS ]; do sleep 15; done
+            [ "$status" = SUCCEEDED ] || { echo "::error::Image build $build finished $status"; exit 1; }
+            digest=$(aws ecr describe-images --repository-name "$IMAGE_REPOSITORY" --image-ids imageTag="$tag" --query 'imageDetails[0].imageDigest' --output text)
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "image=$AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_REPOSITORY@$digest" >> "$GITHUB_OUTPUT"
+      - name: Roll out to the controller
+        env:
+          TAG: ${{ steps.build.outputs.tag }}
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          node deploy/aws/rollout.mjs --tag "$TAG" --image "$IMAGE" --out rollout.json
+          command=$(aws ssm send-command --instance-ids "$CONTROLLER_INSTANCE" --document-name AWS-RunShellScript \
+            --comment "CI rollout $TAG" --parameters file://rollout.json --query Command.CommandId --output text)
+          echo "SSM command $command for $IMAGE"
+          sleep 5
+          while status=$(aws ssm get-command-invocation --command-id "$command" --instance-id "$CONTROLLER_INSTANCE" --query Status --output text) \
+            && { [ "$status" = Pending ] || [ "$status" = InProgress ] || [ "$status" = Delayed ]; }; do sleep 5; done
+          output=$(aws ssm get-command-invocation --command-id "$command" --instance-id "$CONTROLLER_INSTANCE" --query StandardOutputContent --output text)
+          echo "$output"
+          if [ "$status" != Success ] || ! grep -qx READY <<< "$output"; then
+            aws ssm get-command-invocation --command-id "$command" --instance-id "$CONTROLLER_INSTANCE" --query StandardErrorContent --output text | grep -viE 'password|token|secret' || true
+            echo "::error::Rollout $status; the previous container was restored"; exit 1
+          fi
+      - name: Public readiness
+        run: |
+          for attempt in $(seq 1 12); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$PUBLIC_URL/readyz" || true)
+            [ "$code" = 200 ] && { echo "readyz 200"; exit 0; }
+            sleep 5
+          done
+          echo "::error::$PUBLIC_URL/readyz returned $code"; exit 1

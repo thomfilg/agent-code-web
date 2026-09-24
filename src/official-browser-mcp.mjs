@@ -115,6 +115,7 @@ export class OfficialBrowserMcp {
           await this.#check();
         }
         let result;
+        const started = Date.now();
         try {result = await this.#client.callTool({ name, arguments: input }, undefined, { signal: this.#controller.signal, timeout:CALL_TIMEOUT_MS });}
         catch(error) {if(name==='browser_take_screenshot')this.#fence();throw error;}
         finally {
@@ -123,6 +124,7 @@ export class OfficialBrowserMcp {
             for(const file of await readdir(directory).catch(error=>{if(error.code==='ENOENT')return [];throw error;}))await rm(path.join(directory,file),{recursive:true,force:true});
           }
         }
+        if (Date.now() - started > 3000) console.log(`relay_browser ${name} took ${Date.now() - started} ms (${this.#binding.mode})`);
         await this.#check();
         if (name === 'browser_tabs') result={...result,content:[{type:'text',text:this.#binding.mode==='guest'
           ? 'Browser mode: guest. localhost refers to this chat worker.'
