@@ -145,6 +145,10 @@ test("the workflow deploys main with OIDC, one rollout at a time, and pins every
   // Active work defers the rollout; CI retries until a deadline, unless a newer main supersedes it.
   assert.match(workflow, /grep -qx DEFERRED/);
   assert.match(workflow, /RETRY_MINUTES: \d+/);
+  // The OIDC session must outlive the job, or the retry loop dies with ExpiredToken.
+  const session = Number(/role-duration-seconds: (\d+)/.exec(workflow)?.[1]), job = Number(/deploy:[\s\S]*?timeout-minutes: (\d+)/.exec(workflow)?.[1]);
+  assert.ok(session >= job * 60, "credentials last as long as the deploy job");
+  assert.ok(session <= Number(/MaxSessionDuration: (\d+)/.exec(readFileSync("deploy/aws/cd-role.yml", "utf8"))?.[1]), "the role allows the requested session");
   assert.match(workflow, /commits\/main/);
   assert.match(workflow, /id: rollout/);
   assert.match(workflow, /deployed=true.*GITHUB_OUTPUT/);

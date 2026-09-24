@@ -58,6 +58,8 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: deploy-${{ github.run_id }}
+          # Outlives the 90-minute job (build plus up to 60 min waiting for idle chats).
+          role-duration-seconds: 7200
       - name: Build image
         id: build
         run: |
