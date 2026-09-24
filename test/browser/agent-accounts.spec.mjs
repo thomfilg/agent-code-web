@@ -208,9 +208,10 @@ test("repository picker explains GitHub failures and empty results separately fr
   let mode = "empty", releaseOld, oldStarted = false;
   const oldRequest = new Promise(resolve => { releaseOld = resolve; });
   const repository = fullName => ({ id: fullName === "12-apps/future-pay" ? 1 : 2, fullName, defaultBranch: "main", githubConnectionId: "github-fixture", private: true });
-  await page.route("**/api/github", route => route.fulfill({ json: { connected: true, login: "fixture", repositoryAccess: "github", connections: [{ id: "github-fixture", name: "Fixture GitHub", login: "fixture", connected: true, repositoryAccess: "github" }] } }));
+  await page.route("**/api/github", route => route.fulfill({ json: { connected: mode !== "auth", login: "fixture", repositoryAccess: "github", connections: [{ id: "github-fixture", name: "Fixture GitHub", login: "fixture", connected: mode !== "auth", repositoryAccess: "github" }] } }));
   await page.route("**/api/github/repositories*", async route => {
     if (mode === "error") return route.fulfill({ status: 503, json: { error: "Private upstream fixture error" } });
+    if (mode === "auth") return route.fulfill({ status: 401, json: { error: "GitHub credentials expired or were revoked. Reconnect your account." } });
     if (mode === "hold") { oldStarted = true; await oldRequest; return route.fulfill({ json: { repositories: [repository("12-apps/stale")] } }); }
     return route.fulfill({ json: { repositories: mode === "ready" ? [repository("12-apps/future-pay")] : [] } });
   });
@@ -223,9 +224,13 @@ test("repository picker explains GitHub failures and empty results separately fr
     mode = "error";
     await page.getByRole("button", { name: "Add repositories", exact: true }).click();
     await page.locator("#refresh-repositories").click();
-    await expect(page.locator("#repository-status")).toHaveText("Could not load repositories. Check your GitHub connection and retry.");
+    await expect(page.locator("#repository-status")).toHaveText("Your GitHub accounts are connected, but repositories could not be loaded. Retry; if this continues, check repository permissions or GitHub API limits.");
     await expect(page.locator("#repository-status")).toHaveAttribute("role", "alert");
     await expect(page.locator("#repository-results")).not.toContainText("Private upstream");
+    await page.evaluate(() => { window.__relayAuthEvents = 0; window.addEventListener("relay-auth-required", () => window.__relayAuthEvents++); });
+    mode = "auth"; await page.locator("#repository-retry").click();
+    await expect(page.locator("#repository-status")).toHaveText("GitHub account Fixture GitHub is disconnected. Reconnect in Manage GitHub accounts, then retry.");
+    expect(await page.evaluate(() => window.__relayAuthEvents)).toBe(0);
     mode = "empty"; await page.locator("#repository-retry").click();
     await expect(page.locator("#repository-status")).toContainText("No repositories are available from your connected GitHub accounts");
     mode = "ready"; await page.locator("#repository-retry").click();
