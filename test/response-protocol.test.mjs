@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { extractResponse, ResponseStream } from "../src/response-protocol.mjs";
 import { extractTitle, TitleStream } from "../src/title-protocol.mjs";
+import { stripRelayProtocol } from "../public/relay-protocol.js";
 
 const streamedText = events => events.filter(event => event.type === "assistant_delta").map(event => event.delta).join("");
 
@@ -44,4 +45,11 @@ test("response parsing strips appended titles from live and saved text without c
 test("unfinished title-like text remains ordinary response content", () => {
   const source = "Keep <relay-title>an unfinished title";
   assert.equal(extractTitle(source).text, source);
+});
+
+test("saved relay titles cannot become HTML previews and rendering preserves surrounding content", () => {
+  const source = "  Visible result<relay-title>Hidden title</relay-title> with preserved detail.  \n";
+  const rendered = stripRelayProtocol(source);
+  assert.equal(rendered, "  Visible result with preserved detail.  \n");
+  assert.equal(rendered.includes("<relay-title>"), false);
 });
