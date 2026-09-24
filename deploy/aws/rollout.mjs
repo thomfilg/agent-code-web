@@ -29,6 +29,10 @@ export function rolloutCommands({ tag, image }) {
     'relay_free_kib=$(df -Pk / | awk "NR==2 {print \\$4}")',
     'case "$relay_free_kib" in ""|*[!0-9]*) echo "Could not verify controller disk space" >&2; exit 1;; esac',
     'if [ "$relay_free_kib" -lt 4194304 ]; then echo "Controller needs at least 4 GiB free before pulling a release image" >&2; exit 1; fi',
+    // A refused drain must not leave a short-lived registry credential in the
+    // controller host's Docker config. Resume only if drain actually succeeded.
+    'relay_drained=0',
+    `trap 'sudo docker logout "$relay_registry" >/dev/null 2>&1 || true; if [ "$relay_drained" -eq 1 ]; then curl --silent --max-time 5 --request POST http://127.0.0.1:8787/internal/deploy/resume >/dev/null 2>&1 || true; fi' EXIT`,
     'aws ecr get-login-password --region "$(echo "$relay_registry" | cut -d. -f4)" | sudo docker login --username AWS --password-stdin "$relay_registry" >/dev/null',
     'sudo docker pull "$relay_image" >/dev/null',
     'target=$(sudo docker image inspect "$relay_image" --format "{{.Id}}")',
@@ -39,7 +43,7 @@ export function rolloutCommands({ tag, image }) {
     'if ! curl --silent --show-error --fail --max-time 15 --request POST http://127.0.0.1:8787/internal/deploy/drain >/dev/null; then echo "Relay has active work; deployment deferred without stopping workers" >&2; exit 1; fi',
     // If a later pre-stop command fails, reopen the old controller. Once it
     // exits, the replacement or restored container starts undrained.
-    `trap 'curl --silent --max-time 5 --request POST http://127.0.0.1:8787/internal/deploy/resume >/dev/null 2>&1 || true' EXIT`,
+    'relay_drained=1',
     "sudo docker inspect relay --format '{{range .Config.Env}}{{println .}}{{end}}' | sudo tee \"$relay_env\" >/dev/null",
     'sudo chmod 600 "$relay_env"',
     "sudo docker stop --timeout 45 relay",
@@ -48,7 +52,6 @@ export function rolloutCommands({ tag, image }) {
     'relay_ready=0; for relay_attempt in $(seq 1 60); do if curl -fsS http://127.0.0.1:8787/readyz >/dev/null 2>&1; then relay_ready=1; break; fi; sleep 2; done',
     'if [ "$relay_ready" -ne 1 ]; then sudo docker logs --tail 80 relay >&2 || true; sudo docker rm -f relay || true; sudo docker rename "$relay_backup" relay; sudo docker start relay; sudo rm -f "$relay_env"; echo "New container was not ready; previous container restored" >&2; exit 1; fi',
     'sudo rm -f "$relay_env"',
-    'sudo docker logout "$relay_registry" >/dev/null || true',
     // Keep the newest rollback containers; older ones only hold disk.
     `sudo docker ps -a --filter name=^/relay-rollback- --format "{{.CreatedAt}}\\t{{.Names}}" | sort -r | tail -n +${KEEP_ROLLBACKS + 1} | cut -f2 | xargs -r sudo docker rm >/dev/null || true`,
     "sudo docker image prune -a -f >/dev/null || true",

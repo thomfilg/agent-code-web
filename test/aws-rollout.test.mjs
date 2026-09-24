@@ -54,14 +54,17 @@ test("a rejected live-controller drain aborts the rollout before Docker Stop", t
   };
   fake("sudo", `printf '%s\\n' "$*" >> "$RELAY_TEST_CALLS"\ncase "$*" in *'docker inspect relay'*) echo old-image;; *'docker image inspect'*) echo new-image;; esac\nexit 0`);
   fake("aws", "echo fixture-password");
-  fake("curl", "exit 22");
+  fake("curl", `printf '%s\\n' "curl $*" >> "$RELAY_TEST_CALLS"; exit 22`);
   fake("df", "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/root 20000000 10000000 10000000 50%% /\\n'");
   const command = spawnSync("/bin/sh", ["-c", rolloutCommands({ tag: "abc1234def56", image }).join("\n")], {
     env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, RELAY_TEST_CALLS: calls }, encoding: "utf8",
   });
   assert.notEqual(command.status, 0);
   assert.match(command.stderr, /deployment deferred without stopping workers/);
-  assert.doesNotMatch(readFileSync(calls, "utf8"), /docker stop|docker rename|docker run/);
+  const observed = readFileSync(calls, "utf8");
+  assert.match(observed, /docker logout/, "a rejected drain discards the short-lived ECR login");
+  assert.doesNotMatch(observed, /internal\/deploy\/resume/, "a failed drain did not suspend the controller");
+  assert.doesNotMatch(observed, /docker stop|docker rename|docker run/);
 });
 
 test("low controller disk space aborts before an image pull or worker mutation", t => {
