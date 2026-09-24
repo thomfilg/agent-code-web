@@ -188,9 +188,9 @@ test("Markdown renders tables and bubbles; HTML preview cannot leak styles, exec
   await page.screenshot({ path: "test-results/conversation-markdown.png", fullPage: true });
 });
 test("Relay protocol metadata never renders or creates document previews", async ({ page }) => {
-  await openFixture(page, [{ id: "protocol-leak", role: "assistant", text: "Visible result\n<relay-title>Hidden title</relay-title>\n<relay-waiting>yes</relay-waiting>\n<relay-goal>continue</relay-goal>" }]);
+  await openFixture(page, [{ id: "protocol-leak", role: "assistant", text: "Visible result<relay-title>Hidden title</relay-title> with preserved detail.\n<relay-waiting>yes</relay-waiting>\n<relay-goal>continue</relay-goal>" }]);
   const message = page.locator('[data-message-id="protocol-leak"]');
-  await expect(message).toContainText("Visible result");
+  await expect(message).toContainText("Visible result with preserved detail.");
   await expect(message).not.toContainText("relay-title");
   await expect(message).not.toContainText("Hidden title");
   await expect(message.getByRole("button", { name: /Open HTML preview/ })).toHaveCount(0);
