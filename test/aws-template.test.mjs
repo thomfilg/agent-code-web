@@ -34,6 +34,22 @@ test("AWS template keeps state, controller and untrusted workers separated", () 
   assert.equal(t.Parameters.BaseImageId.Type, "AWS::EC2::Image::Id");
 });
 
+test("EC2 state changes are retained outside the controller with scoped SQS access and DLQ", () => {
+  const r = relayTemplate().Resources;
+  assert.equal(r.WorkerStateQueue.Properties.MessageRetentionPeriod, 1209600);
+  assert.equal(r.WorkerStateQueue.Properties.SqsManagedSseEnabled, true);
+  assert.deepEqual(r.WorkerStateQueue.Properties.RedrivePolicy.deadLetterTargetArn, { "Fn::GetAtt": ["WorkerStateDeadLetterQueue", "Arn"] });
+  assert.deepEqual(r.WorkerStateRule.Properties.EventPattern.source, ["aws.ec2"]);
+  assert.deepEqual(r.WorkerStateRule.Properties.Targets[0].DeadLetterConfig.Arn, { "Fn::GetAtt": ["WorkerStateDeadLetterQueue", "Arn"] });
+  const policy = r.WorkerStateQueuePolicy.Properties.PolicyDocument.Statement[0];
+  assert.deepEqual(policy.Principal, { Service: "events.amazonaws.com" });
+  assert.deepEqual(policy.Condition.ArnEquals["aws:SourceArn"], { "Fn::GetAtt": ["WorkerStateRule", "Arn"] });
+  const allowed = r.ControllerRole.Properties.Policies.flatMap(item => item.PolicyDocument.Statement)
+    .find(item => Array.isArray(item.Action) && item.Action.includes("sqs:ReceiveMessage"));
+  assert.deepEqual(allowed.Resource, { "Fn::GetAtt": ["WorkerStateQueue", "Arn"] });
+  assert.doesNotMatch(JSON.stringify(r.BuilderRole), /sqs:/);
+});
+
 test("CloudFront forwards stateful HTTP and WebSockets without caches or public origins", () => {
   const r = relayTemplate().Resources, d = r.Distribution.Properties.DistributionConfig;
   assert.equal(d.ViewerCertificate.CloudFrontDefaultCertificate, true);

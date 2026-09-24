@@ -1,0 +1,26 @@
+[Unit]
+Description=Agent Relay host-owned Docker event witness
+Requires=docker.service
+After=docker.service
+RequiresMountsFor=/srv/relay/data
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/agent-relay-host-event-collector.py --outbox /srv/relay/data/host-events
+Restart=always
+RestartSec=2
+User=1000
+Group=1000
+SupplementaryGroups=docker
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ReadWritePaths=/srv/relay/data/host-events
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

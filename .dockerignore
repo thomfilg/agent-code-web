@@ -13,3 +13,5 @@
 !deploy/aws/
 !deploy/aws/Dockerfile
 !deploy/aws/container-entry.mjs
+!deploy/aws/host-event-collector.py
+!deploy/aws/host-event-collector.service

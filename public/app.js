@@ -137,7 +137,7 @@ function node(tag, className, text) {
   return element;
 }
 
-let healthChatId = null, healthTimer = null, healthRequest = null;
+let healthChatId = null, healthRequest = null, healthRefreshTimer = null, healthWorkerSource = null, healthSystemSource = null;
 const terminalHealthRefreshes = new Map();
 const healthAge = milliseconds => milliseconds == null ? "unknown" : milliseconds < 1_000 ? "now" : milliseconds < 60_000 ? `${Math.floor(milliseconds / 1_000)}s` : `${Math.floor(milliseconds / 60_000)}m`;
 const healthBytes = bytes => bytes == null ? "unknown" : `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GiB`;
@@ -157,6 +157,7 @@ function paintMachineHealth(health) {
     ["Resources", system.unavailable ? `unavailable · ${system.reason}` : `CPU ${system.cpu?.usedPercent ?? "?"}% (${system.cpuCount ?? "?"} cores) · load ${(system.load || []).join("/")} · RAM ${system.ram?.usedPercent ?? "?"}% (${healthBytes(system.ram?.usedBytes)}) · disk ${system.disk?.usedPercent ?? "?"}% · ${system.processCount ?? "?"} processes`],
     ["Harness", harness ? `${harness.status} · Codex ${harness.installed?.codex || "unknown"}${harness.latest?.codex && harness.latest.codex !== harness.installed?.codex ? ` → ${harness.latest.codex}` : ""} · Claude ${harness.installed?.claude || "unknown"}${harness.latest?.claude && harness.latest.claude !== harness.installed?.claude ? ` → ${harness.latest.claude}` : ""}${harness.error ? ` · ${harness.error}` : ""}` : "not checked"],
     ["Anomaly", anomaly || "none"],
+    ["Sampled", health.sampledAt ? new Date(health.sampledAt).toLocaleString() : "unknown"],
   ];
   const list = node("dl", "machine-health-grid");
   for (const [label, value] of rows) list.append(node("dt", "", label), node("dd", "", value));
@@ -171,30 +172,20 @@ function terminalMachineHealth(health) {
 function reconcileTerminalMachineHealth(chatId, health) {
   const chat = state.active;
   if (!chat || chat.id !== chatId || !terminalMachineHealth(health) || ["stopped", "error"].includes(chat.status)) return;
-  const revision = chat.revision || 0;
-  state.liveTools.clear(); state.stream = null;
-  state.active = { ...chat, status: "stopped", statusDetail: "Worker transport stopped", pendingRequest: null,
-    idleDeadlineAt: null, idleKeepAwakeReason: null, workingStartedAt: null,
-    messages: (chat.messages || []).map(message => message.kind === "tool" && ["running", "stopping"].includes(message.meta?.state)
-      ? { ...message, meta: { ...message.meta, state: "completed", interrupted: true, resultMissing: true } } : message) };
-  renderActive();
   if (terminalHealthRefreshes.has(chatId)) return;
   const refresh = api(`/api/chats/${chatId}`).then(result => {
     const current = state.active;
-    if (current?.id === chatId && (result.chat?.revision || 0) > revision) {
+    if (current?.id === chatId && ["stopped", "error"].includes(result.chat?.status)
+      && (result.chat?.revision || 0) >= (current.revision || 0)) {
+      state.liveTools.clear(); state.stream = null;
       state.active = { ...current, ...result.chat }; updateChatSummary(result.chat); renderActive();
     }
   }).catch(() => {}).finally(() => terminalHealthRefreshes.delete(chatId));
   terminalHealthRefreshes.set(chatId, refresh);
 }
 
-function updateMachineHealth(chatId) {
-  if (healthChatId === chatId && healthTimer) return;
-  healthChatId = chatId;
-  clearInterval(healthTimer); healthTimer = null;
-  healthRequest?.abort(); healthRequest = null;
-  if (!chatId) return;
-  const refresh = async () => {
+async function refreshMachineHealth(chatId = healthChatId) {
+  if (!chatId || healthChatId !== chatId) return;
     healthRequest?.abort(); const controller = new AbortController(); healthRequest = controller;
     try {
       const result = await api(`/api/chats/${chatId}/machine-health`, { signal: controller.signal });
@@ -202,9 +193,34 @@ function updateMachineHealth(chatId) {
     } catch (error) {
       if (error.name !== "AbortError" && healthChatId === chatId) elements.healthSummary.textContent = "Machine health · unavailable";
     } finally { if (healthRequest === controller) healthRequest = null; }
-  };
-  void refresh(); healthTimer = setInterval(refresh, 4_000);
 }
+
+function scheduleMachineHealth(chatId = healthChatId) {
+  if (!chatId || healthChatId !== chatId || healthRefreshTimer) return;
+  healthRefreshTimer = setTimeout(() => { healthRefreshTimer = null; void refreshMachineHealth(chatId); }, 150);
+}
+
+function updateMachineHealth(chatId) {
+  if (healthChatId === chatId) return;
+  healthChatId = chatId;
+  clearTimeout(healthRefreshTimer); healthRefreshTimer = null;
+  healthRequest?.abort(); healthRequest = null;
+  healthWorkerSource?.close(); healthWorkerSource = null;
+  healthSystemSource?.close(); healthSystemSource = null;
+  if (!chatId) return;
+  void refreshMachineHealth(chatId);
+  healthWorkerSource = new EventSource(`/api/chats/${chatId}/worker-events`, { withCredentials: true });
+  healthWorkerSource.onopen = () => scheduleMachineHealth(chatId);
+  healthWorkerSource.onmessage = () => scheduleMachineHealth(chatId);
+  healthSystemSource = new EventSource("/api/system/events", { withCredentials: true });
+  healthSystemSource.onopen = () => scheduleMachineHealth(chatId);
+  healthSystemSource.onmessage = ({ data }) => {
+    try { const event = JSON.parse(data); if (!event.chatId || event.chatId === chatId) scheduleMachineHealth(chatId); }
+    catch { /* Ignore malformed observability frames; EventSource reconnects. */ }
+  };
+}
+
+elements.health.addEventListener("toggle", () => { if (elements.health.open) scheduleMachineHealth(); });
 
 function messageTime(createdAt) {
   if (!createdAt) return null;
@@ -614,10 +630,14 @@ function connectEvents(chatId) {
       // undo newer pins, moves, names or states already fetched from the API.
       if ((event.chat.revision || 0) < (state.active.revision || 0) || event.chat.updatedAt < state.active.updatedAt) return;
       const commandsChanged = (event.chat.commandCatalogRevision || 0) !== (state.active.commandCatalogRevision || 0);
+      const healthChanged = event.chat.status !== state.active.status
+        || event.chat.workerLifecycle?.generation !== state.active.workerLifecycle?.generation
+        || event.chat.runtimeMetadata?.instanceId !== state.active.runtimeMetadata?.instanceId;
       state.active = { ...state.active, ...event.chat };
       reconcileOptimisticQueueSend(state.active);
       updateChatSummary(event.chat);
       renderActive();
+      if (healthChanged) scheduleMachineHealth(chatId);
       if (commandsChanged) slashComposer.refresh(chatId);
     } else if (event.type === "message") {
       if (event.message.meta?.commentary && state.stream?.id === event.message.meta.streamId) state.stream.text = "";

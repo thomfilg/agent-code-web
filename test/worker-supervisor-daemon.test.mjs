@@ -79,6 +79,12 @@ test("worker daemon owns exact identity and leases while controller transports c
   await control({ action: "release", processId: "shared-chrome", processInstanceId: replacementReceipt.processInstanceId, leaseId: lease4.id });
   await native.terminate(); await until(() => native.frames.some(frame => frame.channel === "exit")); await native.ackOutput(native.frames.at(-1).seq); native.disconnect();
   assert.deepEqual(await control({ action: "reset" }), { reset: true });
+  const persisted = (await control({ action: "events" })).events;
+  assert.ok(persisted.some(event => event.processId === "native-agent" && event.action === "started"));
+  const nativeExit = persisted.find(event => event.processId === "native-agent" && event.action === "exited");
+  assert.ok(nativeExit, "native process exit is retained after reset and disconnected transports");
+  assert.equal((await control({ action: "ackEvent", sourceId: nativeExit.sourceId })).acknowledged, true);
+  assert.equal((await control({ action: "events" })).events.some(event => event.sourceId === nativeExit.sourceId), false);
   assert.equal((await control({ action: "status" })).configured, false);
   const nextIdentity = { ...selected, attemptId: "next-attempt" };
   await control({ action: "configure", identity: nextIdentity, processId: "shared-chrome", lease: lease1 });

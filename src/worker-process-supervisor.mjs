@@ -169,6 +169,7 @@ export class WorkerProcessSupervisor extends EventEmitter {
     catch {
       entry.exited = true; entry.spawnFailed = true; entry.groupCleaned = true; entry.anchorNeverStarted = true;
       entry.exit = { code: null, signal: null }; this.record(entry, "exit", Buffer.from(JSON.stringify(entry.exit))); entry.exitRecorded = true;
+      this.publishExit(entry);
       throw transportError("LAUNCH_FAILED");
     }
     entry.child.stdin.on("error", () => {});
@@ -187,11 +188,11 @@ export class WorkerProcessSupervisor extends EventEmitter {
             entry.anchor = anchor; entry.commandPid = message.pid; clearTimeout(timer); resolve();
           } catch { clearTimeout(timer); reject(transportError("LAUNCH_OUTCOME_UNKNOWN")); }
         } else if (message.type === "commandExit") {
-          entry.exited = true; entry.exit = { code: message.code, signal: message.signal }; this.drain(entry); this.emit("processExit", this.receipt(entry));
+          entry.exited = true; entry.commandExitObserved = true; entry.exit = { code: message.code, signal: message.signal }; this.publishExit(entry); this.drain(entry);
         } else if (message.type === "launchFailed") {
           try { entry.anchor = processIdentity(entry.child.pid); } catch {}
           entry.spawnFailed = true; entry.exited = true; entry.exit = { code: null, signal: null };
-          clearTimeout(timer); reject(transportError("LAUNCH_FAILED")); this.drain(entry);
+          clearTimeout(timer); reject(transportError("LAUNCH_FAILED")); this.publishExit(entry); this.drain(entry);
         }
       });
       entry.child.once("error", () => {
@@ -199,7 +200,7 @@ export class WorkerProcessSupervisor extends EventEmitter {
         if (!entry.child.pid) {
           entry.anchorNeverStarted = true; entry.groupCleaned = true; entry.exit = { code: null, signal: null };
         }
-        reject(transportError("LAUNCH_FAILED")); this.drain(entry);
+        reject(transportError("LAUNCH_FAILED")); this.publishExit(entry); this.drain(entry);
       });
       entry.child.once("exit", () => { clearTimeout(timer); reject(transportError("LAUNCH_OUTCOME_UNKNOWN")); });
     });
@@ -209,7 +210,7 @@ export class WorkerProcessSupervisor extends EventEmitter {
       entry.anchorExited = true;
       if (!entry.killIssued) entry.cleanupUnconfirmed = true;
       if (!entry.exited) { entry.exited = true; entry.exit = { code: null, signal: null }; }
-      this.drain(entry);
+      this.publishExit(entry); this.drain(entry);
     });
     entry.child.send(spec, error => { if (error) this.emit("diagnostic", { code: "LAUNCH_OUTCOME_UNKNOWN" }); });
     await entry.ready; this.emit("processStarted", this.receipt(entry)); return entry;
@@ -220,6 +221,11 @@ export class WorkerProcessSupervisor extends EventEmitter {
       groupCleanup: entry.cleanupUnconfirmed ? "unconfirmed" : entry.groupCleaned ? "confirmed" : "pending",
       inputAcceptedThrough: entry.inputSeq, outputProducedThrough: entry.outputSeq, outputCommittedThrough: entry.ackedSeq,
       outputSpoolBytes: entry.spoolBytes, outputBlocked: entry.blocked, state: entry.exited ? "exited" : "running", ...(entry.exit ? { exit: entry.exit } : {}) };
+  }
+  publishExit(entry) {
+    if (entry.exitPublished) return;
+    entry.exitPublished = true;
+    this.emit("processExit", this.receipt(entry), { commandExitObserved: entry.commandExitObserved === true });
   }
   validateCursor(entry, cursor) {
     if (!sequence(cursor) || cursor > entry.everSentThrough) throw transportError("OUTPUT_CURSOR_INVALID");

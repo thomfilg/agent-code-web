@@ -4,3 +4,4 @@ export const WORKER_SUPERVISOR_ROOT = `${runtimeRoot}/agent-relay-worker`;
 export const WORKER_SUPERVISOR_SOCKET = `${WORKER_SUPERVISOR_ROOT}/process.sock`;
 export const WORKER_SUPERVISOR_CONTROL_SOCKET = `${WORKER_SUPERVISOR_ROOT}/control.sock`;
 export const WORKER_SUPERVISOR_CODE = "/opt/agent-web/supervisor-code";
+export const WORKER_PROCESS_EVENT_OUTBOX = "/opt/agent-web/worker-events";

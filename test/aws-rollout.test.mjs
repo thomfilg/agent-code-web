@@ -29,6 +29,9 @@ test("the new container is started only after the old one is kept, and failures 
   assert.ok(index(/docker pull/) < index(/docker stop --timeout 45 relay/), "pull before stopping");
   assert.ok(index(/internal\/deploy\/drain/) > index(/docker pull/) && index(/internal\/deploy\/drain/) < index(/docker stop --timeout 45 relay/), "controller drain must fence active work before Stop");
   assert.ok(fences[1] > index(/internal\/deploy\/drain/) && fences[1] < index(/docker stop --timeout 45 relay/), "EC2 must independently fence running workers before Stop");
+  assert.ok(index(/systemctl is-active --quiet agent-relay-host-events.service/) > fences[1]
+    && index(/systemctl is-active --quiet agent-relay-host-events.service/) < index(/docker stop --timeout 45 relay/),
+  "the independent host witness must be running before Docker stops the old controller");
   assert.match(script, /internal\/deploy\/resume/, "a failed pre-stop rollout reopens the controller");
   assert.ok(index(/docker rename relay "\$relay_backup"/) < index(/docker run -d --name relay/), "keep the old container before starting");
   assert.match(script, /--mount type=bind,src=\/srv\/relay\/data,dst=\/var\/lib\/relay/);
@@ -70,7 +73,7 @@ test("a rejected live-controller drain aborts the rollout before Docker Stop", t
   const observed = readFileSync(calls, "utf8");
   assert.match(observed, /docker logout/, "a rejected drain discards the short-lived ECR login");
   assert.doesNotMatch(observed, /internal\/deploy\/resume/, "a failed drain did not suspend the controller");
-  assert.doesNotMatch(observed, /docker stop|docker rename|docker run/);
+  assert.doesNotMatch(observed, /docker stop|docker rename|docker run|systemctl/);
 });
 
 test("low controller disk space aborts before an image pull or worker mutation", t => {

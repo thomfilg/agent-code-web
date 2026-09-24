@@ -41,6 +41,7 @@ export function relayTemplate() {
     allow(["ecr:GetAuthorizationToken"], "*"),
     allow(["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"], get("ApplicationRepository", "Arn")),
     allow(["ec2:DescribeInstances", "ec2:DescribeInstanceStatus", "ec2:DescribeImages"], "*"),
+    allow(["sqs:GetQueueUrl", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"], get("WorkerStateQueue", "Arn")),
     allow(["ec2:StartInstances", "ec2:StopInstances", "ec2:TerminateInstances"], sub("arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"), { StringEquals: { "ec2:ResourceTag/AgentRelayDeployment": ref("AWS::StackName"), "ec2:ResourceTag/ManagedBy": "agent-relay" } }),
     allow("ec2:RunInstances", [sub("arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:subnet/${WorkerSubnet}"), sub("arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${WorkerGroup}"), sub("arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:key-pair/${WorkerKey}"), sub("arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*")]),
     allow("ec2:RunInstances", sub("arn:${AWS::Partition}:ec2:${AWS::Region}::image/*"), { StringEquals: { "ec2:ResourceTag/AgentRelayDeployment": ref("AWS::StackName"), "ec2:ResourceTag/AgentRelayAcceptance": "verified-v1" } }),
@@ -97,6 +98,23 @@ touch /var/lib/relay-controller-ready
 `;
   resource("Controller", "AWS::EC2::Instance", { ImageId: ref("BaseImageId"), InstanceType: "t3.medium", SubnetId: ref("ControllerSubnet"), SecurityGroupIds: [ref("ControllerGroup")], IamInstanceProfile: ref("ControllerProfile"), MetadataOptions: { HttpTokens: "required", HttpPutResponseHopLimit: 1, HttpEndpoint: "enabled" }, CreditSpecification: { CPUCredits: "standard" }, BlockDeviceMappings: [{ DeviceName: "/dev/sda1", Ebs: { VolumeType: "gp3", VolumeSize: 24, Encrypted: true, DeleteOnTermination: true } }], UserData: { "Fn::Base64": sub(bootstrap) }, Tags: tags([{ Key: "Name", Value: ref("AWS::StackName") }]) }, { DependsOn: "PrivateInternet" });
   resource("DataAttachment", "AWS::EC2::VolumeAttachment", { Device: "/dev/sdf", InstanceId: ref("Controller"), VolumeId: ref("DataVolume") });
+  // EC2 state notifications remain queued while the controller instance or
+  // its Relay container is down. The worker VM itself receives no AWS role.
+  resource("WorkerStateDeadLetterQueue", "AWS::SQS::Queue", { QueueName: sub("${AWS::StackName}-worker-state-dlq"),
+    MessageRetentionPeriod: 1209600, SqsManagedSseEnabled: true, Tags: tags() });
+  resource("WorkerStateQueue", "AWS::SQS::Queue", { QueueName: sub("${AWS::StackName}-worker-state"),
+    MessageRetentionPeriod: 1209600, VisibilityTimeout: 120, ReceiveMessageWaitTimeSeconds: 20,
+    SqsManagedSseEnabled: true, RedrivePolicy: { deadLetterTargetArn: get("WorkerStateDeadLetterQueue", "Arn"), maxReceiveCount: 5 }, Tags: tags() });
+  resource("WorkerStateRule", "AWS::Events::Rule", { EventPattern: { source: ["aws.ec2"],
+    "detail-type": ["EC2 Instance State-change Notification"],
+    detail: { state: ["pending", "running", "stopping", "stopped", "shutting-down", "terminated"] } },
+    State: "ENABLED", Targets: [{ Id: "WorkerStateQueue", Arn: get("WorkerStateQueue", "Arn"),
+      DeadLetterConfig: { Arn: get("WorkerStateDeadLetterQueue", "Arn") } }] });
+  resource("WorkerStateQueuePolicy", "AWS::SQS::QueuePolicy", { Queues: [ref("WorkerStateQueue"), ref("WorkerStateDeadLetterQueue")],
+    PolicyDocument: { Version: "2012-10-17", Statement: [allow("sqs:SendMessage",
+      [get("WorkerStateQueue", "Arn"), get("WorkerStateDeadLetterQueue", "Arn")],
+      { StringEquals: { "aws:SourceAccount": ref("AWS::AccountId") }, ArnEquals: { "aws:SourceArn": get("WorkerStateRule", "Arn") } })
+      ].map(statement => ({ ...statement, Principal: { Service: "events.amazonaws.com" } })) } });
   resource("VpcOrigin", "AWS::CloudFront::VpcOrigin", { VpcOriginEndpointConfig: { Name: sub("${AWS::StackName}-origin"), Arn: sub("arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${Controller}"), HTTPPort: 8787, HTTPSPort: 443, OriginProtocolPolicy: "http-only" }, Tags: tags() });
   resource("Distribution", "AWS::CloudFront::Distribution", { DistributionConfig: { Enabled: true, Comment: sub("${AWS::StackName}: private Relay origin, no response caching"), HttpVersion: "http2and3", IPV6Enabled: true, PriceClass: "PriceClass_100", ViewerCertificate: { CloudFrontDefaultCertificate: true }, Origins: [{ Id: "controller", DomainName: get("Controller", "PrivateDnsName"), VpcOriginConfig: { VpcOriginId: get("VpcOrigin", "Id"), OriginReadTimeout: 60, OriginKeepaliveTimeout: 60 } }], DefaultCacheBehavior: { TargetOriginId: "controller", ViewerProtocolPolicy: "redirect-to-https", AllowedMethods: ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"], CachedMethods: ["GET", "HEAD"], Compress: false, CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", OriginRequestPolicyId: "216adef6-5c7f-47e4-b989-5492eafa07d3" }, CustomErrorResponses: [400, 403, 404, 405, 414, 416, 500, 501, 502, 503, 504].map(ErrorCode => ({ ErrorCode, ErrorCachingMinTTL: 0 })) }, Tags: tags() });
   // A leaf policy avoids a ControllerRole -> VpcOrigin -> Controller cycle.
@@ -140,7 +158,7 @@ touch /var/lib/relay-controller-ready
       WorkerPublicKey: { Type: "String", AllowedPattern: "ssh-ed25519 [A-Za-z0-9+/=]+(?: .*)?" },
     }, Conditions: { AppPreviewsEnabled: { "Fn::Equals": [ref("EnableAppPreviews"), "true"] } }, Resources: r,
     Outputs: Object.fromEntries(Object.entries({
-      ControllerInstanceId: ref("Controller"), ArtifactBucket: ref("ArtifactBucket"), ApplicationRepositoryUri: get("ApplicationRepository", "RepositoryUri"), SecretArn: ref("ApplicationSecret"), PublicUrl: sub("https://${Distribution.DomainName}"), DataVolumeId: ref("DataVolume"), DistributionId: ref("Distribution"), WorkerSubnetId: ref("WorkerSubnet"), WorkerSecurityGroupId: ref("WorkerGroup"), WorkerKeyName: ref("WorkerKey"), BuilderInstanceProfile: ref("BuilderProfile"), BaseImageId: ref("BaseImageId"), DeploymentName: ref("AWS::StackName"), ImageBuildProject: ref("ImageBuild"), ControllerRoleArn: get("ControllerRole", "Arn"), VpcOriginId: get("VpcOrigin", "Id"), ControllerOriginDns: get("Controller", "PrivateDnsName"), PreviewHostingEnabled: ref("EnableAppPreviews"),
+      ControllerInstanceId: ref("Controller"), ArtifactBucket: ref("ArtifactBucket"), ApplicationRepositoryUri: get("ApplicationRepository", "RepositoryUri"), SecretArn: ref("ApplicationSecret"), PublicUrl: sub("https://${Distribution.DomainName}"), DataVolumeId: ref("DataVolume"), DistributionId: ref("Distribution"), WorkerSubnetId: ref("WorkerSubnet"), WorkerSecurityGroupId: ref("WorkerGroup"), WorkerKeyName: ref("WorkerKey"), BuilderInstanceProfile: ref("BuilderProfile"), BaseImageId: ref("BaseImageId"), DeploymentName: ref("AWS::StackName"), ImageBuildProject: ref("ImageBuild"), ControllerRoleArn: get("ControllerRole", "Arn"), VpcOriginId: get("VpcOrigin", "Id"), ControllerOriginDns: get("Controller", "PrivateDnsName"), PreviewHostingEnabled: ref("EnableAppPreviews"), WorkerStateQueueUrl: ref("WorkerStateQueue"),
     }).map(([key, Value]) => [key, { Value }]))
   };
 }

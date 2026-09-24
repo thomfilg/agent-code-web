@@ -7,6 +7,20 @@ import { nativeSessionRecords, sessionFailure } from "./native-session-scope.mjs
 import { githubEventRecords, githubEventLockedKind, githubEventNext, webhookId, githubEventFailure, githubEventSessionRecords, assertGitHubEventSession } from "./github-event-scope.mjs";
 
 const admissionSnapshot = values => Object.fromEntries(["chat", "account", "disconnection", "company", "environment"].map((key, index) => [key, values[index]]));
+function workerEventCursor(chatId, after, limit) {
+  if (!/^chat_[a-f0-9]{32}$/.test(chatId || "") || !Number.isSafeInteger(after) || after < 0
+    || !Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("Invalid worker event cursor");
+}
+function workerEventKey(chatId, sourceId) {
+  workerEventCursor(chatId, 0, 1);
+  eventSourceId(sourceId);
+}
+function eventSourceId(sourceId) {
+  if (typeof sourceId !== "string" || !/^[A-Za-z0-9:._-]{1,160}$/.test(sourceId)) throw new Error("Invalid worker event source ID");
+}
+function systemEventCursor(after, limit) {
+  if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error("Invalid system event cursor");
+}
 // One dispatcher per database. A session lock (not an open transaction) owns
 // crash recovery. Handles are opaque in-process capabilities, never API input.
 const eventControllers = new WeakMap();
@@ -57,6 +71,21 @@ export class EncryptedRecords {
       kind TEXT NOT NULL CHECK(kind IN ('attempt','transport')), id TEXT NOT NULL,
       revision BIGINT NOT NULL CHECK(revision > 0), payload BYTEA NOT NULL,
       PRIMARY KEY(kind,id))`);
+    // A committed event row, not NOTIFY or an in-memory SSE buffer, is the
+    // source of truth. The per-chat head serializes writers so a reconnecting
+    // reader cannot skip a lower sequence that commits after a higher one.
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS relay_worker_event_heads (
+      chat_id TEXT PRIMARY KEY, sequence BIGINT NOT NULL CHECK(sequence > 0))`);
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS relay_worker_events (
+      chat_id TEXT NOT NULL, sequence BIGINT NOT NULL CHECK(sequence > 0),
+      source_id TEXT NOT NULL, payload BYTEA NOT NULL,
+      PRIMARY KEY(chat_id,sequence), UNIQUE(chat_id,source_id))`);
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS relay_system_event_head (
+      id SMALLINT PRIMARY KEY CHECK(id=1), sequence BIGINT NOT NULL CHECK(sequence > 0))`);
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS relay_system_events (
+      sequence BIGINT PRIMARY KEY CHECK(sequence > 0), source_id TEXT NOT NULL UNIQUE, chat_id TEXT, payload BYTEA NOT NULL)`);
+    await this.pool.query("ALTER TABLE relay_system_events ADD COLUMN IF NOT EXISTS chat_id TEXT");
+    await this.pool.query("CREATE INDEX IF NOT EXISTS relay_system_events_chat_id ON relay_system_events(chat_id) WHERE chat_id IS NOT NULL");
     if (!await this.get("system", "encryption-check")) await this.put("system", "encryption-check", { ok: true });
   }
   async get(kind, id) {
@@ -78,6 +107,118 @@ export class EncryptedRecords {
     const remove = client => client.query("DELETE FROM relay_records WHERE kind=$1 AND id=$2", [kind, id]);
     if (admissionRecordKind(kind) || kind === "native-session" || githubEventLockedKind(kind)) await this.#transaction([recordLockKey(kind, id)], remove);
     else await remove(this.pool);
+  }
+  async appendWorkerEvent(chatId, sourceId, value) {
+    workerEventKey(chatId, sourceId);
+    return this.#transaction([recordLockKey("chat", chatId), recordLockKey("worker-event", chatId)], async client => {
+      const chat = await client.query("SELECT 1 FROM relay_records WHERE kind='chat' AND id=$1", [chatId]);
+      if (chat.rowCount !== 1) throw new Error("Worker event chat no longer exists");
+      const prior = await client.query("SELECT sequence,payload FROM relay_worker_events WHERE chat_id=$1 AND source_id=$2", [chatId, sourceId]);
+      if (prior.rows[0]) return this.cipher.open("worker-event", `${chatId}/${prior.rows[0].sequence}`, prior.rows[0].payload);
+      const result = await client.query(`INSERT INTO relay_worker_event_heads(chat_id,sequence) VALUES($1,1)
+        ON CONFLICT(chat_id) DO UPDATE SET sequence=relay_worker_event_heads.sequence+1 RETURNING sequence`, [chatId]);
+      const sequence = Number(result.rows[0].sequence);
+      if (!Number.isSafeInteger(sequence)) throw new Error("Worker event sequence exhausted");
+      const event = { ...value, chatId, sourceId, sequence };
+      await client.query("INSERT INTO relay_worker_events(chat_id,sequence,source_id,payload) VALUES($1,$2,$3,$4)",
+        [chatId, sequence, sourceId, this.cipher.seal("worker-event", `${chatId}/${sequence}`, event)]);
+      // This is only a wake-up hint. Lost notifications are recovered from the
+      // event table after LISTEN reconnect, never reconstructed from memory.
+      await client.query("SELECT pg_notify('relay_worker_events',$1)", [chatId]);
+      return event;
+    }, true);
+  }
+  async workerEventsSince(chatId, after = 0, limit = 300) {
+    workerEventCursor(chatId, after, limit);
+    const result = await this.pool.query(`SELECT sequence,payload FROM relay_worker_events
+      WHERE chat_id=$1 AND sequence>$2 ORDER BY sequence LIMIT $3`, [chatId, after, limit]);
+    return result.rows.map(row => this.cipher.open("worker-event", `${chatId}/${row.sequence}`, row.payload));
+  }
+  async appendSystemEvent(sourceId, value) {
+    eventSourceId(sourceId);
+    const chatId = value?.chatId || null;
+    if (chatId) workerEventCursor(chatId, 0, 1);
+    return this.#transaction([recordLockKey("system-event", "global"), ...(chatId ? [recordLockKey("chat", chatId)] : [])], async client => {
+      if (chatId) {
+        const chat = await client.query("SELECT 1 FROM relay_records WHERE kind='chat' AND id=$1", [chatId]);
+        if (chat.rowCount !== 1) throw new Error("System event chat no longer exists");
+      }
+      const prior = await client.query("SELECT sequence,payload FROM relay_system_events WHERE source_id=$1", [sourceId]);
+      if (prior.rows[0]) return this.cipher.open("system-event", prior.rows[0].sequence, prior.rows[0].payload);
+      const result = await client.query(`INSERT INTO relay_system_event_head(id,sequence) VALUES(1,1)
+        ON CONFLICT(id) DO UPDATE SET sequence=relay_system_event_head.sequence+1 RETURNING sequence`);
+      const sequence = Number(result.rows[0].sequence);
+      if (!Number.isSafeInteger(sequence)) throw new Error("System event sequence exhausted");
+      const event = { ...value, sourceId, sequence };
+      await client.query("INSERT INTO relay_system_events(sequence,source_id,chat_id,payload) VALUES($1,$2,$3,$4)",
+        [sequence, sourceId, chatId, this.cipher.seal("system-event", sequence, event)]);
+      await client.query("SELECT pg_notify('relay_worker_events','system')");
+      return event;
+    }, true);
+  }
+  async systemEventsSince(after = 0, limit = 300) {
+    systemEventCursor(after, limit);
+    const result = await this.pool.query("SELECT sequence,payload FROM relay_system_events WHERE sequence>$1 ORDER BY sequence LIMIT $2", [after, limit]);
+    return result.rows.map(row => this.cipher.open("system-event", row.sequence, row.payload));
+  }
+  async deleteWorkerEvents(chatId) {
+    workerEventCursor(chatId, 0, 1);
+    await this.#transaction([recordLockKey("worker-event", chatId)], async client => {
+      await client.query("DELETE FROM relay_worker_events WHERE chat_id=$1", [chatId]);
+      await client.query("DELETE FROM relay_worker_event_heads WHERE chat_id=$1", [chatId]);
+    }, true);
+  }
+  async deleteChatWithWorkerEvents(chatId) {
+    workerEventCursor(chatId, 0, 1);
+    await this.#transaction([recordLockKey("chat", chatId), recordLockKey("worker-event", chatId), recordLockKey("system-event", "global")], async client => {
+      await client.query("DELETE FROM relay_worker_events WHERE chat_id=$1", [chatId]);
+      await client.query("DELETE FROM relay_worker_event_heads WHERE chat_id=$1", [chatId]);
+      await client.query("DELETE FROM relay_system_events WHERE chat_id=$1", [chatId]);
+      await client.query("DELETE FROM relay_records WHERE kind='chat' AND id=$1", [chatId]);
+    }, true);
+  }
+  async watchWorkerEvents(onChange) {
+    if (typeof onChange !== "function") throw new Error("Worker event listener is required");
+    let closed = false, client = null, retry = null, failures = 0;
+    const notify = chatId => { try { void Promise.resolve(onChange(chatId)).catch(() => {}); } catch {} };
+    const reconnect = async () => {
+      if (closed) return;
+      try {
+        const next = await this.pool.connect();
+        if (closed) { next.release(); return; }
+        client = next;
+        const lost = () => {
+          if (client !== next || closed) return;
+          client = null;
+          next.removeListener("notification", received);
+          next.removeListener("error", lost);
+          next.removeListener("end", lost);
+          next.release(true);
+          retry = setTimeout(reconnect, Math.min(1000 * 2 ** Math.min(failures++, 5), 30_000));
+          retry.unref?.();
+        };
+        const received = message => {
+          if (message.channel === "relay_worker_events" && (message.payload === "system" || /^chat_[a-f0-9]{32}$/.test(message.payload || ""))) notify(message.payload);
+        };
+        next.on("notification", received); next.on("error", lost); next.on("end", lost);
+        try { await next.query("LISTEN relay_worker_events"); }
+        catch { lost(); return; }
+        failures = 0;
+        // LISTEN commits before the first catch-up read, closing its initial
+        // race. Re-run catch-up after every reconnect as well.
+        notify(null);
+      } catch {
+        if (!closed) { retry = setTimeout(reconnect, Math.min(1000 * 2 ** Math.min(failures++, 5), 30_000)); retry.unref?.(); }
+      }
+    };
+    await reconnect();
+    if (!client) throw new Error("Worker event subscription could not start");
+    return { close: async () => {
+      closed = true; clearTimeout(retry);
+      const current = client; client = null;
+      if (current) { current.removeAllListeners("notification"); current.removeAllListeners("error"); current.removeAllListeners("end");
+        try { await current.query("UNLISTEN relay_worker_events"); } finally { current.release(); } }
+    } };
   }
   async savedPromptsCompareAndSwap(scope, expected, update, guard) {
     const kind = "saved-prompts";
@@ -244,7 +385,7 @@ export class EncryptedRecords {
 
 // Explicitly injected in unit tests; never a fallback when PostgreSQL fails.
 export class MemoryRecords {
-  constructor() { this.rows = new Map(); this.kind = "memory-test"; this.workerRows = new Map(); this.workerLocks = new Map(); }
+  constructor() { this.rows = new Map(); this.kind = "memory-test"; this.workerRows = new Map(); this.workerLocks = new Map(); this.workerEventRows = new Map(); this.workerEventListeners = new Set(); this.systemEventRows = { sequence: 0, events: [], sources: new Map() }; }
   async get(kind, id) { return structuredClone(this.rows.get(`${kind}/${id}`) || null); }
   async list(kind) { return [...this.rows.entries()].filter(([k]) => k.startsWith(`${kind}/`)).map(([, v]) => structuredClone(v)); }
   async put(kind, id, value) {
@@ -254,6 +395,64 @@ export class MemoryRecords {
   async delete(kind, id) {
     const remove = () => { this.rows.delete(`${kind}/${id}`); };
     return admissionRecordKind(kind) || kind === "native-session" || githubEventLockedKind(kind) ? this.#locked([recordLockKey(kind, id)], remove) : remove();
+  }
+  async appendWorkerEvent(chatId, sourceId, value) {
+    workerEventKey(chatId, sourceId);
+    const { event, created } = await this.#locked([recordLockKey("chat", chatId), recordLockKey("worker-event", chatId)], () => {
+      if (!this.rows.has(`chat/${chatId}`)) throw new Error("Worker event chat no longer exists");
+      const row = this.workerEventRows.get(chatId) || { events: [], sources: new Map() };
+      const prior = row.sources.get(sourceId);
+      if (prior) return { event: structuredClone(prior), created: false };
+      const event = structuredClone({ ...value, chatId, sourceId, sequence: row.events.length + 1 });
+      row.events.push(event); row.sources.set(sourceId, event); this.workerEventRows.set(chatId, row);
+      return { event: structuredClone(event), created: true };
+    });
+    if (created) for (const listener of this.workerEventListeners) { try { listener(chatId); } catch {} }
+    return event;
+  }
+  async workerEventsSince(chatId, after = 0, limit = 300) {
+    workerEventCursor(chatId, after, limit);
+    return structuredClone((this.workerEventRows.get(chatId)?.events || []).filter(event => event.sequence > after).slice(0, limit));
+  }
+  async appendSystemEvent(sourceId, value) {
+    eventSourceId(sourceId);
+    const chatId = value?.chatId || null;
+    if (chatId) workerEventCursor(chatId, 0, 1);
+    const { event, created } = await this.#locked([recordLockKey("system-event", "global"), ...(chatId ? [recordLockKey("chat", chatId)] : [])], () => {
+      if (chatId && !this.rows.has(`chat/${chatId}`)) throw new Error("System event chat no longer exists");
+      const prior = this.systemEventRows.sources.get(sourceId);
+      if (prior) return { event: structuredClone(prior), created: false };
+      const sequence = this.systemEventRows.sequence + 1;
+      const event = structuredClone({ ...value, sourceId, sequence });
+      this.systemEventRows.sequence = sequence;
+      this.systemEventRows.events.push(event); this.systemEventRows.sources.set(sourceId, event);
+      return { event: structuredClone(event), created: true };
+    });
+    if (created) for (const listener of this.workerEventListeners) { try { listener("system"); } catch {} }
+    return event;
+  }
+  async systemEventsSince(after = 0, limit = 300) {
+    systemEventCursor(after, limit);
+    return structuredClone(this.systemEventRows.events.filter(event => event.sequence > after).slice(0, limit));
+  }
+  async deleteWorkerEvents(chatId) {
+    workerEventCursor(chatId, 0, 1);
+    await this.#locked([recordLockKey("worker-event", chatId)], () => this.workerEventRows.delete(chatId));
+  }
+  async deleteChatWithWorkerEvents(chatId) {
+    workerEventCursor(chatId, 0, 1);
+    await this.#locked([recordLockKey("chat", chatId), recordLockKey("worker-event", chatId), recordLockKey("system-event", "global")], () => {
+      this.workerEventRows.delete(chatId);
+      this.systemEventRows.events = this.systemEventRows.events.filter(event => event.chatId !== chatId);
+      this.systemEventRows.sources = new Map(this.systemEventRows.events.map(event => [event.sourceId, event]));
+      this.rows.delete(`chat/${chatId}`);
+    });
+  }
+  async watchWorkerEvents(onChange) {
+    if (typeof onChange !== "function") throw new Error("Worker event listener is required");
+    this.workerEventListeners.add(onChange);
+    queueMicrotask(() => { if (this.workerEventListeners.has(onChange)) onChange(null); });
+    return { close: async () => { this.workerEventListeners.delete(onChange); } };
   }
   async savedPromptsCompareAndSwap(scope, expected, update, guard) {
     return this.#locked([recordLockKey("saved-prompts", scope)], async () => {
