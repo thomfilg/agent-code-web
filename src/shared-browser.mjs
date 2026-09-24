@@ -487,7 +487,7 @@ export class SharedBrowsers {
     for await (const chunk of request) { size += chunk.length; if (size > 100000) return finish(413, "Browser request too large"); chunks.push(chunk); }
     let body; try { body = JSON.parse(Buffer.concat(chunks)); } catch { return finish(400, "Invalid JSON"); }
     {
-      let proxy; try { proxy = await this.official(grant.chatId,token); } catch { return finish(403,'Browser MCP access is unavailable or revoked'); }
+      let proxy; try { proxy = await this.official(grant.chatId,token); } catch (error) { console.error(`relay_browser unavailable: ${String(error?.message || error).split("\n")[0].slice(0, 300)}`); return finish(403,'Browser MCP access is unavailable or revoked'); }
       const server = new Server({name:'relay-official-shared-chrome',version:'1'},{capabilities:{tools:{}}});
       server.setRequestHandler(ListToolsRequestSchema,() => proxy.toolsList());
       server.setRequestHandler(CallToolRequestSchema,(request,extra) => proxy.callTool(request.params,{signal:extra.signal}));

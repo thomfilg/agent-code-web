@@ -24,6 +24,9 @@ const bindingSchema = z.strictObject({ ownerId: id, chatId: id, companyId: id, e
 // return a lease minted by the grant-owned projection, not a marker boolean or
 // generic profile CDP connection. Guest acquisition uses the existing owned
 // worker's private-pipe projection, never a host-browser fallback.
+// One bounded line for operator logs: no stack, no request payloads.
+const diagnostic = error => `${error?.name || "Error"}${error?.code ? ` [${error.code}]` : ""}: ${String(error?.message || error).split("\n")[0].slice(0, 300)}`;
+
 export class OfficialBrowserMcp {
   #binding; #validate; #acquire; #server; #client; #directory; #initializing; #contextPromise; #lease; #released = false;
   #revoked = false; #closing; #controller = new AbortController(); #pending = 0; #queue = Promise.resolve();
@@ -55,7 +58,7 @@ export class OfficialBrowserMcp {
         if (!lease || typeof lease.release !== "function" || !lease.context || typeof lease.context.pages !== "function") throw browserPolicyFailure("CONTEXT_INVALID");
         await this.#check();
         return lease.context;
-      } catch { this.#fence(); throw browserPolicyFailure("CONTEXT_UNAVAILABLE"); }
+      } catch (error) { console.error(`relay_browser context unavailable (${this.#binding.mode}): ${diagnostic(error)}`); this.#fence(); throw browserPolicyFailure("CONTEXT_UNAVAILABLE"); }
     })();
   }
   async #initialize() {
@@ -134,7 +137,9 @@ export class OfficialBrowserMcp {
         if (this.#revoked) { await this.revoke().catch(() => {}); throw browserPolicyFailure("REVOKED"); }
         if (error?.code && typeof error.code === "string" && error.message?.startsWith("Browser MCP access denied")) throw error;
         // Official tool error results remain webpage-visible data. Unexpected
-        // transport/provider exceptions must not disclose private internals.
+        // transport/provider exceptions must not disclose private internals to
+        // the agent; the operator log keeps the first line for diagnosis.
+        console.error(`relay_browser ${name} failed (${this.#binding.mode}): ${diagnostic(error)}`);
         throw browserPolicyFailure("CALL_FAILED");
       }
     });
