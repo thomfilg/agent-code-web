@@ -3,7 +3,7 @@ import { terminateWorker } from "./worker-process.mjs";
 
 // Self-contained so the same checked reader runs on the actual remote worker,
 // without importing controller modules or inheriting its credentials.
-export async function workspaceFileIO({ root, action, path: relative = "", query = "" }) {
+export async function workspaceFileIO({ root, action, path: relative = "", query = "", maxBytes = 512 * 1024 }) {
   const { open, opendir } = await import("node:fs/promises");
   const { constants } = await import("node:fs");
   const { createHash } = await import("node:crypto");
@@ -12,6 +12,8 @@ export async function workspaceFileIO({ root, action, path: relative = "", query
   if (typeof root !== "string" || !paths.isAbsolute(root) || paths.resolve(root) === "/") throw new Error("Invalid workspace root");
   if (typeof relative !== "string" || Buffer.byteLength(relative) > 4096 || /[\x00-\x1f\x7f\\]/.test(relative) || relative.startsWith("/") || relative.split("/").some(part => part === "." || part === ".." || !part && relative)) throw new Error("Choose a relative workspace path");
   if (!["list", "read", "ping"].includes(action) || typeof query !== "string" || query.length > 200) throw new Error("Invalid workspace file operation");
+  // Agent images may be larger than an inline text preview, never above an attachment.
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 5 * 1024 * 1024) throw new Error("Invalid workspace read limit");
   const handles = [], base = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); handles.push(base);
   const fdPath = handle => `/proc/self/fd/${handle.fd}`;
   const directoryFlags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
@@ -60,7 +62,7 @@ export async function workspaceFileIO({ root, action, path: relative = "", query
       return { path: relative, kind: "directory", ...result, text, sha256: hash(text), mime: "text/plain", size: Buffer.byteLength(text), data: Buffer.from(text).toString("base64") };
     }
     if (!before.isFile() || before.nlink > 1n) throw new Error("Only ordinary, non-hardlinked workspace files can be previewed");
-    if (before.size > 512n * 1024n) {
+    if (before.size > BigInt(maxBytes)) {
       const text = `Workspace path reference: ${relative}\nSize: ${before.size} bytes. This file is too large for an inline preview; read the workspace file as needed.`;
       return { path: relative, kind: "file", size: Number(before.size), version: hash([before.dev, before.ino, before.size, before.mtimeNs, before.ctimeNs].join(":")), sha256: null,
         mime: "text/plain", referenceOnly: true, text: null, data: Buffer.from(text).toString("base64") };
@@ -87,7 +89,7 @@ export async function readWorkspaceFiles(chat, executor, input) {
     let output = "", settled = false;
     const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); error ? reject(error) : resolve(value); };
     const timer = setTimeout(() => { void terminateWorker(child); finish(new Error("Workspace read timed out")); }, 10000);
-    child.stdout.on("data", chunk => { output += chunk; if (output.length > 3 * 1024 * 1024) { void terminateWorker(child); finish(new Error("Workspace response exceeds its limit")); } });
+    child.stdout.on("data", chunk => { output += chunk; if (output.length > (request.maxBytes > 512 * 1024 ? 8 : 3) * 1024 * 1024) { void terminateWorker(child); finish(new Error("Workspace response exceeds its limit")); } });
     child.stderr.resume(); child.stdin.on("error", () => {}); child.once("error", finish);
     child.once("close", code => {
       if (code !== 0) return finish(new Error("Workspace reader stopped before completing"));

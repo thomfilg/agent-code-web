@@ -221,3 +221,28 @@ test("concurrent and repeated chat deletion verifies worker cleanup without a fa
   assert.deepEqual(await manager.remove(chat.id), { removed: true, cleanupPending: false });
   assert.equal(destroyCalls, 2);
 });
+
+test("an image the agent cites from its workspace is kept as an attachment of its message", async t => {
+  const { Attachments } = await import("../src/attachments.mjs");
+  const { responsePrompt } = await import("../src/response-protocol.mjs");
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const root = await temporaryDirectory(t), config = testConfig(root), store = new ChatStore(root); await store.initialize();
+  const attachments = new Attachments(new MemoryRecords(), store);
+  const png = Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000", "hex");
+  let chat;
+  const manager = new RuntimeManager({ store, config, attachments, broker: new CapabilityBroker({ ttlMs: 10000 }), gatewayOrigin: "http://localhost",
+    adapterFactory: () => ({ start: async () => {}, stop: async () => {}, send: async text => {
+      await mkdir(path.join(store.get(chat.id).workspace, "shots"), { recursive: true });
+      await writeFile(path.join(store.get(chat.id).workspace, "shots", "home.png"), png);
+      return { text: "Here it is: ![Home page](shots/home.png) and a missing ![one](shots/gone.png)" };
+    } }) });
+  t.after(() => manager.shutdown());
+  chat = await manager.createChat({ agent: "mock" });
+  await manager.send(chat.id, "Show me the page");
+  assert.match(responsePrompt("Show me the page", false), /put !\[short caption\]\(relative\/path\.png\) in your reply/, "real agents are told how to show an image");
+  const reply = store.get(chat.id).messages.findLast(message => message.role === "assistant");
+  assert.equal(reply.attachments.length, 1);
+  assert.deepEqual(reply.attachments[0].agentImage, { path: "shots/home.png", source: "shots/home.png", caption: "Home page" });
+  const [saved] = await attachments.resolve(chat.id, [reply.attachments[0].id]);
+  assert.equal(saved.mime, "image/png"); assert.deepEqual(Buffer.from(saved.data, "base64"), png);
+});

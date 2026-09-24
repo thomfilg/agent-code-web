@@ -1,5 +1,6 @@
 import { openSidePanel, closeSidePanel } from "./side-panels.js";
-import { attachmentPreview, droppedFiles, fileSize, isAttachmentImage } from "./attachment-view.js";
+import { attachmentPreview, chatImages, droppedFiles, fileSize, isAttachmentImage } from "./attachment-view.js";
+import { ImageLightbox } from "./image-lightbox.js";
 const $ = selector => document.querySelector(selector);
 const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
 function button(label, action, cls) { const node = el("button", label, cls); node.type = "button"; node.addEventListener("click", action); return node; }
@@ -454,12 +455,23 @@ export class ChatControls {
       this.dialog(app.name, el("p", `Native app reference · ${app.token}`), el("p", `Company: ${app.company || "Unassigned"}`, "muted"), el("p", app.inactive ? "Historical reference. Select the app again to use it in this chat." : "Saved reference only, not a copy of account credentials. Access is rechecked when this input runs.", "muted"));
       return;
     }
+    if (isAttachmentImage(file)) { this.openImage(file, context); return; }
     const version = this.attachmentPreviewVersion = (this.attachmentPreviewVersion || 0) + 1;
     try {
       const attachment = await this.loadAttachment(file, context.chatId);
       if ((context.chatId ? this.state.active?.id !== context.chatId : this.draftKey() !== context.draftKey) || this.attachmentPreviewVersion !== version) return;
       this.preview.open({ ...context, ...attachmentPreview(attachment), title: attachment.name });
     } catch (error) { this.toast(error.message); }
+  }
+  // Images open full screen; the carousel pages through every image of the
+  // chat (sent and shown by agents), or the draft's images before sending.
+  openImage(file, { chatId, messageId, trigger } = {}) {
+    const images = messageId && chatId ? chatImages(this.state.active?.id === chatId ? this.state.active.messages : [])
+      : this.attachments().filter(item => isAttachmentImage(item)).map(item => ({ file: item, messageId: null }));
+    const list = images.some(image => image.file.id === file.id) ? images : [{ file, messageId }];
+    this.lightbox ||= new ImageLightbox();
+    this.lightbox.open(list.map(image => ({ key: image.file.id, name: image.file.name, caption: image.file.agentImage?.caption || "",
+      load: async () => attachmentPreview(await this.loadAttachment(image.file, chatId)).source })), list.findIndex(image => image.file.id === file.id), trigger);
   }
   renderAttachments() {
     for (const card of this.observedThumbnails) if (!card.isConnected) { this.thumbnailObserver.unobserve(card); this.observedThumbnails.delete(card); }

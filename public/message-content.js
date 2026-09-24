@@ -6,7 +6,7 @@ export { stripRelayProtocol };
 const escape = value => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
 const renderer = new marked.Renderer();
 renderer.html = ({ text }) => `<pre class="html-source"><code>${escape(text)}</code></pre>`;
-export function renderContent(root, text, { onPreview } = {}) {
+export function renderContent(root, text, { onPreview, imageFor } = {}) {
   root.classList.add("markdown");
   root.innerHTML = DOMPurify.sanitize(marked.parse(stripRelayProtocol(text), { renderer, gfm: true }), {
     USE_PROFILES: { html: true }, FORBID_TAGS: ["style", "form", "input", "button", "iframe", "video", "audio"],
@@ -18,6 +18,9 @@ export function renderContent(root, text, { onPreview } = {}) {
   }
   // Remote images may track readers. Do not load them automatically.
   for (const img of root.querySelectorAll("img")) {
+    // Images an agent saved in its workspace were captured as attachments.
+    const captured = imageFor?.(img.getAttribute("src") || "");
+    if (captured) { img.replaceWith(captured); continue; }
     if (!/^data:image\/(png|jpeg|gif|webp);base64,/i.test(img.getAttribute("src") || "")) img.replaceWith(document.createTextNode(img.alt || "[Image]"));
   }
   for (const [index, pre] of [...root.querySelectorAll("pre")].entries()) {

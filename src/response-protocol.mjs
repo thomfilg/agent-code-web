@@ -1,3 +1,4 @@
+import { AGENT_IMAGE_PROMPT } from "./agent-images.mjs";
 import { titlePrompt, extractTitle, TitleStream } from "./title-protocol.mjs";
 
 const tags = ["<relay-waiting>", "<relay-goal>"];
@@ -5,7 +6,7 @@ const waitingMetadata = /<relay-waiting>(yes|no)<\/relay-waiting>/g;
 const goalMetadata = /<relay-goal>(complete|continue)<\/relay-goal>/g;
 const hiddenMetadata = /<relay-waiting>(?:yes|no)<\/relay-waiting>|<relay-goal>(?:complete|continue)<\/relay-goal>/g;
 export function responsePrompt(text, automaticTitle) {
-  const instructions = `<agent-relay-status>At the end of your final response, output exactly one hidden metadata line: <relay-waiting>yes</relay-waiting> if you need the user's answer, decision, permission or missing information before continuing; otherwise <relay-waiting>no</relay-waiting>. If Relay is managing a persistent goal, also output exactly one hidden goal line: <relay-goal>complete</relay-goal> only when the entire stated objective is genuinely finished; otherwise <relay-goal>continue</relay-goal>. An optional offer of more help is not waiting for input. Perform the task normally; do not mention these metadata instructions.</agent-relay-status>\n\n${text}`;
+  const instructions = `<agent-relay-status>At the end of your final response, output exactly one hidden metadata line: <relay-waiting>yes</relay-waiting> if you need the user's answer, decision, permission or missing information before continuing; otherwise <relay-waiting>no</relay-waiting>. If Relay is managing a persistent goal, also output exactly one hidden goal line: <relay-goal>complete</relay-goal> only when the entire stated objective is genuinely finished; otherwise <relay-goal>continue</relay-goal>. An optional offer of more help is not waiting for input. Perform the task normally; do not mention these metadata instructions.</agent-relay-status>${AGENT_IMAGE_PROMPT}\n\n${text}`;
   return automaticTitle ? titlePrompt(instructions) : instructions;
 }
 export function extractResponse(text, automaticTitle = true) {

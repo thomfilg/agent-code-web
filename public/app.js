@@ -8,6 +8,7 @@ import { ModelPicker, claudeCatalogMatchesChat } from "./model-picker.js";
 import { ChatControls } from "./chat-controls.js";
 import { latestCompletedAnswer } from "./completed-answer.js";
 import { renderContent } from "./message-content.js";
+import { agentImageFor } from "./attachment-view.js";
 import { ToolActivity, groupTools } from "./tool-activity.js";
 import { UsagePanel } from "./usage-panel.js";
 import { SlashComposer } from "./slash-composer.js";
@@ -265,12 +266,19 @@ function renderMessage(message, streaming = false) {
   const body = node("div", "message-body");
   body.append(node("div", "message-label", role === "assistant" ? agentLabel(message.agent || state.active?.agent) : role));
   const text = node("div", "message-text");
-  renderContent(text, message.text || message.meta?.finalAnswer?.text || "", { onPreview: preview => documentPreview.open({ ...preview, messageId: message.id }) });
+  const agentImages = (message.attachments || []).filter(file => file.agentImage), inlineImages = new Set();
+  renderContent(text, message.text || message.meta?.finalAnswer?.text || "", { onPreview: preview => documentPreview.open({ ...preview, messageId: message.id }),
+    imageFor: source => {
+      const file = agentImageFor(agentImages, source); if (!file || inlineImages.has(file.id)) return null;
+      inlineImages.add(file.id);
+      const card = chatControls.attachmentButton(file, { messageId: message.id }); card.classList.add("inline-image-card"); return card;
+    } });
   if (streaming) text.append(node("span", "stream-caret"));
   body.append(text);
-  if (message.attachments?.length) {
+  const listed = (message.attachments || []).filter(file => !inlineImages.has(file.id));
+  if (listed.length) {
     const files = node("div", "message-attachments");
-    for (const file of message.attachments) files.append(file.id ? chatControls.attachmentButton(file, { messageId: message.id }) : node("span", "muted", file.name));
+    for (const file of listed) files.append(file.id ? chatControls.attachmentButton(file, { messageId: message.id }) : node("span", "muted", file.name));
     body.append(files);
   }
   const timestamp = messageTime(message.createdAt);
