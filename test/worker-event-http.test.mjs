@@ -70,6 +70,23 @@ test("system event stream is unavailable without the Relay browser session", { t
   await app.stop();
 });
 
+test("revoking a browser session closes an already-open private worker stream before delivery", { timeout: 12000 }, async t => {
+  const root = await temporaryDirectory(t), records = new MemoryRecords();
+  const app = await createAgentWebServer({ config: testConfig(root), records });
+  const { url } = await app.start(); t.after(() => app.stop());
+  const login = await app.browserUsers.register({ username: "workerstreamowner", password: "private-test-password" });
+  const cookie = login.cookie.split(";")[0];
+  const chat = await app.store.create({ title: "Private worker stream", agent: "mock", ownerId: login.user.id });
+  const abort = new AbortController(); t.after(() => abort.abort());
+  const connected = await fetch(`${url}/api/chats/${chat.id}/worker-events`, { headers: { cookie }, signal: abort.signal });
+  assert.equal(connected.status, 200);
+  await app.browserUsers.logout({ headers: { cookie } });
+  const pending = assert.rejects(streamEvent(connected, abort.signal), /ended before an event arrived/);
+  await records.appendWorkerEvent(chat.id, "fixture:after-logout", { type: "worker-state", state: "stopped" });
+  await pending;
+  abort.abort();
+});
+
 test("public host events omit exact Docker container identity", { timeout: 12000 }, async t => {
   const root = await temporaryDirectory(t), records = new MemoryRecords();
   const app = await createAgentWebServer({ config: testConfig(root), records });
