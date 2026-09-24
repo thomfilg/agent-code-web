@@ -111,6 +111,8 @@ export function loadConfig(env = process.env) {
       webhookSecret: env.AGENT_GITHUB_WEBHOOK_SECRET || "",
     },
     idlePolicy,
+    // Hours between automatic sign-in renewals of saved browser profiles; 0 disables.
+    browserProfileRefreshHours: integer(env, "AGENT_BROWSER_PROFILE_REFRESH_HOURS", 24, { min: 0, max: 720 }),
     idleTimeoutMs: integer(env, "AGENT_IDLE_TIMEOUT_MS", idlePolicy === "hibernate" ? 120_000 : 300_000, { min: 100, max: 86_400_000 }),
     chatRetentionDays: integer(env, "AGENT_CHAT_RETENTION_DAYS", 7, { min: 0, max: 3650 }),
     dataDir: path.resolve(APP_ROOT, env.AGENT_DATA_DIR || "data"),

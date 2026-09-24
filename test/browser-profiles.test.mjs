@@ -176,7 +176,8 @@ test("each site's sign-in lifetime comes from its longest-lived login cookie", a
     [".app.clickup.com", "cu_refresh", "2027-09-18T00:00:00Z"],      // the refresh token decides
     [".clickup.com", "_ga", "2030-01-01T00:00:00Z"],                 // analytics is ignored
     ["github.com", "logged_in", "2026-10-01T00:00:00Z"],
-    ["accounts.google.co.uk", "__Host-GAPS", "2026-09-01T00:00:00Z"],
+    ["accounts.google.co.uk", "__Secure-3PSID", "2026-09-01T00:00:00Z"],
+    ["accounts.google.co.uk", "__Host-GAPS", "2030-01-01T00:00:00Z"],          // set even when signed out
     [".linear.app", "session"],                                      // session-only cookie
     ["localhost", "session_token", "2030-01-01T00:00:00Z"],          // development noise
   ] }));

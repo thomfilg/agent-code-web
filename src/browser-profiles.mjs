@@ -66,7 +66,7 @@ async function cookieSummary(file) {
 // (a refresh token usually outlives its short access token). Analytics cookies
 // are ignored. A site whose login cookies are all session-only loses them when
 // Chrome restarts, so its snapshot starts signed out.
-const LOGIN_COOKIE = /refresh|session|sess|sid|auth|token|jwt|login|remember|logged|^__(secure|host)-/i;
+const LOGIN_COOKIE = /refresh|session|sess|sid|auth|token|jwt|login|remember|logged/i;
 const TRACKING_COOKIE = /^(_ga|_gid|_gcl|_fbp|_uet|_ttp|_rdt|__ps|ajs_|analytics|ttcsid|singular|_mkto|_tt_|_clck|_clsk|_hj|mp_|amplitude|intercom-|_dd_s|__cf|cf_)/i;
 const TWO_LEVEL = /\.(com|co|net|org|gov|edu)\.[a-z]{2}$/;
 export const siteOf = host => {
@@ -81,10 +81,11 @@ function loginSessions(db) {
   for (const row of rows) {
     const name = String(row.name);
     if (!LOGIN_COOKIE.test(name) || TRACKING_COOKIE.test(name) || /^\.?(localhost|\d+\.\d+\.\d+\.\d+)$/.test(row.host)) continue;
-    const site = siteOf(row.host), entry = sites.get(site) || { site, expiresAt: null, cookie: null, sessionOnly: true };
+    const site = siteOf(row.host), host = String(row.host).replace(/^\./, "").toLowerCase();
+    const entry = sites.get(site) || { site, host, expiresAt: null, cookie: null, sessionOnly: true };
     const expires = row.expires === null ? null : Number(row.expires);
     if (Number(row.persistent) && expires && (!entry.expiresAt || expires * 1000 > Date.parse(entry.expiresAt))) {
-      Object.assign(entry, { expiresAt: new Date(expires * 1000).toISOString(), cookie: name, sessionOnly: false });
+      Object.assign(entry, { host, expiresAt: new Date(expires * 1000).toISOString(), cookie: name, sessionOnly: false });
     } else if (entry.sessionOnly && !entry.cookie) entry.cookie = name;
     sites.set(site, entry);
   }
@@ -126,7 +127,7 @@ export const chromeMajor = version => Number(/^(\d+)\./.exec(version || "")?.[1]
 
 function publicProfile(profile) {
   const current = profile.versions.at(-1) || null;
-  return { id: profile.id, name: profile.name, companyId: profile.companyId, createdAt: profile.createdAt, updatedAt: profile.updatedAt,
+  return { id: profile.id, name: profile.name, companyId: profile.companyId, createdAt: profile.createdAt, updatedAt: profile.updatedAt, refresh: profile.refresh || null,
     currentVersion: current?.version || 0, sites: current?.sites || [], sessions: current?.sessions || [], chromeVersion: current?.chromeVersion || null,
     versions: profile.versions.map(({ version, bytes, sha256, chromeVersion, sites, source, createdAt }) => ({ version, bytes, sha256, chromeVersion, sites, source, createdAt })) };
 }
@@ -185,6 +186,13 @@ export class BrowserProfiles {
       const value = { ...profile, versions, updatedAt: entry.createdAt };
       await this.records.put("browser-profile", id, value);
       return publicProfile(value);
+    });
+  }
+  // Outcome of the last automatic sign-in refresh (never touches versions).
+  recordRefresh(id, refresh) {
+    return this.serial(async () => {
+      const profile = await this.owned(id);
+      await this.records.put("browser-profile", id, { ...profile, refresh });
     });
   }
   async archive(id, version) {

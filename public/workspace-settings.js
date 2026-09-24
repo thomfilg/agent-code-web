@@ -59,6 +59,7 @@ export class WorkspaceSettings {
     $("#browser-profile-create").addEventListener("click", () => this.browserProfileAction("create"));
     $("#browser-profile-upload").addEventListener("click", () => this.browserProfileAction("upload"));
     $("#browser-profile-delete").addEventListener("click", () => this.browserProfileAction("delete"));
+    $("#browser-profile-refresh").addEventListener("click", () => this.browserProfileAction("refresh"));
     for (const type of ["input", "change"]) $("#environment-form").addEventListener(type, () => this.updateEnvironmentDirty());
     $("#environment-form").addEventListener("submit", event => this.saveEnvironment(event));
     $("#delete-environment").addEventListener("click", () => this.deleteEnvironment());
@@ -519,9 +520,11 @@ export class WorkspaceSettings {
         item.title = session.cookie ? `Longest-lived login cookie: ${session.cookie}` : "";
         list.append(item);
       }
-      details.append(el("p", "muted", "Sign-ins saved in this version. A site can still end a session earlier; sign in again from a chat’s Browser panel and choose “Save to profile” to refresh the snapshot."), list);
+      if (selected.refresh) details.append(el("p", `browser-profile-refresh-status ${selected.refresh.status}`, `Last renewal ${new Date(selected.refresh.at).toLocaleString()}: ${{ running: "in progress", renewed: `renewed as version ${selected.refresh.version}`, "needs-sign-in": "sign in again", skipped: "skipped", failed: "failed" }[selected.refresh.status] || selected.refresh.status}${selected.refresh.message && selected.refresh.status !== "renewed" ? ` — ${selected.refresh.message}` : ""}`));
+      details.append(el("p", "muted", "Sign-ins saved in this version. They are renewed automatically every day. A site can still end a session earlier; sign in again from a chat’s Browser panel and choose “Save to profile” to refresh the snapshot."), list);
     }
     $("#browser-profile-upload").disabled = $("#browser-profile-delete").disabled = !selected;
+    $("#browser-profile-refresh").disabled = !selected?.currentVersion || selected?.refresh?.status === "running";
     $("#browser-profile-create").disabled = !companyId;
   }
   async browserProfileAction(action) {
@@ -533,6 +536,12 @@ export class WorkspaceSettings {
       return String(data).replace(/^data:[^,]*,/, "");
     };
     try {
+      if (action === "refresh") {
+        await this.api(`/api/browser-profiles/${selected}/refresh`, { method: "POST", body: "{}" });
+        $("#environment-save-status").textContent = "Renewal started on a private worker; it takes a few minutes.";
+        this.browserProfiles = (await this.api("/api/browser-profiles")).profiles; this.renderBrowserProfiles();
+        return;
+      }
       if (action === "delete") {
         if (!confirm("Delete this browser profile and all of its versions? Chats that already copied it keep their copies.")) return;
         await this.api(`/api/browser-profiles/${selected}`, { method: "DELETE" });
