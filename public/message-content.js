@@ -1,15 +1,11 @@
 import { marked } from "/vendor/marked.js";
 import DOMPurify from "/vendor/purify.js";
 import { highlightCode } from "./syntax-highlight.js";
+import { stripRelayProtocol } from "./relay-protocol.js";
+export { stripRelayProtocol };
 const escape = value => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
 const renderer = new marked.Renderer();
 renderer.html = ({ text }) => `<pre class="html-source"><code>${escape(text)}</code></pre>`;
-export function stripRelayProtocol(text) {
-  return String(text || "")
-    .replace(/<relay-(title|waiting|goal)>[\s\S]*?<\/relay-\1>/gi, "")
-    .replace(/<\/?(?:relay-(?:title|waiting|goal)|agent-relay-(?:metadata|status))[^>]*>/gi, "")
-    .replace(/^\s+|\s+$/g, "");
-}
 export function renderContent(root, text, { onPreview } = {}) {
   root.classList.add("markdown");
   root.innerHTML = DOMPurify.sanitize(marked.parse(stripRelayProtocol(text), { renderer, gfm: true }), {
