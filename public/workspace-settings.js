@@ -188,7 +188,7 @@ export class WorkspaceSettings {
     const old = explicit ? saved : sameProject && sameCompany ? select.value || saved : saved;
     const available = (this.accounts || []).filter(account => ["codex", "claude"].includes(account.provider) && account.status === "connected");
     $("#agent-account-requirement").hidden = !supported || available.length > 0;
-    select.replaceChildren(option("", "Select an agent account"), ...available.map(account => option(account.id, agentAccountLabel(account))));
+    select.replaceChildren(option("", "Choose agent"), ...available.map(account => option(account.id, agentAccountLabel(account))));
     if (available.some(account => account.id === old)) select.value = old;
     else if (!explicit && !old && available.length === 1) select.value = available[0].id;
     this.accountProject = project;

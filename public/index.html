@@ -134,14 +134,14 @@
                 <div class="composer-input-row"><label class="sr-only" for="initial-prompt">New chat message</label><textarea id="initial-prompt" rows="1" maxlength="100000" placeholder="Describe a task or ask a question…"></textarea><button class="send-button" id="create-chat-button" type="submit" aria-label="Send first message" title="Send message" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg></button></div>
                 <div class="composer-footer">
                   <button type="button" id="new-add-attachments" class="small-icon" aria-label="Add files or photos" title="Add files or photos">+</button>
-                  <button type="button" class="saved-prompts-trigger" data-saved-prompts aria-label="Saved prompts" aria-controls="saved-prompts-picker" aria-expanded="false" title="Saved prompts">▤</button>
-                  <div class="draft-agent-picker" id="new-agent-account-field"><select id="agent-select" aria-label="Agent" required></select><select id="new-agent-account" aria-label="Agent" hidden><option value="">Select an agent account</option></select><button type="button" class="small-icon" id="connect-codex-button" aria-label="Manage agent accounts" title="Manage agent accounts" hidden>⚙</button></div>
                   <select id="new-mode-select" aria-label="New chat permission mode" title="Permission mode">
                     <option value="auto" selected>Auto</option>
                     <option value="accept_edits">Edits</option>
                     <option value="plan">Plan</option>
                   </select>
+                  <div class="draft-agent-picker" id="new-agent-account-field"><select id="agent-select" aria-label="Agent" required></select><select id="new-agent-account" aria-label="Agent" hidden><option value="">Choose agent</option></select><button type="button" class="small-icon" id="connect-codex-button" aria-label="Manage agent accounts" title="Manage agent accounts" hidden>⚙</button></div>
                   <div class="model-controls compact-model-controls" id="new-model-controls"><select class="model-select" aria-label="New chat model" title="Model"></select><select class="effort-select" aria-label="New chat effort" title="Effort"></select><p class="model-note" role="status"></p></div>
+                  <button type="button" class="saved-prompts-trigger" data-saved-prompts aria-label="Saved prompts" aria-controls="saved-prompts-picker" aria-expanded="false" title="Saved prompts">▤</button>
                 </div>
               </div>
               <div id="agent-account-requirement" class="onboarding-hint" hidden><p id="agent-account-hint" class="muted" role="status"></p></div>
