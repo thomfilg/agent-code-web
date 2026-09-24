@@ -234,15 +234,15 @@ export class McpConnections {
   }
 }
 
-const RELAY_APPROVED_SERVERS = new Set(["relay_browser"]);
+const RELAY_APPROVED_SERVERS = new Set(["relay_browser", "relay_github"]);
 export function codexMcpArgs(servers = {}) {
   const toml = value => Array.isArray(value) ? `[${value.map(toml).join(",")}]` : typeof value === "object" ? `{${Object.entries(value).map(([key, v]) => `${JSON.stringify(key)}=${toml(v)}`).join(",")}}` : JSON.stringify(value);
   return Object.entries(servers).flatMap(([name, server]) => {
     const fields = server.type === "http" ? { url: server.url, ...(server.headers ? { http_headers: server.headers } : {}),
       ...(server.bearerTokenEnvVar ? { bearer_token_env_var: server.bearerTokenEnvVar } : {}),
-      // The relay browser is the chat's own Chrome behind a fixed tool allowlist.
+      // The relay browser and GitHub servers are built-in, scoped capabilities.
       // Auto mode runs Codex with approval_policy=never, where any tool that still
-      // asks for approval fails, so its tools are pre-approved.
+      // asks for approval fails. Arbitrary MCP connections remain unapproved.
       ...(RELAY_APPROVED_SERVERS.has(name) ? { default_tools_approval_mode: "approve" } : {}) } : { command: server.command, args: server.args };
     return Object.entries(fields).flatMap(([key, value]) => ["-c", `mcp_servers.${name}.${key}=${toml(value)}`]);
   });

@@ -89,11 +89,13 @@ test("MCP gateway scopes capabilities, preserves protocol headers, blocks redire
   mcps.revokeChat("a"); assert.equal((await fetch(url, { headers: { Authorization: auth } })).status, 401);
 });
 
-test("Codex pre-approves only the relay browser tools, so Auto mode can use them", () => {
+test("Codex pre-approves only built-in scoped relay tools, so Auto mode can use them", () => {
   const args = codexMcpArgs({
     relay_browser: { type: "http", url: "https://relay.test/gateway/browser", headers: {}, bearerTokenEnvVar: "RELAY_MCP_CAPABILITY_0" },
+    relay_github: { type: "http", url: "https://relay.test/gateway/github-worker", headers: { Authorization: "Bearer scoped" } },
     company_tool: { type: "http", url: "https://relay.test/gateway/mcp/x", headers: {} },
   }).join(" ");
   assert.match(args, /mcp_servers\.relay_browser\.default_tools_approval_mode="approve"/);
+  assert.match(args, /mcp_servers\.relay_github\.default_tools_approval_mode="approve"/);
   assert.doesNotMatch(args, /company_tool\.default_tools_approval_mode/);
 });
