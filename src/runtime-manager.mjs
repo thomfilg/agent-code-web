@@ -99,6 +99,7 @@ export class RuntimeManager extends EventEmitter {
   #workerResizes = new Map();
   #workerReconciliations = new Map();
   #backgroundRecheck = new Map();
+  #deletions = new Map();
 
   #activity(chatId, runtime = this.#runtimes.get(chatId), { ignoreSuspension = false } = {}) {
     return workerActivity({
@@ -2610,8 +2611,34 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async remove(chatId) {
+    if (this.#deletions.has(chatId)) return this.#deletions.get(chatId);
+    const deletion = this.#removeChat(chatId);
+    this.#deletions.set(chatId, deletion);
+    try { return await deletion; }
+    finally { this.#deletions.delete(chatId); }
+  }
+
+  async #removeChat(chatId) {
     const chat = this.store.get(chatId);
-    if (!chat) return { removed: false, cleanupPending: false };
+    if (!chat) {
+      // A repeated DELETE must still reconcile an orphaned worker left by an
+      // interrupted first request. A missing chat record is not proof that its
+      // EC2 instance and volumes were destroyed.
+      let cleanupError = null;
+      try {
+        await this.workerBackend.destroy({ id: chatId });
+        await this.store.records?.delete(DELETION_CLEANUP, chatId);
+      } catch (error) { cleanupError = error; }
+      if (cleanupError) {
+        if (!this.store.records) throw cleanupError;
+        await this.store.records.put(DELETION_CLEANUP, chatId, {
+          id: chatId, createdAt: nowIso(), attempts: 0, error: errorMessage(cleanupError).slice(0, 500),
+        });
+        void this.retryDeletionCleanup().catch(error => console.error(`Worker deletion retry failed for ${chatId}: ${errorMessage(error)}`));
+      }
+      await this.attachments?.removeChat(chatId);
+      return { removed: true, cleanupPending: Boolean(cleanupError) };
+    }
     // The UI hides the chat immediately after confirmation. Keep a durable
     // cleanup record if verified worker destruction fails, then report pending
     // instead of claiming that all infrastructure is already gone.
