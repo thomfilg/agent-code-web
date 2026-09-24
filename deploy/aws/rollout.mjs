@@ -17,6 +17,11 @@ export function rolloutCommands({ tag, image }) {
   if (!/^[a-f0-9]{7,40}$/.test(tag || "")) throw new Error("tag must be a git commit sha");
   const match = IMAGE.exec(image || "");
   if (!match) throw new Error("image must be an ECR repository@sha256 digest");
+  const liveWorkerFence = [
+    `relay_live_workers=$(aws ec2 describe-instances --region us-east-2 --filters Name=tag:AgentRelayDeployment,Values=${DEPLOYMENT} Name=tag:ManagedBy,Values=agent-relay Name=instance-state-name,Values=pending,running,stopping --query 'length(Reservations[].Instances[])' --output text)`,
+    'case "$relay_live_workers" in ""|*[!0-9]*) echo "Could not verify live worker count; deployment deferred" >&2; exit 1;; esac',
+    `if [ "$relay_live_workers" -ne 0 ]; then echo ${DEFERRED}; echo "Relay still has running EC2 workers; deployment deferred without stopping workers" >&2; exit ${DEFERRED_EXIT}; fi`,
+  ];
   return [
     "set -eu",
     `relay_registry=${match[1]}`,
@@ -24,6 +29,9 @@ export function rolloutCommands({ tag, image }) {
     // A rerun of the same commit keeps every earlier rollback container.
     `relay_backup=relay-rollback-${tag}-$(date +%s)`,
     `relay_env=/run/relay-${tag}.env`,
+    // An early read avoids pruning/pulling the same unused candidate image on
+    // every CI retry. It is only an optimization: a worker can start later.
+    ...liveWorkerFence,
     'current=$(sudo docker inspect relay --format "{{.Image}}")',
     // The controller's small root disk has repeatedly filled with old ECR
     // layers. Docker keeps every image referenced by the current or rollback
@@ -51,9 +59,7 @@ export function rolloutCommands({ tag, image }) {
     // The old controller's drain predicate can miss an active goal between
     // turns (chat status idle, worker still running). This independent EC2
     // fence must pass before Docker Stop even during the first fixed rollout.
-    `relay_live_workers=$(aws ec2 describe-instances --region us-east-2 --filters Name=tag:AgentRelayDeployment,Values=${DEPLOYMENT} Name=tag:ManagedBy,Values=agent-relay Name=instance-state-name,Values=pending,running,stopping --query 'length(Reservations[].Instances[])' --output text)`,
-    'case "$relay_live_workers" in ""|*[!0-9]*) echo "Could not verify live worker count; deployment deferred" >&2; exit 1;; esac',
-    `if [ "$relay_live_workers" -ne 0 ]; then echo ${DEFERRED}; echo "Relay still has running EC2 workers; deployment deferred without stopping workers" >&2; exit ${DEFERRED_EXIT}; fi`,
+    ...liveWorkerFence,
     "sudo docker inspect relay --format '{{range .Config.Env}}{{println .}}{{end}}' | sudo tee \"$relay_env\" >/dev/null",
     'sudo chmod 600 "$relay_env"',
     "sudo docker stop --timeout 45 relay",
