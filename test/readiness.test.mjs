@@ -91,6 +91,20 @@ test("deployment drain rejects browser requests, busy work and pauses new admiss
   assert.equal((await fetch(url + "/readyz")).status, 200);
 });
 
+test("deployment drain rejects an idle-looking active goal and a retained worker", async t => {
+  const root = await temporaryDirectory(t);
+  const app = await createAgentWebServer({ config: testConfig(root) });
+  const { url } = await app.start(); t.after(() => app.stop());
+  const chat = await app.manager.createChat({ agent: "mock", title: "Long-running goal fixture" });
+  const drain = () => fetch(url + "/internal/deploy/drain", { method: "POST" });
+  await app.store.update(chat.id, { status: "idle", goal: { status: "active", managedBy: "relay", objective: "Continue working" } });
+  assert.equal((await drain()).status, 409, "an active goal is work even between model turns");
+  await app.store.update(chat.id, { status: "idle", goal: { status: "paused", managedBy: "relay", objective: "Continue working" }, workerLifecycle: { state: "running" } });
+  assert.equal((await drain()).status, 409, "an awake worker is protected even without a foreground turn");
+  await app.store.update(chat.id, { status: "stopped", workerLifecycle: { state: "stopped" } });
+  assert.equal((await drain()).status, 200);
+});
+
 for (const pending of ["disconnecting", "removing"]) test(`deployment drain rejects incomplete account ${pending} cleanup after the request has failed`, async t => {
   const root = await temporaryDirectory(t), app = await createAgentWebServer({ config: testConfig(root) });
   const { url } = await app.start(); t.after(() => app.stop());

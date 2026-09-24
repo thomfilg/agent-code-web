@@ -234,7 +234,7 @@ export async function createAgentWebServer(options = {}) {
         const providerLogin = resources.all().some(service => service.github.pending?.size ||
           [...service.mcps.oauth.flows.values()].some(flow => flow.expiresAt > Date.now()));
         const busy = activeMutations || githubWorkers.active || previews?.active || browserAttachments || agentAccounts.flows.size || providerLogin || store.list().some(chat =>
-          manager?.isBusy(chat.id) || manager?.sideChats.busy(chat.id) || ["starting", "stopping", "running", "waiting"].includes(chat.status));
+          manager?.hasDeployProtectedWork(chat.id) || manager?.sideChats.busy(chat.id) || ["starting", "stopping", "running", "waiting"].includes(chat.status));
         if (busy) return json(response, 409, { ok: false, error: "Wait for active work and sign-in attempts to finish" });
         draining = true;
         for (const socket of browserSockets.clients) socket.close(1012, "Relay is restarting");

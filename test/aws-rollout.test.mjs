@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { rolloutCommands } from "../deploy/aws/rollout.mjs";
 
 const image = `456808212788.dkr.ecr.us-east-2.amazonaws.com/agent-relay-mvp-applicationrepository-sujdgarjwejp@sha256:${"a".repeat(64)}`;
@@ -19,6 +21,8 @@ test("the new container is started only after the old one is kept, and failures 
   const index = pattern => commands.findIndex(line => pattern.test(line));
   assert.equal(commands[0], "set -eu");
   assert.ok(index(/docker pull/) < index(/docker stop --timeout 45 relay/), "pull before stopping");
+  assert.ok(index(/internal\/deploy\/drain/) > index(/docker pull/) && index(/internal\/deploy\/drain/) < index(/docker stop --timeout 45 relay/), "controller drain must fence active work before Stop");
+  assert.match(script, /internal\/deploy\/resume/, "a failed pre-stop rollout reopens the controller");
   assert.ok(index(/docker rename relay "\$relay_backup"/) < index(/docker run -d --name relay/), "keep the old container before starting");
   assert.match(script, /--mount type=bind,src=\/srv\/relay\/data,dst=\/var\/lib\/relay/);
   assert.match(script, /--env-file "\$relay_env"/);
@@ -36,6 +40,25 @@ test("the command-line form writes SSM AWS-RunShellScript parameters", () => {
   const parameters = JSON.parse(output);
   assert.deepEqual(parameters.executionTimeout, ["900"]);
   assert.ok(parameters.commands.includes(`relay_image=${image}`));
+});
+
+test("a rejected live-controller drain aborts the rollout before Docker Stop", t => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-rollout-drain-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const calls = join(directory, "calls");
+  const fake = (name, body) => {
+    const file = join(directory, name);
+    writeFileSync(file, `#!/bin/sh\n${body}\n`); chmodSync(file, 0o700);
+  };
+  fake("sudo", `printf '%s\\n' "$*" >> "$RELAY_TEST_CALLS"\ncase "$*" in *'docker inspect relay'*) echo old-image;; *'docker image inspect'*) echo new-image;; esac\nexit 0`);
+  fake("aws", "echo fixture-password");
+  fake("curl", "exit 22");
+  const command = spawnSync("/bin/sh", ["-c", rolloutCommands({ tag: "abc1234def56", image }).join("\n")], {
+    env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, RELAY_TEST_CALLS: calls }, encoding: "utf8",
+  });
+  assert.notEqual(command.status, 0);
+  assert.match(command.stderr, /deployment deferred without stopping workers/);
+  assert.doesNotMatch(readFileSync(calls, "utf8"), /docker stop|docker rename|docker run/);
 });
 
 test("the workflow deploys main with OIDC, one rollout at a time, and pins every action", () => {
