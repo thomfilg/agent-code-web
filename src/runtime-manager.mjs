@@ -996,6 +996,13 @@ export class RuntimeManager extends EventEmitter {
   // A persistent goal is a worker-lifetime lease, not an in-flight turn. It
   // must not block the system continuation queued to perform the next turn.
   isBusy(chatId) { const runtime = this.#runtimes.get(chatId), chat = this.store.get(chatId); return this.#modeChanges.has(chatId) || this.#workerWakes.has(chatId) || this.#suspensions.has(chatId) || this.#sendingNow.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || Boolean(runtime?.failing || runtime?.busy || runtime?.adapter.isBackgroundBusy?.() || runtime?.adapter.hasAwaitedBackgroundWork?.() || runtime?.adapter.hasBackgroundTasks?.() || runtime?.adapter.agents?.busy?.() || chat?.messages?.some(message => message.kind === "tool" && ["running", "stopping"].includes(message.meta?.state))) || this.#importPending(chatId); }
+  hasDeployProtectedWork(chatId) {
+    const chat = this.store.get(chatId);
+    // Deploy must not turn an idle-looking active goal or a retained worker
+    // into a full Stop. A worker can be alive without a foreground model turn.
+    return this.#activity(chatId).active || this.#runtimes.has(chatId) || this.#executors.has(chatId)
+      || this.#awakeWorkers.has(chatId) || chat?.workerLifecycle?.state === "running";
+  }
   async machineHealth(chatId) {
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });

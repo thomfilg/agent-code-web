@@ -26,6 +26,13 @@ export function rolloutCommands({ tag, image }) {
     'sudo docker pull "$relay_image" >/dev/null',
     'target=$(sudo docker image inspect "$relay_image" --format "{{.Id}}")',
     'if [ "$current" = "$target" ]; then echo "Already running $relay_image"; echo READY; exit 0; fi',
+    // Only the running controller can authoritatively decide whether a chat,
+    // goal, browser or retained worker would be interrupted. A rejected drain
+    // leaves the old container serving and aborts the rollout before Stop.
+    'if ! curl --silent --show-error --fail --max-time 15 --request POST http://127.0.0.1:8787/internal/deploy/drain >/dev/null; then echo "Relay has active work; deployment deferred without stopping workers" >&2; exit 1; fi',
+    // If a later pre-stop command fails, reopen the old controller. Once it
+    // exits, the replacement or restored container starts undrained.
+    `trap 'curl --silent --max-time 5 --request POST http://127.0.0.1:8787/internal/deploy/resume >/dev/null 2>&1 || true' EXIT`,
     "sudo docker inspect relay --format '{{range .Config.Env}}{{println .}}{{end}}' | sudo tee \"$relay_env\" >/dev/null",
     'sudo chmod 600 "$relay_env"',
     "sudo docker stop --timeout 45 relay",
