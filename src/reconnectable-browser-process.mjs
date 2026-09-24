@@ -72,6 +72,8 @@ export class ReconnectableBrowserProcess extends EventEmitter {
     super(); this.context = context; this.watchLeaseMs = watchLeaseMs;
     this.controllerLifetime = lifetime;
     this.stdout = new PassThrough(); this.stderr = new PassThrough(); this.stdin = new EventEmitter(); this.pendingOutput = [];
+    this.stats = { updates: 0, updateMs: 0, updateMax: 0, inputs: 0, inputMs: 0, batches: 0, chunks: 0, bytes: 0 };
+    this.statsTimer = setInterval(() => this.logStats(), 15000); this.statsTimer.unref?.();
     this.exitCode = null; this.signalCode = null; this.detached = true; this.epoch = 0;
     this.outputQueue = Promise.resolve(); this.inputQueue = Promise.resolve(); this.storageQueue = Promise.resolve();
     this.closed = new Promise(resolve => { this.resolveClosed = resolve; });
@@ -82,18 +84,29 @@ export class ReconnectableBrowserProcess extends EventEmitter {
     // write is reused instead of re-reading the row first. The transaction is
     // still compare-and-swap: a stale revision fails and falls back to a read.
     const operation = this.storageQueue.then(async () => {
-      const records = this.context.records;
-      if (Number.isSafeInteger(this.revision)) {
-        try {
-          const stored = await records.workerTransportTransaction({ ...this.storageRequest, expectedRevision: this.revision }, decide);
-          this.revision = stored.revision; return stored;
-        } catch (error) { this.revision = null; if (error?.code !== "CAS_CONFLICT") throw error; }
-      }
-      const snapshot = await records.workerTransportGet(this.storageRequest);
-      const stored = await records.workerTransportTransaction({ ...this.storageRequest, expectedRevision: snapshot.revision }, decide);
-      this.revision = stored.revision; return stored;
+      const records = this.context.records, started = Date.now();
+      try { return await this.#write(records, decide); }
+      finally { const ms = Date.now() - started; this.stats.updates++; this.stats.updateMs += ms; this.stats.updateMax = Math.max(this.stats.updateMax, ms); }
     });
     this.storageQueue = operation.catch(() => {}); return operation;
+  }
+  async #write(records, decide) {
+    if (Number.isSafeInteger(this.revision)) {
+      try {
+        const stored = await records.workerTransportTransaction({ ...this.storageRequest, expectedRevision: this.revision }, decide);
+        this.revision = stored.revision; return stored;
+      } catch (error) { this.revision = null; if (error?.code !== "CAS_CONFLICT") throw error; }
+    }
+    const snapshot = await records.workerTransportGet(this.storageRequest);
+    const stored = await records.workerTransportTransaction({ ...this.storageRequest, expectedRevision: snapshot.revision }, decide);
+    this.revision = stored.revision; return stored;
+  }
+  // One bounded operator line per interval with traffic: ledger and link costs.
+  logStats() {
+    const { updates, updateMs, updateMax, inputs, inputMs, batches, chunks, bytes } = this.stats;
+    if (!updates && !inputs && !batches) return;
+    console.log(`relay_browser transport: writes=${updates} avgWriteMs=${(updateMs / (updates || 1)).toFixed(1)} maxWriteMs=${updateMax} inputs=${inputs} avgInputMs=${(inputMs / (inputs || 1)).toFixed(1)} outputBatches=${batches} chunks=${chunks} bytes=${bytes}`);
+    Object.assign(this.stats, { updates: 0, updateMs: 0, updateMax: 0, inputs: 0, inputMs: 0, batches: 0, chunks: 0, bytes: 0 });
   }
   check(epoch, stopping = false) {
     if (epoch !== this.epoch || this.stopping && !stopping) throw unavailable("operation was superseded by Stop");
@@ -254,7 +267,9 @@ export class ReconnectableBrowserProcess extends EventEmitter {
       if (chunks === 1) {
         this.check(epoch);
         if (this.detached || this.stopping) throw unavailable("connection changed during input; action was not replayed");
+        const sending = Date.now();
         await this.client.writeInput(reserved.value.input.seq, data);
+        this.stats.inputs++; this.stats.inputMs += Date.now() - sending;
       } else for (let offset = 0; offset < data.length; offset += MAX_INPUT_BYTES) {
         this.check(epoch);
         if (this.detached || this.stopping) throw unavailable("connection changed during input; action was not replayed");
@@ -305,6 +320,8 @@ export class ReconnectableBrowserProcess extends EventEmitter {
       if (inbox.length > privateInboxLimit) throw unavailable("private output retention bound reached");
       return { ...value, committedOutputSeq: seq, inbox };
     });
+    this.stats.batches++; this.stats.chunks += frames.length;
+    for (const frame of frames) this.stats.bytes += frame.data.length;
     let exitFrame = null;
     for (const frame of frames) {
       if (frame.channel === "exit") { exitFrame = frame; continue; }
@@ -320,7 +337,7 @@ export class ReconnectableBrowserProcess extends EventEmitter {
     if (exitFrame) {
       const frame = exitFrame;
       const exit = JSON.parse(frame.data.toString()); this.exitCode = exit.code; this.signalCode = exit.signal;
-      this.stdout.end(); this.stderr.end(); clearInterval(this.renewal); this.resolveClosed(); this.emit("exit", exit.code, exit.signal);
+      this.stdout.end(); this.stderr.end(); clearInterval(this.renewal); clearInterval(this.statsTimer); this.logStats(); this.resolveClosed(); this.emit("exit", exit.code, exit.signal);
     }
   }
   async terminateRemote() {
@@ -366,7 +383,7 @@ export class ReconnectableBrowserProcess extends EventEmitter {
       this.processClosed = true;
       if (absent && this.exitCode === null && this.signalCode === null) {
         this.exitCode ??= 0; this.signalCode ??= null;
-        this.stdout.end(); this.stderr.end(); this.resolveClosed(); this.emit("exit", this.exitCode, this.signalCode);
+        this.stdout.end(); this.stderr.end(); clearInterval(this.statsTimer); this.logStats(); this.resolveClosed(); this.emit("exit", this.exitCode, this.signalCode);
       }
       this.client.disconnect();
       await this.context.dispose({ failed: false, receipt: this.receipt, processAbsent: true });
