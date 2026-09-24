@@ -9,6 +9,7 @@ import { writeFileSync } from "node:fs";
 
 const IMAGE = /^(\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com)\/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$/;
 const KEEP_ROLLBACKS = 2;
+const DEPLOYMENT = "agent-relay-mvp";
 
 export function rolloutCommands({ tag, image }) {
   if (!/^[a-f0-9]{7,40}$/.test(tag || "")) throw new Error("tag must be a git commit sha");
@@ -44,6 +45,12 @@ export function rolloutCommands({ tag, image }) {
     // If a later pre-stop command fails, reopen the old controller. Once it
     // exits, the replacement or restored container starts undrained.
     'relay_drained=1',
+    // The old controller's drain predicate can miss an active goal between
+    // turns (chat status idle, worker still running). This independent EC2
+    // fence must pass before Docker Stop even during the first fixed rollout.
+    `relay_live_workers=$(aws ec2 describe-instances --region us-east-2 --filters Name=tag:AgentRelayDeployment,Values=${DEPLOYMENT} Name=tag:ManagedBy,Values=agent-relay Name=instance-state-name,Values=pending,running,stopping --query 'length(Reservations[].Instances[])' --output text)`,
+    'case "$relay_live_workers" in ""|*[!0-9]*) echo "Could not verify live worker count; deployment deferred" >&2; exit 1;; esac',
+    'if [ "$relay_live_workers" -ne 0 ]; then echo "Relay still has running EC2 workers; deployment deferred without stopping workers" >&2; exit 1; fi',
     "sudo docker inspect relay --format '{{range .Config.Env}}{{println .}}{{end}}' | sudo tee \"$relay_env\" >/dev/null",
     'sudo chmod 600 "$relay_env"',
     "sudo docker stop --timeout 45 relay",

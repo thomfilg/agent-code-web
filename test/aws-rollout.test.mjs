@@ -24,6 +24,7 @@ test("the new container is started only after the old one is kept, and failures 
   assert.ok(index(/relay_free_kib/) < index(/docker pull/), "free disk is checked before pulling");
   assert.ok(index(/docker pull/) < index(/docker stop --timeout 45 relay/), "pull before stopping");
   assert.ok(index(/internal\/deploy\/drain/) > index(/docker pull/) && index(/internal\/deploy\/drain/) < index(/docker stop --timeout 45 relay/), "controller drain must fence active work before Stop");
+  assert.ok(index(/relay_live_workers=\$\(aws ec2 describe-instances/) > index(/internal\/deploy\/drain/) && index(/relay_live_workers=\$\(aws ec2 describe-instances/) < index(/docker stop --timeout 45 relay/), "EC2 must independently fence running workers before Stop");
   assert.match(script, /internal\/deploy\/resume/, "a failed pre-stop rollout reopens the controller");
   assert.ok(index(/docker rename relay "\$relay_backup"/) < index(/docker run -d --name relay/), "keep the old container before starting");
   assert.match(script, /--mount type=bind,src=\/srv\/relay\/data,dst=\/var\/lib\/relay/);
@@ -83,6 +84,30 @@ test("low controller disk space aborts before an image pull or worker mutation",
   assert.notEqual(command.status, 0);
   assert.match(command.stderr, /at least 4 GiB free/);
   assert.doesNotMatch(readFileSync(calls, "utf8"), /docker pull|docker stop|docker rename|docker run/);
+});
+
+test("an idle-looking active goal cannot be stopped when an old controller accepts drain", t => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-rollout-worker-fence-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const calls = join(directory, "calls");
+  const fake = (name, body) => {
+    const file = join(directory, name);
+    writeFileSync(file, `#!/bin/sh\n${body}\n`); chmodSync(file, 0o700);
+  };
+  fake("sudo", `printf '%s\\n' "$*" >> "$RELAY_TEST_CALLS"; case "$*" in *'docker inspect relay'*) echo old-image;; *'docker image inspect'*) echo new-image;; esac; exit 0`);
+  fake("aws", `printf '%s\\n' "aws $*" >> "$RELAY_TEST_CALLS"; case "$*" in *'ec2 describe-instances'*) echo 1;; *) echo fixture-password;; esac`);
+  fake("curl", `printf '%s\\n' "curl $*" >> "$RELAY_TEST_CALLS"; exit 0`);
+  fake("df", "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/root 20000000 10000000 10000000 50%% /\\n'");
+  const command = spawnSync("/bin/sh", ["-c", rolloutCommands({ tag: "abc1234def56", image }).join("\n")], {
+    env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, RELAY_TEST_CALLS: calls }, encoding: "utf8",
+  });
+  assert.notEqual(command.status, 0);
+  assert.match(command.stderr, /running EC2 workers; deployment deferred/);
+  const observed = readFileSync(calls, "utf8");
+  assert.match(observed, /ec2 describe-instances/);
+  assert.match(observed, /internal\/deploy\/resume/, "an accepted drain must be released on refusal");
+  assert.match(observed, /docker logout/);
+  assert.doesNotMatch(observed, /docker stop|docker rename|docker run/);
 });
 
 test("the workflow deploys main with OIDC, one rollout at a time, and pins every action", () => {
