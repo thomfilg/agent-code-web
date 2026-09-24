@@ -60,8 +60,10 @@ export class BrowserProfileRefresher {
     await record({ status: "running", message: "Renewing saved sign-ins on a private worker…" });
     const chat = await this.store.create({ title: `Browser profile refresh · ${profile.name}`, agent: account.provider, agentAccountId: account.id, ownerId, autoTitle: false,
       environmentId: environment.id, environmentName: environment.name,
-      // The company comes from the source owner, as for any chat; nothing is ever cloned.
-      source: `https://github.com/${profile.companyId}/browser-profile-refresh` });
+      // Worker admission requires a repository of the company. This one only
+      // names the scope: the workspace is marked ready below, so nothing is cloned.
+      repositories: [{ fullName: `${profile.companyId}/browser-profile-refresh`, companyId: profile.companyId, branch: "",
+        directory: `${profile.companyId}--browser-profile-refresh` }] });
     try {
       await prepareWorkspace({ destination: chat.workspace, source: "" });
       await this.store.update(chat.id, { system: { kind: REFRESH_SYSTEM_KIND, profileId, version: profile.currentVersion }, workspaceReady: true });

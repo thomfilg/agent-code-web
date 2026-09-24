@@ -7,6 +7,7 @@ import { MemoryRecords } from "../src/database.mjs";
 import { Companies } from "../src/companies.mjs";
 import { BrowserProfiles, buildProfileArchive } from "../src/browser-profiles.mjs";
 import { BrowserProfileRefresher, compareRefresh, refreshTargets, REFRESH_SYSTEM_KIND } from "../src/browser-profile-refresh.mjs";
+import { companyForChat } from "../public/company-scope.js";
 import { temporaryDirectory } from "./helpers.mjs";
 
 const NOW = Date.parse("2026-09-25T12:00:00Z");
@@ -72,7 +73,9 @@ test("a renewal visits each signed-in site on a hidden system chat and saves the
   assert.equal(saved.refresh.status, "renewed");
   assert.deepEqual(calls[0], ["ensure", { kind: REFRESH_SYSTEM_KIND, profileId: profile.id, version: 1 }]);
   const [created] = calls.created;
-  assert.equal(created.environmentId, "env_1"); assert.equal(created.source, "https://github.com/g2i/browser-profile-refresh");
+  assert.equal(created.environmentId, "env_1");
+  assert.equal(companyForChat(created), "g2i", "admitted as a chat of the profile's company");
+  assert.match(created.repositories[0].directory, /^[A-Za-z0-9_.-]+--[A-Za-z0-9_.-]+$/);
   assert.deepEqual(calls.filter(call => call[0] === "navigate").map(call => call[1]), ["https://google.com/", "https://app.clickup.com/"]);
   assert.equal(calls.at(-1)[0], "remove", "the system chat and its worker are always deleted");
   assert.equal(chats.size, 0);
