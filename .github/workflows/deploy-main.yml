@@ -58,6 +58,9 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: deploy-${{ github.run_id }}
+          # Build (~20 min) and the bounded 60-minute drain retry must fit in
+          # the same session. The deploy role permits up to 3 hours.
+          role-duration-seconds: 7200
       - name: Build image
         id: build
         run: |

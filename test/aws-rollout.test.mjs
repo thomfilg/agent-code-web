@@ -141,6 +141,7 @@ test("the workflow deploys main with OIDC, one rollout at a time, and pins every
   assert.match(workflow, /group: production-deploy\n\s+cancel-in-progress: false/);
   assert.match(workflow, /id-token: write/);
   assert.match(workflow, /environment: production/);
+  assert.match(workflow, /role-duration-seconds: 7200/, "AWS credentials must outlive the bounded build and drain retry");
   assert.doesNotMatch(workflow, /AWS_SECRET_ACCESS_KEY|aws-access-key-id/);
   // Active work defers the rollout; CI retries until a deadline, unless a newer main supersedes it.
   assert.match(workflow, /grep -qx DEFERRED/);
