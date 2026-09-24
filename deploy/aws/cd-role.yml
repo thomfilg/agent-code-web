@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  GitHub Actions production deploy role for thomfilg/agent-code-web. Only the
+  "production" environment (restricted to main in GitHub) can assume it, and it
+  can only build this project's image and run the rollout on this controller.
+
+Parameters:
+  OidcProviderArn:
+    Type: String
+    Description: Existing token.actions.githubusercontent.com OIDC provider ARN
+  ControllerInstanceId:
+    Type: String
+    Default: i-08c991c22089589a5
+  ArtifactBucket:
+    Type: String
+    Default: agent-relay-mvp-artifactbucket-7klwjzxqhntm
+  BuildProject:
+    Type: String
+    Default: ImageBuild-t8BSbSkDsHYX
+  ImageRepository:
+    Type: String
+    Default: agent-relay-mvp-applicationrepository-sujdgarjwejp
+
+Resources:
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: agent-relay-github-deploy
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: !Ref OidcProviderArn }
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                # Legacy and immutable-ID subject formats for the same environment.
+                token.actions.githubusercontent.com:sub:
+                  - repo:thomfilg/agent-code-web:environment:production
+                  - repo:thomfilg@648890/agent-code-web@1370075262:environment:production
+      Policies:
+        - PolicyName: build-and-rollout
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: UploadSource
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub arn:aws:s3:::${ArtifactBucket}/source/*
+              - Sid: BuildImage
+                Effect: Allow
+                Action: [codebuild:StartBuild, codebuild:BatchGetBuilds]
+                Resource: !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${BuildProject}
+              - Sid: ReadImage
+                Effect: Allow
+                Action: ecr:DescribeImages
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImageRepository}
+              - Sid: RunRollout
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${ControllerInstanceId}
+                  - !Sub arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript
+              - Sid: ReadRollout
+                Effect: Allow
+                Action: ssm:GetCommandInvocation
+                Resource: "*"
+
+Outputs:
+  RoleArn:
+    Value: !GetAtt DeployRole.Arn
