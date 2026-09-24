@@ -243,7 +243,7 @@ export function codexMcpArgs(servers = {}) {
       // The relay browser and GitHub servers are built-in, scoped capabilities.
       // Auto mode runs Codex with approval_policy=never, where any tool that still
       // asks for approval fails. Arbitrary MCP connections remain unapproved.
-      ...(RELAY_APPROVED_SERVERS.has(name) ? { default_tools_approval_mode: "approve" } : {}) } : { command: server.command, args: server.args };
+      ...(RELAY_APPROVED_SERVERS.has(name) ? { default_tools_approval_mode: "approve", tool_timeout_sec: 120 } : {}) } : { command: server.command, args: server.args };
     return Object.entries(fields).flatMap(([key, value]) => ["-c", `mcp_servers.${name}.${key}=${toml(value)}`]);
   });
 }

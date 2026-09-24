@@ -97,5 +97,6 @@ test("Codex pre-approves only built-in scoped relay tools, so Auto mode can use 
   }).join(" ");
   assert.match(args, /mcp_servers\.relay_browser\.default_tools_approval_mode="approve"/);
   assert.match(args, /mcp_servers\.relay_github\.default_tools_approval_mode="approve"/);
+  assert.match(args, /mcp_servers\.relay_browser\.tool_timeout_sec=120/);
   assert.doesNotMatch(args, /company_tool\.default_tools_approval_mode/);
 });
