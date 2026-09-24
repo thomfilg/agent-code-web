@@ -1,7 +1,7 @@
 # Worker monitoring: durable events, independent witnesses
 
 Status: durable event ledger, controller-host collector, and EC2 queue/consumer
-implemented locally, not yet deployed. The worker-supervisor collector and browser migration are still
+implemented locally, not yet deployed. The worker-supervisor exit source is still
 required. Do not use this document
 to claim that a worker survives a controller restart or that a stopped VM is
 currently reported in real time.
@@ -29,8 +29,11 @@ controller lifecycle intent/result ───────────────
                                                          browser UI
 ```
 
-The browser does not poll machine-health every four seconds. It loads one
-snapshot, subscribes to the stream, and reconnects with `Last-Event-ID`. The
+The browser does not poll machine-health every four seconds. The local UI change
+loads one snapshot, subscribes to the stream, refreshes on chat/event changes
+or when the details panel opens, and reconnects with `Last-Event-ID`. A
+server-owned 30-second sampler emits only changed health/anomaly states; it is
+independent of browser presence. The
 server executes `LISTEN` before its first catch-up query, and repeats catch-up
 after reconnect. `NOTIFY` is only a hint; the event row is authoritative.
 Writers are idempotent by source event ID. Per-chat sequence numbers serialize
@@ -86,8 +89,9 @@ encrypted payloads, ordered sequence and source-ID deduplication, commit-coupled
 Stop reason projection/recovery, and host Docker event collector with durable
 outbox and deployment gate. The EC2 EventBridge/SQS/DLQ template and
 at-least-once consumer are locally tested, but the infrastructure update has
-not run. The worker collector, current-state projection, alerts, browser
-migration, and live host-service verification are still
+not run. The 5-minute AWS fleet audit and event-driven browser refresh are
+also implemented locally. The worker process-exit witness, current-state
+projection, alert delivery, and live host-service verification are still
 required.
 
 References: [PostgreSQL NOTIFY](https://www.postgresql.org/docs/current/sql-notify.html),

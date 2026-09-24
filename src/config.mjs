@@ -117,6 +117,7 @@ export function loadConfig(env = process.env) {
     chatRetentionDays: integer(env, "AGENT_CHAT_RETENTION_DAYS", 7, { min: 0, max: 3650 }),
     dataDir: path.resolve(APP_ROOT, env.AGENT_DATA_DIR || "data"),
     hostEventDirectory: path.resolve(APP_ROOT, env.AGENT_HOST_EVENT_DIR || path.join(env.AGENT_DATA_DIR || "data", "host-events")),
+    machineHealthSampleMs: integer(env, "AGENT_MACHINE_HEALTH_SAMPLE_MS", 30_000, { min: 5_000, max: 300_000 }),
     workspaceSource: env.AGENT_WORKSPACE_SOURCE || "",
     workerBackend,
     preview,

@@ -64,3 +64,30 @@ test("EC2 queue message remains unacknowledged until replay completes after a da
   assert.equal((await records.workerEventsSince(chat.id)).filter(event => event.type === "ec2-instance-state").length, 1);
   assert.equal(calls.filter(args => args[1] === "delete-message").length, 1);
 });
+
+test("a low-rate AWS fleet audit records only changed exact worker observations", async t => {
+  const root = await temporaryDirectory(t), records = new MemoryRecords(), store = new ChatStore(root, records);
+  await store.initialize();
+  const chat = await store.create({ agent: "mock", title: "EC2 audit fixture" });
+  await store.update(chat.id, { runtimeMetadata: { backend: "ec2", instanceId: instance }, status: "running" });
+  let state = "running", present = true;
+  const runner = async args => {
+    assert.deepEqual(args.slice(0, 2), ["ec2", "describe-instances"]);
+    return JSON.stringify({ Reservations: [{ Instances: present ? [{ InstanceId: instance, State: { Name: state },
+      LaunchTime: "2026-09-24T21:00:00Z", Tags: [
+        { Key: "ManagedBy", Value: "agent-relay" }, { Key: "AgentRelayDeployment", Value: "agent-relay-mvp" },
+        { Key: "AgentWebChat", Value: chat.id },
+      ] }] : [] }] });
+  };
+  const consumer = new Ec2StateEventConsumer({ records, store, region, deployment: "agent-relay-mvp", runner });
+  await consumer.reconcile(); await consumer.reconcile();
+  assert.deepEqual((await records.systemEventsSince()).map(event => event.state), ["running"]);
+  state = "stopped"; await consumer.reconcile();
+  present = false; await consumer.reconcile();
+  present = true; state = "running"; await consumer.reconcile();
+  assert.deepEqual((await records.systemEventsSince()).map(event => event.state), ["running", "stopped", "missing", "running"]);
+  assert.equal(store.get(chat.id).status, "running", "monitor observations never issue Stop or change task state");
+  await store.remove(chat.id);
+  assert.deepEqual(await records.systemEventsSince(), []);
+  assert.equal(await records.get("ec2-observation", chat.id), null);
+});

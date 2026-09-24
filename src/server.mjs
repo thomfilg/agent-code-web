@@ -20,6 +20,7 @@ import { ChatStore } from "./store.mjs";
 import { ChatRetention } from "./chat-retention.mjs";
 import { HostEventIngestor } from "./host-event-ingest.mjs";
 import { Ec2StateEventConsumer } from "./ec2-state-events.mjs";
+import { MachineHealthObserver } from "./machine-health-observer.mjs";
 import { errorMessage } from "./utils.mjs";
 import { createWorkerBackend } from "./worker-backends.mjs";
 import { openDatabase } from "./database.mjs";
@@ -64,6 +65,14 @@ const MIME = {
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
 };
+
+function publicSystemEvent(event) {
+  if (event.source !== "docker-host") return event;
+  const { sequence, sourceId, action, observedAt, status, oomKilled, exitCode } = event;
+  return { sequence, sourceId, type: "controller-container", action, observedAt,
+    ...(status === undefined ? {} : { status }), ...(oomKilled === undefined ? {} : { oomKilled }),
+    ...(exitCode === undefined ? {} : { exitCode }) };
+}
 
 function securityHeaders(response) {
   response.setHeader("x-content-type-options", "nosniff");
@@ -142,6 +151,7 @@ export async function createAgentWebServer(options = {}) {
   let workerEventWatch;
   let hostEventIngestor;
   let ec2StateEventConsumer;
+  let machineHealthObserver;
   let stopping;
   let initializing = true;
   let draining = false;
@@ -608,7 +618,7 @@ export async function createAgentWebServer(options = {}) {
                 for (const event of rows) {
                   if (closed) return;
                   if (!event.chatId || browserUsers.canRead(store.get(event.chatId), current)) {
-                    response.write(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`);
+                    response.write(`id: ${event.sequence}\ndata: ${JSON.stringify(publicSystemEvent(event))}\n\n`);
                   }
                   sequence = event.sequence;
                 }
@@ -1170,6 +1180,8 @@ export async function createAgentWebServer(options = {}) {
       region: config.ec2.region, deployment: config.ec2.deployment, awsBin: config.ec2.awsBin, profile: config.ec2.profile,
       runner: options.ec2StateEventRunner,
       onError: error => console.error("EC2 event ingestion:", errorMessage(error)) }).start();
+    machineHealthObserver = new MachineHealthObserver({ manager, store, records, intervalMs: config.machineHealthSampleMs,
+      onError: error => console.error("Machine health observer:", errorMessage(error)) }).start();
     await manager.githubEvents?.initialize();
     manager.pullRequests.start();
     manager.githubEvents?.process();
@@ -1190,6 +1202,7 @@ export async function createAgentWebServer(options = {}) {
     // reconnect while workers shut down and keep server.close() waiting forever.
     const closed = new Promise(resolve => server.close(resolve));
     await previews?.close();
+    await machineHealthObserver?.close();
     if (manager) await manager.shutdown();
     await agentAccounts.close();
     await Promise.all(resources.all().map(entry => entry.github.close?.()));

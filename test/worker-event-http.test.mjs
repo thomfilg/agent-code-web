@@ -69,3 +69,20 @@ test("system event stream is unavailable without the Relay browser session", { t
   assert.equal((await fetch(`${url}/api/system/events`)).status, 401);
   await app.stop();
 });
+
+test("public host events omit exact Docker container identity", { timeout: 12000 }, async t => {
+  const root = await temporaryDirectory(t), records = new MemoryRecords();
+  const app = await createAgentWebServer({ config: testConfig(root), records });
+  const { url } = await app.start();
+  const abort = new AbortController(); t.after(() => abort.abort());
+  const response = await fetch(`${url}/api/system/events`, { signal: abort.signal });
+  const eventPromise = streamEvent(response, abort.signal);
+  await records.appendSystemEvent("docker:private", { source: "docker-host", action: "die", containerId: "a".repeat(64),
+    containerName: "relay", observedAt: "2026-09-24T22:00:00Z", exitCode: 137 });
+  const publicEvent = await eventPromise;
+  assert.equal(publicEvent.type, "controller-container");
+  assert.equal(publicEvent.exitCode, 137);
+  assert.equal(publicEvent.containerId, undefined);
+  assert.equal(publicEvent.containerName, undefined);
+  abort.abort(); await app.stop();
+});
