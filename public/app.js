@@ -402,18 +402,23 @@ function renderActive() {
   }
   const machineStopped = state.config.workerBackend === "ec2" && chat.status === "stopped"
     && chat.workerLifecycle?.state === "stopped" && chat.workerLifecycle?.result?.cleanup === "stopped";
+  const pendingInput = chat.status === "running" && chat.pendingRequest
+    ? chat.pendingRequest.method?.includes("requestUserInput") ? "answer" : "approval" : null;
   elements.status.textContent = resizing ? `Changing machine to ${resizeTarget}`
     : suspensionStatus === "hibernating" ? "hibernating"
     : suspensionStatus === "hibernated" && chat.status === "starting" ? "resuming"
     : suspensionStatus === "hibernated" ? "hibernated"
     : suspensionStatus === "failed" && chat.status === "error" ? "hibernation failed"
     : machineStopped ? "Machine stopped"
+    : pendingInput === "answer" ? "Needs answer"
+    : pendingInput === "approval" ? "Approval needed"
     : chat.status === "idle" && chat.idleKeepAwakeReason ? "Ready" : chat.status;
   elements.detail.textContent = resizing ? (resizePhase === "stopping" ? "Step 1 of 3 · Stopping current machine"
     : resizePhase === "resizing" ? "Step 2 of 3 · Changing machine size" : "Step 3 of 3 · Starting new machine")
     : machineStopped
     ? chat.workerResize?.status === "failed" ? "EC2 instance is off. The resize did not complete; choose a machine size to retry."
       : `EC2 instance is off${chat.statusDetail ? ` · ${chat.statusDetail}` : ""}`
+    : pendingInput ? `Agent is waiting for your ${pendingInput}. The worker is still running.`
     : chat.statusDetail || "";
   elements.statusDot.className = `status-dot ${chat.status}`;
   const stopButton = $("#stop-button");

@@ -20,6 +20,10 @@ export function workingStatus(chat, liveTools, now = Date.now()) {
   if (!chat || !["running", "starting"].includes(chat.status)) return "";
   const startupStartedAt = chat.status === "starting" && typeof chat.startupProgress?.startedAt === "string" && Number.isFinite(Date.parse(chat.startupProgress.startedAt)) ? chat.startupProgress.startedAt : null;
   const started = startupStartedAt || chat.workingStartedAt || chat.messages?.findLast(message => message.role === "user")?.createdAt || chat.lastActivityAt;
+  if (chat.pendingRequest) {
+    const needsAnswer = chat.pendingRequest.method?.includes("requestUserInput");
+    return `${needsAnswer ? "Waiting for your answer" : "Waiting for your approval"} · ${elapsedLabel(chat.pendingRequest.createdAt || started, now)} · Worker running`;
+  }
   const count = activeToolCount(chat, liveTools);
   return `${chat.status === "starting" ? "Starting" : "Working"} · ${elapsedLabel(started, now)} · Esc to interrupt · ${count} active ${count === 1 ? "tool" : "tools"}`;
 }
