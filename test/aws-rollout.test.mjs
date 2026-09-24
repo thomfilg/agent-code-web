@@ -146,5 +146,10 @@ test("the workflow deploys main with OIDC, one rollout at a time, and pins every
   assert.match(workflow, /grep -qx DEFERRED/);
   assert.match(workflow, /RETRY_MINUTES: \d+/);
   assert.match(workflow, /commits\/main/);
+  assert.match(workflow, /id: rollout/);
+  assert.match(workflow, /deployed=true.*GITHUB_OUTPUT/);
+  assert.match(workflow, /deployed=false.*GITHUB_OUTPUT/);
+  assert.match(workflow, /name: Public readiness\n\s+if: steps\.rollout\.outputs\.deployed == 'true'/,
+    "a superseded successful workflow must not validate the old controller as if the new image was deployed");
   for (const [, ref] of workflow.matchAll(/uses: [\w./-]+@(\S+)/g)) assert.match(ref, /^[a-f0-9]{40}$/, "actions are pinned to commits");
 });
