@@ -1,7 +1,8 @@
 # Worker monitoring: durable events, independent witnesses
 
-Status: durable event ledger, controller-host collector, and EC2 queue/consumer
-implemented locally, not yet deployed. The worker-supervisor exit source is still
+Status: durable event ledger, controller-host collector, EC2 queue/consumer,
+and worker-supervisor process outbox implemented locally, not yet deployed.
+The worker guest-watchdog decision source and current-state projection are still
 required. Do not use this document
 to claim that a worker survives a controller restart or that a stopped VM is
 currently reported in real time.
@@ -44,8 +45,12 @@ sequence, not by clocks on different machines.
 
 - Native agent exit: the worker-owned supervisor/systemd records the exit even
   if the agent cannot report its own death. The outbox survives a lost SSH
-  transport and replays after reconnect. It must not contain prompts, output,
-  account credentials, or raw environment variables.
+  transport and daemon restart. A connected controller receives the normal
+  process-exit frame and drains the outbox; reconnect and acquisition replay
+  anything missed. It ACKs the worker file only after the PostgreSQL commit.
+  An idle daemon is upgraded in place, but an older daemon with retained work
+  is never restarted just to add monitoring. The outbox contains no prompts,
+  output, account credentials, or raw environment variables.
 - Relay container exit/OOM: a **host-owned** collector, not a process inside
   that container, records Docker `die`, `oom`, and `health_status`. systemd
   restarts the collector; its outbox is on the persistent controller volume.
@@ -90,9 +95,11 @@ Stop reason projection/recovery, and host Docker event collector with durable
 outbox and deployment gate. The EC2 EventBridge/SQS/DLQ template and
 at-least-once consumer are locally tested, but the infrastructure update has
 not run. The 5-minute AWS fleet audit and event-driven browser refresh are
-also implemented locally. The worker process-exit witness, current-state
-projection, alert delivery, and live host-service verification are still
-required.
+also implemented locally. The worker process outbox and commit-before-ACK
+replay have local tests, including lost transport, daemon replacement, database
+failure, and a no-restart guard for retained work. They are not live-tested.
+Guest-watchdog decisions, current-state projection, alert delivery, and live
+host-service verification are still required.
 
 References: [PostgreSQL NOTIFY](https://www.postgresql.org/docs/current/sql-notify.html),
 [PostgreSQL LISTEN](https://www.postgresql.org/docs/current/sql-listen.html),

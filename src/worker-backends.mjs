@@ -13,6 +13,7 @@ import { workerSupervisorFiles, workerSupervisorShell, workerSupervisorUnit, wor
 import { RemoteBrowserAttemptCoordinator } from "./remote-browser-attempt.mjs";
 import { ReconnectableBrowserProcess } from "./reconnectable-browser-process.mjs";
 import { ReconnectableAgentProcess } from "./reconnectable-agent-process.mjs";
+import { ingestWorkerProcessEvents } from "./worker-process-event-ingest.mjs";
 import { createSshWorkerProcessTransport } from "./ssh-worker-process-transport.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { validateWorkerInstanceType } from "./worker-instances.mjs";
@@ -150,6 +151,7 @@ export class Ec2Executor {
     const context = await this.browserCoordinator.open(this.chat);
     const child = new ReconnectableBrowserProcess(context, 3000, this.backend.controllerLifetime);
     await child.start({ command, args, cwd: options.cwd || this.workspace, env });
+    child.once("close", () => { void this.flushSupervisorEvents().catch(() => console.warn("[worker-events] browser process evidence replay unavailable")); });
     return child;
   }
 
@@ -158,8 +160,14 @@ export class Ec2Executor {
     const { env, stdio } = this.#remoteOptions(options);
     if (stdio.some(value => value !== "pipe")) throw new Error("Reconnectable native-agent transport requires piped stdio");
     const context = this.browserCoordinator.open(this.chat, "native-agent");
-    return new ReconnectableAgentProcess(context, { command, args, cwd: options.cwd || this.workspace, env }, this.backend.controllerLifetime,
+    const child = new ReconnectableAgentProcess(context, { command, args, cwd: options.cwd || this.workspace, env }, this.backend.controllerLifetime,
       { recoverOnly: options.recoverOnly === true });
+    const replay = () => { void this.flushSupervisorEvents().catch(() => console.warn("[worker-events] native process evidence replay unavailable")); };
+    child.once("close", replay);
+    child.once("processObservedExit", replay);
+    child.on("transportReconnected", replay);
+    child.on("transportReconnectFailed", replay);
+    return child;
   }
 
   async stopRetainedAgent() {
@@ -216,7 +224,7 @@ export class Ec2Executor {
     // v3 images predate lease-driven heartbeat refresh. Upgrade an idle daemon
     // in place before admitting a native process; never restart one that claims
     // retained work, because that would destroy its exact process identity.
-    if (status?.leaseHeartbeat !== true) {
+    if (status?.leaseHeartbeat !== true || status?.eventOutbox !== true && !status?.configured) {
       if (status?.configured) throw new Error("EC2 worker supervisor requires an explicit Stop before its watchdog-safe upgrade");
       if (!installed) await this.#uploadSupervisorCode();
       const unit = Buffer.from(workerSupervisorUnit).toString("base64");
@@ -228,6 +236,8 @@ export class Ec2Executor {
     try { receipt = typeof status === "string" ? JSON.parse(status) : status; } catch { throw new Error("EC2 worker supervisor returned an invalid status receipt"); }
     if (receipt?.protocol !== "relay-worker-supervisor/1" || receipt.version !== workerSupervisorVersion || receipt.leaseHeartbeat !== true
       || typeof receipt.configured !== "boolean" || typeof receipt.daemonInstanceId !== "string") throw new Error("EC2 worker supervisor failed its startup check");
+    this.supervisorEventOutbox = receipt.eventOutbox === true;
+    if (this.supervisorEventOutbox) await this.flushSupervisorEvents().catch(() => console.warn("[worker-events] retained process evidence replay unavailable"));
     const rawBootId = await this.backend.sshCapture(this.host, "cat /proc/sys/kernel/random/boot_id", this.instance.InstanceId);
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(rawBootId)) throw new Error("EC2 worker returned an invalid boot identity");
     const bootId = createHash("sha256").update(rawBootId).digest("hex");
@@ -240,6 +250,14 @@ export class Ec2Executor {
         createSshWorkerProcessTransport({ sshBin: this.backend.config.ec2.sshBin,
           sshArgs: this.backend.sshArgs(this.host, this.instance.InstanceId), expectedIdentity: identity, lease: credential }).connect() });
     this.supervisorReady = true;
+  }
+
+  flushSupervisorEvents() {
+    if (!this.supervisorEventOutbox) return Promise.resolve(0);
+    if (this.workerEventFlush) return this.workerEventFlush;
+    this.workerEventFlush = ingestWorkerProcessEvents({ chatId: this.chat.id, workerId: this.instance.InstanceId,
+      records: this.backend.store.records, control: request => this.#supervisorControl(request) });
+    return this.workerEventFlush.finally(() => { this.workerEventFlush = null; });
   }
 
   #supervisorControl(request) {

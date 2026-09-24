@@ -146,7 +146,14 @@ export class ReconnectableAgentProcess extends EventEmitter {
     this.renewal = setInterval(() => {
       if (!this.detached && !this.stopping && !this.renewing) {
         const client = this.client;
-        this.renewing = Promise.resolve().then(() => this.context.renewLease(client.authorityLeaseId)).then(() => client.status()).then(result => { this.lastHeartbeatAt = new Date().toISOString(); return result; })
+        this.renewing = Promise.resolve().then(() => this.context.renewLease(client.authorityLeaseId)).then(() => client.status()).then(result => {
+          this.lastHeartbeatAt = new Date().toISOString();
+          if (result?.state === "exited" && !this.nativeExitObserved) {
+            this.nativeExitObserved = true;
+            this.emit("processObservedExit");
+          }
+          return result;
+        })
           .catch(error => {
             console.warn(`[worker-transport] lease or status check failed for ${this.context.claim.attemptId}: ${error?.code || error?.name || "error"}`);
             client.disconnect();

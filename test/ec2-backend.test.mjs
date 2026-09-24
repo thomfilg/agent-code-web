@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { loadConfig } from "../src/config.mjs";
-import { Ec2Backend } from "../src/worker-backends.mjs";
+import { Ec2Backend, Ec2Executor } from "../src/worker-backends.mjs";
 import { once } from "node:events";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -126,6 +126,25 @@ test("EC2 sends private environment and native arguments over stdin, never contr
   assert.equal(request.env.PATH, backend.config.ec2.remotePath);
   assert.equal(request.cwd, executor.workspace);
   assert.equal(request.heartbeat, executor.heartbeat);
+});
+
+test("new monitoring code never restarts a supervisor that retains an active process", async () => {
+  const calls = [];
+  const backend = { config: ec2Config(), store: { records: {} }, controllerId: "controller_fixture", legacyOwnerId: null,
+    sshCapture: async (_host, command) => {
+      calls.push(command);
+      if (command.includes(".workspace-seeded")) return "ready";
+      if (command.includes("systemctl --user is-active")) return "active";
+      if (command.includes("worker-supervisor-control.mjs")) return JSON.stringify({ protocol: "relay-worker-supervisor/1", version: "v3",
+        daemonInstanceId: "daemon_fixture", configured: true, leaseHeartbeat: true, eventOutbox: false });
+      if (command === "cat /proc/sys/kernel/random/boot_id") return "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      return "";
+    } };
+  const executor = new Ec2Executor({ backend, chat, instance: instance({ State: { Name: "running" } }), host: "10.0.0.42", supervisorAvailable: true });
+  await executor.prepare();
+  assert.equal(executor.supervisorReady, true);
+  assert.equal(executor.supervisorEventOutbox, false);
+  assert.ok(!calls.some(command => command.includes("systemctl --user restart")), "retained process must not be restarted for a monitoring upgrade");
 });
 
 test("EC2 workspace upload survives SSH pipe/spawn failures and drains the archive on success", async t => {

@@ -4,6 +4,7 @@ export const workerSupervisorVersion = "v3";
 export const workerSupervisorFiles = [
   "worker-process-anchor.mjs",
   "worker-process-supervisor.mjs",
+  "worker-process-event-outbox.mjs",
   "worker-transport-wire.mjs",
   "worker-supervisor-paths.mjs",
   "worker-supervisor-daemon.mjs",

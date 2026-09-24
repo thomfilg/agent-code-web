@@ -3,6 +3,7 @@ import path from "node:path";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmod, lstat, mkdir, realpath, rm, utimes } from "node:fs/promises";
 import { WorkerProcessSupervisor } from "./worker-process-supervisor.mjs";
+import { WorkerProcessEventOutbox } from "./worker-process-event-outbox.mjs";
 import { identity, readFrames, safeId, writeFrame } from "./worker-transport-wire.mjs";
 import { WORKER_SUPERVISOR_CONTROL_SOCKET, WORKER_SUPERVISOR_ROOT, WORKER_SUPERVISOR_SOCKET } from "./worker-supervisor-paths.mjs";
 import { workerSupervisorVersion } from "./worker-supervisor-service.mjs";
@@ -29,13 +30,14 @@ async function removeOwnedSocket(filename) {
 // processes running outside the worker lifecycle.
 export class WorkerSupervisorDaemon {
   constructor({ root = WORKER_SUPERVISOR_ROOT, processSocket = WORKER_SUPERVISOR_SOCKET, controlSocket = WORKER_SUPERVISOR_CONTROL_SOCKET,
-    heartbeat = null } = {}) {
+    heartbeat = null, eventOutboxDirectory = path.join(root, "events") } = {}) {
     if (!path.isAbsolute(root) || path.dirname(processSocket) !== root || path.dirname(controlSocket) !== root || processSocket === controlSocket
-      || heartbeat !== null && !path.isAbsolute(heartbeat)) throw fail("CONFIG_INVALID");
-    Object.assign(this, { root, processSocket, controlSocket, heartbeat });
+      || heartbeat !== null && !path.isAbsolute(heartbeat) || !path.isAbsolute(eventOutboxDirectory)) throw fail("CONFIG_INVALID");
+    Object.assign(this, { root, processSocket, controlSocket, heartbeat, eventOutbox: new WorkerProcessEventOutbox(eventOutboxDirectory) });
     this.instanceId = randomUUID(); this.connections = new Set(); this.leases = new Map(); this.leaseGenerations = new Map(); this.lastInvalidatedLeases = new Map();
   }
   async listen() {
+    this.eventOutbox.initialize();
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     await chmod(this.root, 0o700);
     const parent = await lstat(this.root);
@@ -71,8 +73,13 @@ export class WorkerSupervisorDaemon {
     socket.once("close", () => clearTimeout(timer));
   }
   async dispatch(frame) {
-    if (!safeId(frame?.id) || !["status", "configure", "invalidate", "release", "reset"].includes(frame.action)) throw fail("REQUEST_INVALID");
+    if (!safeId(frame?.id) || !["status", "events", "ackEvent", "configure", "invalidate", "release", "reset"].includes(frame.action)) throw fail("REQUEST_INVALID");
     if (frame.action === "status") return this.status();
+    if (frame.action === "events") return { events: this.eventOutbox.list() };
+    if (frame.action === "ackEvent") {
+      try { return { acknowledged: this.eventOutbox.acknowledge(frame.sourceId) }; }
+      catch { throw fail("EVENT_ACK_FAILED"); }
+    }
     if (frame.action === "configure") return this.configure(frame.identity, frame.processId, frame.lease);
     if (frame.action === "invalidate") {
       if (!safeId(frame.processId) || !safeId(frame.leaseId)) throw fail("REQUEST_INVALID");
@@ -96,7 +103,7 @@ export class WorkerSupervisorDaemon {
   }
   status() {
     return { protocol: "relay-worker-supervisor/1", version: workerSupervisorVersion, daemonInstanceId: this.instanceId, configured: Boolean(this.supervisor),
-      leaseHeartbeat: Boolean(this.heartbeat),
+      leaseHeartbeat: Boolean(this.heartbeat), eventOutbox: true, eventOutboxError: Boolean(this.eventOutboxError),
       ...(this.selectedIdentity ? { identity: this.selectedIdentity } : {}),
       ...(this.leases.size ? { leases: [...this.leases].map(([processId, lease]) => ({ processId, id: lease.id, generation: lease.generation, expiresAt: lease.expiresAt })) } : {}),
       ...(this.supervisor ? { supervisorInstanceId: this.supervisor.instanceId,
@@ -117,6 +124,13 @@ export class WorkerSupervisorDaemon {
       try {
         this.supervisor = await new WorkerProcessSupervisor({ socketPath: this.processSocket, expectedIdentity: selected,
           authorize: request => this.authorize(request) }).listen();
+        for (const [signal, action] of [["processStarted", "started"], ["processExit", "exited"]]) {
+          this.supervisor.on(signal, (receipt, observation) => {
+            try { this.eventOutbox.record(action === "exited" && observation?.commandExitObserved !== true ? "unconfirmed" : action,
+              this.selectedIdentity, receipt); }
+            catch { this.eventOutboxError = true; this.supervisor.emit("diagnostic", { code: "EVENT_OUTBOX_FAILED" }); }
+          });
+        }
       } catch (error) { this.supervisor = null; this.selectedIdentity = null; this.leases.clear(); this.leaseGenerations.clear(); throw error; }
     } else {
       const prior = current;
