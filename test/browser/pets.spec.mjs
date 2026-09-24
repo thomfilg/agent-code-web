@@ -22,7 +22,7 @@ async function setup(page, { selected = null, busy = false } = {}) {
   return { chat, snapshot, calls, get saved() { return saved; }, set saved(value) { saved = value; } };
 }
 const close = page => page.locator("#controls-dialog").evaluate(dialog => dialog.close());
-async function open(page) { await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#pets-button").click(); await expect(page.locator("#controls-title")).toHaveText("Pets"); await expect(page.locator("#controls-content [role=status]")).toContainText("Saved pets loaded"); }
+async function open(page) { await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#pets-button").click(); await expect(page.locator("#controls-title")).toHaveText("Pets"); await expect(page.locator("#controls-content [role=status]")).toContainText("Saved pets loaded"); }
 async function save(page) { await page.getByRole("button", { name: "Save pet", exact: true }).click(); await expect(page.locator("#controls-content [role=status]")).toContainText("saved and active"); }
 async function command(page, text, busy = false) { await page.locator("#message-input").fill(text); await page.getByRole("button", { name: busy ? "Queue" : "Send message", exact: true }).click(); }
 
@@ -92,7 +92,7 @@ test("asset failure is visible and retriable; failed preferences and unknown nam
 test("slow discovery cannot erase a newer draft or replace a newer dialog", async ({ page }) => {
   const f = await setup(page), entered = Promise.withResolvers(), release = Promise.withResolvers(); let delay = true;
   await page.route("**/api/pets", async route => { if (delay) { delay = false; entered.resolve(); await release.promise; } return route.fallback(); });
-  await command(page, "/pets"); await entered.promise; await close(page); await page.locator("#message-input").fill("Newer draft"); await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#keymap-button").click(); release.resolve();
+  await command(page, "/pets"); await entered.promise; await close(page); await page.locator("#message-input").fill("Newer draft"); await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#keymap-button").click(); release.resolve();
   await expect(page.locator("#controls-title")).toHaveText("Keyboard shortcuts"); await expect(page.locator("#message-input")).toHaveValue("Newer draft"); expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
 });
 

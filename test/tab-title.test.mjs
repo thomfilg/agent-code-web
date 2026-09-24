@@ -37,6 +37,9 @@ test("tab title values track selected chat metadata, permission states and actua
   chat.pendingRequest = null; chat.awaitingUser = true; assert.equal(titleItemValue("status", chat), "Needs reply");
   chat.awaitingUser = false;
   for (const [status, expected] of [["idle", "Ready"], ["stopped", "Stopped"], ["error", "Error"], ["stopping", "Stopping"]]) { chat.status = status; assert.equal(titleItemValue("status", chat), expected); assert(!titleBusy(chat)); }
+  chat.status = "stopping"; chat.suspension = { status: "hibernating" }; assert.equal(titleItemValue("status", chat), "Hibernating");
+  chat.status = "stopped"; chat.suspension = { status: "hibernated" }; assert.equal(titleItemValue("status", chat), "Hibernated");
+  chat.status = "error"; chat.suspension = { status: "failed" }; assert.equal(titleItemValue("status", chat), "Hibernation failed");
   chat.archived = true; assert.equal(titleItemValue("status", chat), "Archived");
   chat.taskProgress.completed = 0; assert.equal(titleItemValue("task-progress", chat), "0/2 steps");
   chat.taskProgress = planProgress([], "native", "turn"); assert.equal(titleItemValue("task-progress", chat), "0/0 steps");

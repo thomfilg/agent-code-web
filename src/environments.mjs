@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { companyForChat, companyScope, normalizeCompanyScope, scopeAllows } from "../public/company-scope.js";
+import { companyForChat, companyScope, normalizeCompanyScope } from "../public/company-scope.js";
+import { environmentCompany } from "../public/environment-scope.js";
+import { Companies } from "./companies.mjs";
+import { validateWorkerInstanceType } from "./worker-instances.mjs";
+import { publicHarnessUpdate } from "./harness-state.mjs";
 
 export const SOFTWARE_CATALOG = [
-  { id: "chrome", name: "Google Chrome", version: "Stable", description: "Shared live browser and agent tools; a separate profile without your saved logins", check: "google-chrome --version" },
+  { id: "chrome", name: "Google Chrome", version: "Stable", description: "Shared live browser and agent tools; starts from the environment browser profile when one is selected, otherwise an empty profile", check: "google-chrome --version" },
   { id: "docker", name: "Docker", version: "Engine + Compose", description: "Containers and builds on a dedicated EC2 worker only; never the control-plane socket", check: "docker info --format '{{.ServerVersion}}' && docker compose version && docker buildx version", backends: ["ec2"] },
   { id: "node", name: "Node.js", version: "22", description: "JavaScript runtime and npm", check: "node --version" },
   { id: "python", name: "Python", version: "3", description: "Private virtualenv using the base Python 3 runtime", check: "python3 --version" },
@@ -11,6 +15,12 @@ export const SOFTWARE_CATALOG = [
   { id: "typescript", name: "TypeScript", version: "5", description: "TypeScript compiler", check: "tsc --version" },
   { id: "jq", name: "jq", version: "1.7.1", description: "Command-line JSON processor", check: "jq --version" },
 ];
+export const DEFAULT_CI_MONITORING = Object.freeze({ notifyFailures: true, wakePassing: true });
+export function normalizeCiMonitoring(value = DEFAULT_CI_MONITORING) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || typeof value.notifyFailures !== "boolean" || typeof value.wakePassing !== "boolean") throw new Error("CI monitoring defaults must be enabled or disabled explicitly");
+  return { notifyFailures: value.notifyFailures, wakePassing: value.wakePassing };
+}
 const RESERVED = /^(?:HOME|USER|LOGNAME|PATH|SHELL|TMPDIR|CI|NODE_OPTIONS|LD_.*|DYLD_.*|BASH_ENV|ENV|DOCKER_.*|COMPOSE_.*|GIT_.*|GH_.*|GITHUB_.*|AWS_.*|AGENT_.*|CODEX_.*|CLAUDE_.*|ANTHROPIC_.*|OPENAI_.*|DATABASE_URL|PG.*)$/;
 export function validateVariables(input, previous = []) {
   if (!Array.isArray(input) || input.length > 1000) throw new Error("Variables must be a list of at most 1,000 entries");
@@ -30,27 +40,49 @@ export function validateVariables(input, previous = []) {
   });
 }
 
-function publicEnvironment(environment) {
-  return { ...environment, ...companyScope(environment), scopeNeedsReview: !Array.isArray(environment.companies), variables: environment.variables.map(({ value, ...v }) => ({ ...v, ...(v.secret ? { hasValue: true } : { value }) })) };
+function publicEnvironment(environment, registered, defaultInstanceType = "t3.medium", harnessUpdate = null) {
+  const companyId = environmentCompany(environment);
+  return { ...environment, ciMonitoring: normalizeCiMonitoring(environment.ciMonitoring), ...(environment.backend === "ec2" ? { instanceType: validateWorkerInstanceType(environment.instanceType, defaultInstanceType) } : {}), ...companyScope(environment), scopeNeedsReview: !companyId || !registered.has(companyId), variables: environment.variables.map(({ value, ...v }) => ({ ...v, ...(v.secret ? { hasValue: true } : { value }) })), harnessUpdate: publicHarnessUpdate(harnessUpdate) };
 }
 
 export class Environments {
-  constructor(records, defaultBackend = "local", mcps = null) { this.records = records; this.defaultBackend = defaultBackend; this.mcps = mcps; this.queue = Promise.resolve(); }
+  constructor(records, defaultBackend = "local", mcps = null, { defaultInstanceType = "t3.medium" } = {}) { this.records = records; this.defaultBackend = defaultBackend; this.defaultInstanceType = validateWorkerInstanceType(defaultInstanceType); this.mcps = mcps; this.companies = mcps?.companies || new Companies(records); this.queue = Promise.resolve(); }
   async initialize() {
     if (!(await this.records.list("environment")).length) {
-      await this.save({ name: "Default", backend: this.defaultBackend, allowUnassigned: true, variablesEnabled: true, software: [], variables: [] });
+      // An inert template is not a company grant. Never invent a company or move
+      // credentials during bootstrap; the owner must explicitly assign it.
+      const id = `env_${randomUUID()}`, now = new Date().toISOString();
+      await this.records.put("environment", id, { id, name: "Default", backend: this.defaultBackend, ...(this.defaultBackend === "ec2" ? { instanceType: this.defaultInstanceType } : {}), companies: [], allowUnassigned: false, variablesEnabled: true, software: [], variables: [], setupScript: "", ciMonitoring: { ...DEFAULT_CI_MONITORING }, revision: 1, createdAt: now, updatedAt: now });
     }
   }
-  async list() { return (await this.records.list("environment")).map(publicEnvironment); }
+  async registeredCompanies() { return new Set((await this.companies.list()).map(company => company.id)); }
+  async list() {
+    const registered = await this.registeredCompanies(), harnesses = new Map((await this.records.list("environment-harness")).map(state => [state.environmentId || state.id, state]));
+    return (await this.records.list("environment")).map(environment => publicEnvironment(environment, registered, this.defaultInstanceType, harnesses.get(environment.id)));
+  }
   async get(id, { reveal = false } = {}) {
     const env = await this.records.get("environment", id);
     if (!env) throw Object.assign(new Error("Environment not found"), { statusCode: 404 });
-    return reveal ? env : publicEnvironment(env);
+    return reveal ? env : publicEnvironment(env, await this.registeredCompanies(), this.defaultInstanceType, await this.records.get("environment-harness", id));
   }
   save(input, id = null) {
     const result = this.queue.then(() => this.saveUnlocked(input, id));
     this.queue = result.catch(() => {});
     return result;
+  }
+  setInstanceType(id, input) {
+    const result = this.queue.then(() => this.setInstanceTypeUnlocked(id, input));
+    this.queue = result.catch(() => {});
+    return result;
+  }
+  async setInstanceTypeUnlocked(id, input) {
+    const old = await this.get(id, { reveal: true });
+    if (input.revision !== old.revision) throw Object.assign(new Error("This environment changed in another tab. Reload before saving."), { statusCode: 409 });
+    if (old.backend !== "ec2") throw new Error("Machine size defaults require an EC2 environment");
+    const value = { ...old, instanceType: validateWorkerInstanceType(input.instanceType, this.defaultInstanceType), revision: old.revision + 1, updatedAt: new Date().toISOString() };
+    await this.records.put("environment", id, value);
+    await this.onSaved?.(value);
+    return publicEnvironment(value, await this.registeredCompanies(), this.defaultInstanceType, await this.records.get("environment-harness", id));
   }
   async saveUnlocked(input, id = null) {
     const old = id ? await this.get(id, { reveal: true }) : null;
@@ -58,7 +90,8 @@ export class Environments {
     const name = String(input.name || "").trim();
     if (!name || name.length > 80) throw new Error("Environment name must contain 1–80 characters");
     if (!["local", "ec2"].includes(input.backend)) throw new Error("Choose a local or cloud environment");
-    const software = [...new Set(input.software || [])];
+    const instanceType = input.backend === "ec2" ? validateWorkerInstanceType(input.instanceType ?? old?.instanceType, this.defaultInstanceType) : null;
+    const software = [...new Set(input.software ?? old?.software ?? [])];
     if (software.some(id => !SOFTWARE_CATALOG.some(p => p.id === id))) throw new Error("Unsupported software package");
     if (software.includes("docker") && input.backend !== "ec2") throw new Error("Docker requires a dedicated EC2 worker. Sharing the control-plane Docker socket with agents is not supported.");
     const setupScript = input.setupScript ?? old?.setupScript ?? "";
@@ -66,40 +99,71 @@ export class Environments {
     if (input.networkAccess && input.networkAccess !== "worker_default") throw new Error("Network restrictions must be enforced by the worker infrastructure; this backend cannot enforce a custom network policy");
     if (input.archived !== undefined && typeof input.archived !== "boolean") throw new Error("Archived must be true or false");
     const all = await this.records.list("environment");
-    const mcpIds = input.mcpIds ?? old?.mcpIds ?? [];
+    if (old && (!environmentCompany(old) || !(await this.registeredCompanies()).has(environmentCompany(old))) && input.confirmCompanyAssignment !== true) {
+      throw Object.assign(new Error("This legacy environment needs explicit company review. Select its assigned company before saving."), { statusCode: 400 });
+    }
+    const scope = normalizeCompanyScope(input.companyId !== undefined && input.companies === undefined ? { ...input, companies: [input.companyId] } : input, old || {});
+    const companyId = environmentCompany({ ...scope, ...(input.companyId !== undefined ? { companyId: input.companyId } : {}) });
+    if (!companyId) throw Object.assign(new Error("Each environment must belong to exactly one registered company. Choose its company before saving."), { statusCode: 400 });
+    await this.companies.get(companyId);
+    // A saved browser profile must belong to the same company as the environment.
+    const browserProfileId = input.browserProfileId !== undefined ? input.browserProfileId || null : old?.browserProfileId || null;
+    if (browserProfileId) {
+      const profile = /^bprof_[a-f0-9-]{36}$/.test(browserProfileId) && await this.records.get("browser-profile", browserProfileId);
+      if (!profile) throw Object.assign(new Error("Browser profile not found"), { statusCode: 400 });
+      if (profile.companyId !== companyId) throw Object.assign(new Error("Choose a browser profile that belongs to this environment's company"), { statusCode: 400 });
+    }
+    const mcpIds = this.mcps?.companies ? [] : input.mcpIds ?? old?.mcpIds ?? [];
     if (this.mcps) await this.mcps.validateSelection(mcpIds);
     else if (mcpIds.length) throw new Error("MCP connections are unavailable");
-    if (all.some(env => env.id !== id && env.name.toLowerCase() === name.toLowerCase())) throw new Error("An environment with this name already exists");
+    if (all.some(env => env.id !== id && environmentCompany(env) === companyId && env.name.toLowerCase() === name.toLowerCase())) throw new Error("An environment with this name already exists in this company");
     const value = {
-      id: id || `env_${randomUUID()}`, name, backend: input.backend, ...normalizeCompanyScope(input, old || {}),
-      mcpIds,
-      description: String(input.description || "").slice(0, 500),
-      variablesEnabled: input.variablesEnabled !== false,
-      variables: validateVariables(input.variables || [], old?.variables), software,
-      setupScript, networkAccess: "worker_default", archived: input.archived ?? old?.archived ?? false,
+      id: id || `env_${randomUUID()}`, name, backend: input.backend, ...(instanceType ? { instanceType } : {}), ...scope, companyId,
+      mcpIds, browserProfileId,
+      description: String(input.description ?? old?.description ?? "").slice(0, 500),
+      variablesEnabled: input.variablesEnabled ?? old?.variablesEnabled ?? true,
+      variables: validateVariables(input.variables ?? old?.variables ?? [], old?.variables), software,
+      setupScript, ciMonitoring: normalizeCiMonitoring(input.ciMonitoring ?? old?.ciMonitoring), networkAccess: "worker_default", archived: input.archived ?? old?.archived ?? false,
       revision: (old?.revision || 0) + 1, createdAt: old?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
     await this.records.put("environment", value.id, value);
     await this.onSaved?.(value);
-    return publicEnvironment(value);
+    return publicEnvironment(value, await this.registeredCompanies(), this.defaultInstanceType, await this.records.get("environment-harness", value.id));
   }
   async remove(id, chats) {
     await this.get(id);
     if ((await this.list()).length <= 1) throw new Error("Keep at least one environment");
     if (chats.some(chat => chat.environmentId === id)) throw new Error("This environment is used by a conversation. Delete its conversations first.");
     await this.records.delete("environment", id);
+    await this.records.delete("environment-harness", id);
   }
   async runtime(id, chat = {}) {
     const env = await this.get(id, { reveal: true });
     const company = companyForChat(chat);
-    if (!scopeAllows(env, company)) throw Object.assign(new Error(`Environment “${env.name}” is not available for ${company || "unassigned chats"}. Select that company in its settings first.`), { statusCode: 403 });
+    const assigned = environmentCompany(env);
+    if (!assigned || !(await this.registeredCompanies()).has(assigned)) throw Object.assign(new Error(`Environment “${env.name}” needs company review. Assign exactly one registered company before starting a worker.`), { statusCode: 403 });
+    if (assigned !== company) throw Object.assign(new Error(`Environment “${env.name}” is not available for ${company || "unassigned chats"}. Choose an environment assigned to this chat’s company.`), { statusCode: 403 });
     return {
       id: env.id, name: env.name, revision: env.revision, backend: env.backend, software: env.software,
+      ...(env.backend === "ec2" ? { instanceType: validateWorkerInstanceType(env.instanceType, this.defaultInstanceType) } : {}),
       ...companyScope(env),
-      mcpIds: env.mcpIds || [],
-      setupScript: env.setupScript || "", archived: Boolean(env.archived),
+      mcpIds: this.mcps?.companies ? await this.mcps.forCompany(company) : env.mcpIds || [],
+      setupScript: env.setupScript || "", ciMonitoring: normalizeCiMonitoring(env.ciMonitoring), archived: Boolean(env.archived), browserProfileId: env.browserProfileId || null,
       variables: Object.fromEntries(env.variables.filter(v => env.variablesEnabled && v.enabled && !v.secret).map(v => [v.key, v.value])),
       protectedKeys: env.variables.filter(v => env.variablesEnabled && v.enabled && v.secret).map(v => v.key),
+      harnessUpdate: publicHarnessUpdate(await this.records.get("environment-harness", env.id)),
     };
+  }
+
+  async npmCredential(id, chat = {}) {
+    const env = await this.get(id, { reveal: true });
+    const company = companyForChat(chat), assigned = environmentCompany(env);
+    if (!assigned || !(await this.registeredCompanies()).has(assigned) || assigned !== company) {
+      throw Object.assign(new Error("This environment is not authorized for the chat's company."), { statusCode: 403 });
+    }
+    const variable = env.variablesEnabled && env.variables.find(item => item.enabled && item.secret && item.key === "NODE_AUTH_TOKEN");
+    if (!variable) return null;
+    if (!variable.value || /[\0\r\n]/.test(variable.value)) throw new Error("Protected NODE_AUTH_TOKEN must be a non-empty single-line value");
+    return { token: variable.value, environmentId: env.id, revision: env.revision };
   }
 }

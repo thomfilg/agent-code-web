@@ -30,21 +30,22 @@ test("closing an expired lease before its timer fires still emits exactly one as
   t.mock.timers.tick(1000); assert.deepEqual(changes, ["one", "one"]); assert.equal(presence.chats.size, 0);
 });
 
-test("a visible chat or live browser pauses sleep; leaving restarts it; presence never wakes a stopped worker or sends messages", async t => {
+test("a visible chat does not pause sleep; an open Chrome does; presence never wakes a stopped worker", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   let starts = 0, viewers = false;
   const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }),
     adapterFactory: () => ({ start: async () => { starts++; }, send: async () => ({ text: "Fixture response" }), stop: async () => {} }),
   }); t.after(() => manager.shutdown());
-  manager.browsers = { hasViewers: () => viewers, touch: () => {}, stop: async () => {}, shutdown: async () => {} };
+  manager.browsers = { hasSession: () => viewers, touch: () => {}, stop: async () => {}, shutdown: async () => {} };
   const chat = await manager.createChat({ agent: "mock" });
   await manager.setPresence(chat.id, { clientId: client, active: true }); assert.equal(starts, 0);
   await manager.send(chat.id, "Fixture request");
-  assert.equal(store.get(chat.id).status, "idle"); assert.equal(store.get(chat.id).idleDeadlineAt, null); assert.equal(store.get(chat.id).idleKeepAwakeReason, "tab");
-  await new Promise(resolve => setTimeout(resolve, 140)); assert.equal(store.get(chat.id).status, "idle");
+  assert.equal(store.get(chat.id).status, "idle"); assert.ok(store.get(chat.id).idleDeadlineAt); assert.equal(store.get(chat.id).idleKeepAwakeReason, null);
   await manager.setPresence(chat.id, { clientId: other, active: true });
-  await manager.setPresence(chat.id, { clientId: client, active: false }); assert.equal(store.get(chat.id).idleDeadlineAt, null);
+  await manager.setPresence(chat.id, { clientId: client, active: false }); assert.ok(store.get(chat.id).idleDeadlineAt);
   viewers = true; await manager.refreshActivity(chat.id);
+  assert.equal(store.get(chat.id).idleDeadlineAt, null);
+  await new Promise(resolve => setTimeout(resolve, 140)); assert.equal(store.get(chat.id).status, "idle");
   await manager.setPresence(chat.id, { clientId: other, active: false }); assert.equal(store.get(chat.id).idleKeepAwakeReason, "browser");
   viewers = false; await manager.refreshActivity(chat.id); assert.ok(store.get(chat.id).idleDeadlineAt);
   await waitFor(() => store.get(chat.id).status === "stopped");

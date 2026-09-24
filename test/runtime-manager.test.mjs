@@ -4,6 +4,7 @@ import test from "node:test";
 import { CapabilityBroker } from "../src/capabilities.mjs";
 import { RuntimeManager } from "../src/runtime-manager.mjs";
 import { ChatStore } from "../src/store.mjs";
+import { MemoryRecords } from "../src/database.mjs";
 import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
 
 test("multiple chats stream independently, persist responses, autosleep, and restart", async (t) => {
@@ -90,8 +91,8 @@ test("native background work queues normal input and Send now interrupts only th
   const selected = await manager.enqueue(chat.id, "Send this now");
   await manager.sendQueuedNow(chat.id, selected.queuedMessages.at(-1).id);
   await waitFor(() => !manager.isBusy(chat.id));
-  assert.equal(interrupted, 1); assert.equal(stopped, 0); assert.deepEqual(sent, ["Schedule", "Send this now"]);
-  assert.deepEqual(store.get(chat.id).queuedMessages.map(item => item.text), ["Keep queued"]);
+  assert.equal(interrupted, 1); assert.equal(stopped, 0); assert.deepEqual(sent, ["Schedule", "Send this now\n\n---\n\nKeep queued"]);
+  assert.deepEqual(store.get(chat.id).queuedMessages.map(item => item.text), []);
   assert.equal(store.get(chat.id).idleKeepAwakeReason, "schedule");
   background = true; await hooks.onEvent({ type: "background_turn", active: true });
   await manager.stop(chat.id); assert.equal(stopped, 1); assert.equal(store.get(chat.id).status, "stopped");
@@ -168,4 +169,55 @@ test("a non-mock chat acquires, sleeps, resumes, and destroys its worker backend
   await manager.remove(chat.id);
   assert.ok(calls.some(([action]) => action === "sleep"));
   assert.equal(calls.filter(([action]) => action === "destroy").length, 1);
+});
+
+test("failed worker deletion is reported as pending and retried after chat removal", async t => {
+  const root = await temporaryDirectory(t), records = new MemoryRecords(), store = new ChatStore(root, records);
+  await store.initialize();
+  let destroyCalls = 0, releaseRetry;
+  const retryGate = new Promise(resolve => { releaseRetry = resolve; });
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10_000 }),
+    gatewayOrigin: "http://127.0.0.1:1",
+    workerBackend: { acquire: async () => null, sleep: async () => {}, destroy: async () => {
+      destroyCalls++;
+      if (destroyCalls === 1) throw new Error("EC2 termination not confirmed");
+      await retryGate;
+    } },
+  });
+  t.after(() => { releaseRetry(); manager.shutdown(); });
+  const chat = await manager.createChat({ agent: "codex", title: "Cleanup retry" });
+  const result = await manager.remove(chat.id);
+  assert.deepEqual(result, { removed: true, cleanupPending: true });
+  assert.equal(store.get(chat.id), null);
+  assert.ok(await records.get("worker-deletion-cleanup", chat.id));
+  releaseRetry();
+  await waitFor(async () => !(await records.get("worker-deletion-cleanup", chat.id)));
+  assert.ok(destroyCalls >= 2);
+});
+
+test("concurrent and repeated chat deletion verifies worker cleanup without a false 404", async t => {
+  const root = await temporaryDirectory(t), records = new MemoryRecords(), store = new ChatStore(root, records);
+  await store.initialize();
+  let destroyCalls = 0, releaseDestroy;
+  const destroyGate = new Promise(resolve => { releaseDestroy = resolve; });
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10_000 }),
+    gatewayOrigin: "http://127.0.0.1:1",
+    workerBackend: { acquire: async () => null, sleep: async () => {}, destroy: async () => {
+      destroyCalls++;
+      if (destroyCalls === 1) await destroyGate;
+    } },
+  });
+  t.after(() => { releaseDestroy(); manager.shutdown(); });
+  const chat = await manager.createChat({ agent: "codex", title: "Idempotent deletion" });
+  const first = manager.remove(chat.id);
+  await waitFor(() => destroyCalls === 1);
+  const second = manager.remove(chat.id);
+  releaseDestroy();
+  assert.deepEqual(await Promise.all([first, second]), [
+    { removed: true, cleanupPending: false }, { removed: true, cleanupPending: false },
+  ]);
+  assert.equal(destroyCalls, 1);
+  assert.equal(store.get(chat.id), null);
+  assert.deepEqual(await manager.remove(chat.id), { removed: true, cleanupPending: false });
+  assert.equal(destroyCalls, 2);
 });

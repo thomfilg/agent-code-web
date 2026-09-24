@@ -6,14 +6,17 @@ import { testConfig } from "./helpers.mjs";
 import { ModelCatalog } from "../src/models.mjs";
 import { startMcpFixture } from "./fixtures/mcp-server.mjs";
 import { startBrowserSite } from "./fixtures/browser-site.mjs";
-const browserSite = await startBrowserSite({ port: 8883 });
-const mcpFixture = await startMcpFixture({ port: 8881, anonymousInitialize: true });
+const browserSite = await startBrowserSite({ port: Number(process.env.RELAY_E2E_BROWSER_SITE_PORT ?? 8883) });
+const mcpFixture = await startMcpFixture({ port: Number(process.env.RELAY_E2E_MCP_PORT ?? 8881), anonymousInitialize: true });
 const root = await mkdtemp("/tmp/relay-browser-");
 const config = testConfig(root, { AGENT_WEB_PORT: "8879" });
 const records = new MemoryRecords();
 const repos = ["Acme/api", "Acme/web", "Other/library"].map((full_name, index) => ({ id: index + 1, full_name, name: full_name.split("/")[1], default_branch: "main", private: true, size: 1 }));
 const pull = { number: 42, node_id: "PR_browser", title: "Fixture changes", state: "open", head: { sha: "a".repeat(40), ref: "feature/controls", repo: { full_name: "Acme/api" } }, base: { ref: "main", repo: { full_name: "Acme/api" } }, additions: 12, deletions: 3, changed_files: 1, mergeable: false, mergeable_state: "dirty", auto_merge: null };
-const github = new GitHubConnection({ records, config: config.github, localToken: async () => "test-github-credential",
+const github = new GitHubConnection({ records, config: config.github, loginFactory: () => {
+  let reject, timer;
+  return { start: onCode => new Promise((resolve, fail) => { reject = fail; onCode({ userCode: "TEST-CODE", verificationUrl: "https://github.com/login/device" }); timer = setTimeout(() => resolve("test-github-credential"), 2000); }), close: async () => { clearTimeout(timer); reject?.(new Error("cancelled")); } };
+},
   fetchImpl: async (url, options = {}) => {
     const path = new URL(url).pathname;
     if (path === "/user") return Response.json({ login: "browser-fixture", id: 1 });
@@ -31,11 +34,18 @@ const github = new GitHubConnection({ records, config: config.github, localToken
 });
 const models = new ModelCatalog(config);
 models.codex = async () => ({ models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", efforts: ["low", "medium", "high"], defaultEffort: "low" }, { id: "fixture-gpt", label: "Fixture GPT", isDefault: true, efforts: ["low", "medium", "high"], defaultEffort: "medium" }], source: "fixture" });
-models.claude = async () => ({ models: [{ id: "opus", label: "Opus", efforts: ["auto", "low", "medium", "high", "xhigh", "max"] }, { id: "sonnet", label: "Sonnet", efforts: ["auto", "low", "medium", "high", "xhigh", "max"], defaultEffort: "high" }, { id: "haiku", label: "Haiku", efforts: ["auto"] }, { id: "default", label: "Claude account default", efforts: ["auto", "high"] }], source: "fixture" });
+models.claude = async () => ({ models: [{ id: "opus", label: "Opus", description: "Opus 5.5 with 1M context · Test fixture", efforts: ["auto", "low", "medium", "high", "xhigh", "max"] }, { id: "sonnet", label: "Sonnet", description: "Sonnet 5 · Test fixture", efforts: ["auto", "low", "medium", "high", "xhigh", "max"], defaultEffort: "high" }, { id: "haiku", label: "Haiku", description: "Haiku 4.5 · Test fixture", efforts: ["auto"] }, { id: "default", label: "Claude account default", description: "Opus 5.5 with 1M context · Test fixture", efforts: ["auto", "high"] }], source: "fixture" });
 const commands = { list: async chat => ({ commands: [{ name: "usage", kind: "Web control" }, { name: "goal", kind: "CLI command" }, { name: "work", description: "Installed work skill", kind: "Skill" }, { name: "workflow", description: "Workflow plugin", kind: "Skill" }, ...(chat.agent === "claude" ? [{ name: "claude-only", kind: "Skill" }] : [])] }) };
 const app = await createAgentWebServer({ config, records, github, models, commands }); await app.start();
+const originalMcpFetch = app.manager.mcps.fetch;
+app.manager.mcps.fetch = (url, options) => {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname) || parsed.username || parsed.password) throw new Error("Browser MCP fixture blocks non-loopback endpoints; use the dedicated provider test configuration");
+  return originalMcpFetch(url, { ...options, redirect: "manual" });
+};
+for (const id of ["acme", "other", "12-apps", "g2i"]) await (await app.resources.forOwner(null)).companies.save({ id, name: id });
 const defaultEnvironment = (await app.manager.environments.list())[0];
-await app.manager.environments.save({ ...defaultEnvironment, companies: ["acme", "other", "12-apps", "g2i"], allowUnassigned: true }, defaultEnvironment.id);
+await app.manager.environments.save({ ...defaultEnvironment, companyId: "acme", companies: ["acme"], allowUnassigned: false, confirmCompanyAssignment: true }, defaultEnvironment.id);
 for (const title of ["Existing alpha", "Existing beta"]) await app.manager.createChat({ agent: "mock", title });
 const prChat = await app.store.create({ agent: "mock", title: "PR controls fixture", repositories: [{ fullName: "Acme/api", defaultBranch: "main", branch: "feature/controls" }] });
 await app.store.update(prChat.id, { workflowState: "pr_failing", pullRequests: [{ repository: "Acme/api", number: 42, url: "https://github.com/Acme/api/pull/42", state: "open", headRef: "feature/controls", baseRef: "main", additions: 12, deletions: 3, conflicts: true, checks: "pending", ci: { passed: 2, skipped: 1, inProgress: 1, failed: 0, total: 4 }, autoMerge: false, verifiedAt: new Date().toISOString() }] });

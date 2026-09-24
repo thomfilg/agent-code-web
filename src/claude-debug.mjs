@@ -46,12 +46,12 @@ export async function writePrivateClaudeDebugLog(runtimeHome, sessionId) {
 }
 
 export class ClaudeDebugLog {
-  static async open({ runtimeHome, sessionId, executor, isolation, signal, onError = () => {} }) {
+  static async open({ runtimeHome, sessionId, executor, isolation, signal, onError = () => {}, sanitize = value => value }) {
     signal?.throwIfAborted();
     const script = `(${writePrivateClaudeDebugLog.toString()})(process.argv[1],process.argv[2]).catch(() => { process.stderr.write("Private debug capture failed"); process.stdin.destroy(); process.exitCode = 1; });`;
     const spawn = executor && executor.metadata?.backend !== "local" ? executor.spawn.bind(executor) : spawnWorker;
     const child = spawn("node", ["-e", script, runtimeHome, sessionId], { cwd: runtimeHome, env: { PATH: executor?.environmentPath || process.env.PATH, LANG: "C.UTF-8" }, isolation, stdio: ["pipe", "pipe", "pipe"] });
-    const log = new ClaudeDebugLog(child, onError);
+    const log = new ClaudeDebugLog(child, onError, sanitize);
     const abort = () => log.fail(false); signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
     try { await log.ready.promise; signal?.throwIfAborted(); return log; }
@@ -59,8 +59,9 @@ export class ClaudeDebugLog {
     finally { signal?.removeEventListener("abort", abort); }
   }
 
-  constructor(child, onError) {
+  constructor(child, onError, sanitize = value => value) {
     this.child = child; this.onError = onError; this.ready = Promise.withResolvers(); this.pending = new Map();
+    this.sanitize = sanitize;
     this.closed = new Promise(resolve => { this.resolveClosed = resolve; });
     this.timer = setTimeout(() => this.fail(), 5000);
     this.lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -92,7 +93,7 @@ export class ClaudeDebugLog {
     if (this.error || this.closing) return;
     if (typeof line !== "string" || line.length > 8192 || line.includes("\n")) { this.fail(); return; }
     if (this.child.stdin.writableLength > 256 * 1024) { this.fail(); return; }
-    const safe = redact(line.replace(/\r/g, "")
+    const safe = redact(this.sanitize(line).replace(/\r/g, "")
       .replace(/\bBearer\s+[^\s"',;]+/gi, "Bearer ***")
       .replace(/(["'](?:authorization|api[_-]?key|token|secret|password)["']\s*:\s*)["'][^"']*["']/gi, '$1"***"'));
     this.child.stdin.write(`${JSON.stringify({ line: safe })}\n`);

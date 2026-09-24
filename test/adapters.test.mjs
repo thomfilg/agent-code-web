@@ -66,7 +66,7 @@ test("stopping Codex archives only its unpublished forks, never the source or a 
 test("native side forks route approvals by thread and detach without stopping their parent RPC", async t => {
   const { root, store, chat } = await fixtureChat(t, "codex");
   const parentRequests = [], sideRequests = [], sessions = [];
-  const adapter = new CodexAdapter({ chat, store, config: testConfig(root, { CODEX_BIN: path.join(fixtureDir, "fake-codex.mjs") }), broker: new CapabilityBroker({ ttlMs: 10000 }), hooks: { onRequest: request => parentRequests.push(request), onSessionId: id => sessions.push(id) } });
+  const adapter = new CodexAdapter({ chat: { ...chat, mode: "accept_edits" }, store, config: testConfig(root, { CODEX_BIN: path.join(fixtureDir, "fake-codex.mjs") }), broker: new CapabilityBroker({ ttlMs: 10000 }), hooks: { onRequest: request => parentRequests.push(request), onSessionId: id => sessions.push(id) } });
   t.after(() => adapter.stop()); await adapter.start();
   const rpc = adapter.rpc, original = rpc.request.bind(rpc), calls = [], responses = [];
   rpc.request = async (method, params, timeout) => {
@@ -111,6 +111,8 @@ test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers ap
   };
   adapter = new CodexAdapter({ chat, store, config, broker, gatewayOrigin: "http://127.0.0.1:9", hooks });
   await adapter.start();
+  let nativeSettings = (await adapter.rpc.request("fixture/threadSettings", {})).settings;
+  assert.equal(nativeSettings.approvalPolicy, "never"); assert.equal(nativeSettings.approvalsReviewer, "auto_review");
   let turnParams;
   const originalRequest = adapter.rpc.request.bind(adapter.rpc);
   adapter.rpc.request = (method, params, timeout) => { if (method === "turn/start") turnParams = params; return originalRequest(method, params, timeout); };
@@ -119,9 +121,12 @@ test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers ap
   assert.equal(turnParams.effort, "high");
   assert.deepEqual(turnParams.sandboxPolicy, { type: "readOnly" });
   assert.equal(turnParams.collaborationMode.mode, "plan");
+  assert.equal(turnParams.approvalPolicy, "on-request"); assert.equal(turnParams.approvalsReviewer, "user");
   assert.deepEqual(turnParams.input[1], { type: "localImage", path: "/tmp/image.png" });
   assert.equal(sessionId, "thr_fixture");
   assert.equal(result.text, "hello world");
+  nativeSettings = (await adapter.rpc.request("fixture/threadSettings", {})).settings;
+  assert.equal(nativeSettings.approvalPolicy, "on-request"); assert.equal(nativeSettings.approvalsReviewer, "user");
   assert.ok(events.some((event) => event.type === "assistant_delta" && event.delta === "hello "));
   assert.ok(events.some((event) => event.type === "tool" && event.state === "completed"));
   assert.ok(events.some(event => event.type === "request_resolved" && event.requestId === "approval_900"));
@@ -129,17 +134,53 @@ test("Codex adapter speaks app-server JSON-RPC, streams, resumes, and answers ap
   assert.equal((await adapter.compact()).status, "completed");
   await adapter.send("default mode", { model: "fixture-gpt" });
   assert.equal(turnParams.collaborationMode.mode, "default"); assert.equal(turnParams.sandboxPolicy.type, "workspaceWrite");
-  assert.equal(turnParams.approvalsReviewer, "user");
+  assert.equal(turnParams.approvalsReviewer, "auto_review"); assert.equal(turnParams.approvalPolicy, "never");
+  await adapter.send("explicit edits", { model: "fixture-gpt", mode: "accept_edits" });
+  assert.equal(turnParams.approvalsReviewer, "user"); assert.equal(turnParams.approvalPolicy, "on-request");
   await adapter.send("automatic reviews", { model: "fixture-gpt", mode: "auto" });
-  assert.equal(turnParams.approvalsReviewer, "auto_review"); assert.equal(turnParams.approvalPolicy, "on-request"); assert.equal(turnParams.sandboxPolicy.type, "workspaceWrite");
+  assert.equal(turnParams.approvalsReviewer, "auto_review"); assert.equal(turnParams.approvalPolicy, "never"); assert.equal(turnParams.sandboxPolicy.type, "workspaceWrite");
+  nativeSettings = (await adapter.rpc.request("fixture/threadSettings", {})).settings;
+  assert.equal(nativeSettings.approvalPolicy, "never"); assert.equal(nativeSettings.approvalsReviewer, "auto_review");
+  const goalResult = await adapter.send("automatic goal", { model: "fixture-gpt", mode: "auto", goalDirective: { action: "set", objective: "Verify Auto" } });
+  assert.equal(goalResult.turnsHandled, true);
+  nativeSettings = (await adapter.rpc.request("fixture/goalContinuationSettings", {})).settings;
+  assert.equal(nativeSettings.approvalPolicy, "never"); assert.equal(nativeSettings.approvalsReviewer, "auto_review");
   await adapter.stop();
 
   const resumedChat = { ...chat, agentSessionId: sessionId };
   const resumed = new CodexAdapter({ resumedChat, chat: resumedChat, store, config, broker, gatewayOrigin: "http://127.0.0.1:9", hooks: { ...hooks, onSessionId: () => assert.fail("resume should retain session") } });
   adapter = resumed;
   await resumed.start();
+  nativeSettings = (await resumed.rpc.request("fixture/threadSettings", {})).settings;
+  assert.equal(nativeSettings.approvalPolicy, "never"); assert.equal(nativeSettings.approvalsReviewer, "auto_review");
   assert.equal((await resumed.send("resumed")).text, "hello world");
   await resumed.stop();
+});
+
+test("live Codex Auto reaches the native thread and closes stale approval prompts without granting them", async t => {
+  const { root, store, chat } = await fixtureChat(t, "codex");
+  const requests = [], events = [];
+  const adapter = new CodexAdapter({ chat, store, config: testConfig(root, { CODEX_BIN: path.join(fixtureDir, "fake-codex.mjs") }), broker: new CapabilityBroker({ ttlMs: 10000 }), gatewayOrigin: "http://127.0.0.1:9", hooks: {
+    onRequest: request => requests.push(request),
+    onEvent: event => events.push(event),
+  } });
+  t.after(() => adapter.stop()); await adapter.start();
+
+  const pending = adapter.send("manual turn", { mode: "accept_edits" });
+  await waitFor(() => requests.length === 1);
+  let acknowledged = false;
+  assert.equal(await adapter.setPermissionMode("auto", () => {}, () => { acknowledged = true; }), true);
+  assert.equal(acknowledged, true);
+  assert.equal((await pending).text, "hello world");
+  assert.equal(adapter.requests.size, 0);
+  assert.ok(events.some(event => event.type === "request_resolved" && event.requestId === requests[0].requestId));
+  const nativeSettings = (await adapter.rpc.request("fixture/threadSettings", {})).settings;
+  assert.equal(nativeSettings.approvalPolicy, "never");
+  assert.equal(nativeSettings.approvalsReviewer, "auto_review");
+
+  const requestCount = requests.length;
+  assert.equal((await adapter.send("automatic turn", { mode: "auto" })).text, "hello world");
+  assert.equal(requests.length, requestCount, "Auto must not surface a native permission card");
 });
 
 test("Codex compaction waits for completion and can be interrupted using its native turn ID", async t => {
@@ -177,7 +218,8 @@ test("Claude adapter parses stream-json and retains its resume id", async (t) =>
   assert.ok(events.some((event) => event.type === "tool" && event.tool === "Read" && event.state === "completed" && event.output === "fixture.txt"));
   const settings = JSON.parse((await adapter.send("inspect-settings", { model: "sonnet", effort: "low" })).text);
   assert.equal(settings.model, "sonnet"); assert.equal(settings.effort, "low");
-  assert.equal(settings.mode, "acceptEdits");
+  assert.equal(settings.mode, "auto");
+  assert.equal(JSON.parse((await adapter.send("inspect-settings", { mode: "accept_edits" })).text).mode, "acceptEdits");
   for (const mode of ["plan", "auto"]) assert.equal(JSON.parse((await adapter.send("inspect-settings", { mode })).text).mode, mode);
   const reset = JSON.parse((await adapter.send("inspect-settings", { model: "default", resetEffort: true })).text);
   assert.equal(reset.model, "default"); assert.equal(reset.effort, null); assert.equal(reset.environmentEffort, "auto");
@@ -231,11 +273,11 @@ test("Codex interrupts a turn by its ID and reuses the same app-server and threa
   const adapter = new CodexAdapter({ chat, store, config: testConfig(root, { CODEX_BIN: path.join(fixtureDir, "fake-codex.mjs") }), broker: new CapabilityBroker({ ttlMs: 10000 }), hooks: { onRequest: value => { request = value; } } });
   t.after(() => adapter.stop()); await adapter.start();
   const rpc = adapter.rpc;
-  const sent = adapter.send("interrupt me");
+  const sent = adapter.send("interrupt me", { mode: "accept_edits" });
   const rejected = assert.rejects(sent, /interrupted/);
   await waitFor(() => request); await adapter.interrupt(); await rejected;
   assert.equal(adapter.rpc, rpc); assert.equal(adapter.threadId, "thr_fixture"); assert.equal(adapter.requests.size, 0);
-  request = null; const next = adapter.send("next"); await waitFor(() => request);
+  request = null; const next = adapter.send("next", { mode: "accept_edits" }); await waitFor(() => request);
   await adapter.respond(request.requestId, { decision: "accept" }); assert.equal((await next).text, "hello world");
   await adapter.interrupt(); assert.equal(adapter.rpc, rpc);
 });

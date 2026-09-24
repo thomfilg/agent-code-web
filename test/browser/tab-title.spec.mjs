@@ -1,3 +1,4 @@
+import { openSettingsSection, switchSettingsCompany } from "./settings-navigation.mjs";
 import { test, expect } from "@playwright/test";
 import { DEFAULT_TITLE_ITEMS, TITLE_ITEMS, formatTabTitle } from "../../public/tab-title.js";
 
@@ -24,7 +25,7 @@ async function setup(page, { busy = false, items = DEFAULT_TITLE_ITEMS } = {}) {
 }
 async function open(page, command = false, busy = false) {
   if (command) { await page.locator("#message-input").fill("/title"); await page.getByRole("button", { name: busy ? "Queue" : "Send message", exact: true }).click(); }
-  else { await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#tab-title-button").click(); }
+  else { await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#tab-title-button").click(); }
   await expect(page.locator("#controls-title")).toHaveText("Browser tab title"); await expect(page.locator("#controls-content [role=status]")).toContainText("Saved tab title loaded");
 }
 const close = page => page.locator("#controls-dialog").evaluate(dialog => dialog.close());
@@ -106,7 +107,7 @@ test("failed settings retain the slash command; a late discovery cannot replace 
   const entered = Promise.withResolvers(), release = Promise.withResolvers(); let delay = true;
   await page.route("**/api/tab-title", async route => { if (delay) { delay = false; entered.resolve(); await release.promise; } return route.fallback(); });
   await page.getByRole("button", { name: "Send message", exact: true }).click(); await entered.promise; await close(page);
-  await page.locator("#message-input").fill("New draft"); await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#keymap-button").click(); release.resolve();
+  await page.locator("#message-input").fill("New draft"); await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#keymap-button").click(); release.resolve();
   await expect(page.locator("#controls-title")).toHaveText("Keyboard shortcuts"); await expect(page.locator("#message-input")).toHaveValue("New draft"); expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
 });
 
@@ -133,9 +134,9 @@ test("account changes immediately neutralize the title and discard old-account a
   await page.route("**/api/browser-connections", route => route.fulfill({ json: { connections: [] } }));
   await page.locator("#message-input").fill("Account-change draft"); await open(page); await page.getByLabel("Show Git branch", { exact: true }).check();
   await page.getByRole("button", { name: "Save tab title", exact: true }).click(); await entered.promise; await close(page);
-  await page.getByRole("button", { name: "Browser connections", exact: true }).click(); await page.getByLabel("Username", { exact: true }).fill("title-user"); await page.getByLabel("Account password", { exact: true }).fill("fixture-only-password");
+  await openSettingsSection(page, "Browser connections"); await page.getByLabel("Username", { exact: true }).fill("title-user"); await page.getByLabel("Account password", { exact: true }).fill("fixture-only-password");
   await page.locator("#browser-account-form button[value=login]").click(); await nextLoad.promise; await expect(page).toHaveTitle("Agent Relay");
-  releaseLoad.resolve(); await expect(page.locator("#browser-account-name")).toHaveText("Signed in as title-user"); await page.locator("#browser-connections-close").click(); await expect(page).toHaveTitle("fixture-gpt");
+  releaseLoad.resolve(); await expect(page.locator("#browser-account-name")).toHaveText("Signed in as title-user"); await page.locator("#browser-connections-close").click(); await page.getByLabel("Close settings", { exact: true }).click(); await expect(page).toHaveTitle("fixture-gpt");
   release.resolve(); await expect(page.locator("#toasts")).toContainText("original panel"); await expect(page).toHaveTitle("fixture-gpt");
   await expect(page.locator("#message-input")).toHaveValue("Account-change draft"); expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
 });

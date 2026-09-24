@@ -39,7 +39,7 @@ test("HTTP /init is dispatched in its original chat and records the user's actua
   assert.equal(f.calls.inputs.length, 1); assert.equal(f.calls.inputs[0].chatId, f.chat.id);
   assert.match(f.calls.inputs[0].text, /Inspect this repository and create or improve its AGENTS\.md/);
   assert.match(f.calls.inputs[0].text, /Preserve the release rules\nand inspect the existing tests/);
-  assert.equal(f.calls.inputs[0].options.mode, "accept_edits");
+  assert.equal(f.calls.inputs[0].options.mode, "auto");
   assert.equal(f.app.store.get(f.chat.id).messages.find(message => message.role === "user").text, text);
   assert.equal(f.app.store.list().length, 1, "Initialization must not create a copied/replacement chat");
   assert(!f.app.store.get(f.chat.id).messages.some(message => message.kind === "error"));

@@ -1,0 +1,57 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import {MemoryRecords} from '../src/database.mjs';
+import {AgentAccounts} from '../src/agent-accounts.mjs';
+import {personalBrowserScope} from '../src/personal-browser-authority.mjs';
+import {BrowserConnections} from '../src/browser-connections.mjs';
+
+test('personal MCP authority reads durable account/disconnection state and fails closed on scope changes',{timeout:5000},async () => {
+  const records = new MemoryRecords(), ownerId = 'user_'+'a'.repeat(32), accountId = `account_${randomUUID()}`;
+  const accounts = new AgentAccounts({records,config:{}});
+  const record = {id:accountId,ownerId,provider:'codex',revision:1,status:'connected',name:'Synthetic',auth:{synthetic:true}};
+  await accounts.save(record);
+  let chat = {id:'chat-fixture',ownerId,agent:'codex',agentAccountId:accountId,environmentId:'environment',repositories:[{companyId:'acme',fullName:'owner/project'}]};
+  await records.put('chat',chat.id,chat);
+  let company = {id:'acme',revision:1}, environment = {id:'environment',companyId:'acme',companies:['acme'],revision:1}, duringEnvironment = () => {};
+  const store = {get:() => chat}, resources = {forOwner:async id => {assert.equal(id,ownerId); return {companies:{get:async id => {assert.equal(id,company.id);return company;}},environments:{get:async id => {assert.equal(id,environment.id);await duringEnvironment();return environment;}}};}};
+  const read = () => personalBrowserScope({store,records,resources,agentAccounts:accounts},chat.id);
+  assert.equal((await read()).accountRevision,1);
+  await records.delete('chat',chat.id); await assert.rejects(read(),/durably/); await records.put('chat',chat.id,chat);
+  let changed = false; duringEnvironment = () => { if (!changed) {changed = true; company = {...company,revision:2};} };
+  await assert.rejects(read(),/changed/); duringEnvironment = () => {};
+  const previousIdentity = (await read()).accountIdentityHash;
+  await records.put('agent-account',accountId,{...record,subject:'different-native-subject'});
+  assert.notEqual((await read()).accountIdentityHash,previousIdentity,'native identity is bound even without a revision increment');
+  await records.put('agent-account',accountId,record);
+  duringEnvironment = async () => { await records.delete('chat',chat.id); };
+  await assert.rejects(read(),/changed/); duringEnvironment = () => {}; await records.put('chat',chat.id,chat);
+  await records.put('agent-account',accountId,{...record,status:'disconnected',auth:null});
+  await assert.rejects(read(),'durable disconnect wins over unchanged connected metadata');
+  await records.put('agent-account',accountId,record);
+  await records.put('agent-account-disconnection',accountId,{id:accountId,ownerId});
+  await assert.rejects(read(),/revoked/); await records.delete('agent-account-disconnection',accountId);
+  environment = {...environment,companyId:'foreign'}; await assert.rejects(read(),/company/);
+  environment = {...environment,companyId:'acme',scopeNeedsReview:true}; await assert.rejects(read(),/company/);
+  environment = {...environment,scopeNeedsReview:false,archived:true}; await assert.rejects(read(),/company/);
+  environment = {...environment,archived:false};
+  await records.put('agent-account',accountId,{...record,ownerId:'user_'+'b'.repeat(32)}); await assert.rejects(read(),/not found/);
+  await records.put('agent-account',accountId,{...record,revision:2}); assert.equal((await read()).accountRevision,2);
+  chat = {...chat,agent:'claude'}; await records.put('chat',chat.id,chat); await assert.rejects(read(),/selected agent/);
+  chat = {...chat,agent:'mock'}; await assert.rejects(read(),/named/);
+});
+
+test('revocation during durable sharing-scope lookup cannot resurrect consent',{timeout:5000},async () => {
+  const records = new MemoryRecords(), user = {id:'user_'+'a'.repeat(32)};
+  const chat = {id:'chat',ownerId:user.id,agent:'codex',agentAccountId:'account',environmentId:'env',repositories:[{companyId:'acme',fullName:'owner/project'}]};
+  const connection = {id:'browser',ownerId:user.id,companyId:'acme'}; await records.put('browser-connection',connection.id,connection);
+  const personal = new BrowserConnections({records,store:{get:() => chat},validateCompany:async () => {}});
+  personal.bridges.set(connection.id,{connection,ready:true,tabSelected:true,socket:{readyState:1},pending:new Map()});
+  let release, entered, authorized = 0;
+  const started = new Promise(resolve => {entered = resolve;});
+  personal.officialScope = () => new Promise(resolve => {release = resolve;entered();});
+  personal.request = async () => {authorized++;return {};};
+  const pending = personal.enable(chat.id,user,connection.id); pending.catch(() => {});
+  await Promise.race([started,pending]); await personal.revokeChat(chat.id); release({});
+  await assert.rejects(pending,/cancelled/); assert.equal(authorized,0); assert.equal(personal.grants.size,0);
+});

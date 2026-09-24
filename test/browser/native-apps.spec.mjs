@@ -71,6 +71,22 @@ test("app selection errors preserve the draft and can be retried; the picker fit
   await expect(page.getByLabel("Message", { exact: true })).toHaveValue("Retained draft $fixture-app ");
 });
 
+test("native chat header keeps its title and every action inside phone widths", async ({ page }, testInfo) => {
+  await setup(page);
+  for (const width of [320, 390, 430, 480]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(page.locator("#chat-title")).toBeInViewport({ ratio: 1 });
+    for (const label of ["Open chats", "Open shared Chrome", "Open app preview", "Open side chat", "Open agent threads"]) await expect(page.getByRole("button", { name: label, exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(page.getByLabel("Chat settings", { exact: true })).toBeInViewport({ ratio: 1 });
+    await page.getByLabel("Chat settings", { exact: true }).click();
+    for (const label of ["View changes", "Copy private chat link"]) await expect(page.getByRole("button", { name: label, exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const title = await page.locator("#chat-title").boundingBox(); expect(title.width).toBeGreaterThan(100);
+    if ([320, 390].includes(width)) await page.screenshot({ path: testInfo.outputPath(`native-chat-header-${width}.png`) });
+  }
+});
+
 test("a delayed app selection cannot attach to or overwrite a different chat", async ({ page }) => {
   const { chat, selection, sent } = await setup(page), entered = Promise.withResolvers(), release = Promise.withResolvers();
   await page.route(`**/api/chats/${chat.id}/apps/select`, async route => { entered.resolve(); await release.promise; await route.fulfill({ json: selection }); });

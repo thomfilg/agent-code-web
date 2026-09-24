@@ -4,6 +4,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { ChatStore } from "../src/store.mjs";
+import { MemoryRecords } from "../src/database.mjs";
+import { GitHubWorkerGateway } from "../src/github-worker-gateway.mjs";
 import { prepareWorkspace } from "../src/workspace.mjs";
 import { temporaryDirectory } from "./helpers.mjs";
 
@@ -43,4 +45,34 @@ test("repository URLs with embedded credentials are rejected", async (t) => {
     prepareWorkspace({ destination: path.join(root, "workspace"), source: "https://user:secret@example.test/repo.git" }),
     /credentials are not allowed/,
   );
+});
+
+for (const persistence of ["file", "database"]) test(`legacy source-only ${persistence} chats restore without inventing GitHub selections`, async t => {
+  const root = await temporaryDirectory(t), records = persistence === "database" ? new MemoryRecords() : null;
+  const store = new ChatStore(root, records); await store.initialize();
+  const variants = [undefined, null, {}, [null], [{ fullName: "company/incomplete" }],
+    [{ id: 31, fullName: "company/old-selection" }], [{ id: 31, fullName: "company/old-selection", githubConnectionId: "" }]], ids = [];
+  for (const repositories of variants) {
+    const chat = await store.create({ agent: "codex", title: "Legacy source", source: path.join(root, "old-source"), ownerId: "original-owner" });
+    if (repositories === undefined) delete chat.repositories;
+    else chat.repositories = repositories;
+    ids.push(chat.id);
+    if (records) await records.put("chat", chat.id, chat);
+    else await writeFile(store.chatFile(chat.id), JSON.stringify(chat));
+  }
+  const restarted = new ChatStore(root, records); await restarted.initialize();
+  const gateway = new GitHubWorkerGateway({ store: restarted, servicesFor: () => { throw Error("Must not infer a GitHub connection"); } });
+  t.after(() => gateway.shutdown());
+  assert.deepEqual(restarted.get(ids[0]).repositories, []);
+  assert.equal(restarted.get(ids[0]).ownerId, "original-owner");
+  assert.equal(restarted.get(ids[0]).source, path.join(root, "old-source"));
+  assert.deepEqual(await gateway.runtime(ids[0], "https://relay.example"), { token: null, environmentVariables: {}, repositories: [] });
+  for (let index = 1; index < ids.length; index++) {
+    assert.deepEqual(restarted.get(ids[index]).repositories, variants[index]);
+    await assert.rejects(gateway.runtime(ids[index], "https://relay.example"), {
+      statusCode: 403,
+      message: "This chat's saved GitHub repository selection is incomplete or invalid. Select the repository and intended GitHub account again in a new chat.",
+    });
+  }
+  assert.equal(gateway.entries.size, 0);
 });

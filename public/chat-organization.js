@@ -13,7 +13,8 @@ export function repositoryGroup(chat) {
   const legacy = /^(?:https:\/\/github\.com\/|git@github\.com:)([^/]+\/[^/#?]+?)(?:\.git)?\/?$/.exec(chat.source || "")?.[1];
   const fullName = selected || legacy;
   if (fullName) {
-    const [company, repository] = fullName.split("/");
+    const [owner, repository] = fullName.split("/");
+    const company = chat.repositories?.[0]?.companyId || owner;
     return { company, repository, fullName };
   }
   return { company: "Personal", repository: chat.source ? chat.source.replace(/\/$/, "").split("/").at(-1) : "No repository", fullName: null };
@@ -42,8 +43,9 @@ export function groupChats(chats, groups, sort) {
     const companyKey = identity.company.toLowerCase();
     if (!companies.has(companyKey)) companies.set(companyKey, { name: identity.company, repositories: new Map() });
     const repos = companies.get(companyKey).repositories;
-    const repoKey = identity.repository.toLowerCase();
-    if (!repos.has(repoKey)) repos.set(repoKey, { name: identity.repository, chats: [] });
+    const repoKey = (identity.fullName || identity.repository).toLowerCase();
+    const repoLabel = chat.repositories?.[0]?.companyId && !identity.fullName.toLowerCase().startsWith(`${identity.company.toLowerCase()}/`) ? identity.fullName : identity.repository;
+    if (!repos.has(repoKey)) repos.set(repoKey, { name: repoLabel, chats: [] });
     repos.get(repoKey).chats.push(chat);
   }
   return { pinned, custom, companies: [...companies.values()].sort((a, b) => a.name.localeCompare(b.name)).map(company => ({ ...company, repositories: [...company.repositories.values()].sort((a, b) => a.name.localeCompare(b.name)) })) };
@@ -59,7 +61,7 @@ export function workflowPatch(chat) {
   let workflowState = "idle", stateOrigin = "runtime", stateDetail = "Ready for another message";
   if (chat.archived) { workflowState = "archived"; stateOrigin = "archive"; stateDetail = "Unarchive this chat to continue"; }
   else if (chat.pendingRequest) { workflowState = "asking_question"; stateDetail = "The agent needs your answer or approval"; }
-  else if (["starting", "running", "stopping"].includes(chat.status)) { workflowState = "working"; stateDetail = chat.status === "stopping" ? "Stopping the worker" : "The agent is working"; }
+  else if (["starting", "running", "stopping"].includes(chat.status)) { workflowState = "working"; stateDetail = chat.suspension?.status === "hibernating" ? "Hibernating the environment" : chat.suspension?.status === "hibernated" && chat.status === "starting" ? "Resuming the environment" : chat.status === "stopping" ? "Stopping the worker" : "The agent is working"; }
   else if (chat.awaitingUser) { workflowState = "asking_question"; stateOrigin = "agent"; stateDetail = "The agent is waiting for your reply"; }
   else {
     const prs = (chat.pullRequests || []).filter(pr => pr.verifiedAt);

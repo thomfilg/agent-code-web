@@ -1,10 +1,10 @@
-import { STATUS_ITEMS, DEFAULT_STATUS_ITEMS, validateStatusItems, statusItemValue } from "./status-line.js";
+import { STATUS_ITEMS, DEFAULT_STATUS_ITEMS, validateStatusItems, visibleStatusItems, statusItemValue } from "./status-line.js";
 import { OrderedFieldsControls } from "./ordered-fields-controls.js";
 export class StatusLineControls extends OrderedFieldsControls {
   constructor(options) {
     super(options, { id: "statusline", title: "Status line", name: "status line", adjective: "status-line",
       defaults: DEFAULT_STATUS_ITEMS, items: STATUS_ITEMS, validate: validateStatusItems, hideLabel: "Hide status line", previewLabel: "Status line preview",
-      about: "This configures Relay's web footer, not native tui.status_line or config.toml. It never wakes a worker or sends a message. Values use saved worker reports; missing data stays Not reported, and stopped workers show a saved snapshot. Closing without saving leaves the footer unchanged." });
+      about: "Optional extra fields for Relay's web footer, hidden by default. Model and reasoning stay in their controls, context in its indicator, and branches in the PR strip. Explicitly saved selections remain visible. This does not change native tui.status_line or config.toml, wake a worker or send a message. Values use saved worker reports; missing data stays Not reported. Closing without saving leaves the footer unchanged." });
     this.root = document.querySelector("#chat-statusline");
   }
   resetIdentity() { super.resetIdentity(); this.root.replaceChildren(); this.root.hidden = true; }
@@ -18,8 +18,9 @@ export class StatusLineControls extends OrderedFieldsControls {
     if (!items.length) { const hidden = document.createElement("span"); hidden.className = "muted"; hidden.textContent = "Status line hidden"; root.append(hidden); }
   }
   render() {
-    this.root.hidden = !this.getChat() || !this.snapshot.items.length; this.draw(this.root, this.snapshot.items);
-    if (this.getChat()?.status === "stopped" && this.snapshot.items.length) { const saved = document.createElement("span"); saved.className = "statusline-snapshot"; saved.textContent = "Saved snapshot"; this.root.append(saved); }
+    const items = visibleStatusItems(this.snapshot.items, this.snapshot.revision);
+    this.root.hidden = !this.getChat() || !items.length; this.draw(this.root, items);
+    if (this.getChat()?.status === "stopped" && items.length) { const saved = document.createElement("span"); saved.className = "statusline-snapshot"; saved.textContent = "Saved snapshot"; this.root.append(saved); }
     super.render();
   }
 }

@@ -200,14 +200,123 @@ async function fixture(t, { fake = false, host = false } = {}) {
   models.codex = async () => ({ models: [{ id: "gpt-5.6-sol", efforts: ["high"] }] });
   const broker = new CapabilityBroker({ ttlMs: 120000 }), calls = [];
   const f = { calls, starts: 0 };
-  const manager = new RuntimeManager({ store, config, models, broker, gatewayOrigin: "http://127.0.0.1:9", adapterFactory: params => {
+  const manager = new RuntimeManager({ store, config, models, broker, commands: { list: async () => ({ commands: [{ name: "debug" }] }) }, gatewayOrigin: "http://127.0.0.1:9", adapterFactory: params => {
+    f.hooks = params.hooks;
     if (!fake) return new ClaudeAdapter({ ...params, store, config, broker, gatewayOrigin: "http://127.0.0.1:9" });
-    return { start: async () => { f.starts++; }, send: async (text, settings) => { calls.push({ text, settings }); await f.gate?.promise; return { text: "Native fixture response", nativeSettings: /^\/(?:config|update-config|doctor|checkup)(?:\s|$)/.test(text) ? { model: "sonnet", mode: "plan" } : undefined }; }, stop: async () => f.gate?.resolve() };
+    f.adapter = { start: async () => { f.starts++; }, send: async (text, settings) => { calls.push({ text, settings }); await f.gate?.promise; return { text: "Native fixture response", nativeSettings: /^\/(?:config|update-config|doctor|checkup)(?:\s|$)/.test(text) ? { model: "sonnet", mode: "plan" } : undefined }; }, stop: async () => f.gate?.resolve() };
+    return f.adapter;
   } });
   t.after(() => manager.shutdown());
   const chat = await manager.createChat({ agent: "claude", title: "Private configuration test" });
   return Object.assign(f, { root, store, config, models, broker, manager, chat });
 }
+
+test("live Claude web permission changes await native acknowledgement without restarting the turn", async t => {
+  const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+  await f.manager.setMode(f.chat.id, "default");
+  const running = f.manager.send(f.chat.id, "Continue this same turn"); await waitFor(() => f.calls.length === 1);
+  const control = Promise.withResolvers(); let requested;
+  f.adapter.setPermissionMode = async (mode, guard) => { requested = mode; guard(); await control.promise; guard(); return true; };
+  const changing = f.manager.setMode(f.chat.id, "auto");
+  assert.equal(requested, "auto"); assert.equal(f.store.get(f.chat.id).mode, "default");
+  await assert.rejects(f.manager.setMode(f.chat.id, "plan"), /current permission change/);
+  control.resolve(); await changing;
+  assert.equal(f.store.get(f.chat.id).mode, "auto"); assert.equal(f.starts, 1); assert.equal(f.calls.length, 1);
+  await f.calls[0].settings.onPermissionMode("plan");
+  assert.equal(f.store.get(f.chat.id).mode, "plan", "Later native transitions still reconcile in this turn");
+  f.gate.resolve(); await running;
+});
+
+test("failed, stopped or rebound live permission changes never save a false Auto selection", async t => {
+  for (const outcome of ["failed", "stopped", "rebound"]) {
+    const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+    await f.manager.setMode(f.chat.id, "default");
+    const running = f.manager.send(f.chat.id, "Held turn"); await waitFor(() => f.calls.length === 1);
+    const control = Promise.withResolvers();
+    f.adapter.setPermissionMode = async (_mode, guard) => { await control.promise; guard(); return true; };
+    const changing = f.manager.setMode(f.chat.id, "auto");
+    const rejected = assert.rejects(changing, outcome === "failed" ? /Native refused/ : /chat changed/);
+    if (outcome === "stopped") { await f.manager.stop(f.chat.id); control.resolve(); }
+    else if (outcome === "rebound") { await f.store.update(f.chat.id, { ownerId: "different-owner" }); control.resolve(); }
+    else control.reject(Error("Native refused"));
+    await rejected; assert.equal(f.store.get(f.chat.id).mode, "default");
+    f.gate.resolve(); await running;
+  }
+});
+
+test("only native statuses after the exact live control acknowledgement supersede the selected mode", async t => {
+  for (const afterAck of [false, true]) {
+    const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+    await f.manager.setMode(f.chat.id, "default");
+    const running = f.manager.send(f.chat.id, "Held turn"); await waitFor(() => f.calls.length === 1);
+    const report = f.calls[0].settings.onPermissionMode;
+    f.adapter.setPermissionMode = async (_mode, guard, acknowledge) => {
+      guard(); report("plan"); acknowledge(); if (afterAck) report("default"); return true;
+    };
+    await f.manager.setMode(f.chat.id, "auto");
+    assert.equal(f.store.get(f.chat.id).mode, afterAck ? "default" : "auto");
+    f.gate.resolve(); await running;
+  }
+});
+
+test("native fallback while live mode persistence is pending is reconciled before success", async t => {
+  const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+  await f.manager.setMode(f.chat.id, "default");
+  const running = f.manager.send(f.chat.id, "Held turn"); await waitFor(() => f.calls.length === 1);
+  const entered = Promise.withResolvers(), persisted = Promise.withResolvers(), original = f.store.update.bind(f.store);
+  f.adapter.setPermissionMode = async (_mode, guard, acknowledge) => { guard(); acknowledge(); return true; };
+  f.store.update = async (...args) => {
+    const result = await original(...args);
+    if (result?.mode === "auto") { entered.resolve(); await persisted.promise; }
+    return result;
+  };
+  const changing = f.manager.setMode(f.chat.id, "auto"); await entered.promise;
+  await f.calls[0].settings.onPermissionMode("default"); persisted.resolve();
+  assert.equal((await changing).mode, "default"); assert.equal(f.store.get(f.chat.id).mode, "default");
+  f.gate.resolve(); await running;
+});
+
+test("an older native observation queued before the control acknowledgement cannot undo Auto", async t => {
+  const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+  await f.manager.setMode(f.chat.id, "default");
+  const running = f.manager.send(f.chat.id, "Held turn"); await waitFor(() => f.calls.length === 1);
+  const held = Promise.withResolvers(), entered = Promise.withResolvers(), append = f.store.appendMessage.bind(f.store);
+  f.store.appendMessage = async (id, message) => {
+    if (message.text === "Hold event queue") { entered.resolve(); await held.promise; }
+    return append(id, message);
+  };
+  f.hooks.onEvent({ type: "notice", text: "Hold event queue" }); await entered.promise;
+  const observed = f.calls[0].settings.onPermissionMode("plan");
+  f.adapter.setPermissionMode = async (_mode, guard, acknowledge) => { guard(); acknowledge(); return true; };
+  await f.manager.setMode(f.chat.id, "auto"); held.resolve(); await observed;
+  assert.equal(f.store.get(f.chat.id).mode, "auto");
+  await f.calls[0].settings.onPermissionMode("default");
+  assert.equal(f.store.get(f.chat.id).mode, "default", "A newer native observation is still authoritative");
+  f.gate.resolve(); await running;
+});
+
+test("native mode observations during an unacknowledged failed change are not lost", async t => {
+  for (const queuedBefore of [false, true]) {
+    const f = await fixture(t, { fake: true }); f.gate = Promise.withResolvers();
+    await f.manager.setMode(f.chat.id, "default");
+    const running = f.manager.send(f.chat.id, "Held turn"); await waitFor(() => f.calls.length === 1);
+    const held = Promise.withResolvers(), entered = Promise.withResolvers(), append = f.store.appendMessage.bind(f.store);
+    f.store.appendMessage = async (id, message) => {
+      if (message.text === "Hold event queue") { entered.resolve(); await held.promise; }
+      return append(id, message);
+    };
+    f.hooks.onEvent({ type: "notice", text: "Hold event queue" }); await entered.promise;
+    const control = Promise.withResolvers(); f.adapter.setPermissionMode = () => control.promise;
+    let observed;
+    if (queuedBefore) observed = f.calls[0].settings.onPermissionMode("plan");
+    const changing = f.manager.setMode(f.chat.id, "auto"), rejected = assert.rejects(changing, /Native refused/);
+    if (!queuedBefore) observed = f.calls[0].settings.onPermissionMode("plan");
+    held.resolve(); await observed;
+    control.reject(Error("Native refused")); await rejected;
+    assert.equal(f.store.get(f.chat.id).mode, "plan");
+    f.gate.resolve(); await running;
+  }
+});
 
 test("native modes update immediately and between replies, persist through Stop, and drive the next queued turn", async t => {
   const f = await fixture(t, { fake: true }), other = await f.manager.createChat({ agent: "claude", title: "Other native session" });

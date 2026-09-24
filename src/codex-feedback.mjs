@@ -52,7 +52,7 @@ export class CodexFeedback {
   binding(chat) {
     return hash([chat.id, chat.ownerId || null, chat.agent, chat.agentSessionId || null, companyForChat(chat),
       (chat.repositories || []).map(repo => repo.fullName || `${repo.owner}/${repo.name}`), chat.environmentId || null,
-      chat.workspace, this.config.codex.authMode, this.config.workerBackend]);
+      chat.workspace, this.config.codex.authMode, this.config.workerBackend, ...(chat.agentAccountId ? ["account", chat.agentAccountId] : [])]);
   }
   #chat(chatId, binding) {
     const chat = this.store.get(chatId);

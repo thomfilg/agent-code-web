@@ -17,7 +17,7 @@ async function fixture(page) {
   return f;
 }
 async function open(page) {
-  await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#workspace-trust-button").click();
+  await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#workspace-trust-button").click();
   await expect(page.locator("#controls-title")).toHaveText("Claude workspace trust");
 }
 const inspect = page => page.getByRole("button", { name: "Inspect workspace trust", exact: true }).click();

@@ -1,0 +1,21 @@
+{
+  "account": "456808212788",
+  "region": "us-east-2",
+  "applicationStack": "agent-relay-mvp",
+  "ciStack": "agent-relay-mvp-ci",
+  "repository": "thomfilg/agent-code-web",
+  "repositoryId": "1370075262",
+  "ownerId": "648890",
+  "environment": "aws-mvp",
+  "oidcSubject": "repo:thomfilg@648890/agent-code-web@1370075262:environment:aws-mvp",
+  "engineRepository": "12-apps/ci",
+  "engineRevision": "848182b33461640e9ac0feb7315f747a67877c88",
+  "enabledVariable": "ENABLE_DEPLOY_AWS",
+  "enabledByDefault": false,
+  "container": "relay",
+  "mount": "/srv/relay/data",
+  "destination": "/var/lib/relay",
+  "readyFile": "/var/lib/relay-controller-ready",
+  "port": "8787",
+  "health": "/readyz"
+}

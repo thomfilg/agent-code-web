@@ -38,6 +38,27 @@ test("Claude queued compaction is sent as the exact native /compact input, witho
   assert.deepEqual(calls, ["hold", "/compact"]);
 });
 
+test("queueing during an active Codex goal neither pauses it nor dispatches input before completion", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const sends = [], goalActions = []; let release;
+  const adapter = { goal: { status: "active" }, start: async () => {}, stop: async () => {},
+    goalAction: async action => { goalActions.push(action); adapter.goal = { status: action === "pause" ? "paused" : "active" }; },
+    send: async text => { sends.push(text); if (text.includes("long goal turn")) await new Promise(resolve => { release = resolve; }); return { text: "Done" }; } };
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => adapter });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "codex" });
+  const first = await manager.submit(chat.id, "long goal turn"); await waitFor(() => release);
+  const probe = await manager.enqueue(chat.id, "remove before delivery");
+  assert.equal(adapter.goal.status, "active"); assert.deepEqual(goalActions, []);
+  await manager.editQueue(chat.id, { removeId: probe.queuedMessages[0].id });
+  await manager.enqueue(chat.id, "deliver after goal");
+  assert.equal(sends.length, 1); assert.match(sends[0], /long goal turn/); assert.equal(adapter.goal.status, "active");
+  adapter.goal = { status: "complete" }; release(); await first.completion;
+  await waitFor(() => sends.length === 2 && !manager.isBusy(chat.id) && !store.get(chat.id).queuedMessages.length);
+  assert.match(sends[1], /deliver after goal/);
+  await manager.stop(chat.id);
+});
+
 test("Claude context includes cache writes and reads once, while result totals accumulate across calls", () => {
   const request = { model: "opus", usage: { input_tokens: 2, output_tokens: 4, cache_read_input_tokens: 15477, cache_creation_input_tokens: 31155 } };
   assert.equal(claudeContext(request).contextTokens, 46634);
@@ -54,9 +75,9 @@ test("Codex cached input is not counted twice and snapshots are not added togeth
   assert.equal(usage.contextTokens, 210); assert.equal(usage.context.inputTokens, 100); assert.equal(usage.totals.inputTokens, 250);
   assert.equal(mergeUsage(usage, usage).totals.cacheReadTokens, 250);
 });
-test("tool calls group per user turn and live completion IDs do not count twice", () => {
+test("tool calls group between commentary blocks and live completion IDs do not count twice", () => {
   const { rows, groups } = groupTools([{ id: "u", role: "user" }, { id: "a", kind: "tool", meta: { itemId: "t" } }, { id: "b", role: "assistant" }, { id: "c", kind: "tool", meta: { itemId: "t2" } }], [{ itemId: "t", state: "completed" }]);
-  assert.equal(rows.filter(row => row.kind === "tool_group").length, 1); assert.equal(groups.get("u").size, 2);
+  assert.equal(rows.filter(row => row.kind === "tool_group").length, 2); assert.equal(groups.get("tools-a").size, 1); assert.equal(groups.get("tools-c").size, 1);
 });
 test("messages drain FIFO, stop pauses queue, removal and explicit resume work", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
@@ -119,37 +140,35 @@ async function queueFixture(t, options = {}) {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const calls = []; let release, interruptions = 0, stops = 0;
   const manager = new RuntimeManager({ store, config: testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "10000" }), broker: new CapabilityBroker({ ttlMs: 10000 }),
-    adapterFactory: () => ({ start: async () => {},
+    adapterFactory: ({ hooks }) => ({ start: async () => {},
       stop: async () => { stops++; release?.({ text: "stopped" }); },
       interrupt: async () => { interruptions++; await options.interrupt?.(); release?.({ text: "interrupted" }); },
-      send: text => { calls.push(text); return new Promise(resolve => { release = resolve; }); } }), ...options.manager });
+      send: text => { calls.push(text); if (options.partial) hooks.onEvent({ type: "assistant_delta", delta: options.partial }); return new Promise(resolve => { release = resolve; }); } }), ...options.manager });
   t.after(() => manager.shutdown()); const chat = await manager.createChat({ agent: "mock" });
   return { store, manager, chat, calls, complete: () => release?.({ text: "done" }), interruptions: () => interruptions, stops: () => stops };
 }
 
-test("Send now interrupts only the turn, sends the selected item once, and retains FIFO for the rest", async t => {
+test("Send all now interrupts once and submits every user item with the clicked item first", async t => {
   const f = await queueFixture(t), { manager, store, chat, calls } = f;
   const first = await manager.submit(chat.id, "first"); await waitFor(() => calls.length === 1);
   await manager.enqueue(chat.id, "second"); await manager.enqueue(chat.id, "third"); await manager.enqueue(chat.id, "fourth");
   const selected = store.get(chat.id).queuedMessages[1];
   await Promise.all([manager.editQueue(chat.id, { sendNowId: selected.id }), manager.editQueue(chat.id, { sendNowId: selected.id })]);
   await first.completion; await waitFor(() => calls.length === 2);
-  assert.deepEqual(calls, ["first", "third"]); assert.equal(f.interruptions(), 1); assert.equal(f.stops(), 0);
-  assert.deepEqual(store.get(chat.id).queuedMessages.map(m => m.text), ["second", "fourth"]);
+  assert.deepEqual(calls, ["first", "third\n\n---\n\nsecond\n\n---\n\nfourth"]); assert.equal(f.interruptions(), 1); assert.equal(f.stops(), 0);
+  assert.deepEqual(store.get(chat.id).queuedMessages, []);
   await assert.rejects(manager.editQueue(chat.id, { sendNowId: selected.id }), /not found/); assert.equal(f.interruptions(), 1);
-  f.complete(); await waitFor(() => calls.length === 3); assert.equal(calls[2], "second");
-  f.complete(); await waitFor(() => calls.length === 4); assert.equal(calls[3], "fourth");
   f.complete(); await waitFor(() => !manager.isBusy(chat.id)); assert.equal(store.get(chat.id).queuedMessages.length, 0);
 });
 
-test("Send now works on a paused queue without resuming the other messages; invalid IDs do not interrupt", async t => {
+test("Send all now drains a paused user queue immediately", async t => {
   const f = await queueFixture(t), { manager, store, chat, calls } = f;
   await store.update(chat.id, { queuePaused: true }); await manager.enqueue(chat.id, "later"); await manager.enqueue(chat.id, "now");
   await assert.rejects(manager.editQueue(chat.id, { sendNowId: "wrong-chat-message" }), /not found/);
   const id = store.get(chat.id).queuedMessages[1].id; await manager.editQueue(chat.id, { sendNowId: id });
   await waitFor(() => calls.length === 1); f.complete(); await waitFor(() => !manager.isBusy(chat.id));
-  assert.deepEqual(calls, ["now"]); assert.equal(f.interruptions(), 0);
-  assert.equal(store.get(chat.id).queuePaused, true); assert.equal(store.get(chat.id).queuedMessages[0].text, "later");
+  assert.deepEqual(calls, ["now\n\n---\n\nlater"]); assert.equal(f.interruptions(), 0);
+  assert.equal(store.get(chat.id).queuePaused, false); assert.equal(store.get(chat.id).queuedMessages.length, 0);
 });
 
 test("manual Stop wins over an in-flight Send now and retains the queued input", async t => {
@@ -157,8 +176,8 @@ test("manual Stop wins over an in-flight Send now and retains the queued input",
   const f = await queueFixture(t, { interrupt: () => new Promise(resolve => { finishInterrupt = resolve; }) }), { manager, store, chat, calls } = f;
   await manager.submit(chat.id, "first"); await waitFor(() => calls.length === 1);
   await manager.enqueue(chat.id, "never send after stop"); const id = store.get(chat.id).queuedMessages[0].id;
-  const sending = manager.editQueue(chat.id, { sendNowId: id }); const rejected = assert.rejects(sending, /cancelled/);
-  await waitFor(() => finishInterrupt); await manager.stop(chat.id); finishInterrupt(); await rejected;
+  const sending = manager.editQueue(chat.id, { sendNowId: id });
+  await waitFor(() => finishInterrupt); const stopping = manager.stop(chat.id); finishInterrupt(); await Promise.all([stopping, sending]);
   assert.deepEqual(calls, ["first"]); assert.equal(store.get(chat.id).queuePaused, true);
   assert.equal(store.get(chat.id).queuedMessages[0].id, id); assert.equal(store.get(chat.id).status, "stopped");
 });

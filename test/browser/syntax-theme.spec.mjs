@@ -1,3 +1,4 @@
+import { openSettingsSection, switchSettingsCompany } from "./settings-navigation.mjs";
 import { test, expect } from "@playwright/test";
 
 const created = new WeakMap();
@@ -27,7 +28,7 @@ const block = page => page.locator('#messages code.language-js');
 const color = locator => locator.evaluate(element => getComputedStyle(element).color);
 async function open(page, busy) {
   if (busy !== undefined) { await page.locator("#message-input").fill("/theme"); await page.getByRole("button", { name: busy ? "Queue" : "Send message", exact: true }).click(); }
-  else { await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#syntax-theme-button").click(); }
+  else { await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#syntax-theme-button").click(); }
   await expect(page.locator("#controls-title")).toHaveText("Syntax theme"); await expect(page.locator("#controls-content [role=status]")).toContainText("Saved syntax theme loaded");
 }
 async function save(page) { await page.getByRole("button", { name: "Save syntax theme", exact: true }).click(); await expect(page.locator("#controls-content [role=status]")).toContainText("saved and active"); }
@@ -67,7 +68,7 @@ test("themes preview without applying, save actual code/diff colors and persist 
   expect(await color(block(page).locator(".syntax-keyword").first())).toBe(previewColor);
   await expect(page.locator("#message-input")).toHaveValue("Keep this draft"); await expect(page.locator("#attachment-chips")).toContainText("theme.txt");
   await page.route(`**/api/chats/${f.chat.id}/changes`, route => route.fulfill({ json: { source: "Fixture", files: [{ filename: "example.js", patch: "@@ -1 +1 @@\n-old\n+new" }] } }));
-  await page.getByRole("button", { name: "View changes", exact: true }).click(); await expect(page.locator("#diff-files .diff-line.added")).toHaveCSS("color", "rgb(17, 99, 41)");
+  await page.getByLabel("Chat settings", { exact: true }).click(); await page.getByRole("button", { name: "View changes", exact: true }).click(); await expect(page.locator("#diff-files .diff-line.added")).toHaveCSS("color", "rgb(17, 99, 41)");
   await expect(page.locator("#diff-files .diff-line.added .line-number")).toHaveCSS("color", "rgb(87, 96, 106)");
   await page.reload(); await expect(page.locator("html")).toHaveAttribute("data-syntax-theme", "paper-light"); await expect(block(page)).toHaveAttribute("data-highlight", "ready");
   expect(await color(block(page).locator(".syntax-keyword").first())).toBe(previewColor); expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
@@ -107,7 +108,7 @@ test("failed reads retain slash input; delayed discovery cannot erase newer text
   const entered = Promise.withResolvers(), release = Promise.withResolvers(); let delay = true;
   await page.route("**/api/syntax-theme", async route => { if (delay) { delay = false; entered.resolve(); await release.promise; } return route.fallback(); });
   await page.getByRole("button", { name: "Send message", exact: true }).click(); await entered.promise; await close(page);
-  await page.locator("#message-input").fill("A newer draft"); await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#keymap-button").click(); release.resolve();
+  await page.locator("#message-input").fill("A newer draft"); await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#keymap-button").click(); release.resolve();
   await expect(page.locator("#controls-title")).toHaveText("Keyboard shortcuts"); await expect(page.locator("#message-input")).toHaveValue("A newer draft"); expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
 });
 
@@ -129,7 +130,7 @@ test("large/unknown blocks stay intact and coloring does not load or interfere w
   await expect(page.locator("#messages code.language-js")).toHaveAttribute("data-highlight", "size-limit"); expect(await page.locator("#messages code.language-js").textContent()).toBe(large);
   await expect(page.locator("#messages code.language-unknown")).toHaveAttribute("data-highlight", "plain"); expect(await page.locator("#messages code.language-unknown").textContent()).toBe(`${unknown}\n`);
   await expect(page.locator("#messages code.language-typescript")).toHaveAttribute("data-highlight", "ready"); expect(await page.evaluate(() => Boolean(window.CodeMirror || window.themeInjected))).toBe(false);
-  await page.locator("#message-input").fill("one two three"); await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#vim-button").click(); await expect(page.locator("#vim-mode")).toHaveText("VIM · NORMAL");
+  await page.locator("#message-input").fill("one two three"); await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#vim-button").click(); await expect(page.locator("#vim-mode")).toHaveText("VIM · NORMAL");
   const editor = page.getByLabel("Message (Vim editor)", { exact: true }); for (const key of "gg0dw") await editor.press(key);
   await expect(page.locator("#message-input")).toHaveValue("two three"); expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
 });
@@ -185,9 +186,9 @@ test("account changes reset colors immediately and discard another account's lat
   await page.route("**/api/browser-connections", route => route.fulfill({ json: { connections: [] } }));
   await page.locator("#message-input").fill("Account-change draft"); await open(page); await page.getByRole("radio", { name: "High contrast", exact: true }).check();
   await page.getByRole("button", { name: "Save syntax theme", exact: true }).click(); await entered.promise; await close(page);
-  await page.getByRole("button", { name: "Browser connections", exact: true }).click(); await page.getByLabel("Username", { exact: true }).fill("theme-user"); await page.getByLabel("Account password", { exact: true }).fill("fixture-only-password");
+  await openSettingsSection(page, "Browser connections"); await page.getByLabel("Username", { exact: true }).fill("theme-user"); await page.getByLabel("Account password", { exact: true }).fill("fixture-only-password");
   await page.locator("#browser-account-form button[value=login]").click(); await nextLoad.promise; await expect(page.locator("html")).toHaveAttribute("data-syntax-theme", "relay-dark");
-  releaseLoad.resolve(); await expect(page.locator("#browser-account-name")).toHaveText("Signed in as theme-user"); await page.locator("#browser-connections-close").click(); await expect(page.locator("html")).toHaveAttribute("data-syntax-theme", "plain");
+  releaseLoad.resolve(); await expect(page.locator("#browser-account-name")).toHaveText("Signed in as theme-user"); await page.locator("#browser-connections-close").click(); await page.getByLabel("Close settings", { exact: true }).click(); await expect(page.locator("html")).toHaveAttribute("data-syntax-theme", "plain");
   release.resolve(); await expect(page.locator("#toasts")).toContainText("original panel"); await expect(page.locator("html")).toHaveAttribute("data-syntax-theme", "plain");
   await expect(page.locator("#message-input")).toHaveValue("Account-change draft"); expect(f.calls.actions).toEqual([]); expect(f.calls.errors).toEqual([]);
 });

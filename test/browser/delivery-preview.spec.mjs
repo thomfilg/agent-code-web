@@ -95,18 +95,20 @@ test("long PR branches do not widen the chat or its document overlay on mobile",
   const { chat } = await created.json();
   createdChats.push(chat.id);
   const branch = "feat/a-long-feature-name-that-must-not-expand-the-conversation";
-  const snapshot = { ...chat, messages: [{ id: "preview-answer", role: "assistant", text: "```html\n<table><tr><td>Saved document</td></tr></table>\n```" }], pullRequests: [{ repository: "Acme/long-repository-name", number: 1789, headRef: branch, state: "open", checks: "failing", conflicts: false, additions: 903, deletions: 19, ci: { inProgress: 0, passed: 2, skipped: 0, failed: 1 }, autoMerge: false }] };
+  const snapshot = { ...chat, repositories: [{ fullName: "Acme/long-repository-name" }], workspaceStatus: { branch }, messages: [{ id: "preview-answer", role: "assistant", text: "```html\n<table><tr><td>Saved document</td></tr></table>\n```" }], pullRequests: [{ repository: "Acme/long-repository-name", number: 1789, headRef: branch, state: "open", checks: "failing", conflicts: false, additions: 903, deletions: 19, ci: { inProgress: 0, passed: 2, skipped: 0, failed: 1 }, autoMerge: false }] };
   try {
     await page.route(`**/api/chats/${chat.id}`, route => route.request().method() === "GET" ? route.fulfill({ json: { chat: snapshot } }) : route.continue());
-    await page.route("**/api/sidebar", async route => { const response = await route.fetch(), data = await response.json(); data.chats = data.chats.map(item => item.id === chat.id ? { ...item, pullRequests: snapshot.pullRequests } : item); await route.fulfill({ json: data }); });
+    await page.route("**/api/sidebar", async route => { const response = await route.fetch(), data = await response.json(); data.chats = data.chats.map(item => item.id === chat.id ? { ...item, repositories: snapshot.repositories, workspaceStatus: snapshot.workspaceStatus, pullRequests: snapshot.pullRequests } : item); await route.fulfill({ json: data }); });
     await page.route(`**/api/chats/${chat.id}/events*`, route => route.fulfill({ contentType: "text/event-stream", body: ": layout fixture\n\n" }));
     await page.goto(`/#chat=${chat.id}`);
     const row = page.locator(".pull-request-bar");
     for (const width of [1600, 900, 390, 320]) {
       await page.setViewportSize({ width, height: 900 });
       await expect(row).toBeVisible();
+      await expect(page.locator("#chat-statusline")).toBeHidden();
+      await expect(page.locator(".branch-only")).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
-      const composer = await page.locator(".composer-wrap").boundingBox(), bounds = await row.boundingBox();
+      const composer = await page.locator("#conversation .composer-wrap").boundingBox(), bounds = await row.boundingBox();
       expect(bounds.x).toBeGreaterThanOrEqual(composer.x);
       expect(bounds.x + bounds.width).toBeLessThanOrEqual(composer.x + composer.width + 1);
       await expect(row.getByRole("link", { name: "⑂ #1789" })).toBeInViewport();

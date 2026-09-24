@@ -46,8 +46,8 @@ npm ci
 AGENT_ENABLE_MOCK=1 npm start
 ```
 
-Open <http://127.0.0.1:8787>, connect GitHub (the local `gh auth login`, an
-access token, or a configured OAuth device flow), and select repositories.
+Open <http://127.0.0.1:8787>, connect your GitHub account through the native
+browser code/link, choose its allowed companies, and select repositories.
 Choose Mock for a zero-provider-cost UI test. An initial prompt is optional;
 Codex/Claude name the chat when they receive its first prompt. The model/effort
 controls in the composer apply to the next message and persist per chat.
@@ -66,6 +66,13 @@ the user's credential trust boundary. Do not call this secret isolation.
 An environment variable cannot be both usable by a process and hidden from
 that same process. For that reason this mode does **not** inject either master
 provider key into the agent. It injects only a revocable capability.
+
+This statement applies to **provider-key gateway mode**, not named native
+Codex/Claude accounts. A selected native account supplies its access token to
+that chat's CLI; refresh tokens stay encrypted on the controller. Dedicated
+EC2 workers isolate chats, but code inside the same VM can access the native
+runtime's credentials. See the [remote worker credential boundary](docs/adr/2026-09-19-remote-worker-credential-boundary.md)
+for the per-integration contract and pending AWS acceptance gates.
 
 Export the key only into the control-plane process:
 
@@ -115,6 +122,15 @@ client and owner email in Doppler, not in committed files. The check reports
 presence only and does not open the saved database. See the setup guide for
 the project-scoped token/CLI login and optional manual environment launch.
 
+In Google mode, agent credentials must belong to the signed-in Relay user,
+including the administrator. **Agent accounts** provides named Codex sign-in by
+browser URL/device code and Claude sign-in by authorization URL/returned code,
+with explicit personal/company account selection per chat. There is no
+host-login or shared-key fallback. See the [provider onboarding checklist](docs/provider-onboarding.md) and
+[Codex accounts](docs/codex-accounts.md) for native CLI requirements, storage,
+isolation and the remaining real-account acceptance gates. Both flows are
+implemented; Google login alone does not authorize either provider.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `AGENT_WEB_HOST` | `127.0.0.1` | HTTP bind address |
@@ -128,14 +144,15 @@ the project-scoped token/CLI login and optional manual environment launch.
 | `AUTH_SECRET` | generated and encrypted in PostgreSQL | Optional explicit session encryption secret, at least 32 characters |
 | `AGENT_COOKIE_SECURE` | `0` | mark the browser session cookie Secure when served over HTTPS |
 | `AGENT_IDLE_TIMEOUT_MS` | `300000` | inactivity-to-worker-stop delay, paused while a chat tab or browser viewer is active |
+| `AGENT_IDLE_POLICY` | `stop` | `hibernate` selects the fail-closed EC2 process-preserving path (120000 ms default); it admits only an exact worker/image carrying the dedicated hibernation acceptance marker, otherwise leaves the worker untouched; [implementation and activation boundary](docs/hibernation-lifecycle-foundation.md) |
 | `AGENT_DATA_DIR` | `./data` | persisted chats, workspaces, and CLI state |
 | `AGENT_WORKSPACE_SOURCE` | empty | optional local repo/path cloned into every new chat |
 | `AGENT_ENABLE_MOCK` | `0` | expose the deterministic Mock agent |
 | `AGENT_WORKER_BACKEND` | `local` | `local` process workers or per-chat `ec2` workers |
 | `AGENT_PROCESS_ISOLATION` | `namespace` on Linux | `namespace` or `none` for local workers |
 | `AGENT_CHROME_BIN` | `google-chrome` | Chrome executable in the worker; never a personal profile path |
-| `CODEX_AUTH_MODE` | `gateway` | `gateway` or `host` |
-| `CLAUDE_AUTH_MODE` | `gateway` | `gateway` or `host` |
+| `CODEX_AUTH_MODE` | `gateway` | Legacy local/test mode (`gateway` or `host`); Google users require named accounts instead |
+| `CLAUDE_AUTH_MODE` | `gateway` | Legacy local/test mode (`gateway` or `host`); not a multi-user account-login substitute |
 
 ## Shared Chrome
 
@@ -156,11 +173,15 @@ working direct links: they require port forwarding, so use Shared Chrome there.
 
 The viewport picker offers xxs (320×640), xs (390×844), sm (640×960),
 md (834×1112), lg (1280×800), xlg (1920×1080), and custom dimensions.
-Resizing restarts capture on the same page without navigation. Live PNG frames
-retain 2× pixel density for the presets; very large custom views use 1× to bound
-bitmap memory. The canvas does not upscale a phone viewport to fill a desktop
-panel. Capture, navigation, input and resize operations are serialized, and
-only one frame is decoded at a time. Desktop column dividers can be dragged
+Resizing restarts capture on the same page without navigation. Interaction uses
+compressed Chrome screencast frames; after 350 ms without input or changed frames,
+a lossless PNG restores 2× pixel density for presets (very large custom views use
+1× to bound bitmap memory). PNG capture no longer runs for every repaint. The
+canvas does not upscale a phone viewport to fill a desktop panel. Idle capture
+and viewport/input changes remain serialized to protect Chrome's surface cleanup.
+Only one frame is decoded at a time; stale waiting frames are replaced, and the
+input window bounds outstanding requests, coalescing adjacent mouse motion.
+Desktop column dividers can be dragged
 or resized with arrow keys; widths are saved in this browser.
 
 Both agents receive the built-in `relay_browser` MCP server when their worker
@@ -169,6 +190,17 @@ typing, tabs, viewport sizing and page JavaScript evaluation. The browser starts
 on demand, without an extra model request. Ask the agent to run a dev server and
 open it with `browser_navigate`; use the Browser column to test it yourself.
 Click the page to type, or paste text. Escape returns focus to the address bar.
+With the remote page focused, F5/Ctrl+R/Cmd+R reload that page, not Relay; Shift
+also bypasses its cache. Ctrl+C/Cmd+C copies selected plain text and Ctrl+V/Cmd+V
+pastes plain text. **Copy text** and **Paste text** offer the same operations in
+the toolbar. Clipboard access occurs only on that explicit user action, is not
+stored in chat history, and is not synchronized in the background. The Relay
+origin needs HTTPS (or localhost) and browser clipboard permission for toolbar
+actions; native paste remains available if clipboard-read permission is denied.
+Selections in ordinary inputs, textareas, page text and open shadow roots are
+supported. Password copying, cross-origin embedded-frame copying, rich clipboard
+formats/files and native cut are not implemented by this bridge. Oversized text
+is rejected without silently truncating it (30,000-character limit).
 
 Each chat starts with a fresh, separate Chrome profile. It does **not** import
 your personal Chrome cookies or passwords. Closing the panel disconnects only
@@ -183,6 +215,13 @@ Chrome panel. Leaving the tab starts a fresh idle period. Presence leases
 expire after a disconnect and never wake a stopped worker, invoke an agent, or
 send browsing activity into the conversation. Hidden browser panels stop their
 live stream until the tab becomes visible again.
+
+Use **Wake environment** in the chat's runtime banner to start a stopped worker
+without sending a message to the agent. Startup progress and errors stay visible;
+duplicate clicks share the same startup. An already-open browser panel reconnects
+when ready. Drafts, saved sessions and queued input are retained, and no goal or
+queued message is automatically resumed. This starts the machine, not previously
+terminated application commands such as `npm run dev`; it is not hibernation.
 
 Paste clipboard images/files in the composer to attach them. Click an image
 attachment to preview it in the document column (an overlay on narrow screens),
@@ -292,6 +331,8 @@ Chats use a single compact row: status icon, title, pin, and organize menu.
 Status details and timestamps remain available on hover and in Organize chat.
 Choose **Organize chat → Delete chat** to permanently remove that chat, messages,
 attachments, and workspace after confirmation. A running worker is stopped first.
+**Deleting…** appears immediately while that shutdown completes; the chat is
+removed only after confirmation from the server. Failed deletion can be retried.
 Archive remains available when you want to keep the chat instead. Deleting a
 different chat does not disturb the active conversation or its draft.
 
@@ -330,10 +371,6 @@ open failing PR makes an otherwise idle chat red, and all tracked PRs must be
 merged for the merged state. Closed, unmerged PRs return to idle.
 
 The PR bar above the composer links to GitHub and shows additions/deletions.
-Chats with many linked PRs collapse to at most three rows (two PRs plus a
-"View N more" toggle); the same collapsed/expandable list is shared with the
-organize dialog's PR summary — see
-[ADR 0001](docs/adr/0001-collapsible-pull-request-lists.md).
 Click the change count for a side-by-side file viewer (an overlay on mobile),
 with file search and line numbers. Its source picker switches between GitHub's
 PR diff and the last workspace snapshot, including unpushed changes. Snapshots
@@ -377,30 +414,39 @@ Embedded PostgreSQL requires a non-root user. `AGENT_DATABASE_MODE=memory` is
 for tests only and deliberately does not persist anything.
 
 Additional settings: `AGENT_CONTROL_DIR`, `AGENT_DATABASE_PORT`,
-`AGENT_DATABASE_TLS` (may be disabled for localhost only),
-`AGENT_GITHUB_LOCAL_CONNECT` (defaults on for loopback), and
-`GITHUB_OAUTH_CLIENT_ID` (a GitHub OAuth app with device flow enabled).
-GitHub expiry is saved when reported or supplied; unknown expiry is displayed
-as such. A revoked token is invalidated on the next GitHub API request.
+`AGENT_DATABASE_TLS` (may be disabled for localhost only), and
+`AGENT_GITHUB_CLI` (defaults to `gh`). GitHub onboarding runs native
+`gh auth login` in a new private profile, displays its code/link, then asks for
+the connection name and allowed companies. There is no token-entry or
+host-login import path. A GitHub OAuth client configuration is not required.
+See [GitHub accounts](docs/github-accounts.md) for the credential boundary,
+restart/reconnect behavior and real acceptance evidence. A revoked token is
+invalidated on the next GitHub API request.
 
 ### Company availability and credential separation
 
-GitHub connections, environments and MCP connections each have an **Available
+Agent accounts, environments and MCP connections each have an **Available
 companies** selector. Check several owners (for example `12-apps` and `thomfilg`)
 without granting access to `g2i` or `umg`. Add missing owner names in the form.
 The chat's first repository determines its company; moving its sidebar group or
 adding secondary repositories never changes that authorization scope.
 
+GitHub is different: connecting your account is enough to list every repository
+that GitHub permits that account to access, including organizations. There is no
+second Relay company-selection step, including for existing saved connections.
 Save separate GitHub and MCP connections for different accounts. Repository
-selections retain their GitHub connection ID. A credential must allow both the
-repository's owner and the chat's primary company before Relay can clone it or
-read/update its PRs. Ambiguous GitHub matches require an explicit connection;
-Relay never silently tries another company's token. Clone authentication is
-transient and restricted to the exact repository URL.
+selections retain their GitHub connection ID. Multiple connected GitHub accounts
+require an explicit connection choice; denied access never tries another token.
+Credentials stay private to the signed-in Relay user. Workers receive access
+only to the exact repositories/branches selected for their chat, not the whole
+GitHub account. Clone authentication is transient and restricted to the exact
+repository URL. GitHub revocation, organization SSO and repository permissions
+remain authoritative. See the [GitHub access decision](docs/adr/2026-09-18-github-provider-permissions.md).
 
-An empty company list grants no company access. **Unassigned chats** explicitly
-allows scratch workspaces, not every company. Legacy global credentials remain
-saved and encrypted but require an explicit company selection before reuse;
+For agent accounts, environments and MCPs, an empty company list grants no
+company access. **Unassigned chats** explicitly allows scratch workspaces, not
+every company. Those legacy global credentials remain saved and encrypted but
+require an explicit company selection before reuse;
 old singular MCP organization scopes migrate to the same single company.
 Removing a company or MCP selection revokes existing HTTP MCP grants and streams
 immediately; adding connections and changing worker software/setup/public
@@ -503,7 +549,9 @@ fresh session. The target provider's default model/effort are selected.
 
 - **Mode:** Claude uses native Auto, Accept edits, and Plan permissions. Codex
   uses documented collaboration modes and a read-only sandbox for Plan;
-  Auto/Accept edits retain on-request approvals, not an approval bypass.
+  Auto runs non-interactively inside its workspace-write/no-network sandbox, so
+  a command that needs broader access fails back to the agent instead of opening
+  an approval card. Accept edits retains on-request user approvals.
 - **Effort:** a compact label opens a discrete slider and accessible selector
   for the chosen model's available levels.
 - **Claude Fast:** `/fast`, `/fast on` and `/fast off` control this chat's
@@ -708,7 +756,10 @@ fresh session. The target provider's default model/effort are selected.
   ordinary editing. Registers, undo, macros and search history are cleared on
   chat/account changes or disable. No native config or worker is touched.
 - **Status line:** `/statusline` or **Chat actions → Status line** opens a live
-  preview and field picker for Relay's web footer. Toggle fields and reorder them
+  preview and field picker for Relay's optional web footer, hidden by default.
+  Model/effort stay in their existing controls, context in its indicator, and
+  branches in the repository/PR strip, including before a PR exists. Explicitly
+  saved custom footers remain available. Toggle fields and reorder them
   with arrows or drag handles, then **Save status line**; **Hide status line**
   and **Restore defaults** are staged until saved. Model/reasoning, context,
   5-hour/weekly limits, Git branch, session token totals, native session ID,
@@ -858,13 +909,16 @@ state.
   Rich previews use an opaque-origin iframe: generated scripts, forms,
   navigation and network resources are disabled; styles and malformed markup
   cannot escape into the chat UI.
-- Each user turn has one **Tools used: N** row. Open it to inspect actual tool
-  names, inputs, output, running state, failures and permission denials in a
-  side panel. Missing results are not reported as successful execution.
+- Assistant updates and expandable tool groups appear in execution order.
+  Open a group, then an action, to inspect its inputs, output, running state,
+  failures and permission denials inline. Missing results are not reported as
+  successful execution.
 - Type while an agent works and press Enter or **Queue**. The square **Stop**
-  button interrupts the worker and pauses pending messages. Remove pending
-  items or choose **Resume queue**. Queues persist through controller restarts
-  and stay paused until explicitly resumed.
+  button (or Escape outside another active control) interrupts the current
+  turn and sends the next queued message, if any. Without a queued message it
+  just interrupts the turn; conversation context, worker, Chrome and application
+  processes are retained. Full environment Stop is a separate action. Explicitly
+  paused queues remain persisted and can be resumed with **Resume queue**.
 - `/` opens command/skill completion; type to filter, use Up/Down to select,
   and Enter or Tab to insert without sending. Claude reports installed commands,
   plugin aliases and native commands through its initialize response. Codex

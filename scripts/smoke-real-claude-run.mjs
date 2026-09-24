@@ -12,11 +12,12 @@ import { ProviderGateway } from "../src/provider-gateway.mjs";
 import { spawnWorker } from "../src/worker-process.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { ModelCatalog } from "../src/models.mjs";
+import { claudeFinalAnswer, searchMessages } from "../src/message-search.mjs";
 
 // Installed Claude and a disposable HTTP application. The model is authored;
 // the native tools, application process and requests are real and loopback-only.
 const exec = promisify(execFile);
-const options = new Set(["--network-isolated", "--trace", "--background-exit", "--send-now", "--first-send-now", "--approve-recipe", "--questions", "--skip-questions", "--stop-approval", "--plan-workflow", "--plan-reject", "--plan-stop", "--plan-web-choice", "--effort-settings", "--effort-environment", "--capability-lifetime"]);
+const options = new Set(["--network-isolated", "--trace", "--background-exit", "--send-now", "--first-send-now", "--approve-recipe", "--questions", "--skip-questions", "--stop-approval", "--plan-workflow", "--plan-reject", "--plan-stop", "--plan-web-choice", "--effort-settings", "--effort-environment", "--capability-lifetime", "--search-provenance"]);
 for (const argument of process.argv.slice(2)) assert(options.has(argument), `Unsupported fixture option: ${argument}`);
 if (!process.argv.includes("--network-isolated")) {
   const result = await exec("/usr/bin/unshare", ["--user", "--map-root-user", "--net", "--pid", "--fork", "--mount-proc", "--kill-child=SIGKILL", "--", process.execPath, process.argv[1], ...process.argv.slice(2), "--network-isolated"], { timeout: 90000, maxBuffer: 60000 }).catch(error => {
@@ -29,6 +30,8 @@ if (!process.argv.includes("--network-isolated")) {
   assert.deepEqual(JSON.parse((await exec("/usr/bin/ip", ["-j", "link", "show"])).stdout).map(item => item.ifname), ["lo"]);
   assert.equal((await exec("/usr/bin/ip", ["route", "show"])).stdout.trim(), "");
   const root = await mkdtemp("/tmp/relay-claude-run-"), requests = [];
+  const searchProvenance = process.argv.includes("--search-provenance"), nativeFinalAnswers = [];
+  if (searchProvenance) assert(process.argv.slice(2).every(value => ["--search-provenance", "--network-isolated"].includes(value)), "Search fixture cannot mix workflow variants");
   const backgroundExit = process.argv.includes("--background-exit"), firstSendNow = process.argv.includes("--first-send-now"), sendNow = firstSendNow || process.argv.includes("--send-now");
   const approveRecipe = process.argv.includes("--approve-recipe");
   const stopApproval = process.argv.includes("--stop-approval"), skipQuestions = process.argv.includes("--skip-questions");
@@ -199,6 +202,7 @@ if (!process.argv.includes("--network-isolated")) {
             buffer += chunk; const lines = buffer.split("\n"); buffer = lines.pop();
             for (const line of lines) { try {
               const event = JSON.parse(line);
+              if (searchProvenance && event.type === "result") nativeFinalAnswers.push(claudeFinalAnswer(event, nativeSession));
               if (event.type === "system" && event.subtype === "status" && event.permissionMode) nativeModes.push(event.permissionMode);
               if (process.argv.includes("--trace")) {
                 if (event.type === "command_lifecycle") console.log(JSON.stringify({ phase, lifecycle: event }));
@@ -268,6 +272,14 @@ responses.push({items:await (await fetch(origin+'/items')).json()}); console.log
       const items = await (await fetch(`http://127.0.0.1:${port}/items`, { signal: AbortSignal.timeout(3000) })).json();
       assert.deepEqual(items, [{ title: "ação" }]);
       if (!firstSendNow) assert.match(store.get(chat.id).messages.at(-1).text, /actual HTTP application/);
+      if (searchProvenance) {
+        assert(nativeFinalAnswers.some(answer => answer?.text.includes("actual HTTP application")), "Installed Claude must emit a qualifying successful root ResultMessage, not a fabricated result");
+        const final = store.get(chat.id).messages.at(-1);
+        assert.equal(final.meta.finalAnswer.source, "claude-success-result");
+        assert.equal(final.meta.finalAnswer.text, nativeFinalAnswers.find(answer => answer?.text.includes("actual HTTP application")).text);
+        assert.equal(searchMessages([store.get(chat.id)], { query: "actual HTTP application", role: "assistant" }).results[0].messageId, final.id);
+        console.log("PASS: installed Claude result provenance retained through adapter, runtime persistence and final-only search; loopback model fixture, no live provider");
+      }
     if (capabilityLifetime) {
       phase = "capability"; step = 0;
       const token = launches[0].capability, initial = broker.validate(token, "anthropic");

@@ -29,7 +29,11 @@ export function titleItemValue(id, chat = {}, frame = 0) {
   const validProgress = progress && Number.isSafeInteger(progress.total) && Number.isSafeInteger(progress.completed) && progress.total >= 0 && progress.completed >= 0 && progress.completed <= progress.total;
   const goalStatus = { active: "active", paused: "paused", complete: "complete", blocked: "blocked", usageLimited: "usage-limited", budgetLimited: "budget-limited" }[chat.goal?.status];
   const goal = chat.agent === "codex" && chat.agentSessionId && chat.goal?.threadId === chat.agentSessionId && typeof goalStatus === "string" ? `Goal ${goalStatus}` : null;
-  const status = chat.archived || chat.workflowState === "archived" ? "Archived" : chat.pendingRequest ? (chat.pendingRequest.method?.includes("requestUserInput") ? "Needs answer" : "Approval needed") : chat.awaitingUser ? "Needs reply" : ({ running: "Working", starting: "Starting", stopping: "Stopping", idle: "Ready", stopped: "Stopped", error: "Error" }[chat.status] || "Not reported");
+  const suspension = chat.suspension?.status;
+  const runtimeStatus = suspension === "hibernating" ? "Hibernating" : suspension === "hibernated" && chat.status === "starting" ? "Resuming" : suspension === "hibernated" ? "Hibernated"
+    : suspension === "failed" && chat.status === "error" ? "Hibernation failed"
+    : ({ running: "Working", starting: "Starting", stopping: "Stopping", idle: "Ready", stopped: "Stopped", error: "Error" }[chat.status] || "Not reported");
+  const status = chat.archived || chat.workflowState === "archived" ? "Archived" : chat.pendingRequest ? (chat.pendingRequest.method?.includes("requestUserInput") ? "Needs answer" : "Approval needed") : chat.awaitingUser ? "Needs reply" : runtimeStatus;
   const values = {
     "app-name": "Agent Relay", project: chat.repositories?.[0]?.fullName || leaf(chat.workspaceStatus?.projectRoot) || leaf(details.cwd),
     spinner: titleBusy(chat) ? (frame === null ? "◌" : TITLE_FRAMES[frame % TITLE_FRAMES.length]) : "",

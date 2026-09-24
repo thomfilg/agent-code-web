@@ -7,8 +7,29 @@ import { ClaudeControlChannel } from "./claude-mcp.mjs";
 import { terminateWorker } from "./worker-process.mjs";
 import { ClaudeRequests } from "./claude-requests.mjs";
 import { ClaudeDebugLog } from "./claude-debug.mjs";
+import { claudeCommandMetadata } from "./command-catalog.mjs";
+import { applyUltracode } from "./claude-ultracode.mjs";
 
 const flag = (args, name) => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1]; };
+const flagSettings = args => {
+  let settings;
+  try { settings = JSON.parse(flag(args, "--settings") || "{}"); } catch { settings = {}; }
+  return { ...settings, effortLevel: flag(args, "--effort") || null };
+};
+
+const startupFailure = stderr => {
+  const text = String(stderr || "");
+  const message = /auth|oauth|token|credential|log\s*in|unauthorized|\b401\b/i.test(text)
+    ? "Claude authentication was rejected during startup. Reconnect the selected Claude account and retry."
+    : /unknown (?:option|argument)|unrecognized (?:option|argument)|invalid (?:option|argument)/i.test(text)
+      ? "The installed Claude CLI rejected its startup options. Update the worker image before retrying."
+      : /(?:invalid|failed to (?:parse|load)).{0,80}(?:config|setting|plugin)|(?:config|setting|plugin).{0,80}(?:invalid|failed)/is.test(text)
+        ? "Claude could not load this chat's private configuration or plugins. Review the Claude configuration and retry."
+        : /out of memory|cannot allocate memory|\benomem\b/i.test(text)
+          ? "Claude could not start because the worker ran out of memory. Choose a larger machine and retry."
+          : "Claude exited before its control channel initialized. Retry after checking the selected account and Claude configuration.";
+  return Object.assign(Error(message), { code: "CLAUDE_STARTUP_EXIT", fatalRuntime: true });
+};
 
 // The SDK has no scheduled-task snapshot/change control. Native
 // diagnostics report restoration, automatic deletion and expiry without an
@@ -22,8 +43,9 @@ export const CLAUDE_SCHEDULE_DIAGNOSTICS = ["--debug-to-stderr"];
 // the same stream contract as the one-shot adapter, but a result closes only
 // that logical turn, not the CLI which owns its background application tasks.
 export class ClaudeSession {
-  constructor(child, args, env, onBackgroundEvent = () => {}, { controlTimeoutMs = 30000, requestHooks, cwd, onSchedulesChanged = () => {}, onWorkflowsChanged = () => {} } = {}) {
+  constructor(child, args, env, onBackgroundEvent = () => {}, { controlTimeoutMs = 30000, requestHooks, cwd, onSchedulesChanged = () => {}, onWorkflowsChanged = () => {}, onNativeAgentEvent = null, onNativeAgentClose = null } = {}) {
     this.child = child; this.args = args; this.env = env; this.active = null; this.pending = false;
+    this.applied = { permissionMode: flag(args, "--permission-mode"), model: flag(args, "--model") || "default", settings: flagSettings(args) };
     this.sessionId = flag(args, "--session-id") || flag(args, "--resume");
     this.controlTimeoutMs = controlTimeoutMs;
     this.scheduledJobs = new Set(); this.scheduleCalls = new Map(); this.onSchedulesChanged = onSchedulesChanged;
@@ -33,7 +55,9 @@ export class ClaudeSession {
     this.workflowNotifications = [];
     this.foregroundAgents = new Map();
     this.onBackgroundEvent = onBackgroundEvent;
+    this.onNativeAgentEvent = onNativeAgentEvent;
     this.control = new ClaudeControlChannel(child, controlTimeoutMs);
+    this.startupStderr = "";
     this.requests = requestHooks ? new ClaudeRequests(child, requestHooks, cwd) : null;
     this.closed = new Promise(resolve => { this.resolveClosed = resolve; });
     this.lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -42,6 +66,10 @@ export class ClaudeSession {
       if (event.type === "result") event.relayWorkflowInterrupted = false;
       this.control.accept(event);
       if (this.requests?.accept(event)) return;
+      this.onNativeAgentEvent?.(event);
+      // Opted-in descendant output belongs to its own popup, not the parent's
+      // tool timeline, usage samples, result boundary or background report.
+      if (this.onNativeAgentEvent && event.parent_tool_use_id) return;
       this.trackSchedules(event);
       const workflowsCompleted = this.trackWorkflows(event);
       if (event.type === "result") {
@@ -81,10 +109,15 @@ export class ClaudeSession {
         return;
       }
       if (/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z \[(?:DEBUG|INFO|WARN|ERROR|VERBOSE)\] /.test(line)) this.trackScheduleDiagnostic(line);
-      else this.active?.stderr.write(`${line}\n`);
+      else if (this.active) this.active.stderr.write(`${line}\n`);
+      else this.startupStderr = `${this.startupStderr}${line}\n`.slice(-16_000);
     };
     child.stderr.on("data", chunk => {
-      if (!diagnostics) { this.active?.stderr.write(chunk); return; }
+      if (!diagnostics) {
+        if (this.active) this.active.stderr.write(chunk);
+        else this.startupStderr = `${this.startupStderr}${String(chunk)}`.slice(-16_000);
+        return;
+      }
       const lines = (stderr + decoder.write(chunk)).split("\n"); stderr = lines.pop();
       for (const line of lines) {
         if (!dropping && line.length <= 8192) stderrLine(line);
@@ -99,6 +132,7 @@ export class ClaudeSession {
     child.once("close", (code, signal) => {
       if (diagnostics && stderr && !dropping) stderrLine(stderr + decoder.end());
       this.ended = true; this.control.close(); this.lines.close();
+      onNativeAgentClose?.();
       this.finishBackground();
       this.workflowCalls.clear();
       const workflows = this.workflows.size;
@@ -180,6 +214,12 @@ export class ClaudeSession {
         return;
       }
       const workflow = this.workflows.get(event.task_id);
+      // Native housekeeping (for example auto-dream) emits terminal telemetry
+      // with skip_transcript:true but queues no report. Do not let an untracked
+      // ambient event consume a real task's FIFO report. A bound workflow still
+      // needs its matched terminal/report evidence; this flag alone cannot
+      // release it, and ordinary unknown report-bearing tasks remain queued.
+      if (!workflow && event.skip_transcript === true) return;
       const matches = workflow && workflow.toolUseId === event.tool_use_id;
       if (validId(event.task_id) && ["completed", "failed"].includes(event.status)
         && (!workflow || matches && !workflow.settled)) {
@@ -375,13 +415,19 @@ export class ClaudeSession {
     } else if (event.type === "result") this.scheduleCalls.clear();
   }
 
-  async open(args, env, { resetEffort = false } = {}) {
+  async open(args, env, { resetEffort = false, ultracode, selectionCurrent } = {}) {
     if (this.ended || this.error) throw this.error || Error("Claude application session ended; retry to resume it");
     if (this.pending || this.active) throw Error("A Claude application turn is already running");
     this.pending = true;
+    const checkSelection = () => {
+      if (this.stopping || this.ended || selectionCurrent && !selectionCurrent()) throw new Error("Claude settings changed or the worker stopped before input. Retry with the current selection.");
+    };
     try {
+      checkSelection();
       if (!this.initialized) {
-        await this.control.request("initialize");
+        const initialized = await this.control.request("initialize", this.onNativeAgentEvent ? { forwardSubagentText: true } : {});
+        const commands = claudeCommandMetadata(initialized?.commands);
+        if (commands && !this.stopping && !this.ended) await this.onBackgroundEvent({ type: "command_catalog", commands });
         if (resetEffort) await this.control.request("apply_flag_settings", { settings: { effortLevel: null } });
         this.initialized = true;
       }
@@ -395,10 +441,16 @@ export class ClaudeSession {
         if (env.CLAUDE_CODE_EFFORT_LEVEL !== this.env.CLAUDE_CODE_EFFORT_LEVEL) {
           throw Error("The worker's Claude effort environment changed. Stop the application session before retrying to apply it; its running applications have not been stopped.");
         }
-        await this.control.request("set_permission_mode", { mode: flag(args, "--permission-mode") });
-        await this.control.request("set_model", { model: flag(args, "--model") || "default" });
-        const settings = JSON.parse(flag(args, "--settings") || "{}");
-        settings.effortLevel = flag(args, "--effort") || null;
+        const permissionMode = flag(args, "--permission-mode"), model = flag(args, "--model") || "default";
+        if (permissionMode !== this.applied.permissionMode) {
+          await this.control.request("set_permission_mode", { mode: permissionMode });
+          this.applied.permissionMode = permissionMode;
+        }
+        if (model !== this.applied.model) {
+          await this.control.request("set_model", { model });
+          this.applied.model = model;
+        }
+        const settings = flagSettings(args);
         const enableGatewayFast = env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK === "1" && this.env.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK !== "1";
         if (enableGatewayFast) {
           // Only the adapter's fresh authenticated account check supplies this
@@ -410,16 +462,28 @@ export class ClaudeSession {
           if (typeof existing !== "object" || Array.isArray(existing)) throw Error("Cannot verify native Fast environment; retry after checking the Claude session.");
           settings.env = { ...existing, CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK: "1" };
         }
-        await this.control.request("apply_flag_settings", { settings });
+        if (JSON.stringify(settings) !== JSON.stringify(this.applied.settings)) {
+          await this.control.request("apply_flag_settings", { settings });
+          this.applied.settings = settings;
+        }
         if (enableGatewayFast) this.env = { ...this.env, CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK: "1" };
       }
-      if (this.ended) throw Error("Claude application session stopped before input");
+      checkSelection();
+      const xhigh = flag(args, "--effort") === "xhigh" || env.CLAUDE_CODE_EFFORT_LEVEL === "xhigh";
+      if (typeof ultracode === "boolean" || this.ultracode === true || xhigh) {
+        await applyUltracode(this.control, ultracode === true, checkSelection, {
+          allowUnsupported: ultracode !== true && this.ultracode !== true && !xhigh,
+        });
+        this.ultracode = ultracode === true;
+      }
+      checkSelection();
       const turn = new EventEmitter();
       Object.assign(turn, { stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, signalCode: null });
       const streaming = flag(args, "--input-format") === "stream-json";
       const write = packet => {
         if (this.active !== turn || this.ended) throw Error("Claude application turn stopped before input");
         if (packet.type === "user") {
+          checkSelection();
           if (turn.commandUuid) throw Error("Only one user input is allowed per Claude application turn");
           turn.commandUuid = randomUUID(); packet = { ...packet, uuid: turn.commandUuid };
         }
@@ -448,17 +512,20 @@ export class ClaudeSession {
         if (turn.listenerCount("error")) turn.emit("error", error);
         // A partial native input may already be running: close the transport
         // rather than replaying it or leaving an orphan turn accepting input.
-        void this.stop();
+        void this.stop().catch(stopError => { if (turn.listenerCount("error")) turn.emit("error", stopError); });
       });
       turn.kill = signal => {
         this.requests?.cancel();
         this.scheduleCalls.clear();
-        if (signal === "SIGKILL") void terminateWorker(this.child, 0);
+        if (signal === "SIGKILL") void terminateWorker(this.child, 0).catch(error => { if (turn.listenerCount("error")) turn.emit("error", error); });
         else if (!turn.interrupting) turn.interrupting = this.control.request("interrupt").catch(() => terminateWorker(this.child));
       };
       this.active = turn;
       this.requests?.resume();
       return turn;
+    } catch (error) {
+      if (error?.code === "CLAUDE_CONTROL_CLOSED" && this.ended && !this.stopping) throw startupFailure(this.startupStderr);
+      throw error;
     } finally { this.pending = false; }
   }
 
@@ -467,6 +534,17 @@ export class ClaudeSession {
     this.active = null;
     turn.exitCode = code; turn.signalCode = signal;
     turn.stdout.end(); turn.stderr.end(); turn.emit("exit", code, signal); turn.emit("close", code, signal);
+  }
+
+  async prepareTransportSuspend() {
+    if (this.ended || this.stopping || this.active || this.pending || this.backgroundCommand || this.workflowReport
+      || this.workflows.size || this.scheduledJobs.size || this.scheduleCalls.size || this.workflowCalls.size
+      || this.control.pending.size || this.requests?.requests.size || this.requests?.refreshing) {
+      throw Error("Claude is not at a quiescent suspension boundary");
+    }
+    if (typeof this.child.markRecoverable !== "function") return { retained: false };
+    const checkpoint = await this.child.markRecoverable({ provider: "claude", sessionId: this.sessionId });
+    return { retained: true, processId: "native-agent", checkpoint };
   }
 
   async stop() {

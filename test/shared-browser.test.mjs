@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from "node:events";
 import { connect } from "node:net";
 import WebSocket from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ChromeBrowser } from "../src/browser-worker.mjs";
+import { SharedBrowsers } from "../src/shared-browser.mjs";
 import { createAgentWebServer } from "../src/server.mjs";
 import { testConfig, temporaryDirectory, waitFor } from "./helpers.mjs";
 import { startBrowserSite } from "./fixtures/browser-site.mjs";
 import { prepareChrome } from "../src/chrome-software.mjs";
+import { browserSelectionExpression } from "../src/browser-clipboard.mjs";
 
 const executable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || process.env.AGENT_CHROME_BIN || "google-chrome";
 let available = false; try { execFileSync(executable, ["--version"], { stdio: "ignore" }); available = true; } catch {}
@@ -63,6 +66,56 @@ test("browser-only worker acquisition is deduplicated and idle release does not 
   await app.manager.browserExecutor(chat.id); assert.deepEqual(calls, ["acquire", "sleep", "acquire"]);
 });
 
+test("shared Chrome suspension drains commands, disables capture and detaches without terminating the helper", async () => {
+  const chat = { id: "chat_" + "a".repeat(32), archived: false }, watched = [], child = {
+    detached: false, inputQueue: Promise.resolve(), outputQueue: Promise.resolve(), storageQueue: Promise.resolve(),
+    detach() { this.detached = true; },
+  };
+  const browser = { child, pending: new Map(), heartbeat: null, heartbeatPending: null, watchingRequested: true,
+    ensureConnected: async () => {}, command: async (action, params) => { watched.push([action, params]); if (action === "watch") browser.watchingRequested = params.enabled; } };
+  const browsers = new SharedBrowsers({ store: { get: id => id === chat.id ? chat : null }, config: { sessionCapabilityTtlMs: 60000, idleTimeoutMs: 60000 }, acquire: async () => { throw Error("must not acquire"); } });
+  browsers.entries.set(chat.id, { ready: Promise.resolve(), viewers: new Set(), browser });
+  const result = await browsers.detachForSuspend(chat.id);
+  assert.equal(result.retained, true); assert.equal(result.processId, "shared-chrome");
+  assert.deepEqual(watched, [["watch", { enabled: false }]]);
+  assert.equal(child.detached, true);
+  assert.equal(browsers.entries.has(chat.id), true);
+  await result.resume();
+  assert.equal(browsers.entries.has(chat.id), true);
+  assert.equal(browsers.entries.get(chat.id).suspended, false);
+});
+
+test("opening a suspended shared Chrome resumes its worker before reconnecting the same facade", async () => {
+  const chat = { id: "chat_" + "b".repeat(32), archived: false }, order = [];
+  const child = { detached: false, inputQueue: Promise.resolve(), outputQueue: Promise.resolve(), storageQueue: Promise.resolve(),
+    detach() { this.detached = true; } };
+  const browser = { child, pending: new Map(), heartbeat: null, heartbeatPending: null, watchingRequested: false,
+    command: async () => {}, ensureConnected: async () => { order.push("reconnect"); child.detached = false; } };
+  const browsers = new SharedBrowsers({ store: { get: id => id === chat.id ? chat : null },
+    config: { sessionCapabilityTtlMs: 60000, idleTimeoutMs: 60000 }, acquire: async () => { order.push("resume"); } });
+  browsers.entries.set(chat.id, { ready: Promise.resolve(), viewers: new Set(), browser });
+  await browsers.detachForSuspend(chat.id);
+  order.length = 0;
+  const resumed = await browsers.ensure(chat.id);
+  assert.equal(resumed.browser, browser);
+  assert.deepEqual(order, ["resume", "reconnect"]);
+  assert.equal(resumed.suspended, false);
+});
+
+test("Shared Browser hibernation restores the exact native MCP capability after revocation", async () => {
+  const chat = { id: "chat_" + "c".repeat(32), archived: false };
+  const browsers = new SharedBrowsers({ store: { get: id => id === chat.id ? chat : null },
+    config: { sessionCapabilityTtlMs: 60000, idleTimeoutMs: 60000 }, acquire: async () => { throw Error("must not acquire"); } });
+  const first = browsers.runtime(chat.id, "https://relay.example", { validWhile: () => true }), snapshot = browsers.suspendRuntime(chat.id);
+  const token = first.relay_browser.headers.Authorization.slice(7);
+  assert.equal(snapshot.token, token);
+  await browsers.revokeForSuspend(chat.id); assert.equal(browsers.grants.validate(token, "browser"), null);
+  const resumed = browsers.runtime(chat.id, "https://relay.example", { validWhile: () => true, restoreToken: snapshot.token });
+  assert.equal(resumed.relay_browser.headers.Authorization, `Bearer ${token}`);
+  assert(browsers.grants.validate(token, "browser"));
+  await browsers.revokeForSuspend(chat.id);
+});
+
 test("real Chrome: pipe-only sandboxed browser, live website, clicks, typing, dialogs, tabs and ephemeral profiles", { skip: !available }, async t => {
   const site = await startBrowserSite(); t.after(() => site.close());
   const browser = new ChromeBrowser({ executable }); t.after(() => browser.stop());
@@ -100,11 +153,17 @@ test("real Chrome: pipe-only sandboxed browser, live website, clicks, typing, di
 
 test("shared-browser gateway: authenticated WebSocket, real MCP, same live page, isolated chats and revocation", { skip: !available }, async t => {
   const root = await temporaryDirectory(t), site = await startBrowserSite(); t.after(() => site.close());
-  const app = await createAgentWebServer({ config: testConfig(root, { AGENT_WEB_AUTH_TOKEN: "browser-fixture", AGENT_IDLE_TIMEOUT_MS: "60000", AGENT_CHROME_BIN: executable }) });
+  const app = await createAgentWebServer({ config: testConfig(root, { AGENT_WEB_AUTH_TOKEN: "browser-fixture", AGENT_IDLE_TIMEOUT_MS: "60000", AGENT_CHROME_BIN: executable }),
+    adapterFactory:()=>{throw Error('No model in browser fixture');},browserOptions:{isActive:()=>true,acquire:async()=>({workspace:root,runtimeHome:root,spawn:(command,args,options)=>spawn(command,args,options)})} });
   const { url } = await app.start(); t.after(() => app.stop());
-  const chat = await app.manager.createChat({ agent: "mock", title: "Shared Chrome test" });
+  const ownerId=`user_${randomBytes(16).toString('hex')}`,services=await app.resources.forOwner(ownerId);
+  await services.companies.save({id:'shared-company',name:'Shared fixture'});
+  const environment=await services.environments.save({name:'Shared environment',backend:'local',companyId:'shared-company'}),accountId=`account_${randomUUID()}`;
+  await app.manager.agentAccounts.save({id:accountId,ownerId,provider:'codex',name:'Synthetic account',status:'connected',revision:1,auth:{synthetic:true}});
+  const chat = await app.store.create({ownerId,agent:'codex',agentAccountId:accountId,environmentId:environment.id,repositories:[{companyId:'shared-company',fullName:'fixture/shared'}],title:'Shared Chrome test'});
+  const identity=await app.browserUsers.startSession({id:ownerId,username:'synthetic-shared-user'});
   const other = await app.manager.createChat({ agent: "mock", title: "Other Chrome" });
-  const endpoint = `${url}/api/chats/${chat.id}/browser`, headers = { Authorization: "Bearer browser-fixture" };
+  const endpoint = `${url}/api/chats/${chat.id}/browser`, headers = { Authorization: "Bearer browser-fixture",Cookie:identity.cookie.split(';')[0] };
   assert.equal((await fetch(endpoint)).status, 401);
   assert.equal((await fetch(endpoint, { headers })).status, 200);
   assert.equal(app.manager.browsers.entries.size, 0, "reading browser state must not wake it");
@@ -117,7 +176,7 @@ test("shared-browser gateway: authenticated WebSocket, real MCP, same live page,
   const socket = new WebSocket(websocket, { headers: { ...headers, Origin: url } }); t.after(() => socket.terminate());
   const events = []; socket.on("message", data => events.push(JSON.parse(data))); await once(socket, "open");
   await waitFor(() => events.some(e => e.event === "status"), { timeoutMs: 10000 });
-  const tokenConfig = app.manager.browsers.runtime(chat.id, url).relay_browser;
+  const tokenConfig = app.manager.browsers.runtime(chat.id, url,{validWhile:()=>true}).relay_browser;
   const client = new Client({ name: "browser-test", version: "1" }); t.after(() => client.close());
   await client.connect(new StreamableHTTPClientTransport(new URL(tokenConfig.url), { requestInit: { headers: tokenConfig.headers } }));
   const tools = await client.listTools(); assert.ok(tools.tools.some(tool => tool.name === "browser_snapshot"));
@@ -126,11 +185,16 @@ test("shared-browser gateway: authenticated WebSocket, real MCP, same live page,
   socket.send(JSON.stringify({ id: 1, action: "mouse", params: { type: "mousePressed", x: 60, y: 120, button: "left", buttons: 1, clickCount: 1 } }));
   socket.send(JSON.stringify({ id: 2, action: "mouse", params: { type: "mouseReleased", x: 60, y: 120, button: "left", buttons: 0, clickCount: 1 } }));
   await waitFor(() => events.some(e => e.id === 2));
-  const result = await client.callTool({ name: "browser_evaluate", arguments: { expression: "document.querySelector('#click').textContent" } });
-  assert.equal(JSON.parse(result.content[0].text), "Clicks: 1", "agent sees the user's click");
-  await client.callTool({ name: "browser_fill", arguments: { selector: "#entry", text: "From the agent" } });
+  const result = await client.callTool({ name: "browser_evaluate", arguments: { function: "() => document.querySelector('#click').textContent" } });
+  assert.match(JSON.stringify(result), /Clicks: 1/, "agent sees the user's click");
+  await client.callTool({ name: "browser_type", arguments: { target: "#entry", text: "From the agent" } });
+  await app.manager.browsers.command(chat.id, "evaluate", { expression: "document.querySelector('#entry').select()" });
+  socket.send(JSON.stringify({ id: 3, action: "copy", params: { expression: "document.body.textContent='must not execute'" } }));
+  await waitFor(() => events.some(e => e.id === 3));
+  assert.deepEqual(events.find(e => e.id === 3).value, { text: "From the agent" }, "copy ignores caller-supplied expressions");
+  assert.ok(events.find(e => e.event === "status").value.clipboard);
   await waitFor(() => events.some(e => e.event === "frame" && e.value.data.length > 5000));
-  const screenshot = await client.callTool({ name: "browser_screenshot", arguments: {} }); assert.equal(screenshot.content[0].type, "image");
+  const screenshot = await client.callTool({ name: "browser_take_screenshot", arguments: {} }); assert.ok(screenshot.content.some(item=>item.type==='image'));
   const second = app.manager.browsers.runtime(other.id, url).relay_browser;
   assert.notEqual(second.headers.Authorization, tokenConfig.headers.Authorization);
   assert.equal(app.manager.browsers.info(other.id).running, false);
@@ -141,9 +205,9 @@ test("shared-browser gateway: authenticated WebSocket, real MCP, same live page,
   assert.equal(app.store.get(chat.id).messages.length, 0, "opening Chrome never starts an LLM or logs browser input into the transcript");
 });
 
-test("live frames are lossless, high-DPI and retain the exact CSS viewport through rapid resizing", { skip: !available }, async t => {
+test("idle frames are lossless, high-DPI and retain the exact CSS viewport through rapid resizing", { skip: !available }, async t => {
   const browser = new ChromeBrowser({ executable }); t.after(() => browser.stop()); await browser.start();
-  const frames = []; browser.on("frame", frame => { frames.push(frame); if (frames.length > 12) frames.shift(); });
+  const frames = []; browser.on("frame", frame => { if (frame.mimeType === "image/png") frames.push(frame); });
   await browser.watch(true);
   await waitFor(() => frames.some(frame => frame.width === 1280));
   assert.deepEqual(pngSize(frames.at(-1)), [2560, 1600]);
@@ -160,4 +224,25 @@ test("live frames are lossless, high-DPI and retain the exact CSS viewport throu
   await browser.evaluate("document.body.style.background='red'");
   await new Promise(resolve => setTimeout(resolve, 150));
   assert.equal(frames.length, count, "closing the viewer stops captures, including in-flight frames");
+});
+
+test("remote copy reads only the explicit selection, including textarea/shadow DOM, never passwords or the host clipboard", { skip: !available }, async t => {
+  const browser = new ChromeBrowser({ executable }); t.after(() => browser.stop()); await browser.start();
+  await browser.evaluate(`document.body.innerHTML = '<input id="input" value="Selected fixture text"><textarea id="area">Line one\\nLine two</textarea><input type="password" id="password" value="fixture private"><div id="shadow"></div><p id="paragraph">Ordinary selected page text</p>'`);
+  await browser.evaluate("document.querySelector('#input').focus();document.querySelector('#input').setSelectionRange(9,16)");
+  assert.deepEqual(await browser.evaluate(browserSelectionExpression), { text: "fixture" });
+  await browser.evaluate("document.querySelector('#area').focus();document.querySelector('#area').select()");
+  assert.deepEqual(await browser.evaluate(browserSelectionExpression), { text: "Line one\nLine two" });
+  await browser.evaluate("const root=document.querySelector('#shadow').attachShadow({mode:'open'});root.innerHTML='<input value=shadow>';root.firstChild.focus();root.firstChild.select()");
+  assert.deepEqual(await browser.evaluate(browserSelectionExpression), { text: "shadow" });
+  await browser.evaluate("document.querySelector('#password').focus();document.querySelector('#password').select()");
+  await assert.rejects(browser.evaluate(browserSelectionExpression), /Password fields cannot/);
+  await browser.evaluate("document.activeElement.blur();const range=document.createRange();range.selectNodeContents(document.querySelector('#paragraph'));getSelection().removeAllRanges();getSelection().addRange(range)");
+  assert.deepEqual(await browser.evaluate(browserSelectionExpression), { text: "Ordinary selected page text" });
+  await browser.evaluate("document.querySelector('#paragraph').contentEditable='true';document.querySelector('#paragraph').focus()");
+  assert.deepEqual(await browser.evaluate(browserSelectionExpression), { text: "Ordinary selected page text" });
+  await browser.evaluate("getSelection().removeAllRanges()");
+  await assert.rejects(browser.evaluate(browserSelectionExpression), /Select text/);
+  await browser.evaluate("const input=document.querySelector('#input');input.value='x'.repeat(30001);input.focus();input.select()");
+  await assert.rejects(browser.evaluate(browserSelectionExpression), /30,000 characters/);
 });

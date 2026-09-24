@@ -59,16 +59,43 @@ test("MCP organizations filter grants by primary repository and keep same-provid
 });
 test("saved MCP credentials stay masked, selections validate, revisions conflict and stdio has no secret env", async () => {
   const records = new MemoryRecords(), mcps = new McpConnections(records), envs = new Environments(records, "local", mcps);
-  const connection = await mcps.save({ name: "tools", allowUnassigned: true, type: "http", url: "https://tools.example/mcp", headers: { Authorization: "Bearer protected" } });
+  await envs.companies.save({ id: "fixture", name: "Fixture" });
+  const connection = await mcps.save({ name: "tools", companies: ["fixture"], type: "http", url: "https://tools.example/mcp", headers: { Authorization: "Bearer protected" } });
   assert.equal(connection.headers, undefined); assert.equal(connection.hasCredentials, true); assert.ok(!JSON.stringify(await mcps.list()).includes("protected"));
-  const environment = await envs.save({ name: "MCP env", backend: "local", allowUnassigned: true, mcpIds: [connection.id] });
-  assert.deepEqual((await envs.runtime(environment.id)).mcpIds, [connection.id]);
+  const environment = await envs.save({ name: "MCP env", backend: "local", companies: ["fixture"], mcpIds: [connection.id] });
+  assert.deepEqual((await envs.runtime(environment.id, { repositories: [{ fullName: "fixture/project" }] })).mcpIds, [connection.id]);
   await assert.rejects(mcps.remove(connection.id), /environments/);
   await assert.rejects(mcps.save({ ...connection, name: "changed", revision: 0 }, connection.id), /changed/);
   await assert.rejects(mcps.validateSelection(["missing"]), /Choose/);
   await assert.rejects(mcps.save({ name: "stdio", type: "stdio", command: "npx", args: [], env: { SECRET: "secret" } }), /Protected credentials/);
-  const runtime = await mcps.runtime("chat-a", [connection.id], "http://localhost:8787");
+  const runtime = await mcps.runtime("chat-a", [connection.id], "http://localhost:8787", { repositories: [{ fullName: "fixture/project" }] });
   assert.ok(!JSON.stringify(runtime).includes("protected")); assert.match(codexMcpArgs(runtime).join(" "), /http_headers/);
+});
+test("MCP hibernation restores the exact worker token only while every selected connection is unchanged", async () => {
+  const records = new MemoryRecords(), mcps = new McpConnections(records);
+  const connection = await mcps.save({ name: "retained", allowUnassigned: true, type: "http", url: "https://tools.example/mcp", headers: { Authorization: "Bearer protected" } });
+  const first = await mcps.runtime("retained-chat", [connection.id], "https://relay.example"), snapshot = mcps.suspendRuntime("retained-chat");
+  const token = first.relay_retained.headers.Authorization.slice(7);
+  assert.equal(snapshot.token, token);
+  mcps.revokeChat("retained-chat"); assert.equal(mcps.broker.validate(token, "mcp"), null);
+  const resumed = await mcps.resumeRuntime("retained-chat", [connection.id], "https://relay.example", {}, snapshot);
+  assert.equal(resumed.relay_retained.headers.Authorization, `Bearer ${token}`);
+  assert(mcps.broker.validate(token, "mcp"));
+
+  mcps.revokeChat("retained-chat");
+  await records.put("mcp", connection.id, { ...await mcps.get(connection.id), revision: connection.revision + 1 });
+  await assert.rejects(mcps.resumeRuntime("retained-chat", [connection.id], "https://relay.example", {}, snapshot), /changed/);
+
+  const removedConnection = await mcps.save({ name: "removed", allowUnassigned: true, type: "http", url: "https://removed.example/mcp" });
+  await mcps.runtime("removed-chat", [removedConnection.id], "https://relay.example");
+  const removedSnapshot = mcps.suspendRuntime("removed-chat");
+  mcps.revokeChat("removed-chat");
+  await records.delete("mcp", removedConnection.id);
+  await assert.rejects(mcps.resumeRuntime("removed-chat", [removedConnection.id], "https://relay.example", {}, removedSnapshot), /not found/);
+
+  const empty = await mcps.runtime("empty-chat", [], "https://relay.example"), emptySnapshot = mcps.suspendRuntime("empty-chat");
+  assert.deepEqual(empty, {}); assert.deepEqual(emptySnapshot, { schema: 1, token: null, connections: [] });
+  assert.deepEqual(await mcps.resumeRuntime("empty-chat", [], "https://relay.example", {}, emptySnapshot), {});
 });
 test("MCP gateway scopes capabilities, preserves protocol headers, blocks redirects and revokes on sleep", async t => {
   const records = new MemoryRecords(); let received, redirect = false;
@@ -87,4 +114,16 @@ test("MCP gateway scopes capabilities, preserves protocol headers, blocks redire
   assert.equal((await fetch(`${origin}/gateway/mcp/${other.id}`, { headers: { Authorization: auth } })).status, 401);
   redirect = true; assert.equal((await fetch(url, { headers: { Authorization: auth } })).status, 502);
   mcps.revokeChat("a"); assert.equal((await fetch(url, { headers: { Authorization: auth } })).status, 401);
+});
+
+test("Codex pre-approves only built-in scoped relay tools, so Auto mode can use them", () => {
+  const args = codexMcpArgs({
+    relay_browser: { type: "http", url: "https://relay.test/gateway/browser", headers: {}, bearerTokenEnvVar: "RELAY_MCP_CAPABILITY_0" },
+    relay_github: { type: "http", url: "https://relay.test/gateway/github-worker", headers: { Authorization: "Bearer scoped" } },
+    company_tool: { type: "http", url: "https://relay.test/gateway/mcp/x", headers: {} },
+  }).join(" ");
+  assert.match(args, /mcp_servers\.relay_browser\.default_tools_approval_mode="approve"/);
+  assert.match(args, /mcp_servers\.relay_github\.default_tools_approval_mode="approve"/);
+  assert.match(args, /mcp_servers\.relay_browser\.tool_timeout_sec=120/);
+  assert.doesNotMatch(args, /company_tool\.default_tools_approval_mode/);
 });

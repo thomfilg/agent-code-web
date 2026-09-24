@@ -1,12 +1,14 @@
 import { marked } from "/vendor/marked.js";
 import DOMPurify from "/vendor/purify.js";
 import { highlightCode } from "./syntax-highlight.js";
+import { stripRelayProtocol } from "./relay-protocol.js";
+export { stripRelayProtocol };
 const escape = value => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
 const renderer = new marked.Renderer();
 renderer.html = ({ text }) => `<pre class="html-source"><code>${escape(text)}</code></pre>`;
 export function renderContent(root, text, { onPreview } = {}) {
   root.classList.add("markdown");
-  root.innerHTML = DOMPurify.sanitize(marked.parse(text, { renderer, gfm: true }), {
+  root.innerHTML = DOMPurify.sanitize(marked.parse(stripRelayProtocol(text), { renderer, gfm: true }), {
     USE_PROFILES: { html: true }, FORBID_TAGS: ["style", "form", "input", "button", "iframe", "video", "audio"],
     FORBID_ATTR: ["style", "id", "name"],
   });

@@ -3,6 +3,14 @@
 This is an implementation checklist, not a claim that all commands are complete.
 Commands typed into the composer must perform their real action; sending a
 terminal command as ordinary model text is not an implementation of that action.
+The same admission rule now applies before chat creation, on an idle chat and at
+queue insertion: an exact slash prefix must resolve to a Relay control, native
+command or installed Codex skill. Unknown names such as `/qualquerporra` fail
+before a user message, queue item, worker start or model turn is created. Absolute
+paths at the beginning of a draft are also command syntax and fail validation;
+write them inside an ordinary sentence such as `inspect /tmp/project`. Command
+arguments are preserved after the first whitespace, so `/foo bar` always resolves
+or rejects `/foo` and can never become an ordinary agent prompt.
 
 Native behavior is checked against the installed Codex 0.154.0 app-server schema,
 the official [command reference](https://learn.chatgpt.com/docs/developer-commands)
@@ -14,7 +22,7 @@ and remain at the beginning of native stream-json input.
 
 | Commands | Dispatch / verification |
 | --- | --- |
-| `/goal`, objective, `edit`, `pause`, `resume`, `clear` | Persisted native thread goals; resume queues when busy; objective edits preserve multiline text. Real CLI protocol checks pass; new edit/queue browser check passes. |
+| `/goal`, objective, `edit`, `pause`, `resume`, `clear` | Persisted native thread goals; a confirmed set/edit emits an explicit durable `Goal set:` notice before work continues, resume queues when busy, and objective edits preserve multiline text. Real CLI protocol checks pass; new edit/queue browser check passes. |
 | `/goal [condition\|clear]` (Claude) | Actual native evaluator loop, status, native clear aliases and active-goal Stop/resume verified in private profiles. Literal commands retain FIFO ordering; evaluation failures are visible and streamed goal steps retain their boundaries. Uses Claude semantics, not fabricated Codex pause/resume/state APIs. Hook policies still apply; live activation pending. |
 | `/plan [task]` | Native Plan collaboration/read-only mode; busy requests queue. Claude's native Enter/ExitPlanMode transitions now update the selector and subsequent turns, without overwriting a newer web selection. Unit, browser and installed-CLI checks pass. |
 | `/compact` | Native compaction, FIFO while busy, wakes stopped worker. Real Codex/Claude adapters tested with local API fixtures. |
@@ -58,12 +66,12 @@ and remain at the beginning of native stream-json input.
 | `/permissions`, `/mode` | Permission picker; `auto`, `edits`, `read-only` apply the existing native policy modes, in FIFO order when queued. |
 | `/fast [on/off]`, `/personality [friendly/pragmatic/none]` (Codex) | Catalog-driven, persisted per-chat settings, applied in FIFO order to later turns. Stop/model-change guards, retryable personality picker and draft/attachment protection. Controller/browser checks and actual installed-CLI parameter/resume verification pass; live activation remains pending. |
 | `/fast [on/off]` (Claude) | Per-chat private-gateway opt-in, fresh authenticated account checks, structured native status, FIFO and same-session Stop/resume. First opt-in and later toggles preserve a running app. Native Fast/standard requests, credits, API denials, persisted cooldowns, configuration/model interop and managed-policy enforcement verified. No provider key in workers. Host profiles, custom upstreams, native managed-policy limitations and live activation remain gated below. |
-| `/usage`, `/status`, `/context` | Existing session/usage inspection. |
+| `/usage`, `/status`, `/context` | Existing session/usage inspection. These are handled entirely by the web UI, including while a worker is busy; they do not create a message, queue item or model turn. |
 | `/diff`, `/mcp`, `/skills`, `/help` | Workspace diff, connection manager, installed-command picker. |
 | `/mcp reconnect/enable/disable [server\|all]` (Claude) | Actual native SDK controls with post-action status verification, per-chat native persistence, FIFO, error/Stop recovery and no model call. Bare `/mcp` keeps the saved-connection manager; `/mcp verbose` shows worker-reported status. Private-file preflight and host-profile mutation gates apply; live activation pending. |
 | `/new`, `/clear`, `/resume` | New-chat flow or searchable saved-chat picker; never implicitly delete the old conversation. |
 | `/rename [title]`, `/archive`, `/delete` | Existing organization APIs; deletion retains explicit target confirmation. Delayed responses preserve newer drafts. |
-| `/copy`, `/raw`, `/transcript` | Latest completed response and plain transcript preview. |
+| `/copy`, `/raw`, `/transcript` | `/copy` selects only the latest explicitly proven final answer (the same provenance as message search); `/raw` and `/transcript` preview the plain transcript. Unclassified older answers, commentary and interrupted output are not copy candidates. |
 | `/stop`, `/quit`, `/exit` | Relay's stop-agent-and-pause-queue control. This is broader than native Codex `/stop` (background terminals only), and is labelled accordingly. |
 | `/ps`, `/clean` | Native thread-only background-terminal discovery and confirmed individual/all termination; never send a model prompt or kill another chat's tasks. Controller/browser tests and real-CLI empty-task inspection/cleanup pass. |
 | `/debug-config` | Explicit allowlist of non-secret effective Codex configuration and source layers; never dump raw config, MCP credentials or environment variables. |

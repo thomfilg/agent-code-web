@@ -1,0 +1,15 @@
+**
+!package.json
+!package-lock.json
+!scripts/
+!scripts/build-auth.mjs
+!src/
+!src/**
+!public/
+!public/**
+!chrome-extension/
+!chrome-extension/**
+!deploy/
+!deploy/aws/
+!deploy/aws/Dockerfile
+!deploy/aws/container-entry.mjs

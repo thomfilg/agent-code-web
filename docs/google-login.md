@@ -145,10 +145,11 @@ processes. Do not open registration to arbitrary users.
 
 Google authenticates the **Relay user**, not Claude or Codex. Multiple named
 Claude/Codex accounts, browser authorization URLs, private native profiles,
-encrypted token synchronization and explicit per-chat account selection are a
-separate pending implementation. This Google change must not be presented as
-having delivered or verified those provider-login flows. No personal CLI login
-has been adopted or authorized automatically.
+encrypted token synchronization and explicit per-chat account selection are now
+implemented and active locally and in the AWS application. Fresh real-provider
+consent and selected-account execution/resume remain separate release gates;
+Google login is not evidence that they passed. No personal CLI login is adopted
+or authorized automatically. See the [provider onboarding checklist](provider-onboarding.md).
 
 ## Verification
 
