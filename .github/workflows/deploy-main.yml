@@ -45,7 +45,8 @@ jobs:
   deploy:
     needs: check
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Build (up to ~20 min) plus up to 60 min waiting for active work to end.
+    timeout-minutes: 90
     environment: production
     permissions:
       contents: read
@@ -77,25 +78,45 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "image=$AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_REPOSITORY@$digest" >> "$GITHUB_OUTPUT"
+      # Active chats make the controller refuse the drain (DEFERRED) without
+      # stopping anything; retry until they end, unless a newer main supersedes this run.
       - name: Roll out to the controller
         env:
           TAG: ${{ steps.build.outputs.tag }}
           IMAGE: ${{ steps.build.outputs.image }}
+          GH_TOKEN: ${{ github.token }}
+          RETRY_MINUTES: 60
+          RETRY_SECONDS: 60
         run: |
           set -euo pipefail
           node deploy/aws/rollout.mjs --tag "$TAG" --image "$IMAGE" --out rollout.json
-          command=$(aws ssm send-command --instance-ids "$CONTROLLER_INSTANCE" --document-name AWS-RunShellScript \
-            --comment "CI rollout $TAG" --parameters file://rollout.json --query Command.CommandId --output text)
-          echo "SSM command $command for $IMAGE"
-          sleep 5
-          while status=$(aws ssm get-command-invocation --command-id "$command" --instance-id "$CONTROLLER_INSTANCE" --query Status --output text) \
-            && { [ "$status" = Pending ] || [ "$status" = InProgress ] || [ "$status" = Delayed ]; }; do sleep 5; done
-          output=$(aws ssm get-command-invocation --command-id "$command" --instance-id "$CONTROLLER_INSTANCE" --query StandardOutputContent --output text)
-          echo "$output"
-          if [ "$status" != Success ] || ! grep -qx READY <<< "$output"; then
-            aws ssm get-command-invocation --command-id "$command" --instance-id "$CONTROLLER_INSTANCE" --query StandardErrorContent --output text | grep -viE 'password|token|secret' || true
-            echo "::error::Rollout $status; the previous container was restored"; exit 1
-          fi
+          deadline=$(( $(date +%s) + RETRY_MINUTES * 60 ))
+          attempt=0
+          while :; do
+            attempt=$((attempt + 1))
+            command=$(aws ssm send-command --instance-ids "$CONTROLLER_INSTANCE" --document-name AWS-RunShellScript \
+              --comment "CI rollout $TAG" --parameters file://rollout.json --query Command.CommandId --output text)
+            echo "SSM command $command for $IMAGE (attempt $attempt)"
+            sleep 5
+            while status=$(aws ssm get-command-invocation --command-id "$command" --instance-id "$CONTROLLER_INSTANCE" --query Status --output text) \
+              && { [ "$status" = Pending ] || [ "$status" = InProgress ] || [ "$status" = Delayed ]; }; do sleep 5; done
+            output=$(aws ssm get-command-invocation --command-id "$command" --instance-id "$CONTROLLER_INSTANCE" --query StandardOutputContent --output text)
+            echo "$output"
+            if [ "$status" = Success ] && grep -qx READY <<< "$output"; then exit 0; fi
+            if ! grep -qx DEFERRED <<< "$output"; then
+              aws ssm get-command-invocation --command-id "$command" --instance-id "$CONTROLLER_INSTANCE" --query StandardErrorContent --output text | grep -viE 'password|token|secret' || true
+              echo "::error::Rollout $status; the previous container was restored"; exit 1
+            fi
+            main_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+            if [ "$main_sha" != "$GITHUB_SHA" ]; then
+              echo "::warning::main moved to ${main_sha::12} while the controller had active work; the newer deploy rolls out instead"; exit 0
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::The controller still had active work after $RETRY_MINUTES minutes; nothing was stopped. Re-run this workflow when chats are idle."; exit 1
+            fi
+            echo "::notice::Controller has active work; nothing was stopped. Retrying in $RETRY_SECONDS s"
+            sleep "$RETRY_SECONDS"
+          done
       - name: Public readiness
         run: |
           for attempt in $(seq 1 12); do

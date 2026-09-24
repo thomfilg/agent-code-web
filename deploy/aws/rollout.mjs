@@ -9,6 +9,8 @@ import { writeFileSync } from "node:fs";
 
 const IMAGE = /^(\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com)\/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$/;
 const KEEP_ROLLBACKS = 2;
+export const DEFERRED = "DEFERRED";
+export const DEFERRED_EXIT = 75;
 
 export function rolloutCommands({ tag, image }) {
   if (!/^[a-f0-9]{7,40}$/.test(tag || "")) throw new Error("tag must be a git commit sha");
@@ -29,7 +31,8 @@ export function rolloutCommands({ tag, image }) {
     // Only the running controller can authoritatively decide whether a chat,
     // goal, browser or retained worker would be interrupted. A rejected drain
     // leaves the old container serving and aborts the rollout before Stop.
-    'if ! curl --silent --show-error --fail --max-time 15 --request POST http://127.0.0.1:8787/internal/deploy/drain >/dev/null; then echo "Relay has active work; deployment deferred without stopping workers" >&2; exit 1; fi',
+    // DEFERRED (exit 75, EX_TEMPFAIL) tells CI to retry once the work ends.
+    `if ! curl --silent --show-error --fail --max-time 15 --request POST http://127.0.0.1:8787/internal/deploy/drain >/dev/null; then echo ${DEFERRED}; echo "Relay has active work; deployment deferred without stopping workers" >&2; exit ${DEFERRED_EXIT}; fi`,
     // If a later pre-stop command fails, reopen the old controller. Once it
     // exits, the replacement or restored container starts undrained.
     `trap 'curl --silent --max-time 5 --request POST http://127.0.0.1:8787/internal/deploy/resume >/dev/null 2>&1 || true' EXIT`,

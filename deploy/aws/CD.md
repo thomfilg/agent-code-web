@@ -14,7 +14,13 @@ Every push to `main` runs [`deploy-main.yml`](../../.github/workflows/deploy-mai
    - check the public `/readyz`.
 
 Rollouts queue (`concurrency: production-deploy`); a newer push waits for the
-running one. Manual rollouts should stop once this is enabled, so nothing races
+running one.
+
+If a chat, goal or sign-in is active, the controller refuses the drain and the
+rollout prints `DEFERRED` (exit 75) before stopping anything; the old container
+keeps serving. CI retries every 60 s for up to 60 min (`RETRY_MINUTES`), and stops
+early with success when `main` has moved on, since the newer run deploys it. After
+the deadline the run fails; re-run it when chats are idle. Manual rollouts should stop once this is enabled, so nothing races
 the controller.
 
 ## One-time setup
