@@ -159,6 +159,9 @@ test("cross-site requests cannot wake a worker and preview bootstrap reads preve
   const drain = await fetch(`http://127.0.0.1:${f.localPort}/internal/deploy/drain`, { method: "POST" });
   assert.equal(drain.status, 409); await drain.body.cancel(); partial.destroy();
   await waitFor(() => f.app.previews.active === 0);
+  const awake = await fetch(`http://127.0.0.1:${f.localPort}/internal/deploy/drain`, { method: "POST" });
+  assert.equal(awake.status, 409, "an awake worker remains protected after preview requests finish"); await awake.body.cancel();
+  assert.equal((await f.browser.call(`/api/chats/${f.chatId}/stop`, { method: "POST" })).status, 200);
   const idle = await fetch(`http://127.0.0.1:${f.localPort}/internal/deploy/drain`, { method: "POST" }); assert.equal(idle.status, 200); await idle.body.cancel();
   const resumed = await fetch(`http://127.0.0.1:${f.localPort}/internal/deploy/resume`, { method: "POST" }); assert.equal(resumed.status, 200); await resumed.body.cancel();
 });
