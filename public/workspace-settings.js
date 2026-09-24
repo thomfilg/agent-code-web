@@ -335,9 +335,26 @@ export class WorkspaceSettings {
       const { repositories } = await this.api(`/api/github/repositories${refresh ? "?refresh=1" : ""}`);
       if (request !== this.repositoryRequest) return;
       this.repositories = repositories;
-    } catch {
+    } catch (error) {
       if (request !== this.repositoryRequest) return;
-      this.repositories = []; this.repositoryError = true;
+      // A failed listing is not evidence that every saved GitHub login expired.
+      // Fetch the authoritative connection status before advising a new sign-in.
+      let github = this.github;
+      try { github = await this.api("/api/github"); } catch { /* The original failure remains actionable. */ }
+      if (request !== this.repositoryRequest) return;
+      this.github = github;
+      const disconnected = github?.connections?.filter(connection => !connection.connected) || [];
+      this.repositories = [];
+      if (disconnected.length) {
+        const names = disconnected.map(connection => connection.name || connection.login || "GitHub").join(", ");
+        this.repositoryError = `GitHub ${disconnected.length === 1 ? "account" : "accounts"} ${names} ${disconnected.length === 1 ? "is" : "are"} disconnected. Reconnect in Manage GitHub accounts, then retry.`;
+      } else if (/connection changed while loading/i.test(error.message)) {
+        this.repositoryError = "A GitHub connection changed while repositories were loading. Retry the list; no new sign-in is needed.";
+      } else if (github?.connected) {
+        this.repositoryError = "Your GitHub accounts are connected, but repositories could not be loaded. Retry; if this continues, check repository permissions or GitHub API limits.";
+      } else {
+        this.repositoryError = "Could not load repositories or verify GitHub connections. Retry or check Manage GitHub accounts.";
+      }
     } finally {
       if (request === this.repositoryRequest) { this.repositoryLoading = false; this.renderRepositories(); }
     }
@@ -353,7 +370,7 @@ export class WorkspaceSettings {
     // Keep cached repository rows visible while a refresh is in flight. An
     // empty picker is preferable to a blocking/loading interstitial.
     if (this.repositoryLoading && !this.repositories.length) return;
-    if (this.repositoryError) return status("Could not load repositories. Check your GitHub connection and retry.", { error: true, manage: true, retry: true });
+    if (this.repositoryError) return status(this.repositoryError, { error: true, manage: true, retry: true });
     const primaryCompany = companyForChat({ repositories: this.selected }), environment = this.selectedEnvironment();
     // Legacy repository responses have no companyId; retain their old display
     // behavior, with environment admission still checked in payload and server.

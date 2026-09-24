@@ -104,7 +104,10 @@ async function api(path, options = {}) {
     headers: { "content-type": "application/json", ...(options.headers || {}) },
   });
   const payload = await response.json().catch(() => ({}));
-  if (response.status === 401 && state.config?.features.googleLogin) window.dispatchEvent(new Event("relay-auth-required"));
+  // GitHub can reject a saved credential while the Relay browser session is
+  // still valid. Do not send that user through Relay sign-in again.
+  const githubCredentialFailure = path.startsWith("/api/github") && /^(?:GitHub credentials expired or were revoked|Connect GitHub to continue)/.test(payload.error || "");
+  if (response.status === 401 && state.config?.features.googleLogin && !githubCredentialFailure) window.dispatchEvent(new Event("relay-auth-required"));
   if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
   return payload;
 }
