@@ -44,4 +44,8 @@ test("the viewer pages through every image in the chat and maps Markdown sources
   assert.equal(agentImageFor([shot], "screens/home.png"), shot);
   assert.equal(agentImageFor([shot], "/work/chat/screens/home.png"), shot);
   assert.equal(agentImageFor([shot], "other.png"), null);
+  const before = { id: "file_x", agentImage: { path: "shots/x.png", source: "shots/x.png" } };
+  const after = { id: "file_y", agentImage: { path: "old/shots/x.png", source: "old/shots/x.png" } };
+  assert.equal(agentImageFor([before, after], "old/shots/x.png"), after, "an exact path wins over a suffix");
+  assert.equal(agentImageFor([before, after], "/work/chat/old/shots/x.png"), after, "the longest suffix wins");
 });

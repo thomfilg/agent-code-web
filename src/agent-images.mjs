@@ -33,10 +33,14 @@ export function imageReferences(text, workspace = "") {
 // Reads each cited image and stores it as a chat attachment. A missing, too
 // large or non-image file is skipped: the message then shows the caption text.
 export async function captureAgentImages({ text, workspace, read, upload }) {
+  const references = imageReferences(text, workspace);
+  // Reads run together so several missing or slow paths cost one timeout, not ten.
+  const reads = await Promise.allSettled(references.map(reference => read(reference.path)));
   const images = [];
-  for (const reference of imageReferences(text, workspace)) {
+  for (const [index, reference] of references.entries()) {
     try {
-      const file = await read(reference.path);
+      if (reads[index].status !== "fulfilled") continue;
+      const file = reads[index].value;
       if (!file || file.kind !== "file" || file.referenceOnly || !file.binary || !IMAGE_MIME.test(file.mime || "")) continue;
       const attachment = await upload({ name: path.posix.basename(reference.path), mime: file.mime, data: file.data });
       images.push({ ...attachment, agentImage: { path: reference.path, source: reference.source, caption: reference.alt.slice(0, 300) } });

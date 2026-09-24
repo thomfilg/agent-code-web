@@ -42,8 +42,9 @@ export class ImageLightbox {
     });
     let start = null;
     this.stage.addEventListener("pointerdown", event => { if (event.pointerType !== "mouse") start = { x: event.clientX, y: event.clientY }; });
+    this.stage.addEventListener("pointercancel", () => { start = null; });
     this.stage.addEventListener("pointerup", event => {
-      if (!start) return;
+      if (!start || event.pointerType === "mouse") { start = null; return; }
       const dx = event.clientX - start.x, dy = event.clientY - start.y; start = null;
       if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5 && !this.stage.classList.contains("actual-size")) this.show(this.index + (dx < 0 ? 1 : -1));
     });
