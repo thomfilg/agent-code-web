@@ -17,6 +17,7 @@ import { ProviderGateway } from "./provider-gateway.mjs";
 import { NpmRegistryGateway } from "./npm-registry-gateway.mjs";
 import { RuntimeManager } from "./runtime-manager.mjs";
 import { ChatStore } from "./store.mjs";
+import { ChatRetention } from "./chat-retention.mjs";
 import { errorMessage } from "./utils.mjs";
 import { createWorkerBackend } from "./worker-backends.mjs";
 import { openDatabase } from "./database.mjs";
@@ -172,6 +173,7 @@ export async function createAgentWebServer(options = {}) {
     ...(options.githubWorkerFetch ? { fetchImpl: options.githubWorkerFetch } : {}) });
   await environments.initialize();
   let manager = null;
+  let chatRetention = null;
   let previews = null, previewHosts = null;
   // Provisioning can be disabled while its old CloudFront origins still exist.
   // Their Host must never fall through to Relay's authenticated UI/API routes.
@@ -1063,6 +1065,8 @@ export async function createAgentWebServer(options = {}) {
     await manager.githubEvents?.initialize();
     manager.pullRequests.start();
     manager.githubEvents?.process();
+    chatRetention = new ChatRetention({ store, manager, days: config.chatRetentionDays });
+    chatRetention.start();
     return { host: config.host, port, url: `http://${config.host.includes(":") ? `[${config.host}]` : config.host}:${port}` };
   }
 
@@ -1070,6 +1074,7 @@ export async function createAgentWebServer(options = {}) {
     return stopping ||= shutdown();
   }
   async function shutdown() {
+    await chatRetention?.stop();
     githubWorkers.shutdown();
     npmGateway.shutdown();
     // Stop accepting connections before closing SSE. Otherwise a browser may

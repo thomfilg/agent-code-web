@@ -1,8 +1,8 @@
 # MVP encrypted backup/restore acceptance
 
 This is an explicit operator acceptance check, not a scheduled backup service.
-It incurs one retained encrypted EBS snapshot and a temporary encrypted restore
-volume. It briefly stops the controller and **never** sends prompts, authorizes
+It creates one encrypted EBS snapshot and a temporary encrypted restore
+volume, then removes both after verified cleanup. It briefly stops the controller and **never** sends prompts, authorizes
 accounts, creates user chats, starts workers, or imports local credentials.
 
 The target is deliberately fixed: profile `code-web`, account `456808212788`,
@@ -62,16 +62,17 @@ or restore permissions; the local operator performs these AWS operations.
 7. Exact unmount confirmation precedes detach. Ownership, snapshot source,
    encryption, AZ and attachment are rechecked before deleting **only** the
    temporary restore volume. Exact `InvalidVolume.NotFound` is observed before
-   claiming removal. No force-detach or snapshot deletion exists.
+   claiming removal. The exact owned snapshot is then deleted and
+   `InvalidSnapshot.NotFound` is observed. No force-detach exists.
 
 ## Failures and recovery
 
 Every stage emits only the run ID and relevant command/resource handles.
 Preserve those handles. AWS/SSM output and private Docker diagnostics are not
 forwarded. A command-observation timeout is not evidence that it did not run;
-do not blindly repeat a mutation. The snapshot is retained even if later
-verification fails. A retained snapshot is **not** automatically a verified
-backup; only the final `verified: true` result proves this gate passed.
+do not blindly repeat a mutation. If restore-volume cleanup cannot be verified,
+the snapshot is retained for manual investigation and must be deleted once safe.
+This acceptance check does **not** retain a usable backup on success.
 
 The host recovers the original container on preparation/snapshot-lease errors.
 If the database-only reader cannot be stopped, recovery deliberately refuses

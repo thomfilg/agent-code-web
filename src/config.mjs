@@ -112,6 +112,7 @@ export function loadConfig(env = process.env) {
     },
     idlePolicy,
     idleTimeoutMs: integer(env, "AGENT_IDLE_TIMEOUT_MS", idlePolicy === "hibernate" ? 120_000 : 300_000, { min: 100, max: 86_400_000 }),
+    chatRetentionDays: integer(env, "AGENT_CHAT_RETENTION_DAYS", 7, { min: 0, max: 3650 }),
     dataDir: path.resolve(APP_ROOT, env.AGENT_DATA_DIR || "data"),
     workspaceSource: env.AGENT_WORKSPACE_SOURCE || "",
     workerBackend,
