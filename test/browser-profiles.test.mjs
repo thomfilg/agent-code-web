@@ -14,13 +14,17 @@ import { spawnWorker } from "../src/worker-process.mjs";
 import { temporaryDirectory } from "./helpers.mjs";
 
 // A minimal Chrome user-data-dir: fake cookies only, never a real profile.
-async function fakeProfile(t, { scheme = "v10", extra = null, version = "153.0.8010.12" } = {}) {
+// Chrome stores cookie expiry as microseconds since 1601-01-01.
+const chromeTime = date => BigInt(Date.parse(date)) * 1000n + 11644473600000000n;
+async function fakeProfile(t, { scheme = "v10", extra = null, version = "153.0.8010.12", cookies = null } = {}) {
   const directory = await temporaryDirectory(t, "relay-fake-profile-");
   await mkdir(path.join(directory, "Default", "Local Storage", "leveldb"), { recursive: true });
   const db = new DatabaseSync(path.join(directory, "Default", "Cookies"));
-  db.exec("CREATE TABLE cookies (host_key TEXT, name TEXT, encrypted_value BLOB)");
-  const insert = db.prepare("INSERT INTO cookies VALUES (?, ?, ?)");
-  for (const host of [".clickup.com", ".clickup.com", "app.clickup.com", ".example.test"]) insert.run(host, "sid", Buffer.from(`${scheme}fixture`));
+  db.exec("CREATE TABLE cookies (host_key TEXT, name TEXT, encrypted_value BLOB, expires_utc INTEGER, has_expires INTEGER, is_persistent INTEGER)");
+  const insert = db.prepare("INSERT INTO cookies VALUES (?, ?, ?, ?, ?, ?)");
+  for (const [host, name, expires] of cookies || [[".clickup.com", "sid"], [".clickup.com", "sid"], ["app.clickup.com", "sid"], [".example.test", "sid"]]) {
+    insert.run(host, name, Buffer.from(`${scheme}fixture`), expires ? chromeTime(expires) : 0n, expires ? 1 : 0, expires ? 1 : 0);
+  }
   db.close();
   await writeFile(path.join(directory, "Default", "Local Storage", "leveldb", "000001.log"), "fixture");
   await writeFile(path.join(directory, "Default", "Preferences"), "{}");
@@ -163,4 +167,39 @@ test("Chrome's own UI pages are never offered or selected as tabs", async () => 
     { type: "page", targetId: "settings", title: "Settings", url: "chrome://settings/" },
   ] });
   assert.deepEqual((await browser.tabs()).map(tab => tab.id), ["tab", "settings"]);
+});
+
+test("each site's sign-in lifetime comes from its longest-lived login cookie", async t => {
+  const { loginState } = await import("../public/browser-profile-sessions.js");
+  const archive = await buildProfileArchive(await fakeProfile(t, { cookies: [
+    [".app.clickup.com", "cu_jwt", "2026-09-20T00:00:00Z"],          // short access token
+    [".app.clickup.com", "cu_refresh", "2027-09-18T00:00:00Z"],      // the refresh token decides
+    [".clickup.com", "_ga", "2030-01-01T00:00:00Z"],                 // analytics is ignored
+    ["github.com", "logged_in", "2026-10-01T00:00:00Z"],
+    ["accounts.google.co.uk", "__Host-GAPS", "2026-09-01T00:00:00Z"],
+    [".linear.app", "session"],                                      // session-only cookie
+    ["localhost", "session_token", "2030-01-01T00:00:00Z"],          // development noise
+  ] }));
+  const { sessions } = await inspectProfileArchive(archive);
+  const bySite = Object.fromEntries(sessions.map(session => [session.site, session]));
+  assert.deepEqual(Object.keys(bySite).sort(), ["clickup.com", "github.com", "google.co.uk", "linear.app"]);
+  assert.equal(bySite["clickup.com"].cookie, "cu_refresh");
+  assert.equal(bySite["clickup.com"].expiresAt, "2027-09-18T00:00:00.000Z");
+  assert.equal(bySite["linear.app"].sessionOnly, true);
+  const now = Date.parse("2026-09-25T00:00:00Z");
+  assert.equal(loginState(bySite["clickup.com"], now).level, "valid");
+  assert.equal(loginState(bySite["github.com"], now).level, "expiring");
+  assert.equal(loginState(bySite["google.co.uk"], now).level, "expired");
+  assert.equal(loginState(bySite["linear.app"], now).level, "expired");
+});
+
+test("versions saved before sign-in lifetimes existed are inspected once and persisted", async t => {
+  const { records, profiles } = await services();
+  const profile = await profiles.create({ name: "Legacy", companyId: "g2i" });
+  await profiles.addVersion(profile.id, await buildProfileArchive(await fakeProfile(t, { cookies: [[".clickup.com", "cu_refresh", "2027-09-18T00:00:00Z"]] })));
+  const stored = await records.get("browser-profile", profile.id);
+  delete stored.versions[0].sessions; await records.put("browser-profile", profile.id, stored);
+  const listed = await profiles.list("g2i");
+  assert.equal(listed[0].sessions[0].site, "clickup.com");
+  assert.equal((await records.get("browser-profile", profile.id)).versions[0].sessions[0].cookie, "cu_refresh");
 });

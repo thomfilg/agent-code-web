@@ -4,6 +4,7 @@ import { companyContext } from "./company-context.js";
 import { environmentAllows, environmentCompany } from "./environment-scope.js";
 import { GitHubAccounts } from "./github-accounts.js";
 import { agentAccountLabel, agentProjectKey } from "./agent-account-options.js";
+import { loginState } from "./browser-profile-sessions.js";
 const $ = selector => document.querySelector(selector);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 const option = (value, text) => { const e = el("option", "", text); e.value = value; return e; };
@@ -496,7 +497,8 @@ export class WorkspaceSettings {
     $("#environment-variables-summary").textContent = this.draft.variablesEnabled ? `${this.draft.variables.length} ${this.draft.variables.length === 1 ? "variable" : "variables"}` : "Disabled";
     $("#environment-setup-summary").textContent = this.draft.setupScript.trim() ? "Startup script configured" : "No startup script";
     const profile = this.browserProfiles?.find(item => item.id === this.draft.browserProfileId);
-    $("#environment-browser-summary").textContent = profile ? `${profile.name} · v${profile.currentVersion}` : "Empty profile";
+    const attention = (profile?.sessions || []).filter(session => loginState(session).level !== "valid").length;
+    $("#environment-browser-summary").textContent = profile ? `${profile.name} · v${profile.currentVersion}${attention ? ` · ${attention} sign-in${attention === 1 ? "" : "s"} to renew` : ""}` : "Empty profile";
   }
   renderBrowserProfiles() {
     if (!this.draft) return;
@@ -505,9 +507,20 @@ export class WorkspaceSettings {
     select.replaceChildren(option("", "None · empty profile"), ...profiles.map(profile => option(profile.id, `${profile.name} · v${profile.currentVersion}`)));
     select.value = profiles.some(profile => profile.id === this.draft.browserProfileId) ? this.draft.browserProfileId : "";
     const selected = profiles.find(profile => profile.id === select.value);
-    $("#environment-browser-details").textContent = !selected ? "Chats start with an empty browser profile."
+    const details = $("#environment-browser-details");
+    details.replaceChildren(el("p", "", !selected ? "Chats start with an empty browser profile."
       : !selected.currentVersion ? "No version yet. Upload an archive, or sign in from a chat’s Browser panel and choose “Save to profile”."
-      : `Version ${selected.currentVersion} · ${selected.versions.at(-1).source === "chat" ? "saved from a chat" : "uploaded"} ${new Date(selected.versions.at(-1).createdAt).toLocaleString()} · Chrome ${selected.chromeVersion || "unknown"} · signed-in sites: ${selected.sites.slice(0, 12).join(", ") || "none"}`;
+      : `Version ${selected.currentVersion} · ${selected.versions.at(-1).source === "chat" ? "saved from a chat" : "uploaded"} ${new Date(selected.versions.at(-1).createdAt).toLocaleString()} · Chrome ${selected.chromeVersion || "unknown"}`));
+    if (selected?.sessions?.length) {
+      const list = el("ul", "browser-profile-sessions");
+      for (const session of selected.sessions) {
+        const state = loginState(session), item = el("li", `browser-profile-session ${state.level}`);
+        item.append(el("strong", "", session.site), el("span", "", ` · ${state.text}`));
+        item.title = session.cookie ? `Longest-lived login cookie: ${session.cookie}` : "";
+        list.append(item);
+      }
+      details.append(el("p", "muted", "Sign-ins saved in this version. A site can still end a session earlier; sign in again from a chat’s Browser panel and choose “Save to profile” to refresh the snapshot."), list);
+    }
     $("#browser-profile-upload").disabled = $("#browser-profile-delete").disabled = !selected;
     $("#browser-profile-create").disabled = !companyId;
   }

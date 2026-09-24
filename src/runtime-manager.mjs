@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { loginState } from "../public/browser-profile-sessions.js";
 import { clampText, errorMessage, newId, nowIso, redact } from "./utils.mjs";
 import { prepareWorkspace, prepareRepositories } from "./workspace.mjs";
 import { prepareSoftware, captureWorker } from "./software.mjs";
@@ -312,7 +313,12 @@ export class RuntimeManager extends EventEmitter {
       const services = chat.environmentId && await this.servicesFor(chat);
       const environment = services && await services.environments.runtime(chat.environmentId, chat);
       const profile = environment?.browserProfileId && services.browserProfiles && await services.browserProfiles.get(environment.browserProfileId);
-      if (profile?.currentVersion) return `The guest Chrome starts from a private copy of the user's saved browser profile “${profile.name}”, already signed in to: ${profile.sites.slice(0, 15).join(", ") || "the user's chosen sites"}. Those accounts are a sandbox the user provided for you; use them as needed. This copy belongs only to this chat and is deleted with it.`;
+      if (profile?.currentVersion) {
+        const valid = (profile.sessions || []).filter(session => loginState(session).level !== "expired").map(session => session.site);
+        const expired = (profile.sessions || []).filter(session => loginState(session).level === "expired").map(session => session.site);
+        const signedIn = (profile.sessions?.length ? valid : profile.sites).slice(0, 15).join(", ") || "the user's chosen sites";
+        return `The guest Chrome starts from a private copy of the user's saved browser profile “${profile.name}”, already signed in to: ${signedIn}.${expired.length ? ` Saved sign-ins that have expired (expect a login page there): ${expired.slice(0, 10).join(", ")}.` : ""} Those accounts are a sandbox the user provided for you; use them as needed. This copy belongs only to this chat and is deleted with it.`;
+      }
     } catch { /* Fall back to the default description. */ }
     return "The default guest profile has none of the user's saved logins.";
   }
