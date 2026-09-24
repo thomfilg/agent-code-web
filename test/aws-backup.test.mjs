@@ -14,7 +14,7 @@ const runTags = [...tags, { Key: "AgentRelayBackupRun", Value: runId }, { Key: "
 const fingerprint = { version: 1, records: 1, recordsSha256: "a".repeat(64), attachments: 0, attachmentBytes: 0, attachmentsSha256: "b".repeat(64), encryptionVerified: true };
 const freePort = () => new Promise((resolve, reject) => { const server = net.createServer(); server.on("error", reject); server.listen(0, "127.0.0.1", () => { const port = server.address().port; server.close(() => resolve(port)); }); });
 function fixture({ bad = null, fails = null } = {}) {
-  const calls = [], commands = new Map(); let n = 0, attached = false, deleted = false;
+  const calls = [], commands = new Map(); let n = 0, attached = false, deleted = false, snapshotDeleted = false;
   const aws = async (service, action, args = []) => {
     calls.push({ service, action, args });
     if (fails === action) throw Error("injected provider failure");
@@ -47,7 +47,11 @@ function fixture({ bad = null, fails = null } = {}) {
       return { Status: "Success", ResponseCode: 0, StandardOutputContent: JSON.stringify(result) };
     }
     if (action === "create-snapshot") return { SnapshotId: snapshot };
-    if (action === "describe-snapshots") return { Snapshots: [{ SnapshotId: snapshot, VolumeId: source, OwnerId: backupTarget.account, Encrypted: true, Tags: runTags, State: "completed" }] };
+    if (action === "describe-snapshots") {
+      if (snapshotDeleted) throw Object.assign(Error("snapshot not found"), { snapshotNotFound: true });
+      return { Snapshots: [{ SnapshotId: snapshot, VolumeId: source, OwnerId: backupTarget.account, Encrypted: true, Tags: runTags, State: "completed" }] };
+    }
+    if (action === "delete-snapshot") { snapshotDeleted = true; return {}; }
     if (action === "create-volume") return { VolumeId: restore };
     if (action === "attach-volume") { attached = true; return {}; }
     if (action === "detach-volume") { attached = false; return {}; }
@@ -73,7 +77,8 @@ test("cold snapshot restores to a distinct encrypted volume, proves fingerprint 
   assert.ok(actions.indexOf("create-snapshot") < actions.indexOf("create-volume"));
   assert.ok(f.calls.find(c => c.action === "create-volume").args.includes("--encrypted"));
   for (const action of ["attach-volume", "detach-volume", "delete-volume"]) assert.ok(f.calls.find(c => c.action === action).args.includes(restore));
-  assert.equal(actions.includes("delete-snapshot"), false);
+  assert.equal(result.snapshotRetained, false);
+  assert.ok(f.calls.find(c => c.action === "delete-snapshot").args.includes(snapshot));
   assert.equal(f.calls.some(c => c.action === "delete-volume" && c.args.includes(source)), false);
 });
 
@@ -84,10 +89,10 @@ test("snapshot failure still releases and recovers the original; no restore reso
   assert.equal(f.calls.some(c => c.action === "create-volume"), false);
 });
 
-test("verification failure cleans its copy but retains snapshot; unknown cleanup never force-detaches", async () => {
+test("verification failure cleans its copy and snapshot when safe; unknown cleanup never force-detaches", async () => {
   for (const fails of ["host-restore", "host-cleanup"]) {
     const f = fixture({ fails }); await assert.rejects(verifyBackup({ execute: true }, f.options), error => !error.message.includes("private-host-output"));
-    assert.equal(f.calls.some(c => c.action === "delete-snapshot"), false);
+    assert.equal(f.calls.some(c => c.action === "delete-snapshot"), fails !== "host-cleanup");
     assert.equal(f.calls.some(c => c.action === "delete-volume"), fails !== "host-cleanup");
     assert.equal(f.calls.some(c => c.args.includes("--force")), false);
   }

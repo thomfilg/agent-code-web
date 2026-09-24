@@ -130,6 +130,8 @@ button { border: 0; cursor: pointer; }
 .workspace-strip .repository-chip { padding: 0; border: 0; border-radius: 5px; gap: 4px; background: transparent; min-width: 0; max-width: 100%; }
 .workspace-strip .repository-name, .workspace-strip .repository-branch, .workspace-strip .repository-chip select, .environment-chip { background: var(--panel-soft); border: 0; border-radius: 5px; color: var(--muted); font-size: 10.5px; height: 22px; padding: 3px 5px; }
 .workspace-strip .repository-name { flex: 0 1 auto; max-width: 180px; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-strip button.repository-name { cursor: pointer; text-align: left; }
+.workspace-strip button.repository-name:hover { color: var(--text); background: var(--panel); }
 .workspace-strip .repository-chip select { width: auto; min-width: 55px; max-width: 120px; padding: 2px 4px; }
 .workspace-strip .repository-branch { max-width: 140px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .environment-chip { display: flex; align-items: center; gap: 4px; max-width: 240px; }
@@ -1091,6 +1093,13 @@ dialog { max-height: calc(100dvh - 28px); }
 #composer .composer-actions { gap: 4px; margin-left: 0; }
 #composer .composer-actions .usage-menu > summary { width: 28px; height: 28px; border-color: transparent; }
 #composer .composer-input-row .send-button { position: absolute; right: 7px; bottom: 6px; width: 28px; height: 28px; border-radius: 8px; }
+#new-chat-form .draft-composer { padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+#new-chat-form .draft-composer:focus-within { border-color: transparent; box-shadow: none; }
+#new-chat-form #initial-prompt { min-height: 42px; max-height: 160px; padding: 10px 42px 10px 12px; border: 1px solid #41483b; border-radius: 12px; background: #1b1e19; font-size: var(--type-content); line-height: 1.45; }
+#new-chat-form #initial-prompt:focus { border-color: #59664b; box-shadow: 0 0 0 3px rgba(201,242,124,.03); }
+#new-chat-form .composer-input-row .send-button { position: absolute; right: 7px; bottom: 6px; width: 28px; height: 28px; border-radius: 8px; }
+#new-chat-form .composer-footer { min-height: 30px; margin-top: 3px; padding: 0 3px; gap: 4px; }
+#new-chat-form .composer-footer select { min-height: 28px; height: 28px; padding: 3px 6px; background: transparent; }
 .composer-wrap > .composer-help { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @container (max-width: 540px) {
   .composer { padding: 12px 10px 10px; }

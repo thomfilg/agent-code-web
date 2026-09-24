@@ -116,6 +116,16 @@ after confirming no deployment uses them. There is no automatic AWS teardown.
 
 ## Controller worker settings
 
+Chat retention is controlled by `AGENT_CHAT_RETENTION_DAYS` in the controller
+environment (default `7`; set `0` to disable). Change it through the deployment
+secret/rollout path and restart the controller; no code change is needed. A scan
+runs at startup and hourly. It deletes chats with no message or agent work for
+the configured period, including their attachments and EC2 workers. An open
+browser tab does not reset the clock. Working chats and nonempty queues are
+not removed. Manual cold backup acceptance no longer retains its snapshot on
+success; independently created EBS snapshots or copies require separate
+operator cleanup because the controller has no permission to delete them.
+
 Set via the deployment secret/rollout path, not in a committed environment file:
 
 ```dotenv
@@ -130,6 +140,7 @@ AGENT_EC2_SSH_PRIVATE_KEY=/run/relay/worker-key
 AGENT_EC2_SSH_USER=ubuntu
 AWS_REGION=us-east-1
 AWS_PROFILE=
+AGENT_CHAT_RETENTION_DAYS=7
 ```
 
 Only the controller stores the SSH private key. `AGENT_EC2_USE_PUBLIC_IP=1` is

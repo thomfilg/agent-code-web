@@ -21,6 +21,7 @@ export async function awsCall(service, action, args = []) {
   } catch (error) {
     if (service === "ssm" && action === "get-command-invocation" && String(error.stderr).includes("InvocationDoesNotExist")) throw Object.assign(Error("SSM pending"), { pending: true });
     if (service === "ec2" && action === "describe-volumes" && String(error.stderr).includes("InvalidVolume.NotFound")) throw Object.assign(Error("Exact volume not found"), { volumeNotFound: true });
+    if (service === "ec2" && action === "describe-snapshots" && String(error.stderr).includes("InvalidSnapshot.NotFound")) throw Object.assign(Error("Exact snapshot not found"), { snapshotNotFound: true });
     throw Error(`AWS ${service} ${action} failed; private diagnostics suppressed. Do not blindly repeat mutations.`);
   }
 }
@@ -50,7 +51,7 @@ export async function verifyBackupTarget(aws) {
 export async function verifyBackup({ execute: shouldExecute = false } = {}, { aws = awsCall, sleep = pause, log = () => {}, runId = randomUUID(), pollLimit = 240,
   hostScript = null, fingerprintScript = null } = {}) {
   if (!/^[a-f0-9-]{36}$/.test(runId)) fail("Invalid backup run ID");
-  if (!shouldExecute) return { dryRun: true, ...backupTarget, retainsSnapshot: true, restoresToNewVolume: true, maintenanceGap: true, awsChanges: false };
+  if (!shouldExecute) return { dryRun: true, ...backupTarget, retainsSnapshot: false, restoresToNewVolume: true, maintenanceGap: true, awsChanges: false };
   hostScript ||= await readFile(new URL("./backup-host.py", import.meta.url), "utf8");
   fingerprintScript ||= await readFile(new URL("./backup-fingerprint.mjs", import.meta.url), "utf8");
   const target = await verifyBackupTarget(aws);
@@ -155,10 +156,11 @@ os.execv("/usr/bin/python3",["/usr/bin/python3",p,sys.argv[1]])`;
     const result = await host("restore", { restore: restoreId });
     if (result.ok !== true || result.run !== runId || result.originalRecovered !== true || !result.fingerprint?.encryptionVerified) fail("Restore fingerprint verification did not pass");
     verified = true;
-    return { verified, runId, snapshotId, originalRecovered: sourceRecovered, fingerprint: result.fingerprint, snapshotRetained: true, temporaryVolumeRemoved: true };
+    return { verified, runId, snapshotId, originalRecovered: sourceRecovered, fingerprint: result.fingerprint, snapshotRetained: false, temporaryVolumeRemoved: true };
   } finally {
     // A failed/ambiguous host cleanup must never lead to force-detach/delete.
-    // Keep the tagged snapshot on every path, including failed acceptance.
+    // A failed/ambiguous restore-volume cleanup retains the snapshot for manual
+    // inspection. A successful verification leaves no chat-bearing copy behind.
     if (restoreId && restoreId !== target.source && id(restoreId, "vol")) {
       const volume = await restoreVolume();
       const cleanup = await host("cleanup", { restore: restoreId });
@@ -175,6 +177,15 @@ os.execv("/usr/bin/python3",["/usr/bin/python3",p,sys.argv[1]])`;
         catch (error) { if (error.volumeNotFound) return true; throw error; }
       });
       log({ stage: "restore-volume-removed", runId, volumeId: restoreId, snapshotId, verified });
+    }
+    if (snapshotId && sourceRecovered && (!restoreId || cleanupConfirmed)) {
+      await snapshot();
+      await aws("ec2", "delete-snapshot", ["--snapshot-id", snapshotId]);
+      await poll("backup snapshot deletion", async () => {
+        try { await snapshot(); return false; }
+        catch (error) { if (error.snapshotNotFound) return true; throw error; }
+      });
+      log({ stage: "snapshot-removed", runId, snapshotId, verified });
     }
   }
 }

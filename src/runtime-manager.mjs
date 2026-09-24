@@ -131,6 +131,7 @@ export class RuntimeManager extends EventEmitter {
     return runtime;
   }
   async enqueue(chatId, rawText, attachmentIds = []) {
+    if (this.#deletions.has(chatId)) throw Object.assign(new Error("Chat deletion is in progress"), { statusCode: 409 });
     const text = clampText(rawText, 100_000, "message");
     const current = this.store.get(chatId);
     if (!current) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
@@ -141,7 +142,7 @@ export class RuntimeManager extends EventEmitter {
     const chat = await this.store.update(chatId, current => {
       if (current.archived) throw new Error("Unarchive this chat before queueing messages");
       if ((current.queuedMessages || []).length >= 20) throw new Error("Queue holds at most 20 messages");
-      return { queuedMessages: [...(current.queuedMessages || []), item] };
+      return { queuedMessages: [...(current.queuedMessages || []), item], lastActivityAt: item.createdAt };
     });
     this.publishChat(chat);
     // FIFO input waits for the current native goal run. Pausing the goal here
@@ -1014,6 +1015,7 @@ export class RuntimeManager extends EventEmitter {
   // operation acquires infrastructure only, never an adapter, turn or queue.
   async wake(chatId, guard = () => {}) {
     guard();
+    if (this.#deletions.has(chatId)) throw Object.assign(new Error("Chat deletion is in progress"), { statusCode: 409 });
     const chat = this.store.get(chatId);
     if (!chat) throw Object.assign(new Error("Chat not found"), { statusCode: 404 });
     if (chat.archived || chat.workflowState === "archived") throw Object.assign(new Error("Unarchive this chat before waking its environment"), { statusCode: 409 });
@@ -1816,6 +1818,7 @@ export class RuntimeManager extends EventEmitter {
   }
 
   async #submit(chatId, rawText, attachmentIds = [], queueAction = null, approval = null, githubEvent = null, relayGoalWake = false) {
+    if (this.#deletions.has(chatId)) throw Object.assign(new Error("Chat deletion is in progress"), { statusCode: 409 });
     if (this.#runtimes.get(chatId)?.cleanupFailed) throw Object.assign(new Error("Worker cleanup is incomplete. Retry stopping the environment before resuming."), { statusCode: 409 });
     if (this.#runtimes.get(chatId)?.failing) throw Object.assign(new Error("The failed worker is being disconnected. Wait before resuming this chat."), { statusCode: 409 });
     if (this.#workerWakes.has(chatId)) throw Object.assign(new Error("The environment is waking up. Wait until it is ready before sending a message."), { statusCode: 409 });
@@ -1831,7 +1834,7 @@ export class RuntimeManager extends EventEmitter {
     const resolvedCommand = typeof resolution?.then === "function" ? await resolution : resolution;
     const { commandAction, skill } = resolvedCommand;
     if (chat.workflowState === "archived") throw Object.assign(new Error("Unarchive this chat before sending a message"), { statusCode: 409 });
-    if (this.#modeChanges.has(chatId) || this.#interruptions.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || this.#runtimes.get(chatId)?.busy || this.#runtimes.get(chatId)?.adapter.isBackgroundBusy?.() || (this.#sendingNow.has(chatId) && this.#sendingNow.get(chatId) !== queueAction)) {
+    if (this.#deletions.has(chatId) || this.#modeChanges.has(chatId) || this.#interruptions.has(chatId) || this.#switching.has(chatId) || this.#queued.has(chatId) || this.#runtimes.get(chatId)?.busy || this.#runtimes.get(chatId)?.adapter.isBackgroundBusy?.() || (this.#sendingNow.has(chatId) && this.#sendingNow.get(chatId) !== queueAction)) {
       throw Object.assign(new Error("this chat already has a running turn"), { statusCode: 409 });
     }
     this.#queued.add(chatId);
@@ -2620,6 +2623,14 @@ export class RuntimeManager extends EventEmitter {
     finally { this.#deletions.delete(chatId); }
   }
 
+  async removeExpired(chatId, cutoff) {
+    const chat = this.store.get(chatId);
+    const activity = Date.parse(chat?.lastActivityAt || chat?.createdAt || "");
+    if (!chat || !Number.isFinite(activity) || activity > cutoff || chat.queuedMessages?.length ||
+      ["starting", "running", "stopping"].includes(chat.status) || this.isBusy(chatId) || this.sideChats?.busy(chatId)) return { removed: false, skipped: true };
+    return this.remove(chatId);
+  }
+
   async #removeChat(chatId) {
     const chat = this.store.get(chatId);
     if (!chat) {
@@ -3062,7 +3073,7 @@ export class RuntimeManager extends EventEmitter {
       ...(status === "running" && !["running", "starting"].includes(current.status) ? { workingStartedAt: nowIso() } : {}),
       idleDeadlineAt,
       idleKeepAwakeReason: null,
-      lastActivityAt: nowIso(),
+      ...(status === "running" ? { lastActivityAt: nowIso() } : {}),
     }));
     if (chat) this.#emit(chatId, { type: "chat_updated", chat });
   }

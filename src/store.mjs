@@ -200,6 +200,7 @@ export class ChatStore {
     if (this.records) await this.records.delete("native-feedback", id);
     if (this.records) await this.records.delete("native-logout", id);
     if (this.records) await this.records.delete("desktop-handoff", id);
+    if (this.records) await this.records.delete("hibernation-capabilities", id);
     await rm(this.chatDir(id), { recursive: true, force: true });
     return true;
   }
