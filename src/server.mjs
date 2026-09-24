@@ -706,7 +706,9 @@ export async function createAgentWebServer(options = {}) {
             refresh: () => {
               pending = pending.then(async () => {
                 if (closed) return;
-                if (!auth.authenticated(request) || !browserUsers.canRead(store.get(chatId), user)) { client.close(); return; }
+                const current = await browserUsers.session(request);
+                if (!auth.authenticated(request) || current?.id !== user?.id || current?.sessionId !== user?.sessionId
+                  || !browserUsers.canRead(store.get(chatId), current)) { client.close(); return; }
                 let rows;
                 do {
                   rows = await records.workerEventsSince(chatId, sequence, 300);
@@ -721,7 +723,8 @@ export async function createAgentWebServer(options = {}) {
           };
           const heartbeat = setInterval(() => {
             void browserUsers.session(request).then(current => {
-              if (!auth.authenticated(request) || user && current?.id !== user.id || !browserUsers.canRead(store.get(chatId), current)) client.close();
+              if (!auth.authenticated(request) || current?.id !== user?.id || current?.sessionId !== user?.sessionId
+                || !browserUsers.canRead(store.get(chatId), current)) client.close();
               else if (!response.writableEnded) response.write(": heartbeat\n\n");
             }).catch(() => client.close());
           }, 15_000);
