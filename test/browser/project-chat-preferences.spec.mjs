@@ -46,6 +46,29 @@ async function fixture(page) {
   return f;
 }
 
+test("the selected repository opens its picker and the new-chat send control stays inside the compact input", async ({ page }) => {
+  await fixture(page);
+  await page.getByRole("button", { name: "Change repository g2i-ai/macrosoft" }).click();
+  await expect(page.locator("#repository-picker .repository-picker-dropdown")).toHaveAttribute("open", "");
+  await expect(page.locator("#repo-search")).toBeFocused();
+  await expect(page.locator("#new-chat-form .composer-input-row #create-chat-button")).toBeVisible();
+  await expect(page.locator("#new-chat-form .composer-input-row #create-chat-button")).toHaveCSS("position", "absolute");
+});
+
+test("a slow project restore does not trap repository selection", async ({ page }) => {
+  const f = await fixture(page), gate = Promise.withResolvers();
+  f.hold = { company: "personal", promise: gate.promise };
+  try {
+    await page.getByRole("combobox", { name: "Environment", exact: true }).selectOption("env-personal");
+    await expect.poll(() => f.restores.includes("personal")).toBe(true);
+    await page.getByRole("button", { name: "Add repositories" }).click();
+    await page.locator("#repository-results .repository-option").filter({ hasText: "12-apps/future-pay" }).locator("input").check();
+    await expect(page.getByRole("button", { name: "Change repository 12-apps/future-pay" })).toBeVisible();
+    gate.resolve();
+    await expect(page.getByRole("button", { name: "Change repository 12-apps/future-pay" })).toBeVisible();
+  } finally { gate.resolve(); }
+});
+
 test("company switching restores full repository/branch/account/model selection and keeps the user's unsent draft across switches", async ({ page }) => {
   const f = await fixture(page), env = page.getByRole("combobox", { name: "Environment", exact: true });
   await expect(page.getByLabel("Branch for g2i-ai/macrosoft", { exact: true })).toHaveValue("dev");

@@ -317,7 +317,16 @@ export class WorkspaceSettings {
   }
   setRestoringSelection(busy) {
     this.restoringSelection = busy;
-    for (const selector of ["#new-agent-account", "#agent-select", "#new-model-controls", "#repository-picker", "#selected-repositories"]) $(selector).inert = busy;
+    // A slow account/model restore must not make repository controls dead.
+    // An explicit repository edit cancels the pending restore below.
+    for (const selector of ["#new-agent-account", "#agent-select", "#new-model-controls"]) $(selector).inert = busy;
+  }
+  beginRepositoryEdit() {
+    if (!this.restoringSelection) return;
+    this.selectionVersion = (this.selectionVersion || 0) + 1;
+    this.selectionRestoreError = false;
+    this.setRestoringSelection(false);
+    this.updateCreateAvailability();
   }
   async loadRepositories(refresh = false) {
     const request = ++this.repositoryRequest;
@@ -352,6 +361,7 @@ export class WorkspaceSettings {
     for (const repo of scoped.filter(repo => repo.fullName.toLowerCase().includes(query))) {
       const label = el("label", "repository-option"); const input = el("input"); input.type = "checkbox"; input.checked = this.selected.some(item => item.fullName === repo.fullName && (!item.githubConnectionId || item.githubConnectionId === repo.githubConnectionId));
       input.addEventListener("change", () => {
+        this.beginRepositoryEdit();
         if (input.checked) { this.selected = this.selected.filter(item => item.fullName !== repo.fullName); this.selected.push({ fullName: repo.fullName, branch: repo.defaultBranch, githubConnectionId: repo.githubConnectionId, ...(repo.companyId ? { companyId: repo.companyId } : {}) }); }
         else this.selected = this.selected.filter(item => item.fullName !== repo.fullName);
         this.renderSelected(); this.renderRepositories(); this.remember();
@@ -368,7 +378,13 @@ export class WorkspaceSettings {
     const container = $("#selected-repositories"); container.replaceChildren();
     for (const [index, repo] of this.selected.entries()) {
       const chip = el("div", "repository-chip"); chip.title = `${repo.fullName}${index === 0 ? " · Primary repository" : ""}`;
-      const name = el("span", "repository-name", `‹/› ${repo.fullName.split("/").at(-1)}`); chip.append(name);
+      const name = button(`‹/› ${repo.fullName.split("/").at(-1)}`, event => {
+        event.stopPropagation();
+        this.beginRepositoryEdit();
+        const menu = $("#repository-picker .repository-picker-dropdown");
+        menu.open = !menu.open;
+      }, "repository-name");
+      name.setAttribute("aria-label", `Change repository ${repo.fullName}`); chip.append(name);
       const branch = el("select"); branch.setAttribute("aria-label", `Branch for ${repo.fullName}`); branch.append(option(repo.branch, repo.branch));
       const loadBranches = async () => {
         try {
@@ -379,9 +395,9 @@ export class WorkspaceSettings {
         } catch (error) { this.toast(error.message); }
       };
       branch.addEventListener("focus", loadBranches, { once: true });
-      branch.addEventListener("change", () => { repo.branch = branch.value; this.remember(); }); chip.append(branch);
-      if (index) { const primary = button("↑", () => { this.selected.splice(index, 1); this.selected.unshift(repo); this.renderSelected(); this.remember(); }, "small-icon"); primary.setAttribute("aria-label", `Make ${repo.fullName} primary`); chip.append(primary); }
-      const remove = button("×", () => { this.selected = this.selected.filter(item => item !== repo); this.renderSelected(); this.renderRepositories(); this.remember(); }, "small-icon"); remove.setAttribute("aria-label", `Remove ${repo.fullName}`); chip.append(remove); container.append(chip);
+      branch.addEventListener("change", () => { this.beginRepositoryEdit(); repo.branch = branch.value; this.remember(); }); chip.append(branch);
+      if (index) { const primary = button("↑", () => { this.beginRepositoryEdit(); this.selected.splice(index, 1); this.selected.unshift(repo); this.renderSelected(); this.remember(); }, "small-icon"); primary.setAttribute("aria-label", `Make ${repo.fullName} primary`); chip.append(primary); }
+      const remove = button("×", () => { this.beginRepositoryEdit(); this.selected = this.selected.filter(item => item !== repo); this.renderSelected(); this.renderRepositories(); this.remember(); }, "small-icon"); remove.setAttribute("aria-label", `Remove ${repo.fullName}`); chip.append(remove); container.append(chip);
     }
     const company = companyForChat({ repositories: this.selected });
     const label = this.state.companies?.find(entry => entry.id === company)?.name || company;
