@@ -31,7 +31,7 @@ async function setup(t, { captured, account = { id: "account_1", ownerId: "owner
   await profiles.addVersion(profile.id, await archiveWith(t, googleBefore));
   const chats = new Map(), calls = [];
   const store = {
-    async create(input) { const chat = { id: `chat_${chats.size + 1}`, workspace: await temporaryDirectory(t, "relay-refresh-workspace-"), ...input }; chats.set(chat.id, chat); return chat; },
+    async create(input) { (calls.created ||= []).push(input); const chat = { id: `chat_${chats.size + 1}`, workspace: await temporaryDirectory(t, "relay-refresh-workspace-"), ...input }; chats.set(chat.id, chat); return chat; },
     async update(id, patch) { Object.assign(chats.get(id), patch); return chats.get(id); },
   };
   const manager = {
@@ -42,7 +42,8 @@ async function setup(t, { captured, account = { id: "account_1", ownerId: "owner
     },
     remove: async id => { calls.push(["remove", id]); chats.delete(id); },
   };
-  const refresher = new BrowserProfileRefresher({ store, manager, resources: { forOwner: async () => ({ browserProfiles: profiles }) },
+  const environments = { list: async () => [{ id: "env_1", name: "Sandbox", browserProfileId: profile.id, archived: false, scopeNeedsReview: false }] };
+  const refresher = new BrowserProfileRefresher({ store, manager, resources: { forOwner: async () => ({ browserProfiles: profiles, environments }) },
     agentAccounts: { metadata: new Map(account ? [[account.id, account]] : []) }, settleMs: 0, now: () => NOW, log: { error() {} } });
   return { profiles, profile, refresher, calls, chats };
 }
@@ -70,6 +71,8 @@ test("a renewal visits each signed-in site on a hidden system chat and saves the
   assert.equal(saved.currentVersion, 2); assert.equal(saved.versions.at(-1).source, "refresh");
   assert.equal(saved.refresh.status, "renewed");
   assert.deepEqual(calls[0], ["ensure", { kind: REFRESH_SYSTEM_KIND, profileId: profile.id, version: 1 }]);
+  const [created] = calls.created;
+  assert.equal(created.environmentId, "env_1"); assert.equal(created.source, "https://github.com/g2i/browser-profile-refresh");
   assert.deepEqual(calls.filter(call => call[0] === "navigate").map(call => call[1]), ["https://google.com/", "https://app.clickup.com/"]);
   assert.equal(calls.at(-1)[0], "remove", "the system chat and its worker are always deleted");
   assert.equal(chats.size, 0);
@@ -108,4 +111,16 @@ test("the schedule picks profiles whose last version or renewal is older than th
   assert.deepEqual(await refresher.due(), []);
   refresher.now = () => createdAt + 25 * 3600000;
   assert.deepEqual(await refresher.due(), [{ ownerId: "owner", profileId: profile.id }]);
+});
+
+test("renewal runs in an environment that uses the profile, or is skipped with the reason", async t => {
+  const { profiles, profile, refresher, calls } = await setup(t, { captured: () => { throw new Error("must not capture"); } });
+  refresher.resources = { forOwner: async () => ({ browserProfiles: profiles, environments: { list: async () => [
+    { id: "env_archived", name: "Old", browserProfileId: profile.id, archived: true, scopeNeedsReview: false },
+    { id: "env_other", name: "Other", browserProfileId: null, archived: false, scopeNeedsReview: false },
+  ] } }) };
+  const outcome = await refresher.refresh("owner", profile.id);
+  assert.equal(outcome.status, "skipped"); assert.match(outcome.message, /environment/);
+  assert.equal(calls.created, undefined, "no system chat without an environment");
+  assert.equal((await profiles.get(profile.id)).refresh.status, "skipped");
 });
