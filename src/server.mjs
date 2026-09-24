@@ -18,6 +18,8 @@ import { NpmRegistryGateway } from "./npm-registry-gateway.mjs";
 import { RuntimeManager } from "./runtime-manager.mjs";
 import { ChatStore } from "./store.mjs";
 import { ChatRetention } from "./chat-retention.mjs";
+import { HostEventIngestor } from "./host-event-ingest.mjs";
+import { Ec2StateEventConsumer } from "./ec2-state-events.mjs";
 import { errorMessage } from "./utils.mjs";
 import { createWorkerBackend } from "./worker-backends.mjs";
 import { openDatabase } from "./database.mjs";
@@ -134,7 +136,12 @@ export async function createAgentWebServer(options = {}) {
   const gateway = new ProviderGateway({ config, broker });
   const npmGateway = options.npmGateway || new NpmRegistryGateway({ ttlMs: config.sessionCapabilityTtlMs, upstreamBaseUrl: config.npm.upstreamBaseUrl, ...(options.npmGatewayOptions || {}) });
   const sseClients = new Set();
+  const workerEventClients = new Set();
+  const systemEventClients = new Set();
   const sidebarClients = new Set();
+  let workerEventWatch;
+  let hostEventIngestor;
+  let ec2StateEventConsumer;
   let stopping;
   let initializing = true;
   let draining = false;
@@ -582,6 +589,45 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/sidebar/preferences" && request.method === "PATCH") {
         return json(response, 200, { preferences: await organization.savePreferences(await bodyJson(request, config.maxBodyBytes)) });
       }
+      if (url.pathname === "/api/system/events" && request.method === "GET") {
+        const header = request.headers["last-event-id"] || url.searchParams.get("lastEventId") || "0";
+        if (typeof header !== "string" || !/^(0|[1-9][0-9]{0,15})$/.test(header) || !Number.isSafeInteger(Number(header))) return json(response, 400, { error: "Invalid system event cursor" });
+        response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform", connection: "keep-alive", "x-accel-buffering": "no" });
+        response.write(": connected\n\n");
+        let sequence = Number(header), closed = false, pending = Promise.resolve();
+        const client = {
+          close: () => { if (closed) return; closed = true; clearInterval(heartbeat); systemEventClients.delete(client); response.end(); },
+          refresh: () => {
+            pending = pending.then(async () => {
+              if (closed) return;
+              const current = await browserUsers.session(request);
+              if (!auth.authenticated(request) || current?.id !== user?.id || current?.sessionId !== user?.sessionId) { client.close(); return; }
+              let rows;
+              do {
+                rows = await records.systemEventsSince(sequence, 300);
+                for (const event of rows) {
+                  if (closed) return;
+                  if (!event.chatId || browserUsers.canRead(store.get(event.chatId), current)) {
+                    response.write(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`);
+                  }
+                  sequence = event.sequence;
+                }
+              } while (rows.length === 300 && !closed);
+            }).catch(() => client.close());
+          },
+        };
+        const heartbeat = setInterval(() => {
+          void browserUsers.session(request).then(current => {
+            if (!auth.authenticated(request) || current?.id !== user?.id || current?.sessionId !== user?.sessionId) client.close();
+            else if (!response.writableEnded) response.write(": heartbeat\n\n");
+          }).catch(() => client.close());
+        }, 15_000);
+        heartbeat.unref?.();
+        systemEventClients.add(client);
+        request.once("close", client.close);
+        client.refresh();
+        return;
+      }
       if (url.pathname === "/api/sidebar/events" && request.method === "GET") {
         response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform", connection: "keep-alive", "x-accel-buffering": "no" });
         response.write('data: {"type":"sidebar_changed"}\n\n');
@@ -638,6 +684,43 @@ export async function createAgentWebServer(options = {}) {
         }
         if (tail === "presence" && request.method === "POST") return json(response, 200, await manager.setPresence(chatId, await bodyJson(request, 1000)));
         if (tail === "machine-health" && request.method === "GET") return json(response, 200, await manager.machineHealth(chatId), { "cache-control": "private, no-store" });
+        if (tail === "worker-events" && request.method === "GET") {
+          const header = request.headers["last-event-id"] || url.searchParams.get("lastEventId") || "0";
+          if (typeof header !== "string" || !/^(0|[1-9][0-9]{0,15})$/.test(header) || !Number.isSafeInteger(Number(header))) return json(response, 400, { error: "Invalid worker event cursor" });
+          response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform", connection: "keep-alive", "x-accel-buffering": "no" });
+          response.write(": connected\n\n");
+          let sequence = Number(header), closed = false, pending = Promise.resolve();
+          const client = {
+            chatId, response, ownerId: user?.id,
+            close: () => { if (closed) return; closed = true; clearInterval(heartbeat); workerEventClients.delete(client); response.end(); },
+            refresh: () => {
+              pending = pending.then(async () => {
+                if (closed) return;
+                if (!auth.authenticated(request) || !browserUsers.canRead(store.get(chatId), user)) { client.close(); return; }
+                let rows;
+                do {
+                  rows = await records.workerEventsSince(chatId, sequence, 300);
+                  for (const event of rows) {
+                    if (closed) return;
+                    response.write(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`);
+                    sequence = event.sequence;
+                  }
+                } while (rows.length === 300 && !closed);
+              }).catch(() => client.close());
+            },
+          };
+          const heartbeat = setInterval(() => {
+            void browserUsers.session(request).then(current => {
+              if (!auth.authenticated(request) || user && current?.id !== user.id || !browserUsers.canRead(store.get(chatId), current)) client.close();
+              else if (!response.writableEnded) response.write(": heartbeat\n\n");
+            }).catch(() => client.close());
+          }, 15_000);
+          heartbeat.unref?.();
+          workerEventClients.add(client);
+          request.once("close", client.close);
+          client.refresh();
+          return;
+        }
         if (tail === "browser/access" && request.method === "GET") return json(response, 200, manager.browsers.personal.info(chatId, user));
         if (tail === "browser/access" && request.method === "PATCH") {
           browserUsers.require(user); const input = await bodyJson(request, 2000);
@@ -1077,6 +1160,16 @@ export async function createAgentWebServer(options = {}) {
       } catch (error) { await manager.shutdown(); await new Promise(resolve => server.close(resolve)); throw error; }
     }
     manager.on("event", event => { if (["chat_updated", "message", "chat_deleted"].includes(event.type)) sidebarChanged(); });
+    workerEventWatch = await records.watchWorkerEvents(changedChatId => {
+      for (const client of workerEventClients) if (!changedChatId || client.chatId === changedChatId) client.refresh();
+      if (!changedChatId || changedChatId === "system") for (const client of systemEventClients) client.refresh();
+    });
+    hostEventIngestor = await new HostEventIngestor({ directory: config.hostEventDirectory, records,
+      onError: error => console.error("Host event ingestion:", errorMessage(error)) }).start();
+    if (config.ec2.stateEventsEnabled) ec2StateEventConsumer = await new Ec2StateEventConsumer({ records, store,
+      region: config.ec2.region, deployment: config.ec2.deployment, awsBin: config.ec2.awsBin, profile: config.ec2.profile,
+      runner: options.ec2StateEventRunner,
+      onError: error => console.error("EC2 event ingestion:", errorMessage(error)) }).start();
     await manager.githubEvents?.initialize();
     manager.pullRequests.start();
     manager.githubEvents?.process();
@@ -1102,6 +1195,13 @@ export async function createAgentWebServer(options = {}) {
     await Promise.all(resources.all().map(entry => entry.github.close?.()));
     for (const client of sseClients) client.close();
     sseClients.clear();
+    for (const client of workerEventClients) client.close();
+    workerEventClients.clear();
+    for (const client of systemEventClients) client.close();
+    systemEventClients.clear();
+    await ec2StateEventConsumer?.close();
+    await hostEventIngestor?.close();
+    await workerEventWatch?.close();
     for (const response of sidebarClients) response.end();
     sidebarClients.clear();
     for (const socket of browserSockets.clients) socket.terminate();

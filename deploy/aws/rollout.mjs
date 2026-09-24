@@ -43,7 +43,7 @@ export function rolloutCommands({ tag, image }) {
     // A refused drain must not leave a short-lived registry credential in the
     // controller host's Docker config. Resume only if drain actually succeeded.
     'relay_drained=0',
-    `trap 'sudo docker logout "$relay_registry" >/dev/null 2>&1 || true; if [ "$relay_drained" -eq 1 ]; then curl --silent --max-time 5 --request POST http://127.0.0.1:8787/internal/deploy/resume >/dev/null 2>&1 || true; fi' EXIT`,
+    `trap 'if [ -n "\${relay_monitor_extract:-}" ]; then sudo docker rm "$relay_monitor_extract" >/dev/null 2>&1 || true; fi; sudo docker logout "$relay_registry" >/dev/null 2>&1 || true; if [ "$relay_drained" -eq 1 ]; then curl --silent --max-time 5 --request POST http://127.0.0.1:8787/internal/deploy/resume >/dev/null 2>&1 || true; fi' EXIT`,
     'aws ecr get-login-password --region "$(echo "$relay_registry" | cut -d. -f4)" | sudo docker login --username AWS --password-stdin "$relay_registry" >/dev/null',
     'sudo docker pull "$relay_image" >/dev/null',
     'target=$(sudo docker image inspect "$relay_image" --format "{{.Id}}")',
@@ -60,6 +60,20 @@ export function rolloutCommands({ tag, image }) {
     // turns (chat status idle, worker still running). This independent EC2
     // fence must pass before Docker Stop even during the first fixed rollout.
     ...liveWorkerFence,
+    // The witness is host-owned and already alive when Docker stops the old
+    // controller. It has no agent credentials or Docker socket inside Relay.
+    'relay_monitor_extract=$(sudo docker create "$relay_image")',
+    'sudo install -d -m 0755 /usr/local/libexec',
+    'sudo install -d -o 1000 -g 1000 -m 0700 /srv/relay/data/host-events',
+    'sudo docker cp "$relay_monitor_extract:/app/deploy/aws/host-event-collector.py" /run/relay-deploy/host-event-collector.py',
+    'sudo docker cp "$relay_monitor_extract:/app/deploy/aws/host-event-collector.service" /run/relay-deploy/host-event-collector.service',
+    'sudo install -m 0644 /run/relay-deploy/host-event-collector.py /usr/local/libexec/agent-relay-host-event-collector.py',
+    'sudo install -m 0644 /run/relay-deploy/host-event-collector.service /etc/systemd/system/agent-relay-host-events.service',
+    'sudo docker rm "$relay_monitor_extract" >/dev/null; relay_monitor_extract=',
+    'sudo systemctl daemon-reload',
+    'sudo systemctl enable agent-relay-host-events.service',
+    'sudo systemctl restart agent-relay-host-events.service',
+    'sudo systemctl is-active --quiet agent-relay-host-events.service',
     "sudo docker inspect relay --format '{{range .Config.Env}}{{println .}}{{end}}' | sudo tee \"$relay_env\" >/dev/null",
     'sudo chmod 600 "$relay_env"',
     "sudo docker stop --timeout 45 relay",

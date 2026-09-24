@@ -9,6 +9,7 @@ const timestamp = value => typeof value === "string" && value.length <= 64 && Nu
 const generation = value => Number.isSafeInteger(value) && value >= 0;
 const safeId = value => typeof value === "string" && /^[A-Za-z0-9_.:-]{1,256}$/.test(value);
 const backend = value => typeof value === "string" && /^[a-z][a-z0-9-]{0,31}$/.test(value);
+const safeReason = value => typeof value === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(value);
 
 function at(value) {
   if (!timestamp(value)) throw new Error("Invalid worker lifecycle timestamp");
@@ -64,8 +65,10 @@ export function initialWorkerLifecycle(recordedAt = new Date().toISOString()) {
 
 function normalizeIntent(value) {
   if (value === null) return null;
-  if (!value || !ACTIONS.has(value.action) || !generation(value.generation) || value.generation < 1 || !timestamp(value.requestedAt)) throw new Error("Invalid worker lifecycle intent");
-  return { action: value.action, generation: value.generation, requestedAt: value.requestedAt };
+  if (!value || !ACTIONS.has(value.action) || !generation(value.generation) || value.generation < 1 || !timestamp(value.requestedAt)
+    || value.reason !== undefined && !safeReason(value.reason)) throw new Error("Invalid worker lifecycle intent");
+  return { action: value.action, generation: value.generation, requestedAt: value.requestedAt,
+    ...(value.reason === undefined ? {} : { reason: value.reason }) };
 }
 
 function normalizeResult(value) {
@@ -85,13 +88,14 @@ function normalized(value) {
     controllerLease: publicControllerLease(value.controllerLease), intent, result, updatedAt: value.updatedAt };
 }
 
-export function beginWorkerLifecycle(value, action, recordedAt = new Date().toISOString()) {
+export function beginWorkerLifecycle(value, action, recordedAt = new Date().toISOString(), reason = null) {
   if (!ACTIONS.has(action) || action === "reconcile") throw new Error("Invalid worker lifecycle operation");
+  if (reason !== null && !safeReason(reason)) throw new Error("Invalid worker lifecycle reason");
   const current = normalized(value), next = current.generation + 1;
   if (!Number.isSafeInteger(next)) throw new Error("Worker lifecycle generation exhausted");
   recordedAt = at(recordedAt);
   return { ...current, generation: next, state: STARTING_STATE[action],
-    intent: { action, generation: next, requestedAt: recordedAt }, result: null, updatedAt: recordedAt };
+    intent: { action, generation: next, requestedAt: recordedAt, ...(reason === null ? {} : { reason }) }, result: null, updatedAt: recordedAt };
 }
 
 export function finishWorkerLifecycle(value, receipt, recordedAt = new Date().toISOString()) {

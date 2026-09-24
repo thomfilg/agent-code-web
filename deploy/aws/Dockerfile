@@ -28,11 +28,14 @@ COPY public ./public
 COPY chrome-extension ./chrome-extension
 COPY deploy/aws/container-entry.mjs ./deploy/aws/container-entry.mjs
 COPY deploy/aws/worker-key.mjs ./deploy/aws/worker-key.mjs
+COPY deploy/aws/host-event-collector.py ./deploy/aws/host-event-collector.py
+COPY deploy/aws/host-event-collector.service ./deploy/aws/host-event-collector.service
 RUN chmod -R a+rX /app \
     && node --input-type=module -e "await import('./deploy/aws/worker-key.mjs')" \
     && codex --version && claude --version && gh --version && aws --version
 ENV AGENT_WEB_HOST=0.0.0.0 AGENT_WEB_PORT=8787 AGENT_WORKER_BACKEND=ec2 \
     AGENT_CONTROL_DIR=/var/lib/relay/control AGENT_DATA_DIR=/var/lib/relay/state \
+    AGENT_HOST_EVENT_DIR=/var/lib/relay/host-events \
     AGENT_DATABASE_MODE=embedded AGENT_DATABASE_PORT=55438 \
     AGENT_COOKIE_SECURE=1 AGENT_GOOGLE_AUTH=1 AGENT_ENABLE_MOCK=0 \
     AGENT_PROCESS_ISOLATION=none CODEX_AUTH_MODE=gateway CLAUDE_AUTH_MODE=gateway

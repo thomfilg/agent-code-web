@@ -2425,7 +2425,7 @@ export class RuntimeManager extends EventEmitter {
     this.revokeChatMcps(chatId);
     this.#clearBackgroundRecheck(chatId);
     this.publishChat(await this.store.update(chatId, current => {
-      const workerLifecycle = beginWorkerLifecycle(current.workerLifecycle, "stop", nowIso());
+      const workerLifecycle = beginWorkerLifecycle(current.workerLifecycle, "stop", nowIso(), reason);
       workerLifecycleGeneration = workerLifecycle.generation;
       return { queuePaused: reason === "idle-timeout" ? Boolean(current.queuePaused) : true, startupProgress: failRunningStartup(current.startupProgress), workerLifecycle,
         ...(current.goal?.managedBy === "relay" && current.goal.status === "active" ? { goal: { ...current.goal, status: "paused" } } : {}),

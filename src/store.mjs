@@ -3,6 +3,7 @@ import path from "node:path";
 import { newId, nowIso } from "./utils.mjs";
 import { runtimeWorkflowPatch } from "../public/chat-organization.js";
 import { initialWorkerLifecycle, restoreWorkerLifecycle } from "./worker-lifecycle.mjs";
+import { recordWorkerLifecycle } from "./worker-event-projection.mjs";
 
 function restored(chat) {
   chat = { ...chat, archived: chat.archived ?? chat.workflowState === "archived" };
@@ -35,6 +36,9 @@ export class ChatStore {
     await mkdir(this.chatsDir, { recursive: true, mode: 0o700 });
     if (this.records) {
       for (const chat of await this.records.list("chat")) {
+        // Recover the last committed intent/result before restoration fences
+        // that old controller observation as unknown.
+        await recordWorkerLifecycle(this.records, chat);
         chat.status = "stopped";
         chat.statusDetail = "Ready to resume";
         chat.pendingRequest = null;
@@ -44,6 +48,7 @@ export class ChatStore {
         // The saved observation from another controller is never treated as a
         // live process or a current lease merely because the row survived.
         await this.#persist(chat.id);
+        await recordWorkerLifecycle(this.records, this.#chats.get(chat.id));
       }
     }
     const entries = await readdir(this.chatsDir, { withFileTypes: true });
@@ -161,6 +166,9 @@ export class ChatStore {
     const next = { ...current, ...changes, id, revision: (current.revision || 0) + 1, updatedAt: nowIso() };
     this.#chats.set(id, next);
     await this.#persist(id);
+    if (changes && Object.hasOwn(changes, "workerLifecycle") && JSON.stringify(current.workerLifecycle) !== JSON.stringify(next.workerLifecycle)) {
+      await recordWorkerLifecycle(this.records, next);
+    }
     return clone(next);
   }
 
@@ -190,7 +198,8 @@ export class ChatStore {
     if (!this.#chats.has(id)) return false;
     this.#chats.delete(id);
     await this.#writes.get(id);
-    if (this.records) await this.records.delete("chat", id);
+    if (this.records?.deleteChatWithWorkerEvents) await this.records.deleteChatWithWorkerEvents(id);
+    else if (this.records) await this.records.delete("chat", id);
     if (this.records) await this.records.delete("native-session", id);
     if (this.records) await this.records.delete("github-event-state", id);
     if (this.records) await this.records.delete("native-fork", id);
