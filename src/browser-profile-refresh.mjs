@@ -54,8 +54,14 @@ export class BrowserProfileRefresher {
     if (!profile.currentVersion || !targets.length) return record({ status: "skipped", message: "No saved sign-in to renew." });
     const account = this.account(ownerId);
     if (!account) return record({ status: "failed", message: "Connect a Codex or Claude account: renewal runs on a private worker." });
+    // Workers are admitted per environment and company, like any chat of that environment.
+    const environment = (await services.environments.list()).find(item => item.browserProfileId === profileId && !item.archived && !item.scopeNeedsReview);
+    if (!environment) return record({ status: "skipped", message: "Select this profile in an environment to renew it automatically." });
     await record({ status: "running", message: "Renewing saved sign-ins on a private worker…" });
-    const chat = await this.store.create({ title: `Browser profile refresh · ${profile.name}`, agent: account.provider, agentAccountId: account.id, ownerId, autoTitle: false });
+    const chat = await this.store.create({ title: `Browser profile refresh · ${profile.name}`, agent: account.provider, agentAccountId: account.id, ownerId, autoTitle: false,
+      environmentId: environment.id, environmentName: environment.name,
+      // The company comes from the source owner, as for any chat; nothing is ever cloned.
+      source: `https://github.com/${profile.companyId}/browser-profile-refresh` });
     try {
       await prepareWorkspace({ destination: chat.workspace, source: "" });
       await this.store.update(chat.id, { system: { kind: REFRESH_SYSTEM_KIND, profileId, version: profile.currentVersion }, workspaceReady: true });
