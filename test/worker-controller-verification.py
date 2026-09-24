@@ -1,0 +1,265 @@
+import base64
+import contextlib
+import importlib.util
+import io
+import json
+import pathlib
+import subprocess
+import types
+import unittest
+from unittest.mock import patch
+
+SOURCE = pathlib.Path(__file__).parent.parent / 'deploy/aws/verify-worker-controller.py'
+spec = importlib.util.spec_from_file_location('controller_probe', SOURCE)
+probe = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(probe)
+
+
+class ControllerProbeTest(unittest.TestCase):
+    def run_probe(self, *, fail_ssh=False, resumed=False, missing_pin=False, mismatch_key=False, ssh_result=None, ssh_results=None, ssh_exception=None):
+        request = {'verificationId': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'phase': 'resumed' if resumed else 'fresh',
+                   'workerId': 'i-aaaaaaaaaaaaaaaaa', 'host': '10.84.2.22', 'region': 'us-east-2', 'account': '123456789012',
+                   'deployment': 'relay-fixture',
+                   'secretArn': 'arn:aws:secretsmanager:us-east-2:123456789012:secret:fixture',
+                   'publicKey': 'ssh-ed25519 AAAAFixturePublicKey', 'sentinel': 'fixture-sentinel', 'hibernation': False}
+        known = 'verify-i-aaaaaaaaaaaaaaaaa ssh-ed25519 AAAAFixturePublicKey\n'
+        if resumed and not missing_pin:
+            request['knownHosts'] = known
+        private = '-----BEGIN OPENSSH PRIVATE KEY-----\nPRIVATE-UNIT-FIXTURE-NOT-A-REAL-KEY\n'
+        paths = []
+        ssh_calls, sleeps = [], []
+
+        def run(args, **kwargs):
+            if 'get-secret-value' in args:
+                self.assertEqual(args[args.index('--secret-id') + 1], request['secretArn'])
+                self.assertEqual(kwargs['env']['AWS_SHARED_CREDENTIALS_FILE'], '/dev/null')
+                self.assertNotIn('AWS_ACCESS_KEY_ID', kwargs['env'])
+                self.assertNotIn('OPENAI_API_KEY', kwargs['env'])
+                return types.SimpleNamespace(returncode=0, stdout=json.dumps({'AGENT_WORKER_SSH_KEY_BASE64': base64.b64encode(private.encode()).decode(), 'GOOGLE_CLIENT_SECRET': 'PRIVATE-GOOGLE-FIXTURE'}))
+            if args[0] == '/usr/bin/ssh-keygen':
+                key = pathlib.Path(args[-1])
+                self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(key.parent.stat().st_mode & 0o777, 0o700)
+                self.assertTrue(str(key).startswith('/dev/shm/relay-worker-acceptance-'))
+                self.assertEqual(key.read_text(), private)
+                paths.append(key.parent)
+                return types.SimpleNamespace(returncode=0, stdout='ssh-ed25519 ' + ('WrongKey' if mismatch_key else 'AAAAFixturePublicKey'))
+            self.assertEqual(args[0], '/usr/bin/ssh')
+            ssh_calls.append(args)
+            self.assertNotIn(private, ' '.join(args))
+            self.assertIn('UpdateHostKeys=no', args)
+            self.assertIn('StrictHostKeyChecking=' + ('yes' if resumed else 'accept-new'), args)
+            known_file = pathlib.Path(next(arg.split('=', 1)[1] for arg in args if arg.startswith('UserKnownHostsFile=')))
+            if resumed:
+                self.assertEqual(known_file.read_text(), known)
+            else:
+                known_file.write_text(known)
+            if ssh_exception:
+                raise ssh_exception
+            if ssh_results is not None:
+                return ssh_results.pop(0)
+            return ssh_result or types.SimpleNamespace(returncode=1 if fail_ssh else 0, stdout=json.dumps({'audit': {'valid': True}}), stderr='PRIVATE-ERROR-FIXTURE')
+
+        output = io.StringIO()
+        with patch.object(probe.os, 'geteuid', return_value=0), patch.object(probe.pathlib.Path, 'is_file', return_value=True), patch.object(probe.subprocess, 'run', side_effect=run), patch.object(probe.sys, 'argv', ['probe', base64.b64encode(json.dumps(request).encode()).decode()]), patch.object(probe.time, 'sleep', side_effect=sleeps.append), contextlib.redirect_stdout(output):
+            if fail_ssh or missing_pin or mismatch_key or ssh_result or ssh_exception:
+                with self.assertRaises(RuntimeError) as raised:
+                    probe.main()
+                self.assertNotIn('PRIVATE-', str(raised.exception))
+                self.assertNotIn('PRIVATE-', json.dumps(probe.failure_receipt(raised.exception)))
+            else:
+                probe.main()
+                result = json.loads(output.getvalue())
+                self.assertEqual(result['knownHosts'], known)
+                self.assertEqual(result['phase'], request['phase'])
+        self.assertNotIn('PRIVATE-', output.getvalue())
+        for directory in paths:
+            self.assertFalse(directory.exists(), 'transport key tempfs directory must be removed on every path')
+        return len(ssh_calls), sleeps
+
+    def test_fresh_key_stays_local_and_tempfs_is_cleaned(self):
+        self.run_probe()
+
+    def test_embedded_worker_application_probe_is_valid_python(self):
+        compile(probe.WORKER_PROBE, '<worker-application-probe>', 'exec')
+        self.assertIn("('/usr/local/bin/codex', '/usr/bin/codex')", probe.WORKER_PROBE)
+        self.assertIn("'native-sandbox'", probe.WORKER_PROBE)
+        self.assertIn("'--unshare-all'", probe.WORKER_PROBE)
+        self.assertIn("'thread/list'", probe.WORKER_PROBE)
+        self.assertIn("'applicationTransport': True", probe.WORKER_PROBE)
+        self.assertIn("'shared-chrome'", probe.WORKER_PROBE)
+        self.assertIn("browser-worker.mjs", probe.WORKER_PROBE)
+        self.assertIn("globalThis.__relayHibernation", probe.WORKER_PROBE)
+        self.assertIn("'browserTransport': True", probe.WORKER_PROBE)
+        self.assertIn("browser_keepalive", probe.WORKER_PROBE)
+        self.assertIn("select.select([self.sock]", probe.WORKER_PROBE)
+        self.assertIn("def browser_start_failure(value):", probe.WORKER_PROBE)
+        self.assertIn("application_at('browser-ready-fatal')", probe.WORKER_PROBE)
+
+    def test_resume_pins_previous_public_host_key(self):
+        self.run_probe(resumed=True)
+
+    def test_remote_failure_suppresses_private_output_and_cleans_key(self):
+        self.run_probe(fail_ssh=True)
+
+    def test_resume_requires_host_identity_and_key_pair_must_match(self):
+        self.run_probe(resumed=True, missing_pin=True)
+        self.run_probe(mismatch_key=True)
+
+    def test_safe_diagnostics_classify_without_echoing_subprocess_output(self):
+        cases = [(255, '', 'Host key verification failed PRIVATE-SECRET', 'ssh-host-key'),
+                 (255, '', 'Permission denied (publickey) PRIVATE-SECRET', 'ssh-permission-denied'),
+                 (255, '', 'Connection refused PRIVATE-SECRET', 'ssh-connection-refused'),
+                 (255, '', 'Connection timed out PRIVATE-SECRET', 'ssh-network-unreachable'),
+                 (255, '', 'PRIVATE-SECRET', 'ssh-transport'),
+                 (127, '', 'PRIVATE-SECRET', 'remote-command-missing'),
+                 (1, '', 'PRIVATE-SECRET', 'remote-command-failed'),
+                 (1, '{"reason":"wrong worker user","private":"PRIVATE-SECRET"}', '', 'worker-user'),
+                 (1, '{"reason":"image scrub audit failed"}', '', 'image-audit'),
+                 (1, '{"reason":"PRIVATE-SECRET"}', '', 'remote-command-failed')]
+        for code, stdout, stderr, category in cases:
+            with self.subTest(category=category):
+                failure = probe.probe_failure(types.SimpleNamespace(returncode=code, stdout=stdout, stderr=stderr))
+                receipt = probe.failure_receipt(failure)
+                self.assertEqual(receipt['diagnostic'], {'stage': 'worker-probe', 'category': category, 'exitCode': code})
+                self.assertNotIn('PRIVATE-', json.dumps(receipt))
+
+    def test_auth_hostkey_timeout_missing_executable_and_invalid_json_clean_keys(self):
+        for stderr in ('Permission denied PRIVATE-SECRET', 'Host key verification failed PRIVATE-SECRET'):
+            self.run_probe(ssh_result=types.SimpleNamespace(returncode=255, stdout='', stderr=stderr))
+        self.run_probe(ssh_result=types.SimpleNamespace(returncode=0, stdout='PRIVATE-INVALID-JSON', stderr=''))
+        self.run_probe(ssh_exception=subprocess.TimeoutExpired('PRIVATE-COMMAND', 100, output='PRIVATE-OUTPUT'))
+        self.run_probe(ssh_exception=OSError('PRIVATE-ERROR'))
+
+    def test_failed_audit_receipt_contains_only_allowlisted_boolean_checks(self):
+        worker = {'reason': 'image scrub audit failed', 'auditChecks': {
+            'finalized': True, 'ssmDisabled': False, 'credentialsAbsent': False,
+            'freshIdentity': 'PRIVATE-SECRET', 'watchdogActive': 1,
+            'private': 'PRIVATE-SECRET', 'hostKeys': 'PRIVATE-SECRET'}}
+        failure = probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(worker), stderr='PRIVATE-SECRET'))
+        safe = probe.failure_receipt(failure)
+        self.assertEqual(safe['diagnostic']['auditChecks'], {'finalized': True, 'ssmDisabled': False, 'credentialsAbsent': False})
+        self.assertNotIn('PRIVATE-', json.dumps(safe))
+        worker['reason'] = 'wrong worker user'
+        non_audit = probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(worker), stderr=''))
+        self.assertNotIn('auditChecks', probe.failure_receipt(non_audit)['diagnostic'])
+
+    def test_permanent_image_failure_gets_only_two_short_boot_race_retries(self):
+        calls, sleeps = self.run_probe(ssh_result=types.SimpleNamespace(returncode=1, stdout=json.dumps({
+            'reason': 'image scrub audit failed', 'auditChecks': {'ssmDisabled': False}}), stderr='PRIVATE-SECRET'))
+        self.assertEqual(calls, 3)
+        self.assertEqual(sleeps, [2, 2])
+
+    def test_native_version_boot_contention_gets_only_a_bounded_pre_side_effect_retry(self):
+        timed_out = types.SimpleNamespace(returncode=1, stdout=json.dumps({
+            'reason': 'invalid-worker-receipt', 'probeStage': 'native-version',
+            'exceptionClass': 'TimeoutExpired'}), stderr='PRIVATE-SECRET')
+        passed = types.SimpleNamespace(returncode=0, stdout=json.dumps({'audit': {'valid': True}}), stderr='')
+        calls, sleeps = self.run_probe(ssh_results=[timed_out, passed])
+        self.assertEqual(calls, 2)
+        self.assertEqual(sleeps, [2])
+
+    def test_credential_counts_and_metadata_diagnostics_are_bounded_allowlists(self):
+        for metadata in ('http-403-denied', 'PRIVATE-SECRET'):
+            worker = {'reason': 'image scrub audit failed', 'credentialFailureCounts': {
+                'providerAuthFiles': 0, 'ssmSnapFiles': 2, 'pemFiles': True, 'scanErrors': -1,
+                'ssmLibraryFiles': 1000001, 'ssmPackageFiles': 'PRIVATE-SECRET', 'private': 'PRIVATE-SECRET'}, 'metadataProbe': metadata}
+            safe = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(worker), stderr='')))
+            self.assertEqual(safe['diagnostic']['credentialFailureCounts'], {'providerAuthFiles': 0, 'ssmSnapFiles': 2})
+            self.assertEqual(safe['diagnostic'].get('metadataProbe'), 'http-403-denied' if metadata == 'http-403-denied' else None)
+            self.assertNotIn('PRIVATE-', json.dumps(safe))
+
+    def test_embedded_worker_failure_filters_audit_output_before_ssh(self):
+        audit = {'valid': False, 'finalized': True, 'ssmDisabled': False,
+                 'metadataReachable': False, 'freshIdentity': 'PRIVATE-SECRET',
+                 'watchdogActive': 1, 'secret': 'PRIVATE-SECRET', 'machine': 'PRIVATE-SECRET',
+                 'credentialFailureCounts': {'ssmSnapFiles': 2, 'pemFiles': True, 'scanErrors': -1, 'private': 'PRIVATE-SECRET'}, 'metadataProbe': 'http-403-denied'}
+        def run(args, **kwargs):
+            if args[0] == 'codex':
+                return types.SimpleNamespace(returncode=0, stdout='codex-cli 0.154.0')
+            if args[0] == 'claude':
+                return types.SimpleNamespace(returncode=0, stdout='2.1.222 (Claude Code)')
+            if args[0].endswith('/bwrap'):
+                return types.SimpleNamespace(returncode=0, stdout='')
+            return types.SimpleNamespace(returncode=1, stdout=json.dumps(audit))
+        output = io.StringIO()
+        with patch.object(probe.subprocess, 'check_output', return_value='agent'), patch.object(probe.subprocess, 'run', side_effect=run), patch.object(probe.sys, 'argv', ['probe', '{}']), contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as raised:
+                exec(probe.WORKER_PROBE, {})
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(json.loads(output.getvalue())['auditChecks'], {'finalized': True, 'ssmDisabled': False, 'metadataReachable': False})
+        self.assertEqual(json.loads(output.getvalue())['credentialFailureCounts'], {'ssmSnapFiles': 2})
+        self.assertEqual(json.loads(output.getvalue())['metadataProbe'], 'http-403-denied')
+        self.assertNotIn('PRIVATE-', output.getvalue())
+
+    def execute_worker(self, audit, *, phase='fresh', heartbeat_error=None):
+        def run(args, **kwargs):
+            if args[0] == 'codex': return types.SimpleNamespace(returncode=0, stdout='codex-cli 0.154.0')
+            if args[0] == 'claude': return types.SimpleNamespace(returncode=0, stdout='2.1.222 (Claude Code)')
+            if args[0].endswith('/bwrap'): return types.SimpleNamespace(returncode=0, stdout='')
+            return audit
+        output = io.StringIO()
+        request = {'verificationId': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'phase': phase, 'sentinel': 'PRIVATE-SENTINEL'}
+        with patch.object(probe.subprocess, 'check_output', return_value='agent'), patch.object(probe.subprocess, 'run', side_effect=run), patch.object(probe.sys, 'argv', ['probe', json.dumps(request)]), patch.object(probe.pathlib.Path, 'stat', side_effect=heartbeat_error or FileNotFoundError('PRIVATE-PATH')), contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit): exec(probe.WORKER_PROBE, {})
+        result = json.loads(output.getvalue())
+        self.assertNotIn('PRIVATE-', output.getvalue())
+        return result
+
+    def test_invalid_helper_json_reports_only_stage_class_and_fixed_helper_line(self):
+        stderr = 'Traceback (most recent call last):\n  File "/usr/local/sbin/agent-web-audit-image", line 93, in <module>\n    PRIVATE-SOURCE\nFileNotFoundError: PRIVATE-PATH and PRIVATE-TOKEN\n'
+        result = self.execute_worker(types.SimpleNamespace(returncode=1, stdout='PRIVATE-BODY', stderr=stderr))
+        self.assertEqual(result['reason'], 'invalid-worker-receipt')
+        self.assertEqual(result['probeStage'], 'image-audit-json')
+        self.assertEqual(result['exceptionClass'], 'JSONDecodeError')
+        self.assertEqual(result['helperExceptionClass'], 'FileNotFoundError')
+        self.assertEqual(result['helperLine'], 93)
+        safe = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(result), stderr='PRIVATE-SSH')))
+        self.assertEqual(safe['diagnostic']['helperLine'], 93)
+        self.assertNotIn('PRIVATE-', json.dumps(safe))
+
+    def test_helper_arbitrary_paths_classes_and_out_of_range_lines_are_suppressed(self):
+        for stderr in ('  File "/PRIVATE-PATH", line 5, in <module>\nPRIVATEError: PRIVATE-TOKEN',
+                       '  File "/usr/local/sbin/agent-web-audit-image", line 10001, in <module>\nPRIVATEError: PRIVATE-TOKEN'):
+            result = self.execute_worker(types.SimpleNamespace(returncode=1, stdout='PRIVATE-BODY', stderr=stderr))
+            self.assertNotIn('helperLine', result)
+            self.assertNotIn('helperExceptionClass', result)
+
+    def test_heartbeat_exception_reports_stage_without_path(self):
+        result = self.execute_worker(types.SimpleNamespace(returncode=0, stdout='{"valid":true}', stderr=''), heartbeat_error=PermissionError('PRIVATE-PATH'))
+        self.assertEqual(result['probeStage'], 'heartbeat')
+        self.assertEqual(result['exceptionClass'], 'PermissionError')
+        self.assertNotIn('helperLine', result)
+
+    def test_controller_rejects_untrusted_diagnostic_types_and_unknown_values(self):
+        for line in (True, -1, 10001, 'PRIVATE-SECRET'):
+            value = {'reason': 'invalid-worker-receipt', 'probeStage': 'PRIVATE-SECRET', 'exceptionClass': 'PRIVATE-SECRET', 'helperExceptionClass': 'PRIVATE-SECRET', 'helperLine': line}
+            result = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(value), stderr='')))
+            self.assertEqual(result['diagnostic'], {'stage': 'worker-probe', 'category': 'invalid-receipt', 'exitCode': 1})
+
+    def test_application_transport_diagnostic_exposes_only_fixed_substage(self):
+        for stage in ('initialize-response', 'browser-identity', 'PRIVATE-STAGE'):
+            value = {'reason': 'application transport did not survive hibernation', 'applicationStage': stage,
+                     'private': 'PRIVATE-SECRET'}
+            result = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(value), stderr='PRIVATE-STDERR')))
+            self.assertEqual(result['diagnostic'].get('applicationStage'), stage if stage in ('initialize-response', 'browser-identity') else None)
+            self.assertNotIn('PRIVATE-', json.dumps(result))
+
+        for detail in ('output-identity', 'PRIVATE-FRAME'):
+            value = {'reason': 'application transport did not survive hibernation', 'applicationFrame': detail,
+                     'private': 'PRIVATE-SECRET'}
+            result = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(value), stderr='PRIVATE-STDERR')))
+            self.assertEqual(result['diagnostic'].get('applicationFrame'), 'output-identity' if detail == 'output-identity' else None)
+            self.assertNotIn('PRIVATE-', json.dumps(result))
+
+        for failure in ('sandbox', 'PRIVATE-BROWSER'):
+            value = {'reason': 'application transport did not survive hibernation',
+                     'applicationStage': 'browser-ready-fatal', 'browserFailure': failure,
+                     'private': 'PRIVATE-SECRET'}
+            result = probe.failure_receipt(probe.probe_failure(types.SimpleNamespace(returncode=1, stdout=json.dumps(value), stderr='PRIVATE-STDERR')))
+            self.assertEqual(result['diagnostic'].get('browserFailure'), 'sandbox' if failure == 'sandbox' else None)
+            self.assertNotIn('PRIVATE-', json.dumps(result))
+
+
+if __name__ == '__main__':
+    unittest.main()

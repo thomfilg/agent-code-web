@@ -154,6 +154,7 @@ export class ChatSidebar {
     const pin = button(chat.pinned ? "★" : "☆", `${chat.pinned ? "Unpin" : "Pin"} ${chat.title}`, () => this.patch(chat.id, { pinned: !chat.pinned }).catch(error => this.toast(error.message)));
     pin.setAttribute("aria-pressed", String(Boolean(chat.pinned))); pin.dataset.focusKey = `pin-${chat.id}`;
     const menu = button("⋯", `Organize ${chat.title}`, () => this.editChat(chat)); menu.dataset.focusKey = `organize-${chat.id}`;
+    pin.disabled = Boolean(deleting); menu.disabled = Boolean(deleting);
     controls.append(pin, menu); row.append(select, controls);
     return row;
   }

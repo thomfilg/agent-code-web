@@ -1,3 +1,4 @@
+import { openSettingsSection, switchSettingsCompany } from "./settings-navigation.mjs";
 import { test, expect } from "@playwright/test";
 
 const fixtures = new WeakMap();
@@ -17,7 +18,7 @@ async function setup(page, { busy = false, bindings = {} } = {}) {
 }
 const input = page => page.locator("#message-input");
 const editor = page => page.getByLabel("Message (Vim editor)", { exact: true });
-async function menuToggle(page) { await page.getByLabel("Chat actions", { exact: true }).click(); await page.locator("#vim-button").click(); await expect(page.locator("#vim-mode")).toHaveText("VIM · NORMAL"); }
+async function menuToggle(page) { await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#vim-button").click(); await expect(page.locator("#vim-mode")).toHaveText("VIM · NORMAL"); }
 async function value(page, text) { await expect.poll(() => input(page).inputValue()).toBe(text); }
 async function keys(page, text) { for (const key of text) await editor(page).press(key); }
 
@@ -134,9 +135,9 @@ test("changing the Relay account disables Vim and clears its registers without s
   await page.route("**/api/browser-account/login", route => { user = { id: "vim-other-user", username: "vim-other-user" }; return route.fulfill({ json: { user } }); });
   await page.route("**/api/browser-connections", route => route.fulfill({ json: { connections: [] } }));
   await input(page).fill("Retained draft"); await menuToggle(page); await keys(page, "ggyy");
-  await page.getByRole("button", { name: "Browser connections", exact: true }).click();
+  await openSettingsSection(page, "Browser connections");
   await page.getByLabel("Username", { exact: true }).fill("vim-other-user"); await page.getByLabel("Account password", { exact: true }).fill("fixture-only-password");
   await page.locator("#browser-account-form button[value=login]").click(); await expect(page.locator("#browser-account-name")).toHaveText("Signed in as vim-other-user");
-  await page.locator("#browser-connections-close").click(); await expect(input(page)).toBeVisible(); await value(page, "Retained draft");
+  await page.locator("#browser-connections-close").click(); await page.getByLabel("Close settings", { exact: true }).click(); await expect(input(page)).toBeVisible(); await value(page, "Retained draft");
   await menuToggle(page); await editor(page).press("p"); await editor(page).press("u"); await value(page, "Retained draft"); expect(f.sent).toEqual([]); expect(f.errors).toEqual([]);
 });

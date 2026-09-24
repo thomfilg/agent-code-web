@@ -54,62 +54,74 @@ export function extractTitle(text) {
 }
 
 const titleOpen = "<relay-title>";
-const titleClose = "</relay-title>";
 const titleTag = /^<relay-title>([^<>\r\n]*)<\/relay-title>$/i;
+const titleLine = /^<relay-title>([^<>\r\n]*)<\/relay-title>[ \t]*(?:\r?\n)?$/i;
 const titleLimit = 1000;
 
-// The provider can place reserved metadata after ordinary response text. Hold
-// only a bounded possible tag so neither a complete tag nor a split prefix is
-// exposed to the live stream; everything around it is emitted unchanged.
+// Reserved metadata may follow ordinary text, but quoted/code examples are
+// literal content, not title authority. Hold only a bounded possible tag so
+// neither a complete tag nor a split prefix leaks into the live stream.
 export class TitleStream {
   constructor(emit) {
-    Object.assign(this, { emit, buffer: "", lineHasText: false, candidateAtLineStart: false, trailing: "", hideLineBreak: false });
+    Object.assign(this, { emit, buffer: "", candidateInline: false, line: "", lineOverflow: false,
+      fence: null, inlineTicks: 0, lineInline: 0, tickRun: 0, escaped: false });
   }
   visible(text) {
     for (const char of text) {
-      if (char === "\n") this.lineHasText = false;
-      else if (!/[ \t\r]/.test(char)) this.lineHasText = true;
+      if (this.line.length + char.length <= titleLimit) this.line += char; else this.lineOverflow = true;
+      if (char === "`" && !this.escaped && !this.fence) this.tickRun++;
+      else {
+        if (this.tickRun) { if (!this.inlineTicks) this.inlineTicks = this.tickRun; else if (this.inlineTicks === this.tickRun) this.inlineTicks = 0; this.tickRun = 0; }
+        this.escaped = char === "\\" && !this.escaped;
+      }
+      if (char === "\n") {
+        const fence = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)/.exec(this.line);
+        if (fence) {
+          if (!this.fence && !this.lineInline) { this.fence = { char: fence[1][0], length: fence[1].length }; this.inlineTicks = 0; }
+          else if (this.fence && !this.lineOverflow && fence[1][0] === this.fence.char && fence[1].length >= this.fence.length && !fence[2].trim()) this.fence = null;
+        }
+        this.line = ""; this.lineOverflow = false; this.escaped = false; this.lineInline = this.inlineTicks;
+      }
     }
     if (text) this.emit({ type: "assistant_delta", delta: text });
   }
   metadata() {
-    const match = titleTag.exec(this.buffer);
+    const match = (this.candidateInline ? titleTag : titleLine).exec(this.buffer);
     if (!match) return false;
     const title = match[1].trim().replace(/[\x00-\x1f]/g, "").slice(0, 120);
     if (title) this.emit({ type: "title", title });
-    this.buffer = ""; this.hideLineBreak = this.candidateAtLineStart; this.candidateAtLineStart = false; return true;
+    this.buffer = ""; this.candidateInline = false;
+    return true;
   }
   delta(delta) {
     let ready = "";
     const drain = () => { if (ready) this.visible(ready); ready = ""; };
     for (const char of delta) {
-      if (this.hideLineBreak) {
-        if (/[ \t\r]/.test(char)) { this.trailing += char; continue; }
-        if (char === "\n") { this.trailing = ""; this.hideLineBreak = false; continue; }
-        this.visible(this.trailing); this.trailing = ""; this.hideLineBreak = false;
-      }
       if (char === "<") drain();
-      if (this.buffer || char === "<") {
+      const atLineStart = /^ {0,3}$/.test(this.line);
+      const inProse = this.line.length > 0 && !/^ {4,}/.test(this.line) && !/^\s*>/.test(this.line)
+        && (/\S$/.test(this.line) || /[.!?:;]\s+$/.test(this.line));
+      const eligible = char === "<" && !this.fence && !this.inlineTicks && !this.tickRun && !this.escaped
+        && (atLineStart || inProse);
+      if (this.buffer || eligible) {
         drain();
-        if (!this.buffer) this.candidateAtLineStart = !this.lineHasText;
+        if (!this.buffer) this.candidateInline = !atLineStart;
         this.buffer += char;
+        if (this.candidateInline && this.metadata()) continue;
+        if (char === "\n" && !this.candidateInline && this.metadata()) continue;
         const lower = this.buffer.toLowerCase();
-        if (this.metadata()) continue;
-        const body = lower.startsWith(titleOpen) ? lower.slice(titleOpen.length) : "";
-        const close = body.indexOf("<");
-        const possible = titleOpen.startsWith(lower) || lower.startsWith(titleOpen) && this.buffer.length <= titleLimit
-          && !/[>\r\n]/.test(body.slice(0, close < 0 ? undefined : close))
-          && (close < 0 || titleClose.startsWith(body.slice(close)));
-        if (possible) continue;
-        this.visible(this.buffer); this.buffer = ""; this.candidateAtLineStart = false;
+        const candidate = this.buffer.endsWith("\r") ? this.buffer.slice(0, -1) : this.buffer;
+        if (this.buffer.length <= titleLimit && !this.buffer.includes("\n") && (titleOpen.startsWith(lower)
+          || lower.startsWith(titleOpen) && (!lower.includes("</relay-title>") || titleLine.test(candidate)))) continue;
+        this.visible(this.buffer); this.buffer = ""; this.candidateInline = false;
       } else {
         ready += char;
+        if (char === "\n") drain();
       }
     }
     drain();
   }
   flush() {
-    if (this.buffer && !this.metadata()) { this.visible(this.buffer); this.buffer = ""; }
-    this.trailing = ""; this.hideLineBreak = false;
+    if (this.buffer && !this.metadata()) { this.visible(this.buffer); this.buffer = ""; this.candidateInline = false; }
   }
 }

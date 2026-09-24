@@ -9,8 +9,8 @@ import { temporaryDirectory, testConfig, waitFor } from "./helpers.mjs";
 async function fixture(t) {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const config = testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "60000" }), commands = new CommandCatalog({ workerBackend: "ec2" });
-  const f = { names: ["fixture-old"], discoveries: 0, inputs: [], events: [], hooks: new Map() };
-  commands.discover = async () => { f.discoveries++; return { commands: f.names.map(name => ({ name, ...(f.description ? { description: f.description } : {}) })) }; };
+  const f = { names: ["fixture-old"], nativeNames: ["reload-skills", "fixture-plugin:review", "goal", "code-review", "verify", "run"], discoveries: 0, inputs: [], events: [], hooks: new Map() };
+  commands.discover = async () => { f.discoveries++; return { commands: [...f.nativeNames, ...f.names].map(name => ({ name, ...(f.description && f.names.includes(name) ? { description: f.description } : {}) })) }; };
   const manager = new RuntimeManager({ store, config, commands, broker: new CapabilityBroker({ ttlMs: 120000 }), adapterFactory: ({ chat, hooks }) => {
     f.hooks.set(chat.id, hooks);
     return { start: async () => {}, send: async text => { f.inputs.push({ chatId: chat.id, text }); await f.gate?.promise; if (f.error) throw Error(f.error); return { text: "Native fixture result" }; }, stop: async () => f.gate?.resolve() };
@@ -35,7 +35,16 @@ test("successful native skill reload refreshes only that chat's catalog, includi
   f.description = "Edited command description";
   await f.manager.send(f.chat.id, "/reload-skills");
   assert(f.store.get(f.chat.id).commandCatalogRevision > revision, "Same command names may have edited descriptions or arguments");
-  assert.equal((await f.commands.list(f.store.get(f.chat.id))).commands[0].description, f.description);
+  assert.equal((await f.commands.list(f.store.get(f.chat.id))).commands.find(command => command.name === "fixture-new").description, f.description);
+});
+
+test("unknown Claude commands are rejected before a turn or queue item is created", async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.manager.submit(f.chat.id, "/qualquerporra"), error => error.statusCode === 400 && /Unknown command \/qualquerporra/.test(error.message));
+  await assert.rejects(f.manager.enqueue(f.chat.id, "/qualquerporra later"), error => error.statusCode === 400 && /Unknown command \/qualquerporra/.test(error.message));
+  assert.deepEqual(f.inputs, []);
+  assert.deepEqual(f.store.get(f.chat.id).messages, []);
+  assert.deepEqual(f.store.get(f.chat.id).queuedMessages || [], []);
 });
 
 test("reported native commands invalidate cached discovery only when the catalog changes and persist the new version", async t => {
@@ -43,7 +52,7 @@ test("reported native commands invalidate cached discovery only when the catalog
   const hooks = f.hooks.get(f.chat.id); await f.commands.list(f.chat); f.names = ["fixture-plugin:new"];
   const event = { type: "session_capabilities", connectors: [], slashCommands: ["fixture-plugin:new"] };
   await hooks.onEvent(event);
-  assert.deepEqual((await f.commands.list(f.store.get(f.chat.id))).commands, [{ name: "fixture-plugin:new" }]);
+  assert.deepEqual((await f.commands.list(f.store.get(f.chat.id))).commands.filter(command => command.name.startsWith("fixture-") && command.name !== "fixture-plugin:review"), [{ name: "fixture-plugin:new" }]);
   const revision = f.store.get(f.chat.id).commandCatalogRevision; assert(revision > 0);
   await hooks.onEvent(event); assert.equal(f.store.get(f.chat.id).commandCatalogRevision, revision);
   await hooks.onEvent({ type: "session_capabilities", connectors: [{ name: "relay_one", status: "disabled" }] });
@@ -77,16 +86,16 @@ test("busy native aliases retain their exact prefix and refresh only when the qu
   assert.equal(f.store.get(f.chat.id).commandCatalogRevision, 1);
 });
 
-test("Claude goals and native clear aliases keep their literal arguments and FIFO order without Codex goal actions", async t => {
+test("Claude Relay goals enter the queue in FIFO order and clear without Codex goal actions", async t => {
   const f = await fixture(t); f.gate = Promise.withResolvers();
   const running = f.manager.send(f.chat.id, "Current task"); await waitFor(() => f.inputs.length === 1);
-  const commands = ["/goal Complete both steps\nand preserve ação.", "/goal", "/goal clear", "/goal off"];
+  const commands = ["/goal Complete both steps\nand preserve ação.", "/goal clear"];
   for (const command of commands) await f.manager.enqueue(f.chat.id, command);
   assert.deepEqual(f.inputs.map(input => input.text), ["Current task"]);
   f.gate.resolve(); await running; await waitFor(() => !f.manager.isBusy(f.chat.id) && !f.store.get(f.chat.id).queuedMessages.length);
   assert.deepEqual(f.inputs.map(input => input.text), ["Current task", ...commands]);
-  assert(!f.store.get(f.chat.id).messages.some(message => message.kind === "error"));
-  assert.equal(f.store.get(f.chat.id).goal, undefined, "Do not invent Codex goal state from a Claude command/prose response");
+  assert.deepEqual(f.store.get(f.chat.id).messages.filter(message => message.kind === "error").map(message => message.text), []);
+  assert.equal(f.store.get(f.chat.id).goal, null);
 });
 
 test("bundled reviews preserve flags and multiline targets in FIFO and pause on failure without consuming later input", async t => {

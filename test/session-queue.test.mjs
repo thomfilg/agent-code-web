@@ -75,9 +75,9 @@ test("Codex cached input is not counted twice and snapshots are not added togeth
   assert.equal(usage.contextTokens, 210); assert.equal(usage.context.inputTokens, 100); assert.equal(usage.totals.inputTokens, 250);
   assert.equal(mergeUsage(usage, usage).totals.cacheReadTokens, 250);
 });
-test("tool calls group per user turn and live completion IDs do not count twice", () => {
+test("tool calls group between commentary blocks and live completion IDs do not count twice", () => {
   const { rows, groups } = groupTools([{ id: "u", role: "user" }, { id: "a", kind: "tool", meta: { itemId: "t" } }, { id: "b", role: "assistant" }, { id: "c", kind: "tool", meta: { itemId: "t2" } }], [{ itemId: "t", state: "completed" }]);
-  assert.equal(rows.filter(row => row.kind === "tool_group").length, 1); assert.equal(groups.get("u").size, 2);
+  assert.equal(rows.filter(row => row.kind === "tool_group").length, 2); assert.equal(groups.get("tools-a").size, 1); assert.equal(groups.get("tools-c").size, 1);
 });
 test("messages drain FIFO, stop pauses queue, removal and explicit resume work", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
@@ -140,10 +140,10 @@ async function queueFixture(t, options = {}) {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const calls = []; let release, interruptions = 0, stops = 0;
   const manager = new RuntimeManager({ store, config: testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "10000" }), broker: new CapabilityBroker({ ttlMs: 10000 }),
-    adapterFactory: () => ({ start: async () => {},
+    adapterFactory: ({ hooks }) => ({ start: async () => {},
       stop: async () => { stops++; release?.({ text: "stopped" }); },
       interrupt: async () => { interruptions++; await options.interrupt?.(); release?.({ text: "interrupted" }); },
-      send: text => { calls.push(text); return new Promise(resolve => { release = resolve; }); } }), ...options.manager });
+      send: text => { calls.push(text); if (options.partial) hooks.onEvent({ type: "assistant_delta", delta: options.partial }); return new Promise(resolve => { release = resolve; }); } }), ...options.manager });
   t.after(() => manager.shutdown()); const chat = await manager.createChat({ agent: "mock" });
   return { store, manager, chat, calls, complete: () => release?.({ text: "done" }), interruptions: () => interruptions, stops: () => stops };
 }

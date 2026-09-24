@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { STATUS_ITEMS, DEFAULT_STATUS_ITEMS, validateStatusItems, statusItemValue } from "../public/status-line.js";
+import { STATUS_ITEMS, DEFAULT_STATUS_ITEMS, validateStatusItems, visibleStatusItems, statusItemValue } from "../public/status-line.js";
+import { ChatControls, branchesWithoutPullRequests } from "../public/chat-controls.js";
 import { StatusLinePreferences } from "../src/status-line.mjs";
 import { MemoryRecords } from "../src/database.mjs";
 import { createAgentWebServer } from "../src/server.mjs";
@@ -26,6 +27,42 @@ test("status-line preferences accept ordered unique allowlisted fields and hidin
     assert(webCommands(agent).some(command => command.name === "statusline"));
     assert.throws(() => messageCommand(agent, "/statusline"), /web composer/); assert.throws(() => messageCommand(agent, "/statusline arbitrary"), /web composer/);
   }
+});
+
+test("the redundant default footer is hidden without deleting explicitly saved custom selections", () => {
+  const legacy = ["model-with-reasoning", "context-remaining", "git-branch"], copy = [...legacy];
+  assert.deepEqual(DEFAULT_STATUS_ITEMS, []);
+  assert.deepEqual(visibleStatusItems(legacy, 0), []);
+  assert.deepEqual(visibleStatusItems(legacy, 1), legacy, "An explicit save of the same fields remains opt-in");
+  assert.deepEqual(visibleStatusItems(["session-id", "git-branch"], 0), ["session-id", "git-branch"]);
+  assert.deepEqual(legacy, copy, "No migration or mutation of saved preferences");
+});
+
+test("the PR strip uses observed branches only and does not duplicate an existing PR branch", () => {
+  const chat = { repositories: [{ fullName: "Acme/api", branch: "selected-not-observed" }, { fullName: "Other/lib", branch: "main" }] };
+  assert.deepEqual(branchesWithoutPullRequests(chat), []);
+  chat.workspaceStatus = { branch: "main" };
+  chat.gitBranches = [{ repository: "Acme/api", branch: "old-snapshot" }, { repository: "Other/lib", branch: "feat/secondary" }, { repository: "Not/selected", branch: "ignored" }];
+  assert.deepEqual(branchesWithoutPullRequests(chat), [{ repository: "Acme/api", branch: "main" }, { repository: "Other/lib", branch: "feat/secondary" }]);
+  chat.pullRequests = [{ repository: "acme/API", headRef: "main", merged: true }, { repository: "Other/lib", headRef: "feat/other" }];
+  assert.deepEqual(branchesWithoutPullRequests(chat), [{ repository: "Other/lib", branch: "feat/secondary" }]);
+  assert.deepEqual(branchesWithoutPullRequests({ workspaceStatus: { branch: "detached · abc123" } }), [{ repository: null, branch: "detached · abc123" }]);
+  assert.deepEqual(branchesWithoutPullRequests({ workspaceStatus: { branch: null } }), []);
+});
+
+test("a workspace-only branch snapshot refreshes the existing PR strip", t => {
+  const previous = globalThis.document, nodes = new Map();
+  globalThis.document = { querySelectorAll: () => [], querySelector: selector => {
+    if (!nodes.has(selector)) nodes.set(selector, { style: { setProperty() {} }, replaceChildren() {} });
+    return nodes.get(selector);
+  } };
+  t.after(() => { if (previous === undefined) delete globalThis.document; else globalThis.document = previous; });
+  const chat = { id: "branch-fixture", agent: "claude", repositories: [], workspaceStatus: { branch: "main" } }, seen = [];
+  const controls = Object.assign(Object.create(ChatControls.prototype), { chatId: chat.id, renderAttachments() {}, repositories() {}, pullRequests: value => seen.push(value.workspaceStatus.branch) });
+  controls.render(chat); controls.render(chat);
+  chat.workspaceStatus = { branch: "feat/current" }; controls.render(chat);
+  chat.workspaceStatus = { branch: null }; controls.render(chat);
+  assert.deepEqual(seen, ["main", "feat/current", null]);
 });
 
 test("footer values distinguish current context from totals, avoid double-counting cache/reasoning, and never invent missing usage", () => {

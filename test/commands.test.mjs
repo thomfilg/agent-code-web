@@ -79,6 +79,17 @@ test("command discovery gates model-specific commands and refreshes them when th
   result = await catalog.list({ ...chat, model: "capable" }); assert.ok(["personality", "fast"].every(name => result.commands.some(command => command.name === name)));
 });
 
+test("Google and named-account command discovery cannot inherit host CLI profiles", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const chat = await store.create({ title: "Private commands", agent: "codex", agentAccountId: "chosen-account" });
+  const catalog = new CommandCatalog({ google: { enabled: true }, codex: { authMode: "host" }, claude: { authMode: "host" } });
+  for (const provider of ["codex", "claude"]) {
+    const env = await catalog.env(provider, chat);
+    assert.notEqual(env.HOME, process.env.HOME);
+    assert.equal(env[provider === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"], `${store.runtimeHome(chat.id)}/${provider}`);
+  }
+});
+
 test("installed Claude namespaces keep same-name commands and aliases distinct from web controls", async () => {
   const catalog = new CommandCatalog({ workerBackend: "ec2" });
   const names = ["one:goal", "two:goal", "one:config", "two:plan", "one:reload-plugins"];
@@ -95,6 +106,53 @@ test("installed Claude namespaces keep same-name commands and aliases distinct f
   assert.equal(commandCatalog.length, names.length, "Web/SDK controls must not mutate the worker-reported native inventory");
 });
 
+test("an admitted Codex skill keeps structured dispatch while unknown names never reach the adapter", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const calls = [], commands = { list: async () => ({ commands: [{ name: "work", kind: "Skill", path: "/fixture/work/SKILL.md" }] }) };
+  const manager = new RuntimeManager({ store, config: testConfig(root), commands, broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => ({
+    start: async () => {}, stop: async () => {}, send: async (text, settings) => { calls.push({ text, settings }); return { text: "Skill completed" }; },
+  }) });
+  t.after(() => manager.shutdown()); const chat = await manager.createChat({ agent: "codex", title: "Skill admission" });
+  await manager.send(chat.id, "/work inspect this repository");
+  assert.match(calls[0].text, /\$work inspect this repository/);
+  assert.deepEqual(calls[0].settings.skills, [{ name: "work", path: "/fixture/work/SKILL.md" }]);
+  await assert.rejects(manager.submit(chat.id, "/not-installed"), /Unknown command \/not-installed/);
+  assert.equal(calls.length, 1);
+});
+
+test("a new chat defaults to Auto, validates explicit permission modes and uses its mode on the first turn", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const calls = [];
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => ({
+    start: async () => {}, stop: async () => {}, send: async (text, settings) => { calls.push({ text, settings }); return { text: "Done" }; },
+  }) });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "codex", title: "First-turn Auto" });
+  assert.equal(chat.mode, "auto");
+  await manager.send(chat.id, "inspect safely");
+  assert.equal(calls[0].settings.mode, "auto");
+  await assert.rejects(manager.createChat({ agent: "codex", title: "Invalid mode", mode: "dont_ask" }), /permission mode supported/);
+  assert.equal(store.list().filter(item => item.title === "Invalid mode").length, 0);
+});
+
+test("permission changes are applied to a live Codex runtime instead of only changing the picker", async t => {
+  const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
+  const modes = [], calls = [];
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10000 }), adapterFactory: () => ({
+    start: async () => {}, stop: async () => {},
+    send: async (text, settings) => { calls.push({ text, settings }); return { text: "Done" }; },
+    setPermissionMode: async (mode, guard, acknowledge) => { guard(); modes.push(mode); acknowledge(); return true; },
+  }) });
+  t.after(() => manager.shutdown());
+  const chat = await manager.createChat({ agent: "codex", title: "Live Auto" });
+  await manager.send(chat.id, "start runtime");
+  await manager.setMode(chat.id, "accept_edits");
+  await manager.setMode(chat.id, "auto");
+  assert.deepEqual(modes, ["accept_edits", "auto"]);
+  assert.equal(store.get(chat.id).mode, "auto");
+  assert.equal(calls[0].settings.mode, "auto");
+});
+
 test("plan plus task uses read-only mode; goals persist and stream each native continuation separately", async t => {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const config = testConfig(root, { CODEX_BIN: fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url)), AGENT_IDLE_TIMEOUT_MS: "10000" });
@@ -108,9 +166,19 @@ test("plan plus task uses read-only mode; goals persist and stream each native c
   await manager.send(chat.id, "/goal plan a todo app"); assert.equal(store.get(chat.id).goal.status, "paused");
   await manager.setMode(chat.id, "accept_edits"); await manager.send(chat.id, "/goal create a todo app");
   assert.equal(store.get(chat.id).goal.status, "complete");
+  assert.deepEqual(store.get(chat.id).messages.filter(m => m.kind === "notice" && m.text.startsWith("Goal set:")).map(m => m.text),
+    ["Goal set: plan a todo app", "Goal set: create a todo app"]);
   assert.equal(store.get(chat.id).messages.filter(m => m.role === "assistant").at(-1).text, "Goal verified complete");
   await manager.send(chat.id, "/review --base main");
   assert.equal(store.get(chat.id).messages.filter(m => m.role === "assistant").at(-1).text, "Native review completed without a normal prompt.");
+  const beforeUnknown = store.get(chat.id).messages.length;
+  await assert.rejects(manager.submit(chat.id, "/qualquerporra"), error => error.statusCode === 400 && /Unknown command \/qualquerporra/.test(error.message));
+  await assert.rejects(manager.enqueue(chat.id, "/qualquerporra later"), error => error.statusCode === 400 && /Unknown command \/qualquerporra/.test(error.message));
+  await assert.rejects(manager.submit(chat.id, "/tmp/project is the folder"), error => error.statusCode === 400 && /Invalid slash command/.test(error.message));
+  assert.equal(store.get(chat.id).messages.length, beforeUnknown, "Unknown commands must not become model turns");
+  assert.deepEqual(store.get(chat.id).queuedMessages || [], [], "Unknown commands must not enter the queue");
+  await manager.send(chat.id, "Inspect /tmp/project as an ordinary path");
+  assert.equal(store.get(chat.id).messages.filter(m => m.role === "user").at(-1).text, "Inspect /tmp/project as an ordinary path");
   const beforeInspection = store.get(chat.id).messages.length;
   const terminals = await manager.inspectCommand(chat.id, "ps");
   assert.equal(terminals.awake, true); assert.equal(terminals.items.length, 2); assert.ok(!JSON.stringify(terminals).includes("fixture-secret"));

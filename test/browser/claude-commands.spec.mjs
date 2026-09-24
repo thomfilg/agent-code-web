@@ -12,7 +12,11 @@ async function fixture(page) {
   await page.route(`**/api/chats/${chat.id}/events*`, route => route.fulfill({ contentType: "text/event-stream", body: ": fixture\n\n" }));
   await page.route(`**/api/chats/${chat.id}/commands`, async route => { f.reads++; const commands = [...webCommands("claude"), { name: "reload-skills" }, ...f.catalog]; await f.gate; await route.fulfill({ json: { commands } }); });
   for (const tail of ["messages", "queue"]) await page.route(`**/api/chats/${chat.id}/${tail}`, route => { f.calls.push({ tail, ...route.request().postDataJSON() }); return route.fulfill({ status: f.responseStatus, json: f.responseStatus === 202 ? {} : { error: f.responseError || "/config and /settings do not accept attachments. Remove them or send them in a separate message." } }); });
-  await page.goto(`/#chat=${chat.id}`); await expect(page.locator("#chat-title")).toHaveText(chat.title);
+  await page.goto(`/#chat=${chat.id}`);
+  // Wait for fixture boot under the deliberately CPU-limited browser run;
+  // command assertions below retain their normal timeouts.
+  await expect(page.locator("#chat-title")).toHaveText(chat.title, { timeout: 15000 });
+  await expect.poll(() => page.evaluate(id => window.fixtureSources.some(source => source.url.includes(`/chats/${id}/events`)), chat.id)).toBe(true);
   f.emit = async () => {
     f.snapshot = { ...f.snapshot, revision: f.snapshot.revision + 1, commandCatalogRevision: f.snapshot.commandCatalogRevision + 1 };
     await page.evaluate(chat => window.fixtureSources.find(source => source.url.includes(`/chats/${chat.id}/events`)).dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "chat_updated", chat }) })), f.snapshot);
@@ -22,6 +26,34 @@ async function fixture(page) {
 
 const requestEvent = (page, id, event) => page.evaluate(({ id, event }) => window.fixtureSources.find(source => source.url.includes(`/chats/${id}/events`))
   .dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) })), { id, event });
+
+test("live Auto selection waits for acknowledgement and preserves a pending native approval and unsent draft", async ({ page }) => {
+  const f = await fixture(page);
+  const pendingRequest = { requestId: "pending-grep", method: "claude/tool/requestApproval", prompt: "Inspect fixture", command: "grep example fixture.txt", availableDecisions: ["accept", "decline"] };
+  f.snapshot = { ...f.snapshot, mode: "default", status: "running", pendingRequest }; await f.emit();
+  await page.locator("#message-input").fill("Keep this draft");
+  let release, requests = 0, fail = false;
+  const gate = new Promise(resolve => { release = resolve; });
+  await page.route(`**/api/chats/${f.snapshot.id}/mode`, async route => {
+    requests++; const { mode } = route.request().postDataJSON(); await gate;
+    if (fail) return route.fulfill({ status: 409, json: { error: "Claude could not confirm the permission change" } });
+    f.snapshot = { ...f.snapshot, mode, revision: f.snapshot.revision + 1 };
+    await route.fulfill({ json: { chat: f.snapshot } });
+  });
+  await page.locator("#mode-label").click(); await page.locator('[data-agent-mode="auto"]').click();
+  await expect.poll(() => requests).toBe(1);
+  await expect(page.locator("#mode-label")).toHaveText("Manual");
+  await expect(page.locator('[data-agent-mode="plan"]')).toBeDisabled();
+  release(); await expect(page.locator("#mode-label")).toHaveText("Auto");
+  await expect(page.locator("#approval-card")).toBeVisible();
+  await expect(page.locator("#message-input")).toHaveValue("Keep this draft");
+  fail = true;
+  await page.locator("#mode-label").click(); await page.locator('[data-agent-mode="plan"]').click();
+  await expect(page.locator('[data-agent-mode="plan"]')).toBeEnabled();
+  await expect(page.locator("#mode-label")).toHaveText("Auto");
+  await expect(page.locator("#toasts")).toContainText("could not confirm");
+  expect(f.calls).toEqual([]); expect(f.errors).toEqual([]);
+});
 
 for (const width of [1280, 320]) test(`doctor at ${width}px preserves queued files and requires separate cleanup/permission answers`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
@@ -200,7 +232,7 @@ for (const width of [1280, 320]) test(`expired Claude access at ${width}px offer
   await expect(page.locator("#messages")).toContainText("Stop the worker and retry");
   await expect(page.locator("#messages")).toContainText("the running application has not been restarted");
   expect(stops).toEqual([]); expect(f.calls).toEqual([]);
-  await page.locator('summary[aria-label="Chat actions"]').click();
+  await page.locator('summary[aria-label="Chat settings"]').click();
   await page.getByRole("button", { name: "Stop worker", exact: true }).click();
   await expect.poll(() => stops).toEqual(["POST"]);
   f.snapshot = { ...f.snapshot, status: "stopped" }; await f.emit();
@@ -235,7 +267,7 @@ for (const width of [1280, 320]) test(`Claude effort changes at ${width}px prese
   await expect(page.locator("#messages")).toContainText("/effort status");
   await expect(page.locator("#messages")).toContainText("its running applications have not been stopped");
   await expect(input).toHaveValue("Keep my next task unsent"); await expect(page.locator("#attachment-chips")).toContainText("effort-context.txt");
-  expect(changes).toEqual(["high", "low", "auto"].map(effort => ({ model: "sonnet", effort })));
+  expect(changes).toEqual(["high", "low", "auto"].map(effort => ({ model: "sonnet", effort, ultracode: false })));
   expect(stops).toEqual([]); expect(f.calls).toEqual([]); expect(f.errors).toEqual([]);
 });
 

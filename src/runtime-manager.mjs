@@ -1980,7 +1980,9 @@ export class RuntimeManager extends EventEmitter {
           const goal = commandAction.action === "clear" ? null : commandAction.action === "set"
             ? { threadId: `relay:${chatId}`, objective: commandAction.objective, status: "active", tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, managedBy: "relay" }
             : before ? { ...before, status: commandAction.action === "pause" ? "paused" : commandAction.action === "resume" ? "active" : before.status } : null;
-          this.publishChat(await this.store.update(chatId, { goal }));
+          this.publishChat(await this.store.update(chatId, current => ({ goal,
+            ...(commandAction.action === "clear" ? { queuedMessages: (current.queuedMessages || []).filter(item => !item.relayGoalWake) } : {}),
+          })));
           if (commandAction.action === "set") {
             const notice = await this.store.appendMessage(chatId, { role: "system", kind: "notice", text: `Goal set: ${commandAction.objective}` });
             this.#emit(chatId, { type: "message", message: notice });

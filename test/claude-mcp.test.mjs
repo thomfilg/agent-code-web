@@ -52,6 +52,15 @@ test("native control timeouts, closed workers and EPIPE reject pending work with
   }
 });
 
+test("optional discovery timeout does not shorten unrelated native controls", async t => {
+  const f = controlFixture(t, 1000);
+  const normal = f.channel.request("initialize");
+  await assert.rejects(f.channel.request("get_settings", {}, { timeoutMs: 5 }), /timed out/);
+  assert.equal(f.channel.timeoutMs, 1000); assert.equal(f.channel.pending.size, 1);
+  f.channel.accept({ type: "control_response", response: { subtype: "success", request_id: f.writes[0].request_id, response: {} } });
+  await normal;
+});
+
 function inventoryFixture(initial) {
   const f = { servers: initial.map(server => ({ ...server })), calls: [] };
   f.request = async (subtype, fields = {}) => {
@@ -155,7 +164,7 @@ async function managerFixture(t, host = false) {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
   const config = testConfig(root, { AGENT_IDLE_TIMEOUT_MS: "60000", ...(host ? { CLAUDE_AUTH_MODE: "host" } : {}) }), broker = new CapabilityBroker({ ttlMs: 60000 });
   const f = { calls: [] };
-  const manager = new RuntimeManager({ store, config, broker, adapterFactory: () => ({ start: async () => {}, stop: async () => f.gate?.resolve(), send: async text => { f.calls.push(text); await f.gate?.promise; if (f.error) throw Error(f.error); return { text: "Verified native MCP outcome" }; } }) });
+  const manager = new RuntimeManager({ store, config, broker, commands: { list: async () => ({ commands: [{ name: "mcp" }] }) }, adapterFactory: () => ({ start: async () => {}, stop: async () => f.gate?.resolve(), send: async text => { f.calls.push(text); await f.gate?.promise; if (f.error) throw Error(f.error); return { text: "Verified native MCP outcome" }; } }) });
   t.after(() => manager.shutdown()); const chat = await manager.createChat({ agent: "claude", title: "MCP test" });
   return Object.assign(f, { store, config, broker, manager, chat });
 }

@@ -7,10 +7,14 @@ let pendingTurn = null;
 let turnCount = 0;
 let goal = null;
 let lastMode = "default";
+let threadSettings = null;
+let goalContinuationSettings = null;
+let externalAccount, refreshRequest;
 let backgroundTerminals = [{ processId: "100", command: "npm run dev TOKEN=fixture-secret", cwd: "/fixture/workspace" }, { processId: "200", command: "npm run test:watch", cwd: "/fixture/workspace" }];
 function goalChanged() { send({ method: "thread/goal/updated", params: { threadId: "thr_fixture", goal } }); }
 function continueGoal() {
   if (!goal || goal.status !== "active" || pendingTurn || lastMode === "plan") return;
+  goalContinuationSettings = structuredClone(threadSettings);
   const turn = { threadId: "thr_fixture", turnId: `turn_goal_${++turnCount}` };
   send({ method: "turn/started", params: { threadId: turn.threadId, turn: { id: turn.turnId, status: "inProgress" } } });
   send({ method: "item/agentMessage/delta", params: { ...turn, delta: "Goal verified complete" } });
@@ -22,17 +26,44 @@ rl.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
     send({ id: message.id, result: { userAgent: `${message.params.clientInfo.name}/0.154.0-fixture (private-host-never-expose)`, platformFamily: "unix", platformOs: "linux" } });
+  } else if (message.method === "account/login/start") {
+    if (message.params.type !== "chatgptAuthTokens" || !message.params.accessToken || message.params.refreshToken) return send({ id: message.id, error: { code: -32602, message: "Fixture requires only an external access token" } });
+    externalAccount = message.params;
+    send({ id: message.id, result: { type: "chatgptAuthTokens" } });
+  } else if (message.method === "fixture/accountRefresh") {
+    refreshRequest = message.id;
+    send({ id: 901, method: "account/chatgptAuthTokens/refresh", params: { reason: "unauthorized", previousAccountId: message.params.previousAccountId } });
+  } else if (message.id === 901 && !message.method) {
+    send({ id: refreshRequest, ...(message.error ? { error: message.error } : { result: { fields: Object.keys(message.result).sort(), accountId: message.result.chatgptAccountId, hasAccess: Boolean(message.result.accessToken) } }) });
+  } else if (message.method === "fixture/accountEcho") {
+    send({ method: "error", params: { message: `Fixture echo: ${externalAccount.accessToken}` } });
+    send({ id: message.id, result: externalAccount });
+  } else if (message.method === "fixture/notifications") {
+    for (const notification of message.params.notifications) send(notification);
+    if (message.params.complete) pendingTurn = null;
+    send({ id: message.id, result: {} });
   } else if (message.method === "thread/start") {
+    threadSettings = message.params;
     send({ id: message.id, result: { model: "fixture-gpt", thread: { id: "thr_fixture" } } });
+  } else if (message.method === "thread/fork" && message.params.ephemeral) {
+    send({ id: message.id, result: { model: "fixture-gpt", thread: { id: "thr_side_fixture" } } });
+  } else if (message.method === "thread/unsubscribe") {
+    send({ id: message.id, result: {} });
   } else if (message.method === "thread/list") {
     send({ id: message.id, result: { data: [], nextCursor: null } });
   } else if (message.method === "thread/read") {
     send({ id: message.id, error: { code: -32602, message: "No descendant thread in this fixture" } });
   } else if (message.method === "thread/resume") {
+    threadSettings = message.params;
     if (message.params.threadId === "thr_missing") send({ id: message.id, error: { code: -32602, message: "Fixture native history is missing" } });
     else send({ id: message.id, result: { thread: { id: message.params.threadId === "thr_wrong_identity" ? "thr_other" : message.params.threadId } } });
   } else if (message.method === "thread/settings/update") {
+    threadSettings = message.params;
     send({ id: message.id, result: { settings: message.params } });
+  } else if (message.method === "fixture/threadSettings") {
+    send({ id: message.id, result: { settings: threadSettings } });
+  } else if (message.method === "fixture/goalContinuationSettings") {
+    send({ id: message.id, result: { settings: goalContinuationSettings } });
   } else if (message.method === "thread/backgroundTerminals/list") {
     send({ id: message.id, result: { data: backgroundTerminals, nextCursor: null } });
   } else if (message.method === "thread/backgroundTerminals/terminate") {

@@ -30,7 +30,12 @@ async function openFile(page) {
   await expect(page.getByLabel("Workspace file contents")).toHaveValue("unselected before\nselected context\nunselected after\n");
 }
 async function selectText(page) {
-  await page.getByLabel("Workspace file contents").evaluate(editor => { editor.focus(); editor.setSelectionRange(18, 34); editor.dispatchEvent(new Event("select")); });
+  const editor = page.getByLabel("Workspace file contents");
+  // Clicking a tree item starts an asynchronous read. Select only the new
+  // file's loaded contents, never the previously open file or loading state.
+  await expect(editor).toHaveValue("unselected before\nselected context\nunselected after\n");
+  await editor.evaluate(editor => { editor.focus(); editor.setSelectionRange(18, 34); editor.dispatchEvent(new Event("select")); });
+  await expect(page.locator("#workspace-selection-status")).toHaveText("16 selected characters");
 }
 
 test("read-only workspace viewer stages explicit selections and /ide queues them without ambient content", async ({ page, request }) => {

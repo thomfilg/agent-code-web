@@ -1,5 +1,20 @@
 import { test, expect } from "@playwright/test";
 
+test("chat header keeps primary actions visible and groups secondary controls by purpose", async ({ page }) => {
+  await page.goto("/"); await page.getByRole("button", { name: "Open Existing beta", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Open shared Chrome", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open app preview", exact: true })).toBeVisible();
+  await expect(page.locator(".topbar-actions > #view-changes, .topbar-actions > #copy-chat-link, .topbar-actions > #repositories-menu")).toHaveCount(0);
+  await page.getByLabel("Chat settings", { exact: true }).click();
+  await expect(page.locator(".chat-settings-menu .control-group-label")).toHaveText(["Workspace", "Conversation", "Appearance & input", "Worker", "Danger zone"]);
+  await expect(page.locator("#view-changes")).toBeVisible(); await expect(page.locator("#copy-chat-link")).toBeVisible();
+  await page.getByLabel("Repositories", { exact: true }).click(); await expect(page.locator("#chat-repositories")).toContainText("Add repository");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByLabel("Chat settings", { exact: true })).toBeInViewport();
+  expect(await page.locator(".chat-settings-menu > .control-popover").evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+  await page.screenshot({ path: "test-results/grouped-chat-settings.png", fullPage: true });
+});
+
 test("compact mobile composer switches agents with Sol/Opus high defaults and preserves chat", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 }); await page.goto("/");
   await page.getByRole("button", { name: "Open chats", exact: true }).click();
@@ -47,7 +62,8 @@ test("compact mobile composer switches agents with Sol/Opus high defaults and pr
 });
 
 test("PR bar opens colored diffs, shows CI counts/conflicts, and requires explicit GitHub auto-merge", async ({ page }) => {
-  await page.request.post("/api/github", { data: { method: "local", companies: ["acme", "other"] } });
+  const login = await (await page.request.post("/api/github/device", { data: { companyId: "acme" } })).json();
+  await expect.poll(async () => (await (await page.request.get("/api/github")).json()).connections.find(connection => connection.id === login.connection.id)?.connected).toBe(true);
   await page.goto("/");
   await page.getByRole("button", { name: "Open PR controls fixture", exact: true }).click();
   const bar = page.locator(".pull-request-bar");
@@ -168,10 +184,11 @@ test("upload chips, usage availability, transcript and repository menus are func
   await page.getByLabel("Context and usage", { exact: true }).click();
   await expect(page.locator("#session-usage")).toContainText("Subscription limits not reported");
   await expect(page.locator("#session-usage").getByRole("button", { name: "Compact session" })).toBeEnabled();
-  await page.getByLabel("Chat actions", { exact: true }).click();
+  await page.getByLabel("Chat settings", { exact: true }).click();
   await page.getByRole("button", { name: "Transcript view", exact: true }).click();
   await expect(page.locator("#preview-content")).toContainText("Please inspect the attached files");
   await page.getByLabel("Close preview", { exact: true }).click();
+  await page.getByLabel("Chat settings", { exact: true }).click();
   await page.getByLabel("Repositories", { exact: true }).click();
   await expect(page.locator("#chat-repositories")).toContainText("Add repository");
 });

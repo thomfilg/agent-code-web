@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter, once } from "node:events";
 import { PassThrough } from "node:stream";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, symlink, writeFile } from "node:fs/promises";
 import { ClaudeSession, claudeCallResult, CLAUDE_SCHEDULE_DIAGNOSTICS } from "../src/claude-session.mjs";
 import { ClaudeAdapter } from "../src/adapters/claude.mjs";
@@ -36,11 +37,17 @@ function transport(f) {
   };
   f.respond = packet => {
     let response = {};
+    if (packet.request.subtype === "initialize" && f.initializeSnapshot) response = f.initializeSnapshot;
+    if (packet.request.subtype === "set_permission_mode") response = f.modeAck ?? { mode: packet.request.mode };
     if (f.mcp && packet.request.subtype === "mcp_toggle" && f.refuse !== "mcp_toggle") {
       f.mcp.find(server => server.name === packet.request.serverName).status = packet.request.enabled ? "connected" : "disabled";
     }
     if (f.mcp && packet.request.subtype === "mcp_status") response = { mcpServers: f.mcp.map(server => ({ ...server })) };
     if (packet.request.subtype === "get_settings") response = f.settingsSnapshot || { sources: [{ source: "flagSettings", settings: f.flagSettings || {} }] };
+    if (packet.request.subtype === "get_settings" && Object.hasOwn(f, "ultracodeApplied")) response = { applied: { model: "native-fixture", effort: f.ultracodeEffort || "xhigh", ultracode: f.ultracodeApplied } };
+    if (packet.request.subtype === "apply_flag_settings" && f.refuse !== "apply_flag_settings" && Object.hasOwn(f, "ultracodeApplied") && typeof packet.request.settings.ultracode === "boolean") {
+      f.ultracodeApplied = f.ultracodeLockedOn ? true : f.ultracodeDenied ? false : packet.request.settings.ultracode;
+    }
     if (packet.request.subtype === "reload_plugins") response = f.pluginSnapshot || { commands: [{ name: "fixture:stamp", description: "Native plugin stamp" }], plugins: [{ name: "fixture" }], agents: [], mcpServers: [], error_count: 0 };
     if (packet.request.subtype === "apply_flag_settings" && f.fastState && f.refuse !== "apply_flag_settings" && typeof packet.request.settings.fastMode === "boolean") {
       f.fastState = !f.fastPolicyDenied && packet.request.settings.fastMode ? "on" : "off";
@@ -72,20 +79,198 @@ function transport(f) {
   return child;
 }
 
-async function fixture(t, { interactive = false } = {}) {
+async function fixture(t, { interactive = false, recover = false } = {}) {
   const root = await temporaryDirectory(t), store = new ChatStore(root); await store.initialize();
-  const chat = await store.create({ agent: "claude", title: "Application transport" }), config = testConfig(root);
+  let chat = await store.create({ agent: "claude", title: "Application transport" });
+  if (recover) {
+    await store.update(chat.id, { agentSessionId: "11111111-1111-4111-8111-111111111111",
+      suspension: { policy: "hibernate", status: "hibernated", nativeRetained: true } });
+    chat = store.get(chat.id);
+  }
+  const config = testConfig(root);
   const f = { launches: [], events: [], sessions: [], requests: [] }, broker = new CapabilityBroker({ ttlMs: 60000 });
-  const executor = { workspace: chat.workspace, runtimeHome: store.runtimeHome(chat.id), metadata: { backend: "local" }, mkdir: directory => mkdir(directory, { recursive: true }),
-    spawn(command, args, options) {
+  const retainedToken = recover ? broker.issue({ chatId: chat.id, provider: "anthropic" }) : null;
+  const launch = (kind, command, args, options) => {
       if (f.spawnFailure) throw Error("Fixture spawn failure");
-      f.launches.push({ command, args, env: options.env }); f.nativeSession = args[args.indexOf(args.includes("--session-id") ? "--session-id" : "--resume") + 1]; return transport(f);
-    } };
+      f.launches.push({ kind, command, args, env: options.env, recoverOnly: options.recoverOnly === true }); f.nativeSession = args[args.indexOf(args.includes("--session-id") ? "--session-id" : "--resume") + 1];
+      const child = transport(f);
+      if (recover) Object.assign(child, { ready: Promise.resolve(), recovered: true,
+        recovery: { provider: "claude", sessionId: chat.agentSessionId } });
+      return child;
+  };
+  const executor = { workspace: chat.workspace, runtimeHome: store.runtimeHome(chat.id), metadata: { backend: "local" }, mkdir: directory => mkdir(directory, { recursive: true }),
+    spawn: (command, args, options) => launch("ordinary", command, args, options),
+    spawnAgent: (command, args, options) => launch("agent", command, args, options) };
+  if (retainedToken) executor.retainedCapabilities = { provider: { provider: "anthropic", token: retainedToken,
+    credentialHash: createHash("sha256").update(JSON.stringify(["anthropic", config.claude.providerKey || null, config.claude.upstreamBaseUrl || null])).digest("hex") } };
   const adapter = new ClaudeAdapter({ chat, store, config, executor, broker, gatewayOrigin: "http://127.0.0.1:9",
     hooks: { onSessionId: id => f.sessions.push(id), onEvent: event => f.events.push(event), ...(interactive ? { onRequest: request => f.requests.push(request) } : {}) } });
   t.after(() => adapter.stop());
   return Object.assign(f, { adapter, config, broker, chat, store });
 }
+
+test("Claude retains only managed native owners in the reconnectable agent transport", async t => {
+  const persistent = await fixture(t, { interactive: true });
+  await persistent.adapter.send("Managed private turn", {});
+  assert.deepEqual(persistent.launches.map(item => item.kind), ["agent"]);
+
+  const oneShot = await fixture(t);
+  await oneShot.adapter.send("One-shot turn", {});
+  assert.deepEqual(oneShot.launches.map(item => item.kind), ["ordinary"]);
+});
+
+test("a hibernated Claude owner is adopted for the first ordinary turn without launching a replacement", async t => {
+  const f = await fixture(t, { recover: true });
+  await f.adapter.send("Continue the retained session", {});
+  assert.equal(f.launches.length, 1);
+  assert.equal(f.launches[0].kind, "agent");
+  assert.equal(f.launches[0].recoverOnly, true);
+  assert.ok(f.launches[0].args.includes("--resume"));
+  assert.equal(f.nativeSession, f.chat.agentSessionId);
+  assert.equal(f.adapter.recoverApplication, false);
+  assert.equal(f.inputs.length, 1);
+});
+
+test("forwarded child frames reach only the observer and never complete or contaminate the parent turn", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const sending = f.adapter.send("Parent task", {}); let complete = false;
+  sending.then(() => { complete = true; });
+  await waitFor(() => f.adapter.turnSession?.active?.started);
+  const session_id = f.nativeSession;
+  f.emit({ type: "assistant", session_id, uuid: "root-agent", message: { content: [{ type: "tool_use", id: "agent-call", name: "Agent", input: { name: "Worker", prompt: "Child task", run_in_background: false } }] } });
+  f.emit({ type: "system", subtype: "task_started", session_id, task_type: "local_agent", task_id: "actual-child", tool_use_id: "agent-call" });
+  f.emit({ type: "assistant", session_id, parent_tool_use_id: "agent-call", uuid: "child-text", message: { content: [{ type: "text", text: "Child public answer" }, { type: "tool_use", id: "child-tool", name: "Read", input: { file_path: "CHILD_PRIVATE_PATH" } }] } });
+  f.emit({ type: "result", session_id, parent_tool_use_id: "agent-call", subtype: "success", result: "Child public answer", is_error: false });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(complete, false); assert.equal(f.adapter.turnSession.active !== null, true);
+  assert.match(JSON.stringify(f.adapter.agents.snapshot()), /Child public answer|Tool: Read/);
+  assert.doesNotMatch(JSON.stringify(f.events), /Child public answer|CHILD_PRIVATE_PATH|child-tool/);
+  f.emit({ type: "system", subtype: "task_notification", session_id, task_id: "actual-child", tool_use_id: "agent-call", status: "completed", skip_transcript: true });
+  f.complete("Parent final"); await sending;
+  assert.ok(f.controls.some(packet => packet.request.subtype === "initialize" && packet.request.forwardSubagentText === true));
+});
+
+test("Ultracode startup and retained-session disable confirm workflow state before any input", async t => {
+  const f = await fixture(t, { interactive: true }); f.ultracodeApplied = false;
+  await f.adapter.send("/run synthetic fixture", { effort: "xhigh", ultracode: true });
+  assert.equal(f.ultracodeApplied, true); assert.equal(f.inputs.length, 1);
+  assert.ok(f.controls.some(packet => packet.request.subtype === "apply_flag_settings" && packet.request.settings.ultracode === true && packet.request.settings.effortLevel === "xhigh"));
+  assert.equal(JSON.parse(f.launches[0].args[f.launches[0].args.indexOf("--settings") + 1]).ultracode, true);
+  await f.adapter.send("Ordinary xhigh is not Ultracode", { effort: "xhigh", ultracode: false });
+  assert.equal(f.ultracodeApplied, false); assert.equal(f.inputs.length, 2); assert.equal(f.launches.length, 1);
+  await f.adapter.stop();
+  await f.adapter.send("Explicitly resume Ultracode", { effort: "xhigh", ultracode: true });
+  assert.equal(f.launches.length, 2); assert.equal(f.ultracodeApplied, true); assert.equal(f.inputs.length, 3);
+  assert.ok(f.launches[1].args.includes("--resume"));
+});
+
+test("Ultracode without interactive hooks still verifies before sending a correctly framed user packet", async t => {
+  const f = await fixture(t); f.ultracodeApplied = false;
+  await f.adapter.send("Synthetic explicit mode", { effort: "xhigh", ultracode: true });
+  assert.equal(f.inputs.length, 1); assert.equal(f.inputs[0].message.content, "Synthetic explicit mode");
+  assert.equal(f.ultracodeApplied, true);
+  const missing = await fixture(t);
+  await assert.rejects(missing.adapter.send("Must not be published", { effort: "xhigh", ultracode: true }));
+  assert.equal(missing.inputs.length, 0); assert.deepEqual(missing.sessions, []); assert.equal(missing.adapter.sessionId, null);
+});
+
+test("ordinary effort clears inherited native Ultracode on fresh and resumed SDK sessions with or without request hooks", async t => {
+  for (const interactive of [true, false]) for (const effort of ["xhigh", "low"]) {
+    const f = await fixture(t, { interactive }); f.ultracodeApplied = true;
+    await f.adapter.send("Fresh ordinary selection", { effort, ultracode: false });
+    assert.equal(f.ultracodeApplied, false); assert.equal(f.inputs.length, 1);
+    await f.adapter.stop(); f.ultracodeApplied = true;
+    const firstControl = f.controls.length;
+    await f.adapter.send("Resumed ordinary selection", { effort, ultracode: false });
+    assert.equal(f.ultracodeApplied, false); assert.equal(f.inputs.length, 2);
+    assert.ok(f.launches.at(-1).args.includes("--resume"));
+    assert.deepEqual(f.controls.slice(firstControl).map(packet => packet.request.subtype), ["initialize", "get_settings", "apply_flag_settings", "get_settings"]);
+    assert.equal(f.controls.at(-2).request.settings.ultracode, false);
+  }
+});
+
+test("special native MCP/review commands reject Ultracode before launching and preserve the saved mode", async t => {
+  for (const text of ["/mcp reconnect all", "/code-review"]) {
+    const f = await fixture(t, { interactive: true }); f.chat.ultracode = true;
+    await f.store.update(f.chat.id, { ultracode: true, effort: "xhigh" });
+    await assert.rejects(f.adapter.send(text, { effort: "xhigh", ultracode: true }), /not supported for this native command/);
+    assert.equal(f.launches.length, 0); assert.equal(f.inputs?.length || 0, 0);
+    assert.equal(f.store.get(f.chat.id).ultracode, true);
+  }
+});
+
+test("ordinary effort cannot send while native policy retains Ultracode, including low and resumed sessions", async t => {
+  for (const effort of ["xhigh", "low"]) for (const resume of [false, true]) {
+    const f = await fixture(t, { interactive: true }); f.ultracodeApplied = false;
+    if (resume) { await f.adapter.send("Create synthetic checkpoint", { effort: "low", ultracode: false }); await f.adapter.stop(); }
+    f.ultracodeApplied = true; f.ultracodeLockedOn = true;
+    await assert.rejects(f.adapter.send("Must not send implicit mode", { effort, ultracode: false }), /did not confirm/);
+    assert.equal(f.inputs.length, Number(resume));
+  }
+});
+
+test("missing native metadata denies ordinary xhigh but preserves old non-xhigh CLI compatibility", async t => {
+  const high = await fixture(t, { interactive: true });
+  await assert.rejects(high.adapter.send("No implicit xhigh mode", { effort: "xhigh", ultracode: false }), /did not confirm/);
+  assert.equal(high.inputs.length, 0);
+  const overridden = await fixture(t, { interactive: true });
+  overridden.adapter.executor.environmentVariables = { CLAUDE_CODE_EFFORT_LEVEL: "xhigh" };
+  await assert.rejects(overridden.adapter.send("No implicit overridden mode", { effort: "low", ultracode: false }), /did not confirm/);
+  assert.equal(overridden.inputs.length, 0);
+  const low = await fixture(t, { interactive: true });
+  await low.adapter.send("Legacy low", { effort: "low", ultracode: false });
+  assert.equal(low.inputs.length, 1);
+  assert(!low.controls.some(packet => packet.request.subtype === "apply_flag_settings"));
+  const prior = await fixture(t, { interactive: true }); prior.ultracodeApplied = false;
+  await prior.adapter.send("/run Synthetic enabled checkpoint", { effort: "xhigh", ultracode: true });
+  delete prior.ultracodeApplied;
+  await assert.rejects(prior.adapter.send("Cannot forget the previous workflow flag", { effort: "low", ultracode: false }), /did not confirm/);
+  assert.equal(prior.inputs.length, 1);
+});
+
+test("Ultracode refuses missing contract, disabled workflow, overridden effort and stale selection before input", async t => {
+  for (const failure of ["missing", "workflow", "effort", "stale", "stop"]) {
+    const f = await fixture(t, { interactive: true });
+    if (failure !== "missing") f.ultracodeApplied = false;
+    if (failure === "workflow") f.ultracodeDenied = true;
+    if (failure === "effort") f.ultracodeEffort = "high";
+    let current = true;
+    if (["stale", "stop"].includes(failure)) f.hold = "get_settings";
+    const sending = f.adapter.send("Must not reach native input", { effort: "xhigh", ultracode: true, selectionCurrent: () => current }); sending.catch(() => {});
+    if (["stale", "stop"].includes(failure)) {
+      await waitFor(() => f.controls?.some(packet => packet.request.subtype === "get_settings"));
+      if (failure === "stop") await f.adapter.stop();
+      else { current = false; f.respond(f.controls.find(packet => packet.request.subtype === "get_settings")); }
+    }
+    await assert.rejects(sending); assert.equal(f.inputs.length, 0, failure);
+  }
+});
+
+test("native initialization commands and early system metadata survive before the first logical turn", async t => {
+  const f = await fixture(t, { interactive: true }); f.hold = "initialize";
+  f.initializeSnapshot = { commands: [{ name: "goal", description: "Native goal", privateAccount: "must-not-publish" }], account: "must-not-publish" };
+  const sending = f.adapter.send("Explicit synthetic turn"); sending.catch(() => {});
+  await waitFor(() => f.controls?.some(packet => packet.request.subtype === "initialize"));
+  f.emit({ type: "system", subtype: "init", slash_commands: ["goal", "fixture:plugin"], mcp_servers: [], claude_code_version: "fixture", privateAccount: "must-not-publish" });
+  await waitFor(() => f.events.some(event => event.type === "session_capabilities"));
+  assert.deepEqual(f.events.find(event => event.type === "session_capabilities").slashCommands, ["goal", "fixture:plugin"]);
+  assert.deepEqual(f.inputs, [], "Native discovery does not send a user message");
+  f.respond(f.controls.find(packet => packet.request.subtype === "initialize"));
+  await sending;
+  assert.equal(f.events.find(event => event.type === "command_catalog").commands[0].name, "goal");
+  assert.doesNotMatch(JSON.stringify(f.events), /must-not-publish|privateAccount/);
+  assert.equal(f.inputs.length, 1); assert.equal(f.inputs[0].message.content, "Explicit synthetic turn");
+  await f.adapter.stop(); const count = f.events.length;
+  f.adapter.backgroundEvent({ type: "command_catalog", commands: [{ name: "late" }] });
+  f.adapter.backgroundEvent({ type: "system", subtype: "init", slash_commands: ["late"] });
+  assert.equal(f.events.length, count, "A stopped adapter cannot publish a late catalog");
+});
+
+test("missing initialize commands do not erase a previously known catalog", async t => {
+  const f = await fixture(t, { interactive: true });
+  await f.adapter.send("Explicit synthetic turn");
+  assert(!f.events.some(event => event.type === "command_catalog"));
+});
 
 test("untrusted-workspace warnings survive native startup without leaking private paths or granting trust", async t => {
   const f = await fixture(t, { interactive: true }); f.hold = "initialize";
@@ -462,6 +647,62 @@ test("unrelated native notifications and zero-token errors cannot consume anothe
   assert(f.events.some(event => event.type === "background_response" && event.failed && event.text === "Native report failed before output"));
 });
 
+test("ambient skip_transcript notifications cannot steal a completed Agent's report or strand Send now", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Finish one background unit"); await nativeTurnStarted(f);
+  const task = nativeAgent(f, "actual-unit"); f.complete(); await running;
+  for (const status of ["completed", "completed", "failed"]) {
+    f.emit({ type: "system", subtype: "task_notification", session_id: f.nativeSession,
+      task_id: "ambient-dream", status, skip_transcript: true });
+  }
+  f.emit(task); nativeWorkflowReport(f);
+  const before = f.controls.length;
+  f.adapter.applicationSession.controlTimeoutMs = 25;
+  // Before the fix this rejects with the reported "Native workflow report did
+  // not acknowledge cancellation" error: the idle native owner ACKs interrupt
+  // but has no task-notification report left to complete.
+  await f.adapter.interrupt();
+  assert.equal(f.adapter.isBackgroundBusy(), false, "the saved final report must release its actual Agent, not a phantom housekeeping report");
+  assert.equal(f.adapter.applicationSession.workflowNotifications.length, 0);
+  assert.equal(f.events.filter(event => event.type === "background_response").length, 1);
+  assert.equal(f.controls.length, before, "an idle native owner must not be asked to cancel a nonexistent report");
+  f.block = false; await f.adapter.send("Did you open the PR?");
+  assert.equal(f.launches.length, 1); assert.equal(f.inputs.length, 2);
+});
+
+test("ambient telemetry is excluded without dropping real unknown reports or changing workflow FIFO", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Keep both reports in order"); await nativeTurnStarted(f);
+  const first = nativeAgent(f, "first"), second = nativeAgent(f, "second"); f.complete(); await running;
+  const ambient = { type: "system", subtype: "task_notification", session_id: f.nativeSession, task_id: "ambient-scan", status: "completed", skip_transcript: true };
+  f.emit(ambient);
+  f.emit({ ...first, task_id: "real-untracked", tool_use_id: "untracked-call", skip_transcript: false });
+  f.emit(first); f.emit({ ...ambient, status: "failed" }); f.emit(second);
+  assert.deepEqual(f.adapter.applicationSession.workflowNotifications.map(item => item.id), ["real-untracked", "first", "second"]);
+  nativeWorkflowReport(f);
+  assert.deepEqual([...f.adapter.applicationSession.workflows.keys()], ["first", "second"]);
+  nativeWorkflowReport(f);
+  assert.deepEqual([...f.adapter.applicationSession.workflows.keys()], ["second"]);
+  f.emit(ambient); nativeWorkflowReport(f);
+  assert.equal(f.adapter.isBackgroundBusy(), false);
+  f.emit(ambient);
+  assert.equal(f.adapter.applicationSession.workflowNotifications.length, 0);
+  assert.equal(f.events.filter(event => event.type === "background_response").length, 3);
+});
+
+test("skip_transcript alone never releases an already bound workflow or broadens terminal identity matching", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Preserve the bound task until its report"); await nativeTurnStarted(f);
+  const notification = nativeAgent(f, "bound-unit"); f.complete(); await running;
+  f.emit({ ...notification, tool_use_id: "foreign-call", skip_transcript: true });
+  assert.equal(f.adapter.applicationSession.workflows.get(notification.task_id).settled, false);
+  f.emit({ ...notification, skip_transcript: true });
+  assert.equal(f.adapter.isBackgroundBusy(), true);
+  assert.equal(f.adapter.applicationSession.workflows.get(notification.task_id).settled, true);
+  nativeWorkflowReport(f);
+  assert.equal(f.adapter.isBackgroundBusy(), false);
+});
+
 test("an Agent launched from a notification report remains busy after the previous job is delivered", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
   const running = f.adapter.send("/batch Work that needs a follow-up unit"); await nativeTurnStarted(f);
@@ -628,6 +869,62 @@ test("workflow completion racing stop_task also waits for cancellation of its ne
   assert.equal(f.inputs.length, 1); assert(!f.events.some(event => event.type === "background_response" && event.failed));
 });
 
+test("Manual to Auto changes the active Claude session through native control, never auto-approves a pending tool", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Inspect the fixture", { mode: "default" }); await nativeTurnStarted(f);
+  f.emit({ type: "control_request", request_id: "pending-bash", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "grep example fixture.txt" } } });
+  await waitFor(() => f.requests.length === 1);
+  f.hold = "set_permission_mode";
+  let acknowledged = false;
+  const changing = f.adapter.setPermissionMode("auto").then(value => { acknowledged = value; });
+  await waitFor(() => f.controls.some(packet => packet.request.subtype === "set_permission_mode"));
+  assert.equal(acknowledged, false);
+  const packet = f.controls.find(packet => packet.request.subtype === "set_permission_mode");
+  assert.deepEqual(packet.request, { subtype: "set_permission_mode", mode: "auto" });
+  f.respond(packet); await changing;
+  assert.equal(acknowledged, true); assert.equal(f.launches.length, 1); assert.equal(f.inputs.length, 1);
+  assert.deepEqual(f.permissionReplies || [], [], "Selecting Auto is not an allow reply or a bypass");
+  f.emit({ type: "control_cancel_request", request_id: "pending-bash" });
+  await assert.rejects(f.adapter.respond(f.requests[0].requestId, { decision: "accept" }), /no longer active/);
+  f.complete(); await running;
+});
+
+test("live permission controls reject unavailable, unsupported and stopped native sessions", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  await assert.rejects(f.adapter.setPermissionMode("bypassPermissions"), /Unsupported/);
+  assert.equal(await f.adapter.setPermissionMode("auto"), false, "An idle adapter does not launch a process to change defaults");
+  const running = f.adapter.send("Held turn", { mode: "default" }); await nativeTurnStarted(f);
+  f.refuse = "set_permission_mode";
+  await assert.rejects(f.adapter.setPermissionMode("auto"), /could not confirm/);
+  f.refuse = null;
+  for (const modeAck of [{}, { mode: "default" }]) {
+    f.modeAck = modeAck;
+    await assert.rejects(f.adapter.setPermissionMode("auto"), /could not confirm/);
+  }
+  f.modeAck = null; f.hold = "set_permission_mode";
+  const count = f.controls.length;
+  const changed = f.adapter.setPermissionMode("auto"), rejected = assert.rejects(changed, /confirm|starting or changed/);
+  const stopped = assert.rejects(running, /interrupted/);
+  await waitFor(() => f.controls.length > count);
+  await f.adapter.stop(); await rejected; await stopped;
+  assert.deepEqual(f.permissionReplies || [], []);
+});
+
+test("permission acknowledgement ordering survives status frames in the same stdout chunk", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const observed = []; let acknowledged = false;
+  const running = f.adapter.send("Held turn", { mode: "default", onPermissionMode: mode => observed.push({ mode, acknowledged }) });
+  await nativeTurnStarted(f); f.hold = "set_permission_mode";
+  const changing = f.adapter.setPermissionMode("auto", () => {}, () => { acknowledged = true; });
+  await waitFor(() => f.controls.some(packet => packet.request.subtype === "set_permission_mode"));
+  const packet = f.controls.find(packet => packet.request.subtype === "set_permission_mode");
+  const status = permissionMode => ({ type: "system", subtype: "status", status: null, session_id: f.nativeSession, permissionMode });
+  f.child.stdout.write([status("plan"), { type: "control_response", response: { subtype: "success", request_id: packet.request_id, response: { mode: "auto" } } }, status("default")].map(event => JSON.stringify(event) + "\n").join(""));
+  await changing;
+  assert.deepEqual(observed, [{ mode: "plan", acknowledged: false }, { mode: "default", acknowledged: true }]);
+  f.complete(); await running;
+});
+
 test("private ordinary turns use live native approvals and close their transport after the reply", async t => {
   const f = await fixture(t, { interactive: true }); f.block = true;
   const running = f.adapter.send("Write the fixture recipe", { mode: "default" });
@@ -649,6 +946,19 @@ test("private ordinary turns use live native approvals and close their transport
   await f.adapter.stop(); await rejected;
   assert.equal(f.permissionReplies.at(-1).response.response.behavior, "deny");
   await assert.rejects(f.adapter.respond(f.requests[1].requestId, { decision: "accept" }), /no longer active/);
+});
+
+test("the first Claude turn launches in explicitly selected Auto before native input", async t => {
+  const f = await fixture(t, { interactive: true }); f.block = true;
+  const running = f.adapter.send("Inspect the fixture without a mode switch", { mode: "auto" });
+  await nativeTurnStarted(f);
+  const mode = f.launches[0].args[f.launches[0].args.indexOf("--permission-mode") + 1];
+  assert.equal(mode, "auto");
+  assert.equal(f.inputs.length, 1);
+  assert.equal(f.controls[0].request.subtype, "initialize");
+  assert.equal(f.controls.some(packet => packet.request.subtype === "set_permission_mode"), false,
+    "Auto is part of the initial native launch, not a later best-effort switch");
+  f.complete(); await running;
 });
 
 test("Stop during private ordinary SDK initialization sends no user input and revokes the gateway capability", async t => {
@@ -1150,7 +1460,7 @@ test("application replies retain one CLI and apply next-turn mode/model/effort w
   await f.adapter.send("/verify Probe invalid input", { mode: "plan", model: "haiku", effort: "low" });
   assert.equal(f.launches.length, 1); assert.deepEqual(f.inputs.map(packet => packet.message.content), [text, "/verify Probe invalid input"]);
   assert.notEqual(f.inputs[0].uuid, f.inputs[1].uuid);
-  assert.deepEqual(f.controls.map(packet => packet.request), [{ subtype: "initialize" }, { subtype: "set_permission_mode", mode: "plan" },
+  assert.deepEqual(f.controls.map(packet => packet.request), [{ subtype: "initialize", forwardSubagentText: true }, { subtype: "set_permission_mode", mode: "plan" },
     { subtype: "set_model", model: "haiku" }, { subtype: "apply_flag_settings", settings: { effortLevel: "low" } }]);
   assert.deepEqual(f.sessions, [session]); assert.equal(f.adapter.capability, capability);
   assert(!JSON.stringify(f.launches).includes(f.config.claude.providerKey));
@@ -1161,8 +1471,8 @@ test("application replies retain one CLI and apply next-turn mode/model/effort w
 test("native MCP controls preserve a retained application's CLI, session, capability and next user input", async t => {
   const f = await fixture(t); f.mcp = [{ name: "relay_one", status: "connected" }];
   await f.adapter.send("/run Keep this app"); const token = f.adapter.capability, session = f.adapter.sessionId;
-  assert.equal((await f.adapter.send("/mcp reconnect relay_one")).text, 'Reconnected "relay_one".');
-  assert.equal((await f.adapter.send("/mcp disable relay_one")).text, 'Disabled "relay_one".');
+  assert.equal((await f.adapter.send("/mcp reconnect relay_one", { effort: "low", ultracode: false })).text, 'Reconnected "relay_one".');
+  assert.equal((await f.adapter.send("/mcp disable relay_one", { effort: "low", ultracode: false })).text, 'Disabled "relay_one".');
   assert.equal(f.mcp[0].status, "disabled");
   f.refuse = "mcp_toggle";
   await assert.rejects(f.adapter.send("/mcp enable relay_one"), /Native MCP control failed/);
@@ -1218,10 +1528,13 @@ test("application capabilities reject changed accounts, profiles, owners and com
 test("expiry during native settings rejects unsubmitted input without leaving a stuck logical application turn", async t => {
   const f = await fixture(t); await f.adapter.send("/run Keep the application running");
   const token = f.adapter.capability;
+  const controlsBefore = f.controls.length;
   f.hold = "set_model";
-  const pending = f.adapter.send("Never submit this input"), rejected = assert.rejects(pending, /temporary gateway access expired/);
-  await waitFor(() => f.controls.at(-1).request.subtype === "set_model");
-  f.broker.revoke(token); f.respond(f.controls.at(-1)); await rejected;
+  const pending = f.adapter.send("Never submit this input", { model: "haiku" });
+  await waitFor(() => f.controls.length > controlsBefore && f.controls.at(-1).request.subtype === "set_model");
+  f.broker.revoke(token); assert.equal(f.adapter.capability, token); assert.equal(f.broker.validate(token, "anthropic"), null);
+  assert.throws(() => f.adapter.assertCapability(), /temporary gateway access expired/);
+  f.respond(f.controls.at(-1)); await assert.rejects(pending, /temporary gateway access expired/);
   assert.equal(f.inputs.length, 1); assert.equal(f.adapter.applicationSession.active, null);
   assert.equal(f.child.exitCode, null); assert.equal(f.launches.length, 1);
   await f.adapter.stop(); f.hold = null;
@@ -1243,9 +1556,10 @@ test("Stop revokes before slow shutdown and cannot revoke a replacement capabili
 
 test("background output is independent of a turn waiting for native controls and usage is not counted twice", async t => {
   const f = await fixture(t); await f.adapter.send("/run Launch app");
+  const controlsBefore = f.controls.length;
   f.hold = "apply_flag_settings";
-  const running = f.adapter.send("/verify New user input");
-  await waitFor(() => f.controls.some(packet => packet.request.subtype === f.hold));
+  const running = f.adapter.send("/verify New user input", { effort: "high" });
+  await waitFor(() => f.controls.length > controlsBefore && f.controls.at(-1).request.subtype === f.hold);
   f.complete("A background task ended.");
   assert.equal(f.inputs.length, 1); assert.equal(f.events.filter(event => event.type === "background_response").length, 1);
   f.respond(f.controls.at(-1)); await running;
@@ -1259,7 +1573,7 @@ test("background output is independent of a turn waiting for native controls and
 test("Auto uses the native effort reset before input and never pins later choices through the process environment", async t => {
   const f = await fixture(t);
   await f.adapter.send("/run Launch app", { model: "sonnet", resetEffort: true });
-  assert.deepEqual(f.controls.map(packet => packet.request), [{ subtype: "initialize" }, { subtype: "apply_flag_settings", settings: { effortLevel: null } }]);
+  assert.deepEqual(f.controls.map(packet => packet.request), [{ subtype: "initialize", forwardSubagentText: true }, { subtype: "apply_flag_settings", settings: { effortLevel: null } }]);
   assert.equal(f.launches[0].env.CLAUDE_CODE_EFFORT_LEVEL, undefined);
   for (const effort of ["high", "low", null, "medium"]) {
     await f.adapter.send(`Continue with ${effort || "Auto"}`, { model: "sonnet", effort, resetEffort: !effort });

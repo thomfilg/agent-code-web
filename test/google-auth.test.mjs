@@ -147,6 +147,7 @@ test("user-specific resources stay separate at runtime and MCP capabilities rout
   const owner = await ownerClient.login(fixture);
   const member = await memberClient.login(fixture, { sub: "member", email: "member@example.com", email_verified: true });
   const a = await app.resources.forOwner(owner.id), b = await app.resources.forOwner(member.id);
+  for (const services of [a, b]) await services.companies.save({ id: "acme", name: "Acme" });
   assert.equal(a.records, app.records); assert.notEqual(a.mcps, b.mcps);
   await a.records.put("github_connection", "github_12345678-1234-1234-1234-123456789012", { token: "owner-secret" });
   await assert.rejects(b.github.get("github_12345678-1234-1234-1234-123456789012"), /not found/);

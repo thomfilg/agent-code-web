@@ -91,8 +91,8 @@ test("native background work queues normal input and Send now interrupts only th
   const selected = await manager.enqueue(chat.id, "Send this now");
   await manager.sendQueuedNow(chat.id, selected.queuedMessages.at(-1).id);
   await waitFor(() => !manager.isBusy(chat.id));
-  assert.equal(interrupted, 1); assert.equal(stopped, 0); assert.deepEqual(sent, ["Schedule", "Send this now"]);
-  assert.deepEqual(store.get(chat.id).queuedMessages.map(item => item.text), ["Keep queued"]);
+  assert.equal(interrupted, 1); assert.equal(stopped, 0); assert.deepEqual(sent, ["Schedule", "Send this now\n\n---\n\nKeep queued"]);
+  assert.deepEqual(store.get(chat.id).queuedMessages.map(item => item.text), []);
   assert.equal(store.get(chat.id).idleKeepAwakeReason, "schedule");
   background = true; await hooks.onEvent({ type: "background_turn", active: true });
   await manager.stop(chat.id); assert.equal(stopped, 1); assert.equal(store.get(chat.id).status, "stopped");

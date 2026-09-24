@@ -1,6 +1,12 @@
+import { openSettingsSection, switchSettingsCompany } from "./settings-navigation.mjs";
 import { test, expect } from "@playwright/test";
 const created = [];
-test.afterEach(async ({ request }) => { for (const id of created.splice(0)) await request.delete(`/api/chats/${id}`); });
+test.afterEach(async ({ page, request }) => {
+  // Polling responses may still be inside route.fetch/json when assertions
+  // finish. Drain those handlers before Playwright disposes their context.
+  await page.unrouteAll({ behavior: "wait" });
+  for (const id of created.splice(0)) await request.delete(`/api/chats/${id}`);
+});
 
 async function openFixture(page, messages = [], extra = {}) {
   await page.route("**/api/chats/chat_*/commands", route => route.fulfill({ json: { commands: [{ name: "usage" }, { name: "work", description: "Installed skill" }, { name: "workflow", description: "Plugin workflow" }] } }));
@@ -9,8 +15,10 @@ async function openFixture(page, messages = [], extra = {}) {
   await page.route("**/api/sidebar", async route => { const response = await route.fetch(), data = await response.json(); data.chats = data.chats.map(item => item.id === chat.id ? { ...item, ...extra } : item); await route.fulfill({ json: data }); });
   await page.route(`**/api/chats/${chat.id}/events*`, route => route.fulfill({ contentType: "text/event-stream", body: ": fixture\n\n" }));
   await page.route(`**/api/chats/${chat.id}`, route => route.request().method() === "GET" ? route.fulfill({ json: { chat: { ...chat, ...extra, messages } } }) : route.continue());
-  await page.goto(`/?chat=${chat.id}`);
-  await page.getByRole("button", { name: `Open ${chat.title}`, exact: true }).click();
+  // Use the saved-chat route and force a document load when a test opens
+  // multiple fixtures: changing only the hash does not rerun bootstrap.
+  await page.goto(`/?fixture=${chat.id}#chat=${chat.id}`);
+  await expect(page.locator("#chat-title")).toHaveText(chat.title);
   return chat;
 }
 
@@ -20,7 +28,9 @@ test("command controls edit goals, queue native commands and retain drafts on de
   const queued = [];
   await page.route(`**/api/chats/${chat.id}/queue`, async route => { queued.push(route.request().postDataJSON()); await route.fulfill({ json: { chat } }); });
   const input = page.getByLabel("Message", { exact: true });
-  const submit = async text => { await input.fill(text); await input.press("Escape"); await page.locator("#composer").evaluate(form => form.requestSubmit()); };
+  // Escape interrupts a running turn when autocomplete is closed. Exercise
+  // the actual Queue control instead of accidentally changing the fixture.
+  const submit = async text => { await input.fill(text); await page.getByRole("button", { name: "Queue", exact: true }).click(); };
   for (const command of ["/review --base main", "/init preserve our lint rules", "/model fixture", "/permissions read-only"]) {
     await submit(command); await expect.poll(() => queued.at(-1)?.text).toBe(command);
     expect(queued.at(-1).attachments).toEqual([]); await expect(input).toHaveValue("");
@@ -39,6 +49,27 @@ test("command controls edit goals, queue native commands and retain drafts on de
   await submit("/name New title"); await expect.poll(() => renames).toBe(1); await input.fill("A newer unsent draft"); release();
   await expect(page.locator("#chat-title")).toHaveText("New title"); await expect(input).toHaveValue("A newer unsent draft");
   expect(queued).toHaveLength(5);
+});
+
+test("status stays in the web UI and unknown slash commands never become agent messages", async ({ page }) => {
+  const chat = await openFixture(page);
+  const input = page.getByLabel("Message", { exact: true });
+  const messagePosts = [];
+  page.on("request", request => {
+    if (request.method() === "POST" && request.url().endsWith(`/api/chats/${chat.id}/messages`)) messagePosts.push(request.postDataJSON());
+  });
+  await input.fill("/status"); await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator("#usage-dialog")).toBeVisible();
+  await expect(input).toHaveValue(""); expect(messagePosts).toEqual([]);
+  await page.getByLabel("Close usage", { exact: true }).click();
+
+  const before = (await (await page.request.get(`/api/chats/${chat.id}`)).json()).chat.messages.length;
+  await input.fill("/qualquerporra"); await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect(page.locator("#toasts")).toContainText("Unknown command /qualquerporra");
+  await expect(input).toHaveValue("/qualquerporra");
+  expect(messagePosts).toEqual([{ text: "/qualquerporra", attachments: [] }]);
+  const after = (await (await page.request.get(`/api/chats/${chat.id}`)).json()).chat;
+  expect(after.messages).toHaveLength(before); expect(after.queuedMessages || []).toEqual([]);
 });
 
 test("native terminal controls inspect without prompts, confirm one task and retain the draft", async ({ page }) => {
@@ -114,8 +145,13 @@ test("document previews use the desktop column, styled defaults, and mutually ex
   await page.getByRole("button", { name: "Open Text preview ↗" }).click();
   await expect(panel.locator("pre")).toHaveText("<b>Literal text</b>\n"); await expect(panel.locator("iframe")).toHaveCount(0);
   await page.getByRole("button", { name: "Open SVG preview ↗" }).click(); await expect(frame.locator("circle")).toHaveAttribute("fill", "blue");
-  await page.getByRole("button", { name: "Tools used: 1 ›" }).click(); await expect(panel).not.toBeVisible(); await expect(panel.locator("iframe")).toHaveCount(0);
-  await page.locator("#view-changes").click(); await expect(page.locator("#diff-panel")).toBeVisible(); await expect(page.locator("#tools-panel")).not.toBeVisible();
+  const tool = page.locator("#messages .inline-tool-group");
+  await tool.locator(":scope > summary").click(); await tool.locator(".tool-details > summary").click();
+  await expect(tool.locator(".tool-output")).toHaveText("Real result");
+  await expect(panel).toBeVisible(); await expect(page.locator("#tools-panel")).not.toBeVisible();
+  await page.getByLabel("Chat settings", { exact: true }).click(); await page.locator("#view-changes").click(); await expect(page.locator("#diff-panel")).toBeVisible();
+  await expect(page.locator(".chat-settings-menu")).not.toHaveAttribute("open", "");
+  await expect(panel).not.toBeVisible(); await expect(panel.locator("iframe")).toHaveCount(0);
   await open.click(); await expect(page.locator("#diff-panel")).not.toBeVisible(); await expect(panel).toBeVisible();
   await expect(input).toHaveValue("Keep my draft");
   await page.getByRole("button", { name: "Open Existing beta", exact: true }).click(); await expect(panel).not.toBeVisible(); await expect(panel.locator("iframe")).toHaveCount(0);
@@ -173,8 +209,12 @@ test("Markdown renders tables and bubbles; HTML preview cannot leak styles, exec
     { id: "a", role: "assistant", text: "## Result\n\n| Name | State |\n| --- | --- |\n| Test | Passed |\n\n```html\n<style>body { background: rgb(255, 0, 0) } .message {display:none}</style><h1>Preview works</h1><script>parent.document.body.innerHTML='hacked'</script><img src='https://evil.example/tracker'><div>Unclosed\n```\n\n**Still here** [unsafe](javascript:alert(1))" },
   ]);
   await expect(page.locator(".message.assistant h2")).toHaveText("Result"); await expect(page.locator(".message.assistant table td").last()).toHaveText("Passed");
-  const bounds = await page.locator(".message.user").evaluate(n => ({ width: n.getBoundingClientRect().width, parent: n.parentElement.clientWidth, marginLeft: getComputedStyle(n).marginLeft, display: getComputedStyle(n).display }));
-  expect(bounds.width).toBeLessThan(bounds.parent * .8); expect(parseFloat(bounds.marginLeft)).toBeGreaterThan(0);
+  // The sidebar refresh can replace message nodes between locator resolution
+  // and evaluate. Measure the currently attached bubble in one page task.
+  await expect.poll(() => page.evaluate(() => {
+    const n = document.querySelector(".message.user");
+    return { compact: Boolean(n?.parentElement && n.getBoundingClientRect().width < n.parentElement.clientWidth * .8), aligned: Boolean(n && parseFloat(getComputedStyle(n).marginLeft) > 0) };
+  })).toEqual({ compact: true, aligned: true });
   const background = await page.locator("body").evaluate(n => getComputedStyle(n).backgroundColor);
   await page.getByRole("button", { name: "Open HTML preview ↗" }).click();
   await expect(page.locator("#messages iframe")).toHaveCount(0);
@@ -225,13 +265,13 @@ test("raw and fenced HTML stay isolated across messages and cannot load remote r
   expect(escapedRequests).toEqual([]);
 });
 
-test("25 tool uses collapse into one row and open real inputs/results in the side panel", async ({ page }) => {
+test("25 tool uses collapse into one inline group with nested real inputs and results", async ({ page }) => {
   const messages = [{ id: "u", role: "user", text: "Inspect the code" }, ...Array.from({ length: 25 }, (_, i) => ({ id: `t${i}`, role: "tool", kind: "tool", text: "Bash", meta: { itemId: `call${i}`, tool: "Bash", title: "npm test", input: '{"command":"npm test"}', output: i === 0 ? "Permission denied" : "All tests passed", failed: i === 0, state: "completed" } })), { id: "a", role: "assistant", text: "Inspection complete" }];
-  await openFixture(page, messages); await expect(page.locator("#messages .tool-details")).toHaveCount(0);
-  await page.getByRole("button", { name: "Tools used: 25 ›" }).click(); await expect(page.locator("#tools-panel details")).toHaveCount(25);
-  await page.locator("#tools-panel details summary").first().click(); await expect(page.locator("#tools-panel details").first()).toContainText("Permission denied");
-  await expect(page.locator("#tools-panel details").first()).toContainText("npm test");
-  await page.keyboard.press("Escape"); await expect(page.locator("#tools-panel")).not.toBeVisible();
+  await openFixture(page, messages); await expect(page.locator("#messages .tool-details").first()).toBeHidden();
+  await page.getByText("Ran 25 commands", { exact: true }).click(); await expect(page.locator("#messages .tool-details")).toHaveCount(25);
+  await page.locator("#messages .tool-details summary").first().click(); await expect(page.locator("#messages .tool-details").first()).toContainText("Permission denied");
+  await expect(page.locator("#messages .tool-details").first()).toContainText("npm test");
+  await expect(page.locator("#tools-panel")).not.toBeVisible();
 });
 test("agent questions have clickable choices, keep draft answers during updates and ignore stale resolution", async ({ page }) => {
   await page.addInitScript(() => { const Native = window.EventSource; window.relaySources = []; window.EventSource = class extends Native { constructor(...args) { super(...args); window.relaySources.push(this); } }; });
@@ -315,7 +355,7 @@ test("composer and command picker have readable controls and fit desktop and mob
     await expect(page.locator("#slash-menu")).toBeInViewport({ ratio: 1 });
     for (const selector of ["#composer", "#slash-menu"]) expect(await page.locator(selector).evaluate(n => n.scrollWidth <= n.clientWidth + 1)).toBe(true);
     await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeInViewport();
-    const compact = await page.locator(".composer-wrap").evaluate(n => n.clientWidth <= 540);
+    const compact = await page.locator("#conversation .composer-wrap").evaluate(n => n.clientWidth <= 540);
     await expect(page.getByLabel("Chat model", { exact: true })).toHaveCSS("font-size", compact ? "12px" : "13px");
     if (width === 1440 || width === 390) await page.screenshot({ path: `test-results/composer-commands-${width}.png`, fullPage: true });
     await input.press("Escape");
@@ -405,98 +445,106 @@ test("Send now targets one queued message, retains the others and preserves draf
   await expect(input).toHaveValue("An unfinished draft");
 });
 
-test("busy composer accepts queued messages and its main button stops the agent", async ({ page }) => {
+test("busy composer accepts queued messages and its main button interrupts without stopping the worker", async ({ page }) => {
   const chat = await openFixture(page, [], { status: "running" });
-  let queued = "", stopped = false;
+  let queued = "", interrupted = 0, stopped = 0;
   await page.route(`**/api/chats/${chat.id}/queue`, route => { queued = route.request().postDataJSON().text; return route.fulfill({ json: { chat } }); });
   await page.route(`**/api/chats/${chat.id}/interrupt`, route => { stopped = true; return route.fulfill({ json: { chat: { ...chat, status: "idle" } } }); });
   const input = page.getByLabel("Message", { exact: true }); await expect(input).toBeEnabled();
   await expect(page.getByRole("button", { name: "Stop agent", exact: true })).toBeEnabled();
   await input.fill("Do this next"); await input.press("Enter"); await expect.poll(() => queued).toBe("Do this next");
-  await page.getByRole("button", { name: "Stop agent", exact: true }).click(); await expect.poll(() => stopped).toBe(true);
+  await input.fill("Keep this unsent draft");
+  await page.getByRole("button", { name: "Stop agent", exact: true }).click(); await expect.poll(() => interrupted).toBe(1);
+  await expect(input).toHaveValue("Keep this unsent draft"); expect(stopped).toBe(0); expect(queued).toBe("Do this next");
 });
-test("MCP connection can be saved masked then selected in an environment", async ({ page }) => {
-  await page.goto("/"); await page.getByRole("button", { name: "MCP connections", exact: true }).click();
+test("MCP connection is saved masked and assigned once to its company", async ({ page }) => {
+  await page.goto("/"); await openSettingsSection(page, "MCP connections");
+  await switchSettingsCompany(page, "MCP connections", "acme"); await page.locator("#mcp-new").click();
   await page.locator("#mcp-dialog").getByLabel("Connection name", { exact: true }).fill("browser-tools");
-  await page.locator("#mcp-companies").getByRole("checkbox", { name: "Unassigned chats (no company)", exact: true }).check();
   await page.getByLabel("MCP endpoint URL").fill("https://mcp.example.com/mcp");
   await page.locator("#mcp-auth").selectOption("headers");
   await page.locator("#mcp-headers").fill('{"Authorization":"Bearer fixture-secret"}');
   await page.getByRole("button", { name: "Save connection" }).click(); await expect(page.locator("#mcp-save-status")).toContainText("Saved");
   await expect(page.locator("#mcp-headers")).toHaveValue("");
-  await page.getByLabel("Close MCP connections").click(); await page.getByRole("button", { name: "Environments", exact: true }).click();
-  await page.locator("#environment-mcp-options").getByRole("checkbox", { name: "browser-tools · http" }).check();
-  await page.getByRole("button", { name: "Save environment" }).click(); await expect(page.locator("#environment-save-status")).toContainText("Saved securely");
-  const { environments } = await (await page.request.get("/api/environments")).json(); expect(environments.some(e => e.mcpIds?.length)).toBe(true);
+  await page.getByLabel("Close MCP connections").click(); await openSettingsSection(page, "Environments");
+  await expect(page.locator("#environment-mcp-options")).toContainText("browser-tools · acme");
+  await expect(page.locator("#environment-mcp-options input")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Save environment" })).toBeDisabled();
+  const { environments } = await (await page.request.get("/api/environments")).json(); expect(environments.every(e => !e.mcpIds?.length)).toBe(true);
 });
 
-test("same-name MCP connections can have independent organization scopes in one environment", async ({ page }) => {
-  const ids = []; let env;
+test("same-name MCP connections stay isolated in each company's environment", async ({ page }) => {
+  const ids = [], environmentsCreated = [];
   try {
-    await page.goto("/"); await page.getByRole("button", { name: "MCP connections", exact: true }).click();
+    await page.goto("/"); await openSettingsSection(page, "MCP connections");
     for (const org of ["12-apps", "g2i"]) {
-      await page.getByRole("button", { name: "Custom MCP" }).click();
+      await switchSettingsCompany(page, "MCP connections", org); await page.locator("#mcp-new").click();
       await page.locator("#mcp-dialog").getByLabel("Connection name", { exact: true }).fill("linear-scoped");
-      await page.locator("#mcp-companies").getByLabel("Add companies", { exact: true }).fill(org);
-      await page.locator("#mcp-companies").getByRole("button", { name: "Add companies", exact: true }).click();
       await page.getByLabel("MCP endpoint URL").fill("https://mcp.linear.app/mcp");
       await page.getByRole("button", { name: "Save connection" }).click(); await expect(page.locator("#mcp-save-status")).toContainText("Saved");
-      await expect(page.locator("#mcp-list")).toContainText(`${org} · linear-scoped · Sign-in required`);
+      await expect(page.locator("#mcp-company")).toHaveValue(org); await page.locator("#mcp-back").click();
     }
     const { connections } = await (await page.request.get("/api/mcps")).json(); ids.push(...connections.filter(c => c.name === "linear-scoped").map(c => c.id)); expect(ids.length).toBe(2);
-    await page.locator("#mcp-list").getByRole("button", { name: /^12-apps · linear-scoped/ }).click(); await expect(page.locator("#mcp-companies").getByRole("checkbox", { name: "12-apps", exact: true })).toBeChecked();
-    await page.getByLabel("Close MCP connections").click(); await page.getByRole("button", { name: "Environments", exact: true }).click();
-    await page.getByRole("button", { name: "Add environment", exact: false }).click(); await page.getByLabel("Environment name", { exact: true }).fill("Scoped MCP test");
-    await page.locator("#environment-companies").getByLabel("Add companies", { exact: true }).fill("12-apps, g2i");
-    await page.locator("#environment-companies").getByRole("button", { name: "Add companies", exact: true }).click();
-    for (const org of ["12-apps", "g2i"]) await page.locator("#environment-mcp-options").getByRole("checkbox", { name: `linear-scoped · http · ${org}`, exact: true }).check();
-    await page.getByRole("button", { name: "Save environment" }).click(); await expect(page.locator("#environment-save-status")).toContainText("Saved securely");
-    const { environments } = await (await page.request.get("/api/environments")).json(); env = environments.find(e => e.name === "Scoped MCP test"); expect(env.mcpIds.sort()).toEqual(ids.sort());
+    await switchSettingsCompany(page, "MCP connections", "12-apps"); await page.locator('[data-preset="linear"]').click(); await expect(page.locator("#mcp-company")).toHaveValue("12-apps");
+    await page.getByLabel("Close MCP connections").click();
+    for (const org of ["12-apps", "g2i"]) {
+      await openSettingsSection(page, "Environments", org);
+      await page.getByRole("button", { name: "Add environment", exact: false }).click(); await page.getByLabel("Environment name", { exact: true }).fill(`Scoped MCP test ${org}`);
+      await expect(page.locator("#environment-company")).toHaveValue(org);
+      await expect(page.locator("#environment-company")).toBeDisabled();
+      await page.locator("#environment-advanced summary").click();
+      await expect(page.locator("#environment-mcp-options")).toContainText(`linear-scoped · ${org}`);
+      await expect(page.locator("#environment-mcp-options")).not.toContainText(`linear-scoped · ${org === "g2i" ? "12-apps" : "g2i"}`);
+      await expect(page.locator("#environment-mcp-options input")).toHaveCount(0);
+      await page.getByRole("button", { name: "Save environment" }).click(); await expect(page.locator("#environments-dialog")).toBeHidden();
+      const { environments } = await (await page.request.get("/api/environments")).json(); const env = environments.find(e => e.name === `Scoped MCP test ${org}`);
+      environmentsCreated.push(env.id); expect(env.mcpIds).toEqual([]); expect(env.companies).toEqual([org]);
+    }
   } finally {
-    if (env) await page.request.delete(`/api/environments/${env.id}`);
+    for (const id of environmentsCreated) await page.request.delete(`/api/environments/${id}`);
     for (const id of ids) await page.request.delete(`/api/mcps/${id}`);
   }
 });
 
 test("all development MCP presets populate their official endpoint without installing or authorizing", async ({ page }) => {
   const before = await (await page.request.get("/api/mcps")).json();
-  await page.goto("/"); await page.getByRole("button", { name: "MCP connections", exact: true }).click();
+  await page.goto("/"); await openSettingsSection(page, "MCP connections");
+  await switchSettingsCompany(page, "MCP connections", "other");
   const presets = [
     ["linear", "Linear", "https://mcp.linear.app/mcp", "oauth"],
     ["atlassian", "Atlassian", "https://mcp.atlassian.com/v2/mcp", "oauth"],
-    ["github", "GitHub", "https://api.githubcopilot.com/mcp/", "headers"],
     ["sentry", "Sentry", "https://mcp.sentry.dev/mcp", "oauth"],
     ["figma", "Figma", "https://mcp.figma.com/mcp", "oauth"],
     ["notion", "Notion", "https://mcp.notion.com/mcp", "oauth"],
     ["context7", "Context7", "https://mcp.context7.com/mcp", "none"],
   ];
   for (const [id, name, endpoint, auth] of presets) {
-    await page.locator("#mcp-catalog").evaluate(node => { node.open = true; });
     await page.locator("#mcp-presets").getByRole("button", { name: new RegExp(`^${name} `) }).click();
     await expect(page.locator("#mcp-name")).toHaveValue(id);
     await expect(page.locator("#mcp-url")).toHaveValue(endpoint);
     await expect(page.locator("#mcp-type")).toHaveValue("http");
     await expect(page.locator("#mcp-auth")).toHaveValue(auth);
     await expect(page.locator("#mcp-headers")).toHaveValue("");
+    await page.locator("#mcp-back").click();
   }
   expect(await (await page.request.get("/api/mcps")).json()).toEqual(before);
-  await page.getByRole("button", { name: "Custom MCP" }).click();
+  await page.locator("#mcp-new").click();
   await expect(page.locator("#mcp-name")).toHaveValue("");
   await expect(page.locator("#mcp-url")).toHaveValue("");
 });
 
 test("MCP presets, custom OAuth consent, real tool discovery and mobile layout", async ({ page }) => {
-  await page.goto("/"); await page.getByRole("button", { name: "MCP connections", exact: true }).click();
+  await page.goto("/"); await openSettingsSection(page, "MCP connections");
   await page.locator("#mcp-presets").getByRole("button", { name: /^Linear/ }).click();
   await expect(page.locator("#mcp-url")).toHaveValue("https://mcp.linear.app/mcp"); await expect(page.locator("#mcp-auth")).toHaveValue("oauth");
-  await page.getByRole("button", { name: "Custom MCP" }).click(); await expect(page.locator("#mcp-url")).toHaveValue("");
+  await page.locator("#mcp-back").click(); await page.locator("#mcp-new").click(); await expect(page.locator("#mcp-url")).toHaveValue("");
   await page.locator("#mcp-name").fill("oauth-fixture"); await page.locator("#mcp-url").fill("http://127.0.0.1:8881/mcp");
   await page.getByRole("button", { name: "Save connection" }).click(); await expect(page.locator("#mcp-connection-status")).toContainText("Sign-in required");
   const popupReady = page.waitForEvent("popup"); await page.getByRole("button", { name: "Connect with OAuth" }).click();
   const popup = await popupReady; await popup.getByRole("link", { name: "Approve access" }).click();
   await expect(popup.getByRole("heading", { name: "MCP connected" })).toBeVisible();
   await expect(page.locator("#mcp-connection-status")).toContainText("Connected · 1 tools");
-  await page.getByText("Available tools", { exact: true }).click(); await expect(page.locator(".mcp-tool-list")).toContainText("fixture_echo");
+  await page.getByText("Connection details", { exact: true }).click(); await expect(page.locator(".mcp-tool-list")).toContainText("fixture_echo");
   const { connections } = await (await page.request.get("/api/mcps")).json(); const connection = connections.find(c => c.name === "oauth-fixture");
   expect(connection.oauthConnected).toBe(true); expect(JSON.stringify(connections)).not.toContain("fixture-access-secret");
   await popup.close(); await page.setViewportSize({ width: 390, height: 844 });
