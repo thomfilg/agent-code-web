@@ -24,6 +24,10 @@ const bindingSchema = z.strictObject({ ownerId: id, chatId: id, companyId: id, e
 // return a lease minted by the grant-owned projection, not a marker boolean or
 // generic profile CDP connection. Guest acquisition uses the existing owned
 // worker's private-pipe projection, never a host-browser fallback.
+// EC2 guest browsers reach Chrome through a durable, reconnectable transport;
+// heavy pages can need tens of seconds there, so calls get a generous bound.
+const CALL_TIMEOUT_MS = 90000;
+
 // One bounded line for operator logs: no stack, no request payloads.
 const diagnostic = error => `${error?.name || "Error"}${error?.code ? ` [${error.code}]` : ""}: ${String(error?.message || error).split("\n")[0].slice(0, 300)}`;
 
@@ -67,7 +71,7 @@ export class OfficialBrowserMcp {
       await this.#check();
       this.#server = await official.createConnection({ browser: { browserName: "chromium", isolated: false }, capabilities: [],
         saveSession: false, outputDir: this.#directory, outputMaxSize: 2 * 1024 * 1024, allowUnrestrictedFileAccess: false,
-        console: { level: "error" }, timeouts: { action: 5000, navigation: 10000, settle: 0, idle: 0 }, imageResponses: "allow", snapshot: { mode: "full" } }, () => this.#context());
+        console: { level: "error" }, timeouts: { action: 15000, navigation: 45000, settle: 0, idle: 0 }, imageResponses: "allow", snapshot: { mode: "full" } }, () => this.#context());
       await this.#check();
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       this.#client = new Client({ name: "relay-browser-policy", version: "1" });
@@ -100,18 +104,18 @@ export class OfficialBrowserMcp {
         await this.#context();
         if (this.#lease.beforeTool) {
           await this.#lease.beforeTool({selectTab:async index => {
-            const listed = await this.#client.callTool({name:'browser_tabs',arguments:{action:'list'}},undefined,{signal:this.#controller.signal,timeout:15000});
+            const listed = await this.#client.callTool({name:'browser_tabs',arguments:{action:'list'}},undefined,{signal:this.#controller.signal,timeout:CALL_TIMEOUT_MS});
             if(listed.isError)throw browserPolicyFailure('TAB_SYNC_FAILED');
-            const result = await this.#client.callTool({name:'browser_tabs',arguments:{action:'select',index}},undefined,{signal:this.#controller.signal,timeout:15000});
+            const result = await this.#client.callTool({name:'browser_tabs',arguments:{action:'select',index}},undefined,{signal:this.#controller.signal,timeout:CALL_TIMEOUT_MS});
             if(result.isError)throw browserPolicyFailure('TAB_SYNC_FAILED');
           },resize:async size=>{
-            const result=await this.#client.callTool({name:'browser_resize',arguments:size},undefined,{signal:this.#controller.signal,timeout:15000});
+            const result=await this.#client.callTool({name:'browser_resize',arguments:size},undefined,{signal:this.#controller.signal,timeout:CALL_TIMEOUT_MS});
             if(result.isError)throw browserPolicyFailure('VIEWPORT_SYNC_FAILED');
           }});
           await this.#check();
         }
         let result;
-        try {result = await this.#client.callTool({ name, arguments: input }, undefined, { signal: this.#controller.signal, timeout: 15000 });}
+        try {result = await this.#client.callTool({ name, arguments: input }, undefined, { signal: this.#controller.signal, timeout:CALL_TIMEOUT_MS });}
         catch(error) {if(name==='browser_take_screenshot')this.#fence();throw error;}
         finally {
           if(name==='browser_take_screenshot'&&this.#directory) {

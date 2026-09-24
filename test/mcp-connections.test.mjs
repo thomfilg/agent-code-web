@@ -95,5 +95,6 @@ test("Codex pre-approves only the relay browser tools, so Auto mode can use them
     company_tool: { type: "http", url: "https://relay.test/gateway/mcp/x", headers: {} },
   }).join(" ");
   assert.match(args, /mcp_servers\.relay_browser\.default_tools_approval_mode="approve"/);
+  assert.match(args, /mcp_servers\.relay_browser\.tool_timeout_sec=120/);
   assert.doesNotMatch(args, /company_tool\.default_tools_approval_mode/);
 });

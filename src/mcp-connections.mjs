@@ -243,7 +243,7 @@ export function codexMcpArgs(servers = {}) {
       // The relay browser is the chat's own Chrome behind a fixed tool allowlist.
       // Auto mode runs Codex with approval_policy=never, where any tool that still
       // asks for approval fails, so its tools are pre-approved.
-      ...(RELAY_APPROVED_SERVERS.has(name) ? { default_tools_approval_mode: "approve" } : {}) } : { command: server.command, args: server.args };
+      ...(RELAY_APPROVED_SERVERS.has(name) ? { default_tools_approval_mode: "approve", tool_timeout_sec: 120 } : {}) } : { command: server.command, args: server.args };
     return Object.entries(fields).flatMap(([key, value]) => ["-c", `mcp_servers.${name}.${key}=${toml(value)}`]);
   });
 }
