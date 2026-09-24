@@ -22,6 +22,13 @@ export function rolloutCommands({ tag, image }) {
     `relay_backup=relay-rollback-${tag}-$(date +%s)`,
     `relay_env=/run/relay-${tag}.env`,
     'current=$(sudo docker inspect relay --format "{{.Image}}")',
+    // The controller's small root disk has repeatedly filled with old ECR
+    // layers. Docker keeps every image referenced by the current or rollback
+    // containers; unused images can be pulled again from immutable ECR digests.
+    'sudo docker image prune -a -f >/dev/null',
+    'relay_free_kib=$(df -Pk / | awk "NR==2 {print \\$4}")',
+    'case "$relay_free_kib" in ""|*[!0-9]*) echo "Could not verify controller disk space" >&2; exit 1;; esac',
+    'if [ "$relay_free_kib" -lt 4194304 ]; then echo "Controller needs at least 4 GiB free before pulling a release image" >&2; exit 1; fi',
     'aws ecr get-login-password --region "$(echo "$relay_registry" | cut -d. -f4)" | sudo docker login --username AWS --password-stdin "$relay_registry" >/dev/null',
     'sudo docker pull "$relay_image" >/dev/null',
     'target=$(sudo docker image inspect "$relay_image" --format "{{.Id}}")',
@@ -44,7 +51,7 @@ export function rolloutCommands({ tag, image }) {
     'sudo docker logout "$relay_registry" >/dev/null || true',
     // Keep the newest rollback containers; older ones only hold disk.
     `sudo docker ps -a --filter name=^/relay-rollback- --format "{{.CreatedAt}}\\t{{.Names}}" | sort -r | tail -n +${KEEP_ROLLBACKS + 1} | cut -f2 | xargs -r sudo docker rm >/dev/null || true`,
-    "sudo docker image prune -f >/dev/null || true",
+    "sudo docker image prune -a -f >/dev/null || true",
     'sudo docker ps --filter name=^/relay$ --format "{{.Names}}::{{.Image}}::{{.Status}}"',
     "echo READY",
   ];
