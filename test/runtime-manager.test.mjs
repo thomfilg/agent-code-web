@@ -194,3 +194,30 @@ test("failed worker deletion is reported as pending and retried after chat remov
   await waitFor(async () => !(await records.get("worker-deletion-cleanup", chat.id)));
   assert.ok(destroyCalls >= 2);
 });
+
+test("concurrent and repeated chat deletion verifies worker cleanup without a false 404", async t => {
+  const root = await temporaryDirectory(t), records = new MemoryRecords(), store = new ChatStore(root, records);
+  await store.initialize();
+  let destroyCalls = 0, releaseDestroy;
+  const destroyGate = new Promise(resolve => { releaseDestroy = resolve; });
+  const manager = new RuntimeManager({ store, config: testConfig(root), broker: new CapabilityBroker({ ttlMs: 10_000 }),
+    gatewayOrigin: "http://127.0.0.1:1",
+    workerBackend: { acquire: async () => null, sleep: async () => {}, destroy: async () => {
+      destroyCalls++;
+      if (destroyCalls === 1) await destroyGate;
+    } },
+  });
+  t.after(() => { releaseDestroy(); manager.shutdown(); });
+  const chat = await manager.createChat({ agent: "codex", title: "Idempotent deletion" });
+  const first = manager.remove(chat.id);
+  await waitFor(() => destroyCalls === 1);
+  const second = manager.remove(chat.id);
+  releaseDestroy();
+  assert.deepEqual(await Promise.all([first, second]), [
+    { removed: true, cleanupPending: false }, { removed: true, cleanupPending: false },
+  ]);
+  assert.equal(destroyCalls, 1);
+  assert.equal(store.get(chat.id), null);
+  assert.deepEqual(await manager.remove(chat.id), { removed: true, cleanupPending: false });
+  assert.equal(destroyCalls, 2);
+});
