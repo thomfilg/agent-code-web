@@ -222,3 +222,16 @@ test("workspace results recheck chat ownership after asynchronous capture", asyn
   await captured; await app.store.update(chat.id, { ownerId: "new-private-owner" }); release();
   const response = await reading; assert.equal(response.status, 404); assert.doesNotMatch(await response.text(), /chosen range/);
 });
+
+test("image reads may raise the inline limit up to 5 MB, never beyond", async t => {
+  const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = await mkdtemp(join(tmpdir(), "relay-image-read-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0]), Buffer.alloc(700 * 1024, 1)]);
+  await writeFile(join(root, "shot.png"), png);
+  assert.equal((await workspaceFileIO({ root, action: "read", path: "shot.png" })).referenceOnly, true, "default preview limit is unchanged");
+  const image = await workspaceFileIO({ root, action: "read", path: "shot.png", maxBytes: 5 * 1024 * 1024 });
+  assert.equal(image.mime, "image/png"); assert.equal(image.binary, true); assert.equal(Buffer.from(image.data, "base64").length, png.length);
+  await assert.rejects(workspaceFileIO({ root, action: "read", path: "shot.png", maxBytes: 6 * 1024 * 1024 }), /read limit/);
+});

@@ -22,3 +22,20 @@ export function droppedFiles(transfer) {
   if (!files.length) throw Error("Choose individual files or images to attach.");
   return files;
 }
+
+// Every image in the conversation, sent by the user or shown by an agent, in
+// message order. The image viewer pages through this list.
+export function chatImages(messages = []) {
+  return messages.flatMap(message => (message.attachments || []).filter(file => file.id && isAttachmentImage(file)).map(file => ({ file, messageId: message.id })));
+}
+// The agent image a Markdown image source refers to, if it was captured.
+export function agentImageFor(files = [], source = "") {
+  let decoded = source; try { decoded = decodeURI(source); } catch { /* keep the raw source */ }
+  const path = decoded.replace(/^(?:\.\/)+/, "");
+  const images = files.filter(file => file.agentImage);
+  const exact = images.find(file => file.agentImage.source === source || file.agentImage.source === decoded || file.agentImage.path === path);
+  if (exact) return exact;
+  // A workspace-absolute source ends with the captured relative path; the
+  // longest match wins so "old/shots/x.png" never resolves to "shots/x.png".
+  return images.filter(file => decoded.endsWith(`/${file.agentImage.path}`)).sort((a, b) => b.agentImage.path.length - a.agentImage.path.length)[0] || null;
+}

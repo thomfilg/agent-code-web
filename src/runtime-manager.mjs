@@ -19,6 +19,7 @@ import { renderingSample } from "./rendering-sample.mjs";
 import { messageCommand } from "./message-command.mjs";
 import { invalidSlashCommandError, parseSlashCommand } from "../public/slash-command.js";
 import { finalAnswerMeta } from "./message-search.mjs";
+import { AGENT_IMAGE_BYTES, captureAgentImages } from "./agent-images.mjs";
 import { ChatPresence } from "./chat-presence.mjs";
 import { PreviewActivity } from "./preview-activity.mjs";
 import { publicRequest, responseFor } from "./agent-requests.mjs";
@@ -308,6 +309,18 @@ export class RuntimeManager extends EventEmitter {
   }
 
   // Tell the agent which saved sign-ins its guest Chrome copy starts with.
+  // Images the agent cites from its workspace become chat attachments while the
+  // worker is still running. Without a cited image nothing is read.
+  async #agentImages(chatId, text) {
+    if (!this.attachments || !/!\[/.test(text || "")) return {};
+    const chat = this.store.get(chatId); if (!chat) return {};
+    const executor = this.#executors.has(chatId) ? await Promise.resolve(this.#executors.get(chatId)).catch(() => null) : null;
+    if (!executor && this.config.workerBackend === "ec2") return {};
+    const attachments = await captureAgentImages({ text, workspace: executor?.workspace || chat.workspace,
+      read: relative => readWorkspaceFiles(chat, executor, { action: "read", path: relative, maxBytes: AGENT_IMAGE_BYTES }),
+      upload: file => this.attachments.upload(chatId, file) });
+    return attachments.length ? { attachments } : {};
+  }
   async #browserProfileNote(chat) {
     try {
       const services = chat.environmentId && await this.servicesFor(chat);
@@ -2122,6 +2135,7 @@ export class RuntimeManager extends EventEmitter {
         kind: "message",
         text: remainingAssistantText(runtime, output.text),
         meta: { ...(runtime.assistantPublishedLength ? { segmentedTurn: true } : {}), ...finalAnswerMeta(result.finalAnswer, this.store.get(chatId).agent) },
+        ...await this.#agentImages(chatId, remainingAssistantText(runtime, output.text)),
       });
       if (turn.cancelled || runtime.generation !== generation || this.#runtimes.get(chatId) !== runtime) return;
       this.#emit(chatId, { type: "turn_completed", message });
@@ -3154,7 +3168,8 @@ export class RuntimeManager extends EventEmitter {
       const output = extractResponse(event.text || "", chat.autoTitle);
       if (output.title) await this.#agentEvent(chatId, { type: "title", title: output.title });
       await this.store.update(chatId, { awaitingUser: output.awaitingUser, needsAgentHandoff: false });
-      const message = await this.store.appendMessage(chatId, { id: runtime.assistantMessageId, role: "assistant", agent: chat.agent, kind: "message", text: remainingAssistantText(runtime, output.text), meta: { ...(runtime.assistantPublishedLength ? { segmentedTurn: true } : {}), ...finalAnswerMeta(event.finalAnswer, chat.agent) } });
+      const text = remainingAssistantText(runtime, output.text);
+      const message = await this.store.appendMessage(chatId, { id: runtime.assistantMessageId, role: "assistant", agent: chat.agent, kind: "message", text, meta: { ...(runtime.assistantPublishedLength ? { segmentedTurn: true } : {}), ...finalAnswerMeta(event.finalAnswer, chat.agent) }, ...await this.#agentImages(chatId, text) });
       this.#emit(chatId, { type: "turn_completed", message }); return;
     }
     if (event.type === "native_account_updated") {
@@ -3190,8 +3205,9 @@ export class RuntimeManager extends EventEmitter {
       if (runtime?.busy && !existing) {
         const commentary = (runtime.assistantText || "").slice(runtime.assistantPublishedLength || 0);
         if (commentary.trim()) {
-          const message = await this.store.appendMessage(chatId, { role: "assistant", agent: this.store.get(chatId).agent, kind: "message", text: commentary.replace(/^\n+/, "").trimEnd(), meta: { commentary: true, streamId: runtime.assistantMessageId } });
           runtime.assistantPublishedLength = runtime.assistantText.length;
+          const text = commentary.replace(/^\n+/, "").trimEnd();
+          const message = await this.store.appendMessage(chatId, { role: "assistant", agent: this.store.get(chatId).agent, kind: "message", text, meta: { commentary: true, streamId: runtime.assistantMessageId }, ...await this.#agentImages(chatId, text) });
           this.#emit(chatId, { type: "message", message });
         }
       }
