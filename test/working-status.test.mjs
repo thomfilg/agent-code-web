@@ -24,6 +24,18 @@ test("active tools count current-turn running tools only, deduplicates live entr
   tools.set("a", { state: "completed" }); assert.equal(activeToolCount(chat, tools), 1);
 });
 
+test("a pending question or approval is not described as active agent work", () => {
+  const createdAt = "2026-09-24T20:32:34Z", now = Date.parse(createdAt) + 12 * 60_000;
+  const chat = { status: "running", workingStartedAt: "2026-09-24T20:00:00Z", pendingRequest: {
+    requestId: "fixture", method: "claude/tool/requestUserInput", createdAt,
+  }, messages: [{ role: "user", createdAt: "2026-09-24T20:00:00Z" },
+    { role: "tool", kind: "tool", meta: { itemId: "question", state: "running", tool: "AskUserQuestion" } }] };
+  assert.equal(workingStatus(chat, new Map(), now), "Waiting for your answer · 12m 0s · Worker running");
+  assert.equal(workingStatus({ ...chat, pendingRequest: { ...chat.pendingRequest, method: "claude/tool/requestApproval" } }, new Map(), now),
+    "Waiting for your approval · 12m 0s · Worker running");
+  assert.match(workingStatus({ ...chat, pendingRequest: null }, new Map(), now), /^Working · 44m 34s/);
+});
+
 test("startup uses its persisted start on cold wake/reload without changing later working-turn timing", () => {
   const start = "2026-09-19T12:00:00Z", now = Date.parse(start) + 20000;
   const chat = { status: "starting", startupProgress: { startedAt: start }, workingStartedAt: "2026-09-19T11:00:00Z", messages: [] };
