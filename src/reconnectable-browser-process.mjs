@@ -34,6 +34,9 @@ function recoveryFailure(context, message, retry = () => context.dispose({ faile
   return error;
 }
 const privateInboxLimit = 8192;
+// Guest projection commands may carry Playwright's injected script (~350 KB);
+// they are sent in MAX_INPUT_BYTES chunks. Matches BrowserProcess's 1 MiB bound.
+const PRIVATE_INPUT_LIMIT = 1024 * 1024 + 4096;
 const readOnly = packet => packet.action === "status" || packet.action === "transportHeartbeat" || packet.action === "watch" && packet.params?.enabled === false;
 
 // Explicitly injected local validation only. No environment flag, HTTP field,
@@ -249,7 +252,7 @@ export class ReconnectableBrowserProcess extends EventEmitter {
     if (this.detached || this.stopping) throw unavailable("connection is detached; no action was sent");
     const epoch = this.epoch;
     const data = Buffer.from(JSON.stringify(packet) + "\n");
-    if (data.length > 128 * 1024) throw unavailable("command exceeds the private input bound");
+    if (data.length > PRIVATE_INPUT_LIMIT) throw unavailable("command exceeds the private input bound");
     const chunks = Math.ceil(data.length / MAX_INPUT_BYTES), digest = hash(data);
     // A single-chunk command (nearly every browser action) reserves its RPC and
     // its input sequence in one write: the same state the two-step path reaches

@@ -88,3 +88,17 @@ test("a reconnectable browser never delivers CDP events before the reply that pr
   assert.deepEqual(order, ["reply", "event:Page.lifecycleEvent"]);
   browser.fail(new Error("done"));
 });
+
+test("large projection commands such as Playwright's injected script are sent in bounded chunks", async () => {
+  const records = ledger(state()), child = browser(records), written = [];
+  child.detached = false;
+  child.client = { writeInput: async (seq, data) => { written.push({ seq, bytes: data.length }); } };
+  const packet = { id: 7, action: "project", params: { operation: "command", method: "Runtime.evaluate", params: { expression: "x".repeat(340 * 1024) } } };
+  await child.sendCommand(packet);
+  const total = Buffer.byteLength(JSON.stringify(packet) + "\n");
+  assert.equal(written.reduce((sum, item) => sum + item.bytes, 0), total);
+  assert.ok(written.length > 1 && written.every(item => item.bytes <= 16 * 1024));
+  assert.deepEqual(written.map(item => item.seq), written.map((_, index) => index + 1));
+  assert.equal(records.row.value.input, null, "the chunked command settles its reservation");
+  await assert.rejects(child.sendCommand({ id: 8, action: "project", params: { expression: "x".repeat(1100 * 1024) } }), /private input bound/);
+});
