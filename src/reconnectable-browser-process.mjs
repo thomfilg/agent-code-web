@@ -33,7 +33,7 @@ function recoveryFailure(context, message, retry = () => context.dispose({ faile
   Object.defineProperty(error, "retryBrowserCleanup", { value: retry });
   return error;
 }
-const privateLimit = 2 * 1024 * 1024;
+const privateInboxLimit = 8192;
 const readOnly = packet => packet.action === "status" || packet.action === "transportHeartbeat" || packet.action === "watch" && packet.params?.enabled === false;
 
 // Explicitly injected local validation only. No environment flag, HTTP field,
@@ -71,16 +71,27 @@ export class ReconnectableBrowserProcess extends EventEmitter {
   constructor(context, watchLeaseMs, lifetime = controllerLifetime) {
     super(); this.context = context; this.watchLeaseMs = watchLeaseMs;
     this.controllerLifetime = lifetime;
-    this.stdout = new PassThrough(); this.stderr = new PassThrough(); this.stdin = new EventEmitter();
+    this.stdout = new PassThrough(); this.stderr = new PassThrough(); this.stdin = new EventEmitter(); this.pendingOutput = [];
     this.exitCode = null; this.signalCode = null; this.detached = true; this.epoch = 0;
     this.outputQueue = Promise.resolve(); this.inputQueue = Promise.resolve(); this.storageQueue = Promise.resolve();
     this.closed = new Promise(resolve => { this.resolveClosed = resolve; });
     this.storageRequest = { attemptId: context.claim.attemptId, processId, controllerId: context.claim.controllerId, controllerEpoch: context.claim.controllerEpoch };
   }
   update(decide) {
+    // Every browser message crosses this ledger, so the revision of the last
+    // write is reused instead of re-reading the row first. The transaction is
+    // still compare-and-swap: a stale revision fails and falls back to a read.
     const operation = this.storageQueue.then(async () => {
-      const snapshot = await this.context.records.workerTransportGet(this.storageRequest);
-      return this.context.records.workerTransportTransaction({ ...this.storageRequest, expectedRevision: snapshot.revision }, decide);
+      const records = this.context.records;
+      if (Number.isSafeInteger(this.revision)) {
+        try {
+          const stored = await records.workerTransportTransaction({ ...this.storageRequest, expectedRevision: this.revision }, decide);
+          this.revision = stored.revision; return stored;
+        } catch (error) { this.revision = null; if (error?.code !== "CAS_CONFLICT") throw error; }
+      }
+      const snapshot = await records.workerTransportGet(this.storageRequest);
+      const stored = await records.workerTransportTransaction({ ...this.storageRequest, expectedRevision: snapshot.revision }, decide);
+      this.revision = stored.revision; return stored;
     });
     this.storageQueue = operation.catch(() => {}); return operation;
   }
@@ -102,7 +113,8 @@ export class ReconnectableBrowserProcess extends EventEmitter {
       if (!this.stopping) this.emit("transportDetached");
     });
     client.on("output", frame => {
-      this.outputQueue = this.outputQueue.then(() => this.output(frame, client)).catch(() => {
+      this.pendingOutput.push({ frame, client });
+      this.outputQueue = this.outputQueue.then(() => this.drainOutput()).catch(() => {
         this.storageFailed = true; client.disconnect();
         this.emit("transportFault", { message: "Private browser output could not be retained; reconnect is blocked. Stop the browser explicitly." });
       });
@@ -226,15 +238,24 @@ export class ReconnectableBrowserProcess extends EventEmitter {
     const data = Buffer.from(JSON.stringify(packet) + "\n");
     if (data.length > 128 * 1024) throw unavailable("command exceeds the private input bound");
     const chunks = Math.ceil(data.length / MAX_INPUT_BYTES), digest = hash(data);
-    await this.update(({ value }) => {
+    // A single-chunk command (nearly every browser action) reserves its RPC and
+    // its input sequence in one write: the same state the two-step path reaches
+    // just before sending, without persisting the intermediate "sent: 0" step.
+    const reserved = await this.update(({ value }) => {
       if (value.input) throw unavailable("a previous action has unknown outcome; use Stop instead of replaying it");
       const rpcs = Array.isArray(value.rpcs) ? value.rpcs : [];
       if (rpcs.length >= 100 || rpcs.some(rpc => rpc.commandId === packet.id)) throw unavailable("browser RPC ledger is full or duplicated");
       const rpc = { commandId: packet.id, digest, mutating: !readOnly(packet), state: "sending" };
-      return { ...value, rpcs: [...rpcs, rpc], input: { commandId: packet.id, digest, data: data.toString("base64"), mutating: rpc.mutating, chunks, sent: 0, unknown: false } };
+      const input = { commandId: packet.id, digest, data: data.toString("base64"), mutating: rpc.mutating, chunks, sent: 0, unknown: false };
+      if (chunks === 1) return { ...value, rpcs: [...rpcs, rpc], nextInputSeq: value.nextInputSeq + 1, input: { ...input, seq: value.nextInputSeq, sent: 1 } };
+      return { ...value, rpcs: [...rpcs, rpc], input };
     });
     try {
-      for (let offset = 0; offset < data.length; offset += MAX_INPUT_BYTES) {
+      if (chunks === 1) {
+        this.check(epoch);
+        if (this.detached || this.stopping) throw unavailable("connection changed during input; action was not replayed");
+        await this.client.writeInput(reserved.value.input.seq, data);
+      } else for (let offset = 0; offset < data.length; offset += MAX_INPUT_BYTES) {
         this.check(epoch);
         if (this.detached || this.stopping) throw unavailable("connection changed during input; action was not replayed");
         const reserved = (await this.update(({ value }) => ({ ...value, nextInputSeq: value.nextInputSeq + 1,
@@ -261,23 +282,43 @@ export class ReconnectableBrowserProcess extends EventEmitter {
       throw error;
     }
   }
-  async output(frame, client) {
-    const raw = frame.data.toString("base64");
+  // Chunks that arrived while the previous batch was being retained are
+  // committed, delivered and applied together, one batch per client link.
+  async drainOutput() {
+    while (this.pendingOutput.length) {
+      const client = this.pendingOutput[0].client, batch = [];
+      while (this.pendingOutput[0]?.client === client && batch.length < 256) batch.push(this.pendingOutput.shift().frame);
+      await this.output(batch, client);
+    }
+  }
+  async output(frames, client) {
+    // Commit before delivery, so a reattach never re-delivers a written chunk.
+    // Payloads are not retained: recovery after a controller restart requires
+    // an empty inbox, so only the sequence cursor is ever read back.
     const stored = await this.update(({ value }) => {
-      if (frame.seq !== value.committedOutputSeq + 1) throw unavailable("unexpected output sequence");
-      const inbox = [...value.inbox, { seq: frame.seq, channel: frame.channel, data: raw }];
-      if (Buffer.byteLength(JSON.stringify(inbox)) > privateLimit) throw unavailable("private output retention bound reached");
-      return { ...value, committedOutputSeq: frame.seq, inbox };
+      let seq = value.committedOutputSeq;
+      const inbox = [...value.inbox];
+      for (const frame of frames) {
+        if (frame.seq !== seq + 1) throw unavailable("unexpected output sequence");
+        seq = frame.seq; inbox.push({ seq, channel: frame.channel, bytes: frame.data.length });
+      }
+      if (inbox.length > privateInboxLimit) throw unavailable("private output retention bound reached");
+      return { ...value, committedOutputSeq: seq, inbox };
     });
-    if (frame.channel === "stdout" || frame.channel === "stderr") {
+    let exitFrame = null;
+    for (const frame of frames) {
+      if (frame.channel === "exit") { exitFrame = frame; continue; }
+      if (frame.channel !== "stdout" && frame.channel !== "stderr") continue;
       const stream = this[frame.channel];
       if (!stream.write(frame.data)) await new Promise(resolve => stream.once("drain", resolve));
     }
-    await this.update(({ value }) => ({ ...value, appliedOutputSeq: frame.seq, inbox: value.inbox.filter(item => item.seq > frame.seq) }));
+    const last = frames.at(-1).seq;
+    await this.update(({ value }) => ({ ...value, appliedOutputSeq: last, inbox: value.inbox.filter(item => item.seq > last) }));
     // The stable BrowserProcess/readline instance survives link detach. This
     // compaction is NOT enough to reconstruct it after controller restart.
     await client.ackOutput(stored.value.committedOutputSeq).catch(() => {});
-    if (frame.channel === "exit") {
+    if (exitFrame) {
+      const frame = exitFrame;
       const exit = JSON.parse(frame.data.toString()); this.exitCode = exit.code; this.signalCode = exit.signal;
       this.stdout.end(); this.stderr.end(); clearInterval(this.renewal); this.resolveClosed(); this.emit("exit", exit.code, exit.signal);
     }
