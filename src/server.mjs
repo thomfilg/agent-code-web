@@ -40,6 +40,7 @@ import { MCP_PRESETS } from "./mcp-presets.mjs";
 import { safeMcpUrl, oauthCookieName } from "./mcp-oauth.mjs";
 import { SharedBrowsers } from "./shared-browser.mjs";
 import { BrowserProfiles, PROFILE_ARCHIVE_LIMIT } from "./browser-profiles.mjs";
+import { BrowserProfileRefresher, REFRESH_SYSTEM_KIND } from "./browser-profile-refresh.mjs";
 import { WebSocketServer } from "ws";
 import { BrowserUsers } from "./browser-users.mjs";
 import { GoogleAuth } from "./google-auth.mjs";
@@ -172,7 +173,7 @@ export async function createAgentWebServer(options = {}) {
   const githubWorkers = new GitHubWorkerGateway({ store, servicesFor: chat => resources.forOwner(chat.ownerId), ttlMs: config.sessionCapabilityTtlMs,
     ...(options.githubWorkerFetch ? { fetchImpl: options.githubWorkerFetch } : {}) });
   await environments.initialize();
-  let manager = null;
+  let manager = null, profileRefresher = null;
   let chatRetention = null;
   let previews = null, previewHosts = null;
   // Provisioning can be disabled while its old CloudFront origins still exist.
@@ -327,7 +328,8 @@ export async function createAgentWebServer(options = {}) {
       // Authentication/resource lookup can outlive shutdown's stream cleanup.
       // Do not let an already accepted request open a new SSE stream afterward.
       if (stopping || draining) return json(response, 503, { error: "Relay is restarting" }, { connection: "close" });
-      const visibleChats = () => store.list().filter(chat => browserUsers.canRead(chat, user));
+      // System chats (automatic browser sign-in renewal) never appear to users.
+      const visibleChats = () => store.list().filter(chat => !chat.system && browserUsers.canRead(chat, user));
       if (url.pathname === "/api/message-search" && request.method === "POST") {
         const input = await bodyJson(request, 2000), guard = async () => {
           const current = await browserUsers.session(request);
@@ -498,7 +500,13 @@ export async function createAgentWebServer(options = {}) {
       if (url.pathname === "/api/github/branches" && request.method === "GET") return json(response, 200, { branches: await github.branches(url.searchParams.get("repository"), url.searchParams.get("connection") || undefined, url.searchParams.get("company") || undefined) });
       if (url.pathname === "/api/browser-profiles" && request.method === "GET") return json(response, 200, { profiles: await browserProfiles.list(url.searchParams.get("companyId") || undefined) });
       if (url.pathname === "/api/browser-profiles" && request.method === "POST") return json(response, 201, { profile: await browserProfiles.create(await bodyJson(request, 4000)) });
-      const browserProfileRoute = /^\/api\/browser-profiles\/(bprof_[a-f0-9-]{36})(?:\/(versions))?$/.exec(url.pathname);
+      const browserProfileRoute = /^\/api\/browser-profiles\/(bprof_[a-f0-9-]{36})(?:\/(versions|refresh))?$/.exec(url.pathname);
+      if (browserProfileRoute?.[2] === "refresh" && request.method === "POST") {
+        // Renewal takes minutes (a private worker boots); its outcome is saved on the profile.
+        await browserProfiles.get(browserProfileRoute[1]);
+        void profileRefresher.refresh(user?.id || null, browserProfileRoute[1]);
+        return json(response, 202, { started: true });
+      }
       if (browserProfileRoute && !browserProfileRoute[2] && request.method === "GET") return json(response, 200, { profile: await browserProfiles.get(browserProfileRoute[1]) });
       if (browserProfileRoute && !browserProfileRoute[2] && request.method === "DELETE") { await browserProfiles.remove(browserProfileRoute[1], await environments.list()); return json(response, 200, { removed: true }); }
       if (browserProfileRoute?.[2] === "versions" && request.method === "POST") {
@@ -1027,7 +1035,12 @@ export async function createAgentWebServer(options = {}) {
       isActive: () => false, onViewers: chatId => manager.refreshActivity(chatId),
       profiles: {
         resolve: async chatId => {
-          const chat = store.get(chatId); if (!chat?.environmentId) return null;
+          const chat = store.get(chatId);
+          if (chat?.system?.kind === REFRESH_SYSTEM_KIND) {
+            const profile = await (await resources.forOwner(chat.ownerId)).browserProfiles.get(chat.system.profileId);
+            return { id: profile.id, name: profile.name, version: chat.system.version, chromeVersion: profile.chromeVersion };
+          }
+          if (!chat?.environmentId) return null;
           const services = await resources.forOwner(chat.ownerId);
           const environment = await services.environments.runtime(chat.environmentId, chat);
           if (!environment.browserProfileId) return null;
@@ -1037,6 +1050,8 @@ export async function createAgentWebServer(options = {}) {
         archive: async (chatId, id, version) => (await resources.forOwner(store.get(chatId)?.ownerId)).browserProfiles.archive(id, version),
       },
       ...options.browserOptions });
+    profileRefresher = new BrowserProfileRefresher({ store, manager, resources, agentAccounts, intervalMs: config.browserProfileRefreshHours * 3600000 });
+    if (config.browserProfileRefreshHours > 0) profileRefresher.start();
     manager.browsers.personal = new BrowserConnections({ records, store, ttlMs: config.sessionCapabilityTtlMs, validateCompany: async (user, companyId) => (await resources.forOwner(user.id)).companies.get(companyId) });
     manager.browsers.personal.on("viewers", chatId => { void manager.refreshActivity(chatId).catch(() => {}); });
     manager.browsers.personal.on("changed", chatId => {
@@ -1074,6 +1089,7 @@ export async function createAgentWebServer(options = {}) {
     return stopping ||= shutdown();
   }
   async function shutdown() {
+    profileRefresher?.stop();
     await chatRetention?.stop();
     githubWorkers.shutdown();
     npmGateway.shutdown();

@@ -446,7 +446,7 @@
           <h3>Add a profile or version</h3>
           <label><span>New profile name</span><input id="browser-profile-name" maxlength="80" placeholder="e.g. ClickUp sandbox"></label>
           <label><span>Profile archive (.tar.gz)</span><input type="file" id="browser-profile-file" accept=".gz,.tgz,application/gzip"></label>
-          <div class="browser-profile-actions"><button type="button" class="secondary-button" id="browser-profile-create">Create profile</button><button type="button" class="secondary-button" id="browser-profile-upload">Upload new version</button><button type="button" class="secondary-button" id="browser-profile-delete">Delete profile</button></div>
+          <div class="browser-profile-actions"><button type="button" class="secondary-button" id="browser-profile-create">Create profile</button><button type="button" class="secondary-button" id="browser-profile-upload">Upload new version</button><button type="button" class="secondary-button" id="browser-profile-refresh">Renew sign-ins now</button><button type="button" class="secondary-button" id="browser-profile-delete">Delete profile</button></div>
           <p class="muted">Build an archive from a Chrome user-data-dir with <code>node scripts/import-browser-profile.mjs &lt;dir&gt; --out profile.tar.gz</code>. Only sign-in state is kept: cookies, saved logins and site storage. To sign in without an archive, create an empty profile, open the Browser panel of a chat in this environment, sign in, then choose “Save to profile”.</p>
           </section>
           <section id="environment-variables-editor" hidden>

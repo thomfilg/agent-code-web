@@ -40,7 +40,7 @@ jobs:
       - name: Syntax check
         run: find src public scripts test chrome-extension deploy -type f \( -name '*.mjs' -o -name '*.js' \) -print0 | xargs -0 -n1 node --check
       - name: Deployment and browser tests
-        run: node --test test/aws-rollout.test.mjs test/browser-profiles.test.mjs test/reconnectable-browser-ledger.test.mjs
+        run: node --test test/aws-rollout.test.mjs test/browser-profiles.test.mjs test/browser-profile-refresh.test.mjs test/reconnectable-browser-ledger.test.mjs
 
   deploy:
     needs: check
