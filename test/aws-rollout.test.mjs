@@ -60,7 +60,8 @@ test("a rejected live-controller drain aborts the rollout before Docker Stop", t
   const command = spawnSync("/bin/sh", ["-c", rolloutCommands({ tag: "abc1234def56", image }).join("\n")], {
     env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, RELAY_TEST_CALLS: calls }, encoding: "utf8",
   });
-  assert.notEqual(command.status, 0);
+  assert.equal(command.status, 75, "a deferral is a temporary failure CI retries");
+  assert.equal(command.stdout.trim(), "DEFERRED");
   assert.match(command.stderr, /deployment deferred without stopping workers/);
   const observed = readFileSync(calls, "utf8");
   assert.match(observed, /docker logout/, "a rejected drain discards the short-lived ECR login");
@@ -101,7 +102,8 @@ test("an idle-looking active goal cannot be stopped when an old controller accep
   const command = spawnSync("/bin/sh", ["-c", rolloutCommands({ tag: "abc1234def56", image }).join("\n")], {
     env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, RELAY_TEST_CALLS: calls }, encoding: "utf8",
   });
-  assert.notEqual(command.status, 0);
+  assert.equal(command.status, 75, "a live worker defers CI rather than failing the rollout permanently");
+  assert.equal(command.stdout.trim(), "DEFERRED");
   assert.match(command.stderr, /running EC2 workers; deployment deferred/);
   const observed = readFileSync(calls, "utf8");
   assert.match(observed, /ec2 describe-instances/);
@@ -117,5 +119,9 @@ test("the workflow deploys main with OIDC, one rollout at a time, and pins every
   assert.match(workflow, /id-token: write/);
   assert.match(workflow, /environment: production/);
   assert.doesNotMatch(workflow, /AWS_SECRET_ACCESS_KEY|aws-access-key-id/);
+  // Active work defers the rollout; CI retries until a deadline, unless a newer main supersedes it.
+  assert.match(workflow, /grep -qx DEFERRED/);
+  assert.match(workflow, /RETRY_MINUTES: \d+/);
+  assert.match(workflow, /commits\/main/);
   for (const [, ref] of workflow.matchAll(/uses: [\w./-]+@(\S+)/g)) assert.match(ref, /^[a-f0-9]{40}$/, "actions are pinned to commits");
 });
