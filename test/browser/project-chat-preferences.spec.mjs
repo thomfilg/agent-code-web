@@ -53,6 +53,20 @@ test("the selected repository opens its picker and the new-chat send control sta
   await expect(page.locator("#repo-search")).toBeFocused();
   await expect(page.locator("#new-chat-form .composer-input-row #create-chat-button")).toBeVisible();
   await expect(page.locator("#new-chat-form .composer-input-row #create-chat-button")).toHaveCSS("position", "absolute");
+  const positions = await page.locator("#new-chat-form .composer-footer > *").evaluateAll(elements => elements.map(element => Math.round(element.getBoundingClientRect().x)));
+  expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  await expect(page.locator("#new-chat-form .composer-footer")).toHaveCSS("justify-content", "flex-start");
+});
+
+test("new-chat controls stay grouped when no agent account is selected", async ({ page }) => {
+  await fixture(page);
+  await page.setViewportSize({ width: 920, height: 500 });
+  await page.locator("#new-agent-account").selectOption("");
+  await expect(page.locator("#new-agent-account")).toHaveValue("");
+  await expect(page.locator("#new-agent-account option:checked")).toHaveText("Choose agent");
+  const controls = await page.locator("#new-chat-form .composer-footer > *").evaluateAll(elements => elements.map(element => ({ x: element.getBoundingClientRect().x, width: element.getBoundingClientRect().width })));
+  expect(controls[2].x - (controls[1].x + controls[1].width)).toBeLessThan(12);
+  expect(controls[4].x).toBeGreaterThan(controls[2].x + controls[2].width);
 });
 
 test("a slow project restore does not trap repository selection", async ({ page }) => {

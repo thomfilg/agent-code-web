@@ -1098,8 +1098,17 @@ dialog { max-height: calc(100dvh - 28px); }
 #new-chat-form #initial-prompt { min-height: 42px; max-height: 160px; padding: 10px 42px 10px 12px; border: 1px solid #41483b; border-radius: 12px; background: #1b1e19; font-size: var(--type-content); line-height: 1.45; }
 #new-chat-form #initial-prompt:focus { border-color: #59664b; box-shadow: 0 0 0 3px rgba(201,242,124,.03); }
 #new-chat-form .composer-input-row .send-button { position: absolute; right: 7px; bottom: 6px; width: 28px; height: 28px; border-radius: 8px; }
-#new-chat-form .composer-footer { min-height: 30px; margin-top: 3px; padding: 0 3px; gap: 4px; }
+#new-chat-form .composer-footer { min-height: 30px; margin-top: 3px; padding: 0 3px; gap: 4px; justify-content: flex-start; flex-wrap: nowrap; }
 #new-chat-form .composer-footer select { min-height: 28px; height: 28px; padding: 3px 6px; background: transparent; }
+#new-chat-form .draft-agent-picker { flex: 0 1 auto; }
+#new-chat-form .draft-agent-picker select { max-width: 155px; }
+#new-chat-form .compact-model-controls { margin-left: 0; flex: 0 1 auto; }
+#new-chat-form .saved-prompts-trigger { flex: 0 0 28px; width: 28px; height: 28px; margin-left: auto; border-color: transparent; }
+@container (max-width: 540px) {
+  #new-chat-form .composer-footer { flex-wrap: wrap; }
+  #new-chat-form .draft-agent-picker { flex: 0 1 auto; }
+  #new-chat-form .compact-model-controls { flex: 0 1 auto; }
+}
 .composer-wrap > .composer-help { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @container (max-width: 540px) {
   .composer { padding: 12px 10px 10px; }
