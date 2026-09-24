@@ -68,3 +68,23 @@ test("committed output keeps only sequence metadata while it waits to be applied
   await child.drainOutput();
   assert.deepEqual(seen, [{ seq: 1, channel: "stdout", bytes: 17 }]);
 });
+
+test("a reconnectable browser never delivers CDP events before the reply that precedes them", async () => {
+  const { PassThrough } = await import("node:stream");
+  const { EventEmitter } = await import("node:events");
+  const { BrowserProcess } = await import("../src/shared-browser.mjs");
+  const child = new EventEmitter();
+  Object.assign(child, { stdout: new PassThrough(), stderr: new PassThrough(), stdin: Object.assign(new EventEmitter(), { write() {} }),
+    // The durable ledger acknowledges replies later than the next lines arrive.
+    commandSettled: () => new Promise(resolve => setTimeout(resolve, 30)), sendCommand: async () => {} });
+  const browser = new BrowserProcess(child);
+  browser.resolveReady({}); clearTimeout(browser.timer);
+  const order = [];
+  browser.on("projection", value => order.push(`event:${value.method}`));
+  const reply = browser.dispatch("project", {}, { onResponse: () => order.push("reply") });
+  child.stdout.write(`${JSON.stringify({ id: 1, value: { ok: true } })}\n${JSON.stringify({ event: "projection", value: { method: "Page.lifecycleEvent" } })}\n`);
+  await reply;
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.deepEqual(order, ["reply", "event:Page.lifecycleEvent"]);
+  browser.fail(new Error("done"));
+});
